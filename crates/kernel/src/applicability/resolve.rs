@@ -562,7 +562,7 @@ impl<'s> ResolutionLadder<'s> {
     }
 
     /// Bounded by the budget and [`ANCESTRY_WALK_CAP`] on every step, so a deep
-    /// history cannot hold the request past its deadline. commentlint: allow(JUDGE)
+    /// history cannot hold the request past its deadline.
     fn test_ancestry_graph(&self, ancestor: ObjectId, descendant: ObjectId) -> Option<bool> {
         let mut graph = self.graph.borrow_mut();
         let graph = graph.get_or_insert_with(|| self.snapshot.revision_graph());
@@ -593,7 +593,7 @@ impl<'s> ResolutionLadder<'s> {
             }) {
                 Ok(Some(commit)) => commit,
                 // A grafted boundary parent is absent by construction, not a
-                // missing object a fetch would supply. commentlint: allow(JUDGE)
+                // missing object a fetch would supply.
                 Ok(None) if self.shallow => continue,
                 Ok(None) | Err(_) => {
                     self.note_unreadable_object();

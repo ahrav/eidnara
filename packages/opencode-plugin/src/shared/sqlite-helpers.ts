@@ -20,7 +20,7 @@ export function closeQuietly(db: Database | null | undefined): void {
 /**
  * Builds a `json_extract` that yields NULL for a malformed `column` instead of raising `malformed JSON`.
  * `CASE` evaluates only the taken branch, so the extract never runs on an invalid document; an `AND`
- * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input. commentlint: allow(JUDGE)
+ * guard has no such ordering guarantee. `column` and `path` are code literals, never caller input.
  */
 export function jsonField(column: string, path: string): string {
     return `CASE WHEN json_valid(${column}) = 1 THEN json_extract(${column}, '${path}') END`;

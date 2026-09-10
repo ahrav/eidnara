@@ -58,7 +58,6 @@ function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["ac
  * least one, so a fractional value would fall back to the default page and a
  * zero limit would return a single note. Flooring keeps the requested page;
  * a value below `minimum` is dropped so the daemon applies its default.
- * commentlint: allow(JUDGE)
  */
 function pageNumber(value: number | undefined, minimum: number): number | undefined {
     if (typeof value !== "number" || !Number.isFinite(value)) return value;
@@ -227,7 +226,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
             }
             let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-            // Only a live local evaluator compiles the condition; the daemon's `refuse_conditioned_note_without_evaluator` owns the uncompiled case. commentlint: allow(JUDGE)
+            // Only a live local evaluator compiles the condition; the daemon's `refuse_conditioned_note_without_evaluator` owns the uncompiled case.
             if (
                 (action === "write" || action === "update") &&
                 surfaceCondition &&

@@ -40,7 +40,7 @@ export function rustCommandId(operation: string): string {
 /**
  * The daemon reads `session_id` from the body; the transport routes on the same id.
  *
- * `projectRoot` follows the invocation cwd: session lineage and `session.wrapup` authority are keyed by `(session, root)`, in the same git-root spelling the kernel memory routes bind, so a Pi `/cd` moves later commands with it. commentlint: allow(JUDGE)
+ * `projectRoot` follows the invocation cwd: session lineage and `session.wrapup` authority are keyed by `(session, root)`, in the same git-root spelling the kernel memory routes bind, so a Pi `/cd` moves later commands with it.
  *
  * `ctx.signal` is the command's abort signal; the transport settles an aborted call without waiting out the request budget.
  */

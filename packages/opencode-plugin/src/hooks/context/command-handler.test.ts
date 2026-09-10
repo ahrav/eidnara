@@ -667,7 +667,7 @@ describe("createEidnaraCommandHandler", () => {
         });
 
         it("keeps the re-run line inside the toast cut for the longest event and a derived object id", async () => {
-            // With a TUI connected the reply is a toast that keeps only its opening characters, so the line the user must act on cannot follow the surface list. commentlint: allow(JUDGE)
+            // With a TUI connected the reply is a toast that keeps only its opening characters, so the line the user must act on cannot follow the surface list.
             const objectId = `mem_${"f".repeat(32)}`;
             const kernel = new FakeKernel();
             kernel.seedDecision({

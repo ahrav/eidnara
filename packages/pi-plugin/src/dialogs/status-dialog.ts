@@ -153,7 +153,7 @@ export async function showStatusDialog(
 /** Initial daemon status and the reader that refreshes it. */
 export interface DaemonStatusSource {
     initial: RustSessionStatus;
-    /** Rejects when the daemon cannot answer; the dialog then keeps the previous snapshot. commentlint: allow(JUDGE) */
+    /** Rejects when the daemon cannot answer; the dialog then keeps the previous snapshot. */
     read: () => Promise<RustSessionStatus>;
 }
 
@@ -446,7 +446,7 @@ export function buildPiStatusDetail(
     const compartmentCount = positiveNumber(daemonStatus?.compartment_count) ?? 0;
     const compartmentTokens = positiveNumber(daemonStatus?.compartment_tokens) ?? 0;
     const pendingOpsCount = positiveNumber(daemonStatus?.pending_drop_count) ?? 0;
-    // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` reads it. commentlint: allow(JUDGE)
+    // `wrapup_active` is the daemon's only in-flight signal, so `historianRunning` reads it.
     const historianRunning = daemonStatus?.wrapup_active === true;
     const tailHygiene = resolveTailHygieneStatus(daemonStatus?.tail_hygiene);
 

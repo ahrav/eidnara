@@ -82,7 +82,7 @@ impl ConfigContent {
     /// `None` unless every document in the YAML stream parses and at least one
     /// is a mapping or sequence. A TOML or INI file parses as one plain scalar
     /// or fails, so structure here means the file is YAML; the line heuristic
-    /// applies otherwise. commentlint: allow(JUDGE)
+    /// applies otherwise.
     fn yaml(&self) -> Option<&[serde_norway::Value]> {
         self.yaml_documents()
             .filter(|documents| documents.iter().any(yaml_is_structured))
@@ -369,7 +369,7 @@ fn yaml_is_structured(value: &serde_norway::Value) -> bool {
 /// A line scan cannot tell a mapping key from the same text inside a block
 /// scalar (`description: |` followed by an indented `enabled: true`), so a
 /// parsed YAML document is walked structurally like JSON. Only string keys
-/// are compared. commentlint: allow(JUDGE)
+/// are compared.
 fn yaml_contains_key(value: &serde_norway::Value, key: &str) -> bool {
     match value {
         serde_norway::Value::Mapping(map) => map.iter().any(|(name, nested)| {
@@ -397,7 +397,7 @@ enum KeyPresence {
 /// (after whitespace and optional quoting) and be followed by a delimiter.
 /// A TOML multi-line string can hold a line shaped exactly like an
 /// assignment, so a document containing one is undecidable rather than
-/// scanned. commentlint: allow(JUDGE)
+/// scanned.
 fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     if let Some(value) = content.json() {
         return present(json_contains_key(value, key));
@@ -406,7 +406,7 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
         // `[server]` alone parses as a YAML flow sequence of one scalar and as
         // a TOML table header; only the TOML reading defines a key, so a
         // document of scalar-only sequences that has table-header lines is
-        // read as TOML. commentlint: allow(JUDGE)
+        // read as TOML.
         let scalar_sequences_only = documents.iter().all(|document| {
             matches!(document, serde_norway::Value::Sequence(items)
                 if items.iter().all(|item| !yaml_is_structured(item)))
@@ -427,7 +427,7 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
     // A YAML document whose root is a block scalar (`|` or `>`) or a quoted
     // scalar parses as one string and holds no keys; its lines are content,
     // not assignments. A bare TOML or INI line also parses as a YAML plain
-    // scalar, which is why only these marked forms decide here. commentlint: allow(JUDGE)
+    // scalar, which is why only these marked forms decide here.
     if content
         .yaml_documents()
         .is_some_and(|documents| documents.iter().all(yaml_is_scalar))
@@ -448,15 +448,22 @@ fn config_contains_key(content: &ConfigContent, key: &str) -> KeyPresence {
 /// and INI `key: value`. Strings (basic with escapes, literal), arrays,
 /// inline tables, and comments are tokenized, so text inside a value is
 /// never a key. `None` when the document holds a multi-line string, whose
-/// lines the tokenizer does not model. commentlint: allow(JUDGE)
+/// lines the tokenizer does not model.
 fn toml_keys(text: &str) -> Option<Vec<String>> {
     if text.contains("\"\"\"") || text.contains("'''") {
         return None;
     }
     let mut keys = Vec::new();
+    let mut value = ValueScan::default();
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        // An open array treats a following `[` line as an element, not a
+        // table header.
+        if value.is_open() {
+            value.collect_keys(line, &mut keys)?;
             continue;
         }
         if let Some(inner) = table_header(line) {
@@ -465,20 +472,28 @@ fn toml_keys(text: &str) -> Option<Vec<String>> {
             }
             continue;
         }
-        let mut scanner = TomlScanner::new(line);
-        let Some(lhs) = scanner.take_until_delimiter() else {
+        let Some((lhs, rest)) = split_at_delimiter(line) else {
             continue;
         };
         let Some(segments) = key_segments(lhs) else {
             continue;
         };
         keys.extend(segments);
-        scanner.collect_value_keys(&mut keys);
+        value.collect_keys(rest, &mut keys)?;
+    }
+    // A container still open at the end consumed every later line as value
+    // content; whatever those lines defined is unreadable, not absent.
+    if value.is_open() {
+        return None;
     }
     Some(keys)
 }
 
-/// `[a.b]` or `[[a.b]]` up to its closing bracket, allowing a trailing comment.
+/// The key text of a `[a.b]` or `[[a.b]]` header. Accepts only whitespace or
+/// a `#` comment after the closing bracket. A quote starts a quoted segment
+/// only at a segment start and only when the line closes it; brackets inside
+/// quoted segments are not structural, and any other quote is a literal
+/// character of an INI section name.
 fn table_header(line: &str) -> Option<&str> {
     let (open, close) = if line.starts_with("[[") {
         ("[[", "]]")
@@ -488,20 +503,43 @@ fn table_header(line: &str) -> Option<&str> {
         return None;
     };
     let body = &line[open.len()..];
-    let end = body.find(close)?;
-    let rest = body[end + close.len()..].trim_start();
-    (rest.is_empty() || rest.starts_with('#')).then_some(&body[..end])
+    let mut pos = 0usize;
+    let mut segment_start = true;
+    while pos < body.len() {
+        let rest = &body[pos..];
+        if let Some(after) = rest.strip_prefix(close) {
+            let after = after.trim_start();
+            return (after.is_empty() || after.starts_with('#')).then_some(&body[..pos]);
+        }
+        if segment_start
+            && rest.starts_with(['"', '\''])
+            && let Some((_, after)) = quoted(rest)
+        {
+            pos = body.len() - after.len();
+            segment_start = false;
+            continue;
+        }
+        let ch = rest.chars().next()?;
+        segment_start = ch == '.' || (segment_start && ch.is_whitespace());
+        pos += ch.len_utf8();
+    }
+    None
 }
 
 /// Segments of a dotted key, with a quoted segment as one key whatever dots it
-/// holds and a basic-quoted segment honoring escapes. `None` for a malformed
-/// key. commentlint: allow(JUDGE)
+/// holds and a basic-quoted segment honoring escapes. A quote-led segment the
+/// line never closes is a literal INI key. `None` for an empty segment or for
+/// text that follows a quoted segment without a dot.
 fn key_segments(lhs: &str) -> Option<Vec<String>> {
     let mut segments = Vec::new();
     let mut rest = lhs.trim();
     while !rest.is_empty() {
-        let segment = if rest.starts_with(['"', '\'']) {
-            let (segment, after) = quoted(rest)?;
+        let quoted_segment = if rest.starts_with(['"', '\'']) {
+            quoted(rest)
+        } else {
+            None
+        };
+        let segment = if let Some((segment, after)) = quoted_segment {
             rest = after.trim_start();
             segment
         } else {
@@ -525,7 +563,7 @@ fn key_segments(lhs: &str) -> Option<Vec<String>> {
 
 /// The unescaped contents of the quoted string at the start of `text` and the
 /// text after its closing quote. A basic string honors `\\` escapes; a literal
-/// string has none. commentlint: allow(JUDGE)
+/// string has none.
 fn quoted(text: &str) -> Option<(String, &str)> {
     let mut chars = text.char_indices().peekable();
     let (_, quote) = chars.next()?;
@@ -563,107 +601,108 @@ fn quoted(text: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Walks one assignment line after its key.
-struct TomlScanner<'a> {
-    line: &'a str,
-    pos: usize,
+/// The key text before the first `=` or `:` outside quotes, and the text after
+/// that delimiter. `None` when the line has no key.
+fn split_at_delimiter(line: &str) -> Option<(&str, &str)> {
+    let mut pos = 0usize;
+    while pos < line.len() {
+        let rest = &line[pos..];
+        let ch = rest.chars().next()?;
+        match ch {
+            '"' | '\'' => {
+                let (_, after) = quoted(rest)?;
+                pos = line.len() - after.len();
+            }
+            '=' | ':' => return Some((&line[..pos], &line[pos + 1..])),
+            '#' => return None,
+            _ => pos += ch.len_utf8(),
+        }
+    }
+    None
 }
 
-impl<'a> TomlScanner<'a> {
-    fn new(line: &'a str) -> Self {
-        Self { line, pos: 0 }
-    }
+/// Walks the value side of assignments, carrying open containers across
+/// lines so a multi-line array is read as one value.
+#[derive(Default)]
+struct ValueScan {
+    // The innermost open container decides what a comma separates: keys in
+    // an inline table, elements in an array. Counts cannot tell the two
+    // apart once they nest, so the containers are kept in order.
+    containers: Vec<Container>,
+    expecting_key: bool,
+}
 
-    fn rest(&self) -> &'a str {
-        &self.line[self.pos..]
-    }
-
-    /// The key text before the first `=` or `:` outside quotes, leaving the
-    /// scanner just past that delimiter. `None` when the line has no key.
-    fn take_until_delimiter(&mut self) -> Option<&'a str> {
-        let start = self.pos;
-        while self.pos < self.line.len() {
-            let rest = self.rest();
-            let ch = rest.chars().next()?;
-            match ch {
-                '"' | '\'' => {
-                    let (_, after) = quoted(rest)?;
-                    self.pos = self.line.len() - after.len();
-                }
-                '=' | ':' => {
-                    let lhs = &self.line[start..self.pos];
-                    self.pos += 1;
-                    return Some(lhs);
-                }
-                '#' => return None,
-                _ => self.pos += ch.len_utf8(),
-            }
-        }
-        None
+impl ValueScan {
+    fn is_open(&self) -> bool {
+        !self.containers.is_empty()
     }
 
     /// Keys defined inside the value: an inline table at any depth defines its
-    /// keys, including inside arrays; strings and comments define none.
-    fn collect_value_keys(&mut self, keys: &mut Vec<String>) {
-        // The innermost open container decides what a comma separates: keys
-        // in an inline table, elements in an array. Counts cannot tell the two
-        // apart once they nest, so the containers are kept in order. commentlint: allow(JUDGE)
-        let mut containers: Vec<Container> = Vec::new();
-        let mut expecting_key = false;
-        while self.pos < self.line.len() {
-            let rest = self.rest();
+    /// keys, including inside arrays; strings and comments define none. An
+    /// unterminated string ends a bare value at the line. Inside an open
+    /// container the same string may hide the closing bracket, so the rest
+    /// of the document is unreadable and the scan yields `None`.
+    fn collect_keys(&mut self, text: &str, keys: &mut Vec<String>) -> Option<()> {
+        let mut pos = 0usize;
+        while pos < text.len() {
+            let rest = &text[pos..];
             let Some(ch) = rest.chars().next() else {
                 break;
             };
-            let in_table = containers.last() == Some(&Container::Table);
+            let in_table = self.containers.last() == Some(&Container::Table);
             match ch {
-                '#' if containers.is_empty() => break,
+                '#' => break,
                 '"' | '\'' => {
-                    let Some((text, after)) = quoted(rest) else {
-                        return;
+                    let Some((quoted_text, after)) = quoted(rest) else {
+                        if !self.containers.is_empty() {
+                            return None;
+                        }
+                        self.expecting_key = false;
+                        return Some(());
                     };
-                    self.pos = self.line.len() - after.len();
-                    if expecting_key {
-                        keys.push(text);
-                        expecting_key = false;
+                    pos = text.len() - after.len();
+                    if self.expecting_key {
+                        keys.push(quoted_text);
+                        self.expecting_key = false;
                     }
                     continue;
                 }
                 '{' => {
-                    containers.push(Container::Table);
-                    expecting_key = true;
+                    self.containers.push(Container::Table);
+                    self.expecting_key = true;
                 }
                 '}' => {
-                    containers.pop();
-                    expecting_key = false;
+                    self.containers.pop();
+                    self.expecting_key = false;
                 }
                 '[' => {
-                    containers.push(Container::Array);
-                    expecting_key = false;
+                    self.containers.push(Container::Array);
+                    self.expecting_key = false;
                 }
                 ']' => {
-                    containers.pop();
-                    expecting_key = false;
+                    self.containers.pop();
+                    self.expecting_key = false;
                 }
-                ',' => expecting_key = in_table,
-                '=' => expecting_key = false,
-                '.' if expecting_key => {}
+                ',' => self.expecting_key = in_table,
+                '=' => self.expecting_key = false,
+                '.' if self.expecting_key => {}
                 c if c.is_whitespace() => {}
-                _ if expecting_key && in_table => {
+                _ if self.expecting_key && in_table => {
                     let end = rest
                         .find(|c: char| c.is_whitespace() || matches!(c, '=' | ',' | '}' | '.'))
                         .unwrap_or(rest.len());
                     keys.push(rest[..end].to_string());
-                    self.pos += end;
+                    pos += end;
                     if !rest[end..].starts_with('.') {
-                        expecting_key = false;
+                        self.expecting_key = false;
                     }
                     continue;
                 }
                 _ => {}
             }
-            self.pos += ch.len_utf8();
+            pos += ch.len_utf8();
         }
+        Some(())
     }
 }
 
@@ -746,7 +785,7 @@ fn enclosing_gitlink<'p>(index: &gix::index::State, tracked: &'p str) -> Option<
 /// never saw. A tracked path is compared by blob id against its index entry;
 /// an untracked path that is present and not ignored appeared after the
 /// snapshot. `None` when the path is tracked but the check read no content,
-/// which leaves nothing to compare. commentlint: allow(JUDGE)
+/// which leaves nothing to compare.
 pub(super) fn observation_matches_index(
     cache: &mut CheckCache,
     snapshot: &CheckoutSnapshot,
@@ -756,20 +795,20 @@ pub(super) fn observation_matches_index(
     let repo = snapshot.repo();
     let index = snapshot.index();
     // A path beneath a tracked gitlink lives in the submodule's index; the
-    // superproject index only says the gitlink exists. commentlint: allow(JUDGE)
+    // superproject index only says the gitlink exists.
     if let Some(gitlink) = enclosing_gitlink(index, tracked) {
         // A gitlink that was clean at the snapshot has its worktree equal to
         // the commit the superproject index records, so that commit's tree is
         // the snapshot-time reference; the submodule's live index is not,
         // since a stage after the snapshot moves it. A dirty gitlink is in the
-        // dirty set and the gate catches the overlap before this runs. commentlint: allow(JUDGE)
+        // dirty set and the gate catches the overlap before this runs.
         let commit = index.entry_by_path(gitlink.into())?.id;
         let Some(nested) = snapshot.nested_index(gitlink) else {
             return Some(false);
         };
         let relative = &tracked[gitlink.len() + 1..];
         // The recorded commit is the only snapshot-time reference; without it
-        // the live observation cannot be validated and is not accepted. commentlint: allow(JUDGE)
+        // the live observation cannot be validated and is not accepted.
         let Some(mut tree) = nested
             .repo
             .find_commit(commit)
@@ -825,7 +864,7 @@ fn observation_matches_entry(
     let executable = match cache.resolve(snapshot, path) {
         Resolved::RegularFile { executable } => executable,
         // An absent path is consistent with no entry, or with a skip-worktree
-        // entry the checkout never materializes. commentlint: allow(JUDGE)
+        // entry the checkout never materializes.
         Resolved::Absent => {
             return Some(
                 entry.is_none()
@@ -835,7 +874,7 @@ fn observation_matches_entry(
             );
         }
         // A directory is what a recorded gitlink looks like on disk; any other
-        // non-file shape under a tracked entry diverged from the index. commentlint: allow(JUDGE)
+        // non-file shape under a tracked entry diverged from the index.
         Resolved::NotAFile(_) => {
             return Some(match entry {
                 None => true,
@@ -864,7 +903,7 @@ fn observation_matches_entry(
     };
     // A chmod alone moves git's mode between 100644 and 100755 and counts as
     // a modification where the filesystem tracks the bit, so the mode is
-    // compared before the bytes. commentlint: allow(JUDGE)
+    // compared before the bytes.
     let capabilities = repo.filesystem_options().ok()?;
     let observed = if executable { "exec" } else { "file" };
     if !tracked_mode_matches(entry_mode, observed, capabilities) {
@@ -880,7 +919,7 @@ fn observation_matches_entry(
     )
     .ok()?;
     // Raw bytes first; a `text eol=crlf` file only matches after the
-    // conversion git applies on the way into the index. commentlint: allow(JUDGE)
+    // conversion git applies on the way into the index.
     Some(
         blob == entry_id
             || normalized_blob_id_in(repo, index, tracked, content.text.as_bytes())

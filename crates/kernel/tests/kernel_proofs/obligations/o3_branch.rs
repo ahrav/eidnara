@@ -1,5 +1,5 @@
-//! O3, git-branch applicability: `ResolutionLadder::evaluate` agrees with an independent reachability oracle over 16 seeded DAGs of 5..=12 commits with merges and a disconnected root, exhaustive over `(anchor, head)` pairs within each DAG. commentlint: allow(JUDGE)
-//! Patch-id fallback through `ApplicabilityEngine::evaluate` is proven by `kernel_applicability_acceptance::acceptance_patch_id_fallback_resolves_moved_commits`, and duplicate-patch-id ambiguity by `kernel_anchor_resolution::rebase_fixture_resolves_through_patch_id_and_duplicates_stay_uncertain`; this module owns the graph property. commentlint: allow(JUDGE)
+//! O3, git-branch applicability: `ResolutionLadder::evaluate` agrees with an independent reachability oracle over 16 seeded DAGs of 5..=12 commits with merges and a disconnected root, exhaustive over `(anchor, head)` pairs within each DAG.
+//! Patch-id fallback through `ApplicabilityEngine::evaluate` is proven by `kernel_applicability_acceptance::acceptance_patch_id_fallback_resolves_moved_commits`, and duplicate-patch-id ambiguity by `kernel_anchor_resolution::rebase_fixture_resolves_through_patch_id_and_duplicates_stay_uncertain`; this module owns the graph property.
 //!
 //! With no capture, `resolve_commit` skips the patch-id and tree-hash rungs
 //! (`match_in_window` has nothing to match), so the ancestry test alone

@@ -137,9 +137,9 @@ impl KernelStore {
         Ok(targets)
     }
 
-    /// Returns decision-payload sizes in bytes at snapshot `requested`, keyed by `object_id`: the query reads `length(decision_payload)` only, so a caller can bound how many full payloads it materializes before asking for any of them. commentlint: allow(JUDGE)
+    /// Returns decision-payload sizes in bytes at snapshot `requested`, keyed by `object_id`: the query reads `length(decision_payload)` only, so a caller can bound how many full payloads it materializes before asking for any of them.
     ///
-    /// Uses the same id binding, snapshot, and error semantics as [`Self::decisions_for_objects_as_of`]; no payload is parsed, so [`KernelError::CorruptCanonicalRow`] is never returned. commentlint: allow(JUDGE)
+    /// Uses the same id binding, snapshot, and error semantics as [`Self::decisions_for_objects_as_of`]; no payload is parsed, so [`KernelError::CorruptCanonicalRow`] is never returned.
     pub fn decision_payload_sizes_as_of(
         &self,
         object_ids: &[String],
@@ -242,7 +242,7 @@ fn load_decisions_for_objects(
     Ok(rows)
 }
 
-/// Shares `load_decisions_for_objects`'s visibility predicate so a size row exists exactly when the full decision row would. commentlint: allow(JUDGE)
+/// Shares `load_decisions_for_objects`'s visibility predicate so a size row exists exactly when the full decision row would.
 fn load_decision_payload_sizes(
     tx: &Transaction<'_>,
     requested: i64,

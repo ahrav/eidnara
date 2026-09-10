@@ -318,7 +318,7 @@ describe("ctx_memory create and revise through the cached token", () => {
         const args = { action: "revise", objectId: "mem_a", content: "A, revised." };
         const first = parseJson<CommitJson>(await tool.execute(args, "call-revise-inherit"));
         expect(first.outcome).toBe("applied");
-        // The omitted fields inherited from the retired predecessor, which no read serves; the probe compares only the stated content and lets the daemon's digest prove the rest. commentlint: allow(JUDGE)
+        // The omitted fields inherited from the retired predecessor, which no read serves; the probe compares only the stated content and lets the daemon's digest prove the rest.
         const second = parseJson<CommitJson>(await tool.execute(args, "call-revise-inherit"));
         expect(second).toMatchObject({
             outcome: "already applied",
@@ -340,7 +340,7 @@ describe("ctx_memory create and revise through the cached token", () => {
             ),
         );
         expect(first.outcome).toBe("applied");
-        // An explicit field that differs from the successor is not a redelivery, so the probe declines and the ordinary path reports the retired target. commentlint: allow(JUDGE)
+        // An explicit field that differs from the successor is not a redelivery, so the probe declines and the ordinary path reports the retired target.
         const text = await tool.execute(
             { action: "revise", objectId: "mem_a", content: "A, revised differently." },
             "call-revise-differs",
@@ -384,7 +384,7 @@ describe("ctx_memory create and revise through the cached token", () => {
         };
         try {
             setSystemTime(new Date("2026-01-01T12:00:00Z"));
-            // The stored expiry is not day-aligned, so it cannot have been generated; the probe must not substitute it. commentlint: allow(JUDGE)
+            // The stored expiry is not day-aligned, so it cannot have been generated; the probe must not substitute it.
             const misaligned = harness();
             const first = parseJson<CommitJson>(
                 await misaligned.execute(
@@ -406,7 +406,7 @@ describe("ctx_memory create and revise through the cached token", () => {
                     "call-anti-explicit",
                 ),
             ).toBe(digestError);
-            // A day-aligned explicit expiry beyond the retry's own generated horizon fails the substitution bound. commentlint: allow(JUDGE)
+            // A day-aligned explicit expiry beyond the retry's own generated horizon fails the substitution bound.
             const farFuture = harness();
             const second = parseJson<CommitJson>(
                 await farFuture.execute(
@@ -447,7 +447,7 @@ describe("ctx_memory create and revise through the cached token", () => {
             await tool.execute({ ...args, objectId: "mem_a" }, "call-revise-retarget"),
         );
         expect(first.outcome).toBe("applied");
-        // The retry names a target that never existed: absence from the read cannot prove it was the committed predecessor, and the probe's digest names the new target, so the daemon rejects the reuse and the ordinary visibility error surfaces. commentlint: allow(JUDGE)
+        // The retry names a target that never existed: absence from the read cannot prove it was the committed predecessor, and the probe's digest names the new target, so the daemon rejects the reuse and the ordinary visibility error surfaces.
         expect(await tool.execute({ ...args, objectId: "mem_gone" }, "call-revise-retarget")).toBe(
             "Error: memory not found or not visible from this project: mem_gone",
         );
@@ -564,7 +564,7 @@ describe("ctx_memory reads beyond the daemon row cap", () => {
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
         kernel.seedDecision({ object_id: "mem_b", decision_kind: "ARCHITECTURE", summary: "B." });
         kernel.seedDecision({ object_id: "mem_c", decision_kind: "ARCHITECTURE", summary: "C." });
-        // The id filter bypasses the daemon's row cap but not its byte budget; the cap stands in for a budget that holds two rows per filtered read. commentlint: allow(JUDGE)
+        // The id filter bypasses the daemon's row cap but not its byte budget; the cap stands in for a budget that holds two rows per filtered read.
         kernel.filteredReadRowCap = 2;
         const tool = harness(kernel);
         const merged = parseJson<CommitJson>(
@@ -681,7 +681,7 @@ describe("ctx_memory lifecycle and merge", () => {
             ),
         );
         expect(first.outcome).toBe("applied");
-        // The reason is caller-controlled audit text and never enters the operation key, so a fresh reason cannot mint a fresh key. commentlint: allow(JUDGE)
+        // The reason is caller-controlled audit text and never enters the operation key, so a fresh reason cannot mint a fresh key.
         expect(
             await tool.execute(
                 { action: "archive", objectId: "mem_b", reason: "second delivery" },
@@ -736,7 +736,7 @@ describe("ctx_memory lifecycle and merge", () => {
             ),
         ).toBe(refused);
         expect(tool.transport.methods()).not.toContain("kernel.commit");
-        // Archive's replay probe reaches the daemon, but its snapshot-0 token trips the token conflict before the envelope can mutate the hidden row. commentlint: allow(JUDGE)
+        // Archive's replay probe reaches the daemon, but its snapshot-0 token trips the token conflict before the envelope can mutate the hidden row.
         expect(
             await tool.execute({ action: "archive", objectId: "mem_secret" }, "call-archive-x"),
         ).toBe(refused);
@@ -896,7 +896,7 @@ describe("ctx_memory domain fence and lineage", () => {
         expect(
             await tool.execute({ action: "archive", objectId: "mem_notes" }, "call-archive-domain"),
         ).toBe("Error: memory not found or not visible from this project: mem_notes");
-        // Archive's replay probe reaches the daemon, but its snapshot-0 token trips the token conflict before the envelope can mutate the out-of-domain row. commentlint: allow(JUDGE)
+        // Archive's replay probe reaches the daemon, but its snapshot-0 token trips the token conflict before the envelope can mutate the out-of-domain row.
         const probe = tool.transport.calls.find((call) => call.method === "kernel.commit");
         expect(probe?.body).toMatchObject({
             tokens: [{ object_id: "mem_notes", known_as_of: 0 }],
@@ -1155,7 +1155,7 @@ describe("ctx_memory anti-memory", () => {
             setSystemTime(new Date("2026-01-01T12:00:00Z"));
             const first = parseJson<CommitJson>(await tool.execute(args, "call-anti-revise-day"));
             expect(first.outcome).toBe("applied");
-            // The generated expiry re-renders day-aligned two days later, so only the stored-expiry comparison recognizes the committed successor. commentlint: allow(JUDGE)
+            // The generated expiry re-renders day-aligned two days later, so only the stored-expiry comparison recognizes the committed successor.
             setSystemTime(new Date("2026-01-03T12:00:00Z"));
             const second = parseJson<CommitJson>(await tool.execute(args, "call-anti-revise-day"));
             expect(second).toMatchObject({

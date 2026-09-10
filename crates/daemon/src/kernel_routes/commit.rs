@@ -1023,7 +1023,7 @@ impl Handler {
                         "previews": [],
                     }),
                 ),
-                // A malformed combination of operations, not a kernel state: each operation previews on its own. commentlint: allow(JUDGE)
+                // A malformed combination of operations, not a kernel state: each operation previews on its own.
                 Ok(Err(CommitFailure::Kernel(KernelError::PreviewAuthorityChanged))) => {
                     crate::invalid_params_error(format!(
                         "{OPERATION} preview cannot judge an operation whose approval chain an \

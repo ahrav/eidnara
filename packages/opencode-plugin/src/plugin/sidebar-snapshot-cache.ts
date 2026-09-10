@@ -14,7 +14,7 @@ interface CachedSnapshot {
     modelKey: string | undefined;
 }
 
-/** Identifies one sticky snapshot. Token totals are measured against one model's window, so a different `modelKey` resets the entry instead of reusing it. commentlint: allow(JUDGE) */
+/** Identifies one sticky snapshot. Token totals are measured against one model's window, so a different `modelKey` resets the entry instead of reusing it. */
 export interface StickySnapshotScope {
     sessionId: string;
     directory: string;
@@ -22,7 +22,7 @@ export interface StickySnapshotScope {
 }
 
 const MAX_CACHED_SESSIONS = 100;
-/** Roots retained per session. A session lives under one root; the slack covers alternate spellings of that root without letting a long-lived session accumulate a snapshot per directory it was ever polled from. commentlint: allow(JUDGE) */
+/** Roots retained per session. A session lives under one root; the slack covers alternate spellings of that root without letting a long-lived session accumulate a snapshot per directory it was ever polled from. */
 export const MAX_CACHED_ROOTS_PER_SESSION = 4;
 const STALE_SNAPSHOT_AGE_MS = 5 * 60 * 1000; // 5 minutes
 

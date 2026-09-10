@@ -54,7 +54,7 @@ export default function eidnaraSubagentExtension(pi: ExtensionAPI): void {
 
             registerEidnaraTools(pi, {
                 kernelClient: createPiKernelClientResolver(
-                    // The resolver loads configuration from `projectRoot`; a `/cd` into another project dials with that project's `memory.enabled` and connection file, not the startup ones. commentlint: allow(JUDGE)
+                    // The resolver loads configuration from `projectRoot`; a `/cd` into another project dials with that project's `memory.enabled` and connection file, not the startup ones.
                     (projectRoot) => loadPiConfig({ cwd: projectRoot }).config,
                 ),
                 rustToolBackends: {},

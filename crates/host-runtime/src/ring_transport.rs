@@ -276,7 +276,7 @@ impl RingTransport {
         let root = CancellationToken::new();
         let read_cancel = root.child_token();
         let (sender, queue) = frame_sender(queue_frames, root.clone(), frame_deadline);
-        // One slot beyond `queue_frames` is reserved for the terminal event, so a fault or cancellation is reported even when the receiver has stopped draining. commentlint: allow(JUDGE)
+        // One slot beyond `queue_frames` is reserved for the terminal event, so a fault or cancellation is reported even when the receiver has stopped draining.
         let inbound_capacity = queue_frames
             .saturating_add(1)
             .min(tokio::sync::Semaphore::MAX_PERMITS);
@@ -349,7 +349,7 @@ impl RingTransport {
                 }
                 drop(panic_inbound);
                 // A quarantined ring may remain mapped by its peer, so its charges move to the quarantined bucket rather than being refunded.
-                // A peer that closed its doorbell ends has dropped its attachment, so its ring is reclaimable even though the backend latched quarantine on the closed doorbell. commentlint: allow(JUDGE)
+                // A peer that closed its doorbell ends has dropped its attachment, so its ring is reclaimable even though the backend latched quarantine on the closed doorbell.
                 let quarantined = (rings.first.is_quarantined() || rings.second.is_quarantined())
                     && !peer_released_ring(&rings);
                 drop(rings);
@@ -417,7 +417,7 @@ pub(crate) fn worker_descriptor(
     ))
 }
 
-/// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host. commentlint: allow(JUDGE)
+/// A stream doorbell reads end-of-file only after its peer end is closed, which is how a peer that exited or dropped its attachment appears to the host.
 fn peer_released_ring(rings: &DuplexRing) -> bool {
     use std::io::Read;
     let Ok(doorbell) = rings.second.duplicate_data_ready() else {
@@ -497,13 +497,13 @@ async fn run_endpoint(
             return;
         }
     };
-    // One ring depth of receives after `read_cancel` covers every frame committed before it. commentlint: allow(JUDGE)
+    // One ring depth of receives after `read_cancel` covers every frame committed before it.
     let post_cancel_depth =
         usize::try_from(rings.second.grant().geometry().descriptor_depth).unwrap_or(usize::MAX);
     let mut post_cancel_frames: Option<usize> = None;
     let mut finishing = false;
     loop {
-        // The loop checks lifecycle tokens before receiving frames so sustained inbound traffic cannot bypass the `select!` below. commentlint: allow(JUDGE)
+        // The loop checks lifecycle tokens before receiving frames so sustained inbound traffic cannot bypass the `select!` below.
         if discard.is_cancelled() || root.is_cancelled() {
             return;
         }
@@ -631,7 +631,7 @@ async fn run_endpoint(
     }
 }
 
-// `ShmReceiver::recv` maps a closed channel to `CleanEof`, so a fault must be sent explicitly before `inbound` drops. commentlint: allow(JUDGE)
+// `ShmReceiver::recv` maps a closed channel to `CleanEof`, so a fault must be sent explicitly before `inbound` drops.
 fn fail(
     inbound: &mut Option<Inbound>,
     queue: &mut SenderQueue,
@@ -645,7 +645,7 @@ fn fail(
     root.cancel();
 }
 
-// Teardown must not depend on the receiver draining: a full channel under `discard` or `root` cancellation yields instead of blocking the endpoint. commentlint: allow(JUDGE)
+// Teardown must not depend on the receiver draining: a full channel under `discard` or `root` cancellation yields instead of blocking the endpoint.
 async fn deliver(
     inbound: &InboundSender,
     queue: &SenderQueue,
@@ -702,15 +702,15 @@ async fn receive_one(
     let charge = loop {
         tokio::select! {
             biased;
-            // An available budget charges before the lifecycle arms are polled, so a frame committed before read cancellation still drains; only a frame that must wait for budget yields to cancellation. commentlint: allow(JUDGE)
+            // An available budget charges before the lifecycle arms are polled, so a frame committed before read cancellation still drains; only a frame that must wait for budget yields to cancellation.
             charge = &mut charge => match charge {
                 Some(charge) => break charge,
                 // The declared body exceeds the ingress budget's capacity outright; no release can admit it.
                 None => return Err(ReadClose::Overloaded),
             },
-            // Read cancellation stops only the read side: dropping `lease` discards the frame and `Ok(false)` lets the writer keep draining. commentlint: allow(JUDGE)
+            // Read cancellation stops only the read side: dropping `lease` discards the frame and `Ok(false)` lets the writer keep draining.
             () = read_cancel.cancelled() => return Ok(false),
-            // The endpoint loop observes `discard` and exits; the dropped lease discards the frame. commentlint: allow(JUDGE)
+            // The endpoint loop observes `discard` and exits; the dropped lease discards the frame.
             () = discard.cancelled() => return Ok(false),
             () = tokio::time::sleep_until(deadline) => {
                 // The peer and transport are healthy; only the ingress budget is
@@ -811,7 +811,7 @@ fn publish_owned(ring: &Ring, bytes: &[u8], tail: &[u8], deadline: StdInstant) -
     commit_before(reservation, body_len, deadline)
 }
 
-// Serialization runs after `reserve_until` returns, so the deadline is re-checked at commit; dropping an uncommitted reservation aborts it. commentlint: allow(JUDGE)
+// Serialization runs after `reserve_until` returns, so the deadline is re-checked at commit; dropping an uncommitted reservation aborts it.
 fn commit_before(
     reservation: ProducerReservation<'_>,
     body_len: usize,

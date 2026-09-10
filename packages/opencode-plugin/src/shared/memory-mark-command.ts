@@ -72,7 +72,7 @@ export type MemoryMarkOutcome =
     | { kind: "needs_confirmation"; preview: DispositionPreview }
     /** The user declined the confirmation; nothing was written. */
     | { kind: "declined"; preview: DispositionPreview }
-    /** A relaxation without a valid approval, refused at the preview or recorded as denied by the commit; the disposition is unchanged. commentlint: allow(JUDGE) */
+    /** A relaxation without a valid approval, refused at the preview or recorded as denied by the commit; the disposition is unchanged. */
     | { kind: "denied"; result: DispositionResult }
     | { kind: "applied"; result: DispositionResult; commitSeq: number; replayed: boolean }
     /** The daemon answered the preview or the commit with a non-available state. */
@@ -94,12 +94,12 @@ export interface MemoryMarkInput {
     isCancelled?: () => boolean;
 }
 
-/** Repeating the same event on the same object in one session reuses the identity, so the daemon replays the receipt instead of recording twice. commentlint: allow(JUDGE) */
+/** Repeating the same event on the same object in one session reuses the identity, so the daemon replays the receipt instead of recording twice. */
 export function memoryMarkOperationId(sessionId: string, args: MemoryMarkArgs): string {
     return [sessionId, args.event, args.objectId].join(OPERATION_KEY_SEPARATOR);
 }
 
-/** The daemon returns one verdict for the single operation sent; only a verdict for `operation` may decide the confirmation and the reported outcome. commentlint: allow(JUDGE) */
+/** The daemon returns one verdict for the single operation sent; only a verdict for `operation` may decide the confirmation and the reported outcome. */
 function verdictFor<R extends DispositionResult>(
     results: readonly R[],
     operation: DispositionOperation,
@@ -126,10 +126,10 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
     const previewed = await client.previewDispositions({ ...intent, operations: [operation] });
     if (!isAvailable(previewed))
         return { kind: "refused", step: "preview", state: previewed.state };
-    // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing. commentlint: allow(JUDGE)
+    // A recorded identity replays its receipt whatever the object's state is now, so the preview has nothing to judge and asks nothing.
     if (previewed.receipt === undefined) {
         const preview = verdictFor(previewed.previews, operation);
-        // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written. commentlint: allow(JUDGE)
+        // The reply decoded but does not answer the operation sent: a daemon contract violation, and nothing was written.
         if (!preview) return { kind: "refused", step: "preview", state: invalid("internal") };
         if (preview.denied) return { kind: "denied", result: preview };
         if (preview.visibility_changes && !args.confirmed) {
@@ -142,9 +142,9 @@ export async function runMemoryMarkCommand(input: MemoryMarkInput): Promise<Memo
     const committed = await client.commit({ ...intent, operations: [operation] });
     if (!isAvailable(committed)) return { kind: "refused", step: "commit", state: committed.state };
     const result = verdictFor(committed.dispositions, operation);
-    // The receipt exists, so the commit may have been applied; a verdict list that does not answer the operation leaves its effect unknown rather than refused. commentlint: allow(JUDGE)
+    // The receipt exists, so the commit may have been applied; a verdict list that does not answer the operation leaves its effect unknown rather than refused.
     if (!result) return { kind: "refused", step: "commit", state: unavailable("outcome_unknown") };
-    // The object can move between the preview and the commit; the commit's verdict is the one recorded. commentlint: allow(JUDGE)
+    // The object can move between the preview and the commit; the commit's verdict is the one recorded.
     if (result.denied) return { kind: "denied", result };
     return {
         kind: "applied",
@@ -177,7 +177,7 @@ export function formatMemoryMarkOutcome(outcome: MemoryMarkOutcome, args: Memory
     const title = "## Eidnara Memory";
     switch (outcome.kind) {
         case "needs_confirmation":
-            // The re-run line comes first: OpenCode shows this reply as a toast that keeps only its opening characters, and the surface list below can run past that cut. commentlint: allow(JUDGE)
+            // The re-run line comes first: OpenCode shows this reply as a toast that keeps only its opening characters, and the surface list below can run past that cut.
             return [
                 `${title} — Confirmation Needed`,
                 "",

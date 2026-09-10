@@ -122,8 +122,8 @@ fn windowed(c: &mut Criterion) {
 criterion_group!(benches, windowed);
 
 fn main() {
-    // `cargo test --all-targets` omits `--bench`; without this guard Criterion's test mode walks every cell over 64 MiB corpora in a debug build, which took seven minutes per toolchain in CI. commentlint: allow(JUDGE)
-    // `cargo bench -- --test` keeps `--bench`, so Criterion still runs every cell once. commentlint: allow(JUDGE)
+    // `cargo test --all-targets` omits `--bench`; without this guard Criterion's test mode walks every cell over 64 MiB corpora in a debug build, which took seven minutes per toolchain in CI.
+    // `cargo bench -- --test` keeps `--bench`, so Criterion still runs every cell once.
     if !std::env::args().any(|arg| arg == "--bench") {
         eprintln!("windowed: corpus setup runs only under `cargo bench`");
         return;

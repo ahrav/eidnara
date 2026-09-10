@@ -2165,7 +2165,7 @@ async fn a_read_over_the_byte_budget_serves_the_newest_rows_that_fit() {
     let baseline = daemon.read("explicit_search", None).await;
     assert_eq!(baseline["truncated"], false, "{}", baseline["truncated"]);
 
-    // Rows of ~480 KiB each, one commit apiece so each is strictly newer than the last; enough of them exceed the byte budget while every summary stays under the 512 KiB redaction limit. commentlint: allow(JUDGE)
+    // Rows of ~480 KiB each, one commit apiece so each is strictly newer than the last; enough of them exceed the byte budget while every summary stays under the 512 KiB redaction limit.
     let row_bytes = 480 * 1024;
     let total = MAX_READ_ROW_BYTES / row_bytes + 3;
     let summary = "s".repeat(row_bytes);
@@ -2186,7 +2186,7 @@ async fn a_read_over_the_byte_budget_serves_the_newest_rows_that_fit() {
     let served = object_ids(&read);
     assert!(!served.is_empty());
     assert!(served.len() < total + 1, "{}", served.len());
-    // The served set is a contiguous run of the newest commits; the small oldest row is past the stopping point even though it would fit. commentlint: allow(JUDGE)
+    // The served set is a contiguous run of the newest commits; the small oldest row is past the stopping point even though it would fit.
     let mut expected: Vec<String> = (0..served.len())
         .map(|offset| format!("decision-object-{}", total - offset))
         .collect();

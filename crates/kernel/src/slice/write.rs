@@ -988,7 +988,7 @@ fn load_live_typed_object(
 }
 
 /// Every caller's SELECT must project the same eight columns in this order.
-/// `load_live_decision_by_object` appends `d.decision_id` at index 8. commentlint: allow(JUDGE)
+/// `load_live_decision_by_object` appends `d.decision_id` at index 8.
 ///
 /// `invalidated_commit_seq` is `None` because every caller filters `invalidated_commit_seq IS NULL`.
 /// `superseded_by` is `None` because the projections omit it, so a live but superseded row decodes with `superseded_by: None`.

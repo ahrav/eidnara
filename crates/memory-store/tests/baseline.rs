@@ -178,7 +178,7 @@ fn fresh_open_creates_memory_sqlite_with_the_eidnara_identity_and_the_whole_base
 }
 
 /// `notes` triggers require scalar functions that only `MemoryStore::open` registers,
-/// so a raw connection cannot mutate `notes`. commentlint: allow(JUDGE)
+/// so a raw connection cannot mutate `notes`.
 #[test]
 fn a_raw_connection_cannot_mutate_notes_because_the_trigger_functions_are_unregistered() {
     const TRIGGER_FUNCTIONS: [&str; 3] = [
@@ -204,7 +204,7 @@ fn a_raw_connection_cannot_mutate_notes_because_the_trigger_functions_are_unregi
     let conn = Connection::open(dir.path().join("memory.sqlite")).unwrap();
     // Negative control: `cache_state` has no triggers, so this raw write succeeds and
     // the `notes` failures are the unregistered functions, not a read-only file or
-    // a held lease. commentlint: allow(JUDGE)
+    // a held lease.
     conn.execute(
         "INSERT INTO cache_state (session_id, row_version, core_state, meta)
          VALUES ('raw-session', 1, '{}', '{}')",
@@ -214,7 +214,7 @@ fn a_raw_connection_cannot_mutate_notes_because_the_trigger_functions_are_unregi
 
     // SQLite resolves trigger functions at statement preparation and reports only the
     // first unresolved function, so the reported name depends on trigger creation
-    // order. commentlint: allow(JUDGE)
+    // order.
     for sql in [
         "INSERT INTO notes (project_path, content) VALUES ('project', 'raw')",
         "UPDATE notes SET content = 'x' WHERE id = ?1",
@@ -292,7 +292,7 @@ fn notes_changefeed_triggers_snapshot_and_watch_every_column() {
 
     let page = store.pull_changefeed("notes", 0, 100).unwrap();
     let ops: Vec<&str> = page.rows.iter().map(|row| row.op.as_str()).collect();
-    // One feed row per API mutation. commentlint: allow(JUDGE)
+    // One feed row per API mutation.
     assert_eq!(ops, ["insert", "update", "tombstone"]);
     for row in &page.rows {
         assert_eq!(row.module_row_id, note.id);

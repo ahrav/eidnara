@@ -209,7 +209,7 @@ pub struct OutboundFrame {
     pub written: Option<Box<dyn FnOnce(Instant) + Send>>,
 }
 
-/// Senders hold `admission` shared across the retired re-check and the queue push; the finishing endpoint takes it exclusively so its final empty `try_recv` proves no admitted frame is still landing. commentlint: allow(JUDGE)
+/// Senders hold `admission` shared across the retired re-check and the queue push; the finishing endpoint takes it exclusively so its final empty `try_recv` proves no admitted frame is still landing.
 type AdmissionGate = Arc<RwLock<()>>;
 
 #[derive(Clone)]
@@ -224,7 +224,7 @@ pub struct FrameSender {
 }
 
 impl FrameSender {
-    /// Closes admission before the endpoint drains, so every frame `send` admitted is published and none admitted afterwards is silently dropped. commentlint: allow(JUDGE)
+    /// Closes admission before the endpoint drains, so every frame `send` admitted is published and none admitted afterwards is silently dropped.
     pub fn finish(&self) {
         self.retired.cancel();
         self.finish.cancel();
@@ -299,7 +299,7 @@ impl SenderQueue {
         self.rx.try_recv()
     }
 
-    /// Takes the next queued frame after `finish`. `None` is final: admission is closed and every push that passed its retired check has landed. commentlint: allow(JUDGE)
+    /// Takes the next queued frame after `finish`. `None` is final: admission is closed and every push that passed its retired check has landed.
     pub(crate) fn drain_finished(&mut self) -> Option<OutboundFrame> {
         if let Ok(frame) = self.rx.try_recv() {
             return Some(frame);

@@ -131,7 +131,7 @@ impl Model {
         }
     }
 
-    /// For operations `supports_fault` never routes through a fault hook, which land on every attempt. commentlint: allow(JUDGE)
+    /// For operations `supports_fault` never routes through a fault hook, which land on every attempt.
     fn mint_ordinal(&mut self) -> usize {
         self.next += 1;
         self.next
@@ -264,7 +264,7 @@ fn seed(proof: &mut Proof, model: &mut Model) {
 /// no fault window the kernel exposes. Ingest has one (`AfterEvents`), but its
 /// rollback unlinks the object and retains the shard directory it created. The
 /// `cas_layout` digest records that directory, so the before/after digest
-/// comparison `fault` performs does not hold for ingest. commentlint: allow(JUDGE)
+/// comparison `fault` performs does not hold for ingest.
 fn supports_fault(op: &Op, model: &Model) -> bool {
     match op {
         Op::Stage | Op::Ingest { .. } | Op::RebuildAlignment => false,

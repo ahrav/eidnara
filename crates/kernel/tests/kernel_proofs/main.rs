@@ -1,11 +1,11 @@
-//! This binary runs the kernel replay/repair correctness proofs. commentlint: allow(JUDGE)
+//! This binary runs the kernel replay/repair correctness proofs.
 //!
-//! Modules: `harness` (proof harness), `model` (randomized operation model), commentlint: allow(JUDGE)
-//! `canonical_state_proofs` (negative controls for the shared canonical-state digest), commentlint: allow(JUDGE)
-//! `fixtures` (spec builders), `obligations` (per-obligation proofs). commentlint: allow(JUDGE)
+//! Modules: `harness` (proof harness), `model` (randomized operation model),
+//! `canonical_state_proofs` (negative controls for the shared canonical-state digest),
+//! `fixtures` (spec builders), `obligations` (per-obligation proofs).
 //!
 //! The obligation numbering runs O1 through O10 and skips O4; this binary does not
-//! prove O4. commentlint: allow(JUDGE)
+//! prove O4.
 //!
 //! Every submodule is declared here so the binary links once; code other test
 //! binaries share lives under `tests/support/` and is `#[path]`-included.

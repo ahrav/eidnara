@@ -97,7 +97,7 @@ fn dense_maximum_input_succeeds() {
 fn transaction_ceilings_keep_a_body_the_default_work_budget_replaces_whole() {
     // Private-key matches and the Slack tokens nested in them are each charged
     // a full rule radius plus keyword probes, so this density exhausts the
-    // default work budget but not the transaction budget. commentlint: allow(JUDGE)
+    // default work budget but not the transaction budget.
     let body = "xoxs-0-0-0-0".repeat(5) + "-000";
     let unit = format!("-----BEGIN PRIVATE KEY-----{body}KEY----- plain\n");
     let mut input = unit.repeat(secret_scanner::MAX_INPUT_BYTES / unit.len() + 1);

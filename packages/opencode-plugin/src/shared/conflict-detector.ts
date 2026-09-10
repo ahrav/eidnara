@@ -218,9 +218,9 @@ function hostFlagEnabled(
 }
 
 /**
- * OpenCode config files in host merge order, lowest precedence first: user-level `opencode.json`, user-level `opencode.jsonc`, the `OPENCODE_CONFIG` file, project root, then `.opencode/`. commentlint: allow(JUDGE)
- * Later entries override earlier ones key by key. The list contains candidate paths; callers decide whether a missing file matters. commentlint: allow(JUDGE)
- * `OPENCODE_DISABLE_PROJECT_CONFIG` omits the project-root and `.opencode/` layers. commentlint: allow(JUDGE)
+ * OpenCode config files in host merge order, lowest precedence first: user-level `opencode.json`, user-level `opencode.jsonc`, the `OPENCODE_CONFIG` file, project root, then `.opencode/`.
+ * Later entries override earlier ones key by key. The list contains candidate paths; callers decide whether a missing file matters.
+ * `OPENCODE_DISABLE_PROJECT_CONFIG` omits the project-root and `.opencode/` layers.
  */
 export function openCodeConfigLayerPaths(directory: string): string[] {
     const user = getOpenCodeConfigPaths({ binary: "opencode" });
@@ -445,7 +445,7 @@ export interface OmoConfigCandidate {
 
 /**
  * `basenames` is probed in order, and `detectConfigFile` prefers `.jsonc` over `.json`.
- * oh-my-opencode reads one file per location; a stale `.json` can mask a hook enabled by `.jsonc`. commentlint: allow(JUDGE)
+ * oh-my-opencode reads one file per location; a stale `.json` can mask a hook enabled by `.jsonc`.
  */
 function activeOmoConfigFile(dir: string, basenames: readonly string[]): string | null {
     for (const basename of basenames) {
@@ -468,7 +468,7 @@ function userOmoDir(): string | null {
     }
 }
 
-/** Shared by the detector and the fixer so their read and write sets cannot drift. commentlint: allow(JUDGE) */
+/** Shared by the detector and the fixer so their read and write sets cannot drift. */
 export function omoConfigCandidatePaths(directory: string): OmoConfigCandidate[] {
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
     const locations: Array<{ dir: string; basenames: readonly string[]; unified: boolean }> = [

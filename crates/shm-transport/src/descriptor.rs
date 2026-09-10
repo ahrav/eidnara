@@ -24,7 +24,7 @@ pub const MAX_SPANS: usize = 2;
 
 /// Shared by `FrameDescriptor::validate` and `SamplePrefix::validate` so both paths agree on
 /// which wire headers are admissible.
-/// Callers that must reject a header before consuming a reservation use this ahead of `commit`, which runs the same check. commentlint: allow(JUDGE)
+/// Callers that must reject a header before consuming a reservation use this ahead of `commit`, which runs the same check.
 pub fn check_wire_header(
     wire_header: &[u8; WIRE_V2_HEADER_BYTES],
     body_len: u64,

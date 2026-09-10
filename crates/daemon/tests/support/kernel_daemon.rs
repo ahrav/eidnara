@@ -23,7 +23,7 @@ pub struct KernelDaemon {
     route: RouteHandle,
     project: PathBuf,
     // Fields drop in declaration order; the directory must outlive the handler
-    // that holds files inside it. commentlint: allow(JUDGE)
+    // that holds files inside it.
     _data: tempfile::TempDir,
 }
 
@@ -115,12 +115,12 @@ impl KernelDaemon {
         }
     }
 
-    /// Seeds the digest from `key`, matching `tests/kernel_routes.rs`, so a retry under the same key replays. commentlint: allow(JUDGE)
+    /// Seeds the digest from `key`, matching `tests/kernel_routes.rs`, so a retry under the same key replays.
     pub async fn commit(&self, key: &str, operations: Vec<Value>) -> Value {
         self.commit_with_digest_seed(key, key, operations).await
     }
 
-    /// The kernel refuses a stored `key` whose digest differs, so a `digest_seed` other than `key` reaches that path. commentlint: allow(JUDGE)
+    /// The kernel refuses a stored `key` whose digest differs, so a `digest_seed` other than `key` reaches that path.
     pub async fn commit_with_digest_seed(
         &self,
         key: &str,

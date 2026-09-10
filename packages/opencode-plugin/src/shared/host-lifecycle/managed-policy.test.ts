@@ -292,15 +292,15 @@ describe("managed payload discovery", () => {
         platform: "linux" as const,
         readMounts: () => "/dev/root / ext4 rw 0 0\n",
     };
-    // Compiled Bun binaries load declaring modules from an embedded filesystem, so `orphanModuleUrl` has no ancestor `package.json`. commentlint: allow(JUDGE)
+    // Compiled Bun binaries load declaring modules from an embedded filesystem, so `orphanModuleUrl` has no ancestor `package.json`.
     const orphanModuleUrl = "file:///nonexistent-compiled-root/bin/main.js";
 
-    // Only mutating commands surface the bootstrap failure; observation answers from the pre-native classifier instead. commentlint: allow(JUDGE)
+    // Only mutating commands surface the bootstrap failure; observation answers from the pre-native classifier instead.
     test("an explicit external root is examined without the declaring parent walk", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
         const external = mkdtempSync(join(tmpdir(), "eidnara-managed-external-"));
         try {
-            // The payload directory exists but carries no manifest, so resolution succeeds and verification is the first stage to fail. commentlint: allow(JUDGE)
+            // The payload directory exists but carries no manifest, so resolution succeeds and verification is the first stage to fail.
             mkdirSync(
                 join(external, "node_modules", ...hostRelease.packages.payloads[0].split("/")),
                 {
@@ -344,7 +344,7 @@ describe("managed payload discovery", () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-managed-data-"));
         const install = mkdtempSync(join(tmpdir(), "eidnara-managed-install-"));
         try {
-            // The farther ancestor carries the requested name; the nearer descriptor is present but unparseable, so climbing past it would certify the farther install. commentlint: allow(JUDGE)
+            // The farther ancestor carries the requested name; the nearer descriptor is present but unparseable, so climbing past it would certify the farther install.
             writeFileSync(join(install, "package.json"), JSON.stringify({ name: "@eidnara/cli" }));
             const nested = join(install, "nested");
             mkdirSync(join(nested, "dist"), { recursive: true });
@@ -380,7 +380,7 @@ describe("managed payload discovery", () => {
                 platformReaders: supportedLinux,
                 admissionIo,
             });
-            // The walk found the declaring package; the failure is the payload lookup beneath it. commentlint: allow(JUDGE)
+            // The walk found the declaring package; the failure is the payload lookup beneath it.
             expect((await policy.start()).reason).toBe("native_payload_missing");
         } finally {
             rmSync(root, { recursive: true, force: true });
@@ -401,7 +401,7 @@ describe("managed payload discovery", () => {
                 admissionIo,
             });
             delete env.XDG_DATA_HOME;
-            // A policy reading the live object would now resolve no data root at all. commentlint: allow(JUDGE)
+            // A policy reading the live object would now resolve no data root at all.
             expect((await policy.start()).reason).toBe("unsupported_install_layout");
         } finally {
             rmSync(root, { recursive: true, force: true });

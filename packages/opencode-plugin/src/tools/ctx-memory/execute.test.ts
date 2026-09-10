@@ -37,7 +37,7 @@ function identityFor(toolCallId: string): CtxMemoryWriteIdentity {
     return { sessionId: SESSION, toolCallId };
 }
 
-/** The wrappers pass raw arguments through when schema parsing fails, so the executor can receive `null` where the type says `string | undefined`. commentlint: allow(JUDGE) */
+/** The wrappers pass raw arguments through when schema parsing fails, so the executor can receive `null` where the type says `string | undefined`. */
 function rawArgs(value: Record<string, unknown>): CtxMemoryArgs {
     return value as unknown as CtxMemoryArgs;
 }
@@ -154,7 +154,7 @@ describe("executeCtxMemory", () => {
 
     test("a first row whose bounded view still overflows is bounded until it fits the response budget", async () => {
         const { client } = harness();
-        // Each control character serializes as six bytes, so a raw 1,024-byte field cap still lets ten anti-memory fields plus the duplicated summary exceed the budget. commentlint: allow(JUDGE)
+        // Each control character serializes as six bytes, so a raw 1,024-byte field cap still lets ten anti-memory fields plus the duplicated summary exceed the budget.
         const heavy = "\u0001".repeat(3_000);
         const antiMemory = {
             trigger: heavy,
@@ -244,7 +244,7 @@ describe("executeCtxMemory", () => {
                 { category: "ARCHITECTURE", content: "unrelated two" },
                 "call-unrelated-2",
             );
-            // The generated expiry re-renders two days later, so the daemon answers `operation_key_reused` and the executor recovers the replay from the stored row instead of a receipt. commentlint: allow(JUDGE)
+            // The generated expiry re-renders two days later, so the daemon answers `operation_key_reused` and the executor recovers the replay from the stored row instead of a receipt.
             setSystemTime(new Date("2026-01-03T12:00:00Z"));
             const second = JSON.parse(await run(client, "create", args, "call-anti-replay")) as {
                 outcome: string;
@@ -289,7 +289,7 @@ describe("executeCtxMemory", () => {
             ),
         ) as CommitReply;
         expect(first.outcome).toBe("applied");
-        // A null field counts as omitted: the probe skips its comparison instead of calling `.trim()` on it, and the stated fields match the successor. commentlint: allow(JUDGE)
+        // A null field counts as omitted: the probe skips its comparison instead of calling `.trim()` on it, and the stated fields match the successor.
         for (const nulled of [{ reason: null }, { content: null }]) {
             const replay = JSON.parse(
                 await run(
@@ -334,7 +334,7 @@ describe("executeCtxMemory", () => {
             ),
         ) as CommitReply;
         expect(revised.outcome).toBe("applied");
-        // The successor carries the object id a create under this identity derives, with the same category, rationale, and payload, but its stored operation was a supersede at revision 2, so the create must not report it as already applied. commentlint: allow(JUDGE)
+        // The successor carries the object id a create under this identity derives, with the same category, rationale, and payload, but its stored operation was a supersede at revision 2, so the create must not report it as already applied.
         const text = await run(
             client,
             "create",

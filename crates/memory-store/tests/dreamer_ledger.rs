@@ -581,7 +581,7 @@ fn the_request_digest_ignores_map_insertion_order_and_pins_the_protocol() {
         dreamer_request_digest(&ordered).unwrap(),
         dreamer_request_digest(&permuted).unwrap()
     );
-    // Array order affects the digest. commentlint: allow(JUDGE)
+    // Array order affects the digest.
     let reordered_items = json!({
         "task": "classify",
         "prompt_body": "p",

@@ -221,7 +221,7 @@ impl CompositeComponent for BrocaComponent {
         };
         match request {
             Request::Send(send) => {
-                // Outcomes fixed by the session's existing state resolve before any admission gate: a client recovering a lost response, or one that must see `idempotency_conflict`/`session_deleted`, is not masked by a harness that became unavailable after the run started. commentlint: allow(JUDGE)
+                // Outcomes fixed by the session's existing state resolve before any admission gate: a client recovering a lost response, or one that must see `idempotency_conflict`/`session_deleted`, is not masked by a harness that became unavailable after the run started.
                 if let Some(outcome) = self.supervisor.existing_session_outcome(&key, &ctx.body) {
                     return match outcome {
                         Ok(run_id) => respond(&ctx, protocol::send_response_body(&run_id)).await,
@@ -229,10 +229,10 @@ impl CompositeComponent for BrocaComponent {
                     };
                 }
                 // The handler checks harness availability before credentials because descriptor failures take precedence over credential failures.
-                // The probe opens, hashes, and stats closure nodes, so it runs on the blocking pool like the execution-path resolution; a stalled closure store must not occupy runtime workers. commentlint: allow(JUDGE)
+                // The probe opens, hashes, and stats closure nodes, so it runs on the blocking pool like the execution-path resolution; a stalled closure store must not occupy runtime workers.
                 let supervisor = Arc::clone(&self.supervisor);
                 let harness = key.harness;
-                // The probe also races request cancellation and a fixed budget so stalled sends cannot pin the reserved handler slots. commentlint: allow(JUDGE)
+                // The probe also races request cancellation and a fixed budget so stalled sends cannot pin the reserved handler slots.
                 let probe = tokio::select! {
                     biased;
                     () = ctx.cancelled() => {
@@ -332,9 +332,9 @@ impl CompositeComponent for BrocaComponent {
 
     async fn health(&self) -> HealthReport {
         // The wire contract admits `ready | unavailable`; `unavailable` means no supported harness can run.
-        // A harness whose descriptor resolves but whose snapshot holds no usable credential rejects every send at `CredentialVerifier::verify`, so it cannot run either. commentlint: allow(JUDGE)
-        // The descriptor probes open, hash, and stat closure nodes, so they run on the blocking pool; a probe that cannot complete reads as unavailable. commentlint: allow(JUDGE)
-        // The probe is bounded well under the host's lifecycle callback deadline so a stalled closure store degrades Broca instead of making the health callback host-fatal. commentlint: allow(JUDGE)
+        // A harness whose descriptor resolves but whose snapshot holds no usable credential rejects every send at `CredentialVerifier::verify`, so it cannot run either.
+        // The descriptor probes open, hash, and stat closure nodes, so they run on the blocking pool; a probe that cannot complete reads as unavailable.
+        // The probe is bounded well under the host's lifecycle callback deadline so a stalled closure store degrades Broca instead of making the health callback host-fatal.
         let supervisor = Arc::clone(&self.supervisor);
         let descriptor_unavailable = tokio::time::timeout(
             config::AVAILABILITY_PROBE_BUDGET,

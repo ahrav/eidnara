@@ -358,7 +358,7 @@ async function executeAugmentation(
     throwSentinel("CTX-AUG");
 }
 
-/** OpenCode's command path has no dialog, so the confirmation is the reply itself: the user re-issues the command with the confirm flag. commentlint: allow(JUDGE) */
+/** OpenCode's command path has no dialog, so the confirmation is the reply itself: the user re-issues the command with the confirm flag. */
 export const MEMORY_MARK_ACTOR = "user:opencode";
 
 async function executeMemoryMark(

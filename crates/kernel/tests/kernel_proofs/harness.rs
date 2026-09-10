@@ -3,10 +3,10 @@
 //! (resubmit a recorded intent), and `fault` (drive an operation through an
 //! in-process fault hook, then prove the rollback holds across a restart).
 //!
-//! Fault domain: an injected fault returns an error inside an open `IMMEDIATE` transaction, so SQLite rolls the transaction back before the handle is dropped. commentlint: allow(JUDGE)
-//! `restart` then reopens a cleanly closed database with no torn write, unflushed WAL, or lost tail. commentlint: allow(JUDGE)
-//! "Survives restart" here means the rollback is the committed state, not crash durability. commentlint: allow(JUDGE)
-//! The power-loss / `SIGKILL` harness is `crates/kernel/tests/cas_fault_injection.rs`. commentlint: allow(JUDGE)
+//! Fault domain: an injected fault returns an error inside an open `IMMEDIATE` transaction, so SQLite rolls the transaction back before the handle is dropped.
+//! `restart` then reopens a cleanly closed database with no torn write, unflushed WAL, or lost tail.
+//! "Survives restart" here means the rollback is the committed state, not crash durability.
+//! The power-loss / `SIGKILL` harness is `crates/kernel/tests/cas_fault_injection.rs`.
 //!
 //! Query methods return owned values so no borrow of the store outlives a
 //! `restart`. `restart` takes the handle out before reopening because a
@@ -28,7 +28,7 @@ use crate::canonical_state::{CanonicalDigest, Profile, digest};
 /// Owns a temporary kernel root, its current store handle, and intents available
 /// for replay. Methods panic on fixture setup or proof failure.
 pub struct Proof {
-    // Declaration order carries the drop dependency: the store closes before its root directory is removed. commentlint: allow(JUDGE)
+    // Declaration order carries the drop dependency: the store closes before its root directory is removed.
     store: Option<KernelStore>,
     root: TempDir,
     intents: Vec<CommitIntent>,

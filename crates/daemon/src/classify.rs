@@ -37,7 +37,7 @@ pub const CLASSIFY_TEMPERATURE: f64 = 0.1;
 pub const CLASSIFY_MAX_OUTPUT_TOKENS: u32 = 32_000;
 pub const CLASSIFY_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
 /// The host clamps a request's `timeout_ms` to the await ceiling, so no caller can hold a producer past it.
-/// With the two bounds equal, an await that times out has spent the whole request budget. commentlint: allow(JUDGE)
+/// With the two bounds equal, an await that times out has spent the whole request budget.
 pub const CLASSIFY_MAX_REQUEST_TIMEOUT: Duration = CLASSIFY_AWAIT_TIMEOUT;
 /// Version of the prompt template `render_classify_prompt` produces; digested
 /// into every request and recorded on every attempt.

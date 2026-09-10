@@ -59,7 +59,7 @@ pub enum KernelError {
     InvalidInput,
     #[error("kernel admission classification or transition is invalid")]
     AdmissionPolicy,
-    /// A preview refuses a later admission that depends on authority an earlier admission in the same preview changed. A commit runs the authority cascade over that change before judging the later admission; the preview does not simulate the cascade, so it refuses rather than judge against authority the commit would already have revised. commentlint: allow(JUDGE)
+    /// A preview refuses a later admission that depends on authority an earlier admission in the same preview changed. A commit runs the authority cascade over that change before judging the later admission; the preview does not simulate the cascade, so it refuses rather than judge against authority the commit would already have revised.
     #[error("kernel preview rests on an authority an earlier previewed admission changed")]
     PreviewAuthorityChanged,
     #[error("kernel snapshot is newer than the committed tip")]
@@ -1375,7 +1375,7 @@ impl AcquireLimit {
     }
 
     /// Pooled connections outlive one scan; the guard clears the handler on
-    /// every exit path. commentlint: allow(JUDGE)
+    /// every exit path.
     pub(crate) fn install_progress_handler(
         self,
         connection: &Connection,

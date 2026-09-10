@@ -2,7 +2,7 @@
  * The harness-neutral body of `ctx_search`. The OpenCode and Pi tool wrappers
  * parse their own argument shapes and call `executeCtxSearch`, so both
  * harnesses rank, pack, and word the states of daemon-served memories the
- * same way. commentlint: allow(JUDGE)
+ * same way.
  */
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
@@ -51,7 +51,7 @@ function normalizeSources(sources?: string[]): CtxSearchSource[] | undefined {
 /** Unknown source names echoed back in the validation error; the rest are counted. */
 const MAX_ECHOED_UNKNOWN_SOURCES = 3;
 
-/** The wrappers fall back to raw arguments when schema parsing fails, so `sources` is validated as an array of supported names before any iteration: a non-array would throw an unhandled TypeError, and a misspelled name silently dropped would search nothing and report a misleading "no results". The raw array is caller-controlled, so the error names at most `MAX_ECHOED_UNKNOWN_SOURCES` field-bounded values and counts the rest rather than repeating arbitrarily long input. Answers the error text or `null` when valid. commentlint: allow(JUDGE) */
+/** The wrappers fall back to raw arguments when schema parsing fails, so `sources` is validated as an array of supported names before any iteration: a non-array would throw an unhandled TypeError, and a misspelled name silently dropped would search nothing and report a misleading "no results". The raw array is caller-controlled, so the error names at most `MAX_ECHOED_UNKNOWN_SOURCES` field-bounded values and counts the rest rather than repeating arbitrarily long input. Answers the error text or `null` when valid. */
 function invalidSourcesError(sources: unknown): string | null {
     if (sources === undefined) return null;
     if (!Array.isArray(sources)) {
@@ -156,7 +156,7 @@ export async function executeCtxSearch(
         sessionId: toolContext.sessionID,
         projectRoot,
     });
-    // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name. commentlint: allow(JUDGE)
+    // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name.
     const idQuery = parseObjectIdQuery(query);
     let memoryRows: ReadRow[] = [];
     let memoryState: MemoryState | null = null;
@@ -198,7 +198,7 @@ export async function executeCtxSearch(
             `Memory: unresolved object id${unresolvedObjectIds.length === 1 ? "" : "s"} (the daemon read stayed truncated): ${unresolvedObjectIds.join(", ")}`,
         );
     }
-    // A truncated snapshot drops the oldest rows, so a lexical hit that lives only in an omitted memory is silently missing; the note keeps "no results" from reading as a complete search. commentlint: allow(JUDGE)
+    // A truncated snapshot drops the oldest rows, so a lexical hit that lives only in an omitted memory is silently missing; the note keeps "no results" from reading as a complete search.
     if (memoryTruncated) {
         notes.push("Memory: the memory read was truncated; older memories were not searched.");
     }

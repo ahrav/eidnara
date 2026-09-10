@@ -78,7 +78,7 @@ impl ApplicabilityState {
     /// Whether read repair appends a durable observation for this state. Only
     /// a stale verdict records a block and only a current re-evaluation clears
     /// one; historical, uncertain, and dirty verdicts are recomputable from the
-    /// checkout and stay in-request vetoes. commentlint: allow(JUDGE)
+    /// checkout and stay in-request vetoes.
     pub fn records_observation(self) -> bool {
         matches!(self, Self::Stale | Self::Current)
     }
@@ -142,23 +142,23 @@ pub struct FailedCheck {
 pub struct ClassificationToken(Option<Arc<ObjectCacheKey>>);
 
 /// Most scope terms one candidate may carry. One term per dimension is the
-/// canonical shape, so this bounds only malformed rows. commentlint: allow(JUDGE)
+/// canonical shape, so this bounds only malformed rows.
 pub const MAX_SCOPE_TERMS: usize = 64;
 
 /// Most values one `set` scope term may carry before the engine refuses to
-/// hash or canonicalize it. commentlint: allow(JUDGE)
+/// hash or canonicalize it.
 pub const MAX_SCOPE_SET_VALUES: usize = 4096;
 
 /// Most bytes across every value of every scope term on one candidate. The
 /// count caps bound how many strings are visited; this bounds how much is
-/// hashed and cloned. commentlint: allow(JUDGE)
+/// hashed and cloned.
 pub const MAX_SCOPE_BYTES: usize = 1 << 20;
 
-/// Most bytes in one candidate's object id, which every cache key copies. commentlint: allow(JUDGE)
+/// Most bytes in one candidate's object id, which every cache key copies.
 pub const MAX_OBJECT_ID_BYTES: usize = 4096;
 
 /// Most bytes across the query context and scope context of one request,
-/// which the inputs digest hashes once per anchor kind. commentlint: allow(JUDGE)
+/// which the inputs digest hashes once per anchor kind.
 pub const MAX_REQUEST_CONTEXT_BYTES: usize = 1 << 20;
 
 /// Per-object verdict with evidence. `append_pending` marks a non-current
@@ -427,7 +427,7 @@ impl ApplicabilityEngine {
         let mut stats = EvaluationStats::default();
         // Query and scope context are hashed once per request; a context past
         // the bound makes every candidate uncertain before any byte of it is
-        // digested. commentlint: allow(JUDGE)
+        // digested.
         if request_context_exceeds_bounds(query, scope_context) {
             let objects = candidates
                 .iter()
@@ -494,7 +494,7 @@ impl ApplicabilityEngine {
             }
             // An oversized payload is refused before anything reads it: the
             // decode returns without parsing, and the digests below would
-            // otherwise hash every byte after the deadline. commentlint: allow(JUDGE)
+            // otherwise hash every byte after the deadline.
             if let Some(payload) = candidate.payload.as_deref()
                 && payload.len() > MAX_OBJECT_PAYLOAD_BYTES
             {
@@ -512,7 +512,7 @@ impl ApplicabilityEngine {
                 continue;
             }
             // Scope terms are hashed and canonicalized value by value; a set
-            // past this many values is refused before either runs. commentlint: allow(JUDGE)
+            // past this many values is refused before either runs.
             if candidate
                 .scope_terms
                 .as_ref()
@@ -565,7 +565,7 @@ impl ApplicabilityEngine {
             // A scope that excludes the query settles the object before any
             // declared config file is read for the cache key. Scopes with a
             // `git_reachable` term need the graph and take the full path, so
-            // their boundary validation still runs. commentlint: allow(JUDGE)
+            // their boundary validation still runs.
             if let Some(terms) = &candidate.scope_terms
                 && !scope_needs_graph(terms)
             {
@@ -592,7 +592,7 @@ impl ApplicabilityEngine {
                     });
                 if let Some((state, evidence)) = excluded {
                     // Query-local and uncacheable: the object cache key would
-                    // need the check observations this path exists to skip. commentlint: allow(JUDGE)
+                    // need the check observations this path exists to skip.
                     objects.push(finished(
                         candidate,
                         ClassificationToken(None),
@@ -697,7 +697,7 @@ impl ApplicabilityEngine {
             }
             // A walk under a moved sparse or shallow boundary answered for a
             // repository the snapshot does not describe, so the verdict it
-            // produced is not returned either. commentlint: allow(JUDGE)
+            // produced is not returned either.
             let classification = if boundary_moved
                 && !matches!(
                     classification.state,
@@ -763,7 +763,7 @@ impl ApplicabilityEngine {
             .update(key, |cached| cached.append_confirmed = true)
     }
 
-    // Memoized verdicts only; a poisoned guard is recovered. commentlint: allow(JUDGE)
+    // Memoized verdicts only; a poisoned guard is recovered.
     fn object_cache(
         &self,
     ) -> MutexGuard<'_, TwoGenerationCache<Arc<ObjectCacheKey>, CachedClassification, PrehashedState>>
@@ -907,10 +907,10 @@ impl ApplicabilityEngine {
                 // The dirty gate read the snapshot; the check read the live
                 // file. A declared path edited in between pairs a clean gate
                 // with content it never saw, so the check's observation is
-                // held against the index before its verdict counts. commentlint: allow(JUDGE)
+                // held against the index before its verdict counts.
                 // Only a confirmed match lets the observation count; an
                 // observation the revalidation could not compare (unreadable
-                // bytes, an oversized file) is as unproven as a mismatch. commentlint: allow(JUDGE)
+                // bytes, an oversized file) is as unproven as a mismatch.
                 if let Some((path, tracked)) =
                     check_path_within_affected(check, &spec.affected_paths)
                     && observation_matches_index(&mut memos.check_cache, snapshot, path, &tracked)
@@ -1207,7 +1207,7 @@ enum DeclaredPath<'a> {
 
 fn declared_path(path: &str) -> DeclaredPath<'_> {
     // Git paths cannot hold a NUL, so no dirty entry could ever overlap this
-    // spelling; it fails closed instead of reading as a clean path. commentlint: allow(JUDGE)
+    // spelling; it fails closed instead of reading as a clean path.
     if path.contains('\0') {
         return DeclaredPath::Unplaceable;
     }
@@ -1252,7 +1252,7 @@ fn trim_trailing_slashes(mut path: &[u8]) -> &[u8] {
 }
 
 /// Whether the request's query and scope contexts together exceed
-/// `MAX_REQUEST_CONTEXT_BYTES`. The walk stops at the bound. commentlint: allow(JUDGE)
+/// `MAX_REQUEST_CONTEXT_BYTES`. The walk stops at the bound.
 fn request_context_exceeds_bounds(query: &QueryContext, scope_context: &ScopeMatchContext) -> bool {
     let mut bytes = 0usize;
     let mut charge = |field: Option<&str>| {
@@ -1273,7 +1273,7 @@ fn request_context_exceeds_bounds(query: &QueryContext, scope_context: &ScopeMat
 }
 
 /// Whether an anchor row's text columns and payload together exceed
-/// `MAX_OBJECT_PAYLOAD_BYTES`. The walk stops at the bound. commentlint: allow(JUDGE)
+/// `MAX_OBJECT_PAYLOAD_BYTES`. The walk stops at the bound.
 fn anchor_row_exceeds_bounds(anchor: &AnchorRowSpec) -> bool {
     let mut bytes = 0usize;
     let mut charge = |len: usize| {
@@ -1302,7 +1302,7 @@ fn anchor_row_exceeds_bounds(anchor: &AnchorRowSpec) -> bool {
 
 /// Whether the scope terms exceed the count or byte bounds the engine will
 /// hash and canonicalize. The byte walk stops at the bound, so an oversized
-/// row costs at most the bound to reject. commentlint: allow(JUDGE)
+/// row costs at most the bound to reject.
 fn scope_terms_exceed_bounds(terms: &[ScopeTermSpec]) -> bool {
     if terms.len() > MAX_SCOPE_TERMS {
         return true;
@@ -1366,7 +1366,7 @@ fn check_path_within_affected<'c>(
         CheckSpec::Symbol { .. } | CheckSpec::Unrecognized => return None,
     };
     // Both spellings are normalized the same way, so `config//app.toml` in a
-    // check overlaps `config/app.toml` in the affected paths. commentlint: allow(JUDGE)
+    // check overlaps `config/app.toml` in the affected paths.
     let tracked = match declared_path(path) {
         DeclaredPath::Path(normalized) => normalized,
         DeclaredPath::WorktreeRoot | DeclaredPath::Unplaceable => return None,

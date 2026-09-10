@@ -17,7 +17,7 @@ export function isPrototypePollutionKey(key: string): boolean {
 }
 
 /**
- * comment-json boxes a scalar root (`"x"` parses to a `String` object), which `isRecord` cannot tell from an object root. commentlint: allow(JUDGE)
+ * comment-json boxes a scalar root (`"x"` parses to a `String` object), which `isRecord` cannot tell from an object root.
  * Only a plain-prototype object counts as an object root.
  */
 export function isCommentJsonObjectRoot(value: unknown): value is Record<string, unknown> {
@@ -102,7 +102,7 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
  * `jsonc-parser` accepts two scalar shapes that `serde_json`, which reads the
  * same file in the daemon, rejects: an out-of-range literal such as `1e400`
  * (read as `Infinity`) and a string with an unpaired UTF-16 surrogate escape
- * such as `"\ud800"`. commentlint: allow(JUDGE)
+ * such as `"\ud800"`.
  */
 function assertScalarsWellFormed(node: Node): void {
     if (node.type === "number" && !Number.isFinite(node.value)) {

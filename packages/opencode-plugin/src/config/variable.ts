@@ -7,7 +7,7 @@ import { getLocation, type JSONPath } from "jsonc-parser";
 import { stripJsoncComments } from "../shared/jsonc-parser";
 
 /**
- * The environment's home takes precedence over the account database, so a harness or test can point every home-relative path at a scratch directory; Bun's `os.homedir()` does not re-read `HOME` after startup. commentlint: allow(JUDGE)
+ * The environment's home takes precedence over the account database, so a harness or test can point every home-relative path at a scratch directory; Bun's `os.homedir()` does not re-read `HOME` after startup.
  */
 function homeDir(): string {
     if (process.platform === "win32") {
@@ -62,7 +62,7 @@ const FILE_PATTERN = /\{file:([^}]+)\}/g;
 const NESTED_FILE_PATTERN = /\{file:((?:[^{}]|\{(?!env:)|\{env:[^{}]*\})+)\}/g;
 const PLACEHOLDER_PATTERN = /\uE000eidnara:(\d+)\uE000/g;
 
-/** `path.relative` applies the platform's separator and case rules, so a descendant is detected on Windows as well as POSIX. commentlint: allow(JUDGE) */
+/** `path.relative` applies the platform's separator and case rules, so a descendant is detected on Windows as well as POSIX. */
 function isWithinDirectory(dir: string, candidate: string): boolean {
     const rel = relative(dir, candidate);
     return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
@@ -76,7 +76,7 @@ function realPathOrSelf(path: string): string {
     }
 }
 
-/** User-level configs warn, rather than block, when `{file:}` resolves under these directories. Each directory is compared by its spelled path and by its real path, so a home or credential directory that is itself a symlink still catches a candidate given by its real location. commentlint: allow(JUDGE) */
+/** User-level configs warn, rather than block, when `{file:}` resolves under these directories. Each directory is compared by its spelled path and by its real path, so a home or credential directory that is itself a symlink still catches a candidate given by its real location. */
 function sensitiveFilePathReason(resolvedPath: string): string | null {
     const home = homeDir();
     const sensitiveDirs: Array<{ dir: string; label: string }> = [
@@ -141,7 +141,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
     // Strip JSONC comments before substitution to prevent tokens in comments from triggering environment or file reads.
     text = stripJsoncComments(text);
 
-    // Substituted values go in as placeholders and come back out in one final pass, so replacement text is never rescanned: an environment value that spells `{file:...}` stays a value, and file contents that spell `{env:...}` stay contents. The delimiter is a private-use code point. commentlint: allow(JUDGE)
+    // Substituted values go in as placeholders and come back out in one final pass, so replacement text is never rescanned: an environment value that spells `{file:...}` stays a value, and file contents that spell `{env:...}` stay contents. The delimiter is a private-use code point.
     const substitutions: string[] = [];
     const placeholder = (value: string): string => {
         substitutions.push(value);
@@ -162,7 +162,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
 
     const configDir = input.configPath ? dirname(input.configPath) : process.cwd();
 
-    // A file token's path may embed `{env:...}` groups, and each group's value is a raw path fragment that may itself contain `}`; matching the groups as units keeps such a value from ending the token early. commentlint: allow(JUDGE)
+    // A file token's path may embed `{env:...}` groups, and each group's value is a raw path fragment that may itself contain `}`; matching the groups as units keeps such a value from ending the token early.
     text = text.replace(
         NESTED_FILE_PATTERN,
         (token, rawPath: string, index: number, source: string) => {
@@ -171,7 +171,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             if (prefix.startsWith("//")) return token;
             tokenPath = getLocation(source, index).path;
 
-            // A missing fragment must not leave a shorter path that names some other existing file (`{file:{env:DIR}/secret}` with `DIR` unset would read `/secret`), so the whole token yields the empty string the env warning already announced. commentlint: allow(JUDGE)
+            // A missing fragment must not leave a shorter path that names some other existing file (`{file:{env:DIR}/secret}` with `DIR` unset would read `/secret`), so the whole token yields the empty string the env warning already announced.
             let nestedEnvMissing = false;
             let nestedEnvExpanded = false;
             let filePath = rawPath
@@ -194,7 +194,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
                 ? "path withheld: it contains an {env:} expansion"
                 : filePath;
 
-            // Inlining a sensitive file exposes its contents in the substituted config. The spelled path is classified before the existence check so the warning fires whether or not the file is there. commentlint: allow(JUDGE)
+            // Inlining a sensitive file exposes its contents in the substituted config. The spelled path is classified before the existence check so the warning fires whether or not the file is there.
             const warnSensitive = (reason: string, target: string): void => {
                 warnings.push(
                     `${token} resolves to a sensitive path (${reason}: ${target}); ` +
@@ -209,7 +209,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
                 return "";
             }
 
-            // The read follows symlinks, so an existing file's real path is classified too; a link elsewhere into a credential directory is still a credential read. commentlint: allow(JUDGE)
+            // The read follows symlinks, so an existing file's real path is classified too; a link elsewhere into a credential directory is still a credential read.
             if (!spelledReason) {
                 const realPath = realPathOrSelf(filePath);
                 const realReason = realPath === filePath ? null : sensitiveFilePathReason(realPath);

@@ -28,7 +28,7 @@ mod reference {
         placeholder: String,
         original: String,
         /// The original is input that spelled a placeholder; it is restored as
-        /// itself and never expanded, since it names no minted region. commentlint: allow(JUDGE)
+        /// itself and never expanded, since it names no minted region.
         literal: bool,
     }
 
@@ -307,7 +307,7 @@ mod reference {
     fn restore_regions(text: &str, preserved: &[PreservedRegion]) -> String {
         // Minted regions restore newest first so a region's original can carry
         // older placeholders. Literal regions restore last and once: their
-        // originals spell placeholders that must not be expanded again. commentlint: allow(JUDGE)
+        // originals spell placeholders that must not be expanded again.
         let mut working = text.to_string();
         for region in preserved.iter().rev().filter(|region| !region.literal) {
             working = working.replace(&region.placeholder, &region.original);

@@ -343,7 +343,6 @@ mod tests {
     /// that `PROMPT_SURFACE_TOOL_IDS` declares; a mismatch would silently drop
     /// a tool from the session manifest through the `is_known_tool_id` filter.
     /// The constant is a membership set, so order is not compared.
-    /// commentlint: allow(JUDGE)
     #[test]
     fn session_tools_expose_exactly_the_declared_tool_ids() {
         let declared: std::collections::BTreeSet<&str> =

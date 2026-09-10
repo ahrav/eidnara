@@ -19,13 +19,13 @@ use crate::dispatch::PreparedOutcome;
 
 const OPERATION: &str = "kernel.read";
 
-/// Rows served per read. A row's fixed JSON structure (registry fields, token, visibility, scope) encodes to ~500 bytes before payload text, so this cap keeps a payload-light response in the low tens of mebibytes and bounds client-side parse and ranking work; memory surfaces render at most ~100 rows per query, so the newest rows this cap keeps dominate every surface's candidate set. commentlint: allow(JUDGE)
+/// Rows served per read. A row's fixed JSON structure (registry fields, token, visibility, scope) encodes to ~500 bytes before payload text, so this cap keeps a payload-light response in the low tens of mebibytes and bounds client-side parse and ranking work; memory surfaces render at most ~100 rows per query, so the newest rows this cap keeps dominate every surface's candidate set.
 pub const MAX_READ_ROWS: usize = 8192;
 
-/// Byte budget for the serialized `rows` array: one eighth of the 64 MiB wire cap. Redaction caps each decision text field at 512 KiB, so a worst-case row is ~1 MiB and at least eight always fit; typical memory rows run ~1 KiB, so thousands fit before [`MAX_READ_ROWS`] binds first. The response is the rows plus a fixed envelope of under 200 bytes, so a rows array within this budget cannot reach the cap that would fail the whole response. commentlint: allow(JUDGE)
+/// Byte budget for the serialized `rows` array: one eighth of the 64 MiB wire cap. Redaction caps each decision text field at 512 KiB, so a worst-case row is ~1 MiB and at least eight always fit; typical memory rows run ~1 KiB, so thousands fit before [`MAX_READ_ROWS`] binds first. The response is the rows plus a fixed envelope of under 200 bytes, so a rows array within this budget cannot reach the cap that would fail the whole response.
 pub const MAX_READ_ROW_BYTES: usize = crate::dispatch::MAX_WIRE_BODY_BYTES / 8;
 
-/// Ids per `object_ids` filter. A filtered read preflights one mutation batch, so the bound stays far under [`MAX_READ_ROWS`] and a filtered read never hits the row cap. commentlint: allow(JUDGE)
+/// Ids per `object_ids` filter. A filtered read preflights one mutation batch, so the bound stays far under [`MAX_READ_ROWS`] and a filtered read never hits the row cap.
 pub const MAX_READ_OBJECT_IDS: usize = 64;
 
 #[derive(Debug, Deserialize)]
@@ -35,7 +35,7 @@ pub(crate) struct ReadRequest {
     /// `None` reads the tip.
     #[serde(default)]
     as_of: Option<i64>,
-    /// Filters the read to these objects before the row cap applies, so a targeted lookup addresses a row the bounded unfiltered read drops; `None` reads the whole surface. commentlint: allow(JUDGE)
+    /// Filters the read to these objects before the row cap applies, so a targeted lookup addresses a row the bounded unfiltered read drops; `None` reads the whole surface.
     #[serde(default)]
     object_ids: Option<Vec<String>>,
     /// Whether the serving policy judges freshness before rows are returned.
@@ -64,7 +64,7 @@ pub(crate) struct ReadResponse {
     pub(crate) known_as_of: i64,
     pub(crate) tip: i64,
     pub(crate) rows: Vec<VisibleRow>,
-    /// Whether rows beyond [`MAX_READ_ROWS`] were dropped. Byte-budget truncation happens at serialization, so the response's flag can be `true` while `truncated` here is `false`. commentlint: allow(JUDGE)
+    /// Whether rows beyond [`MAX_READ_ROWS`] were dropped. Byte-budget truncation happens at serialization, so the response's flag can be `true` while `truncated` here is `false`.
     pub(crate) truncated: bool,
     /// Decision rows keyed by `object_id`, looked up at `known_as_of`. Total
     /// over the visible decision-kind rows in `rows`: a missing entry fails
@@ -72,11 +72,11 @@ pub(crate) struct ReadResponse {
     pub(crate) decisions: HashMap<String, DecisionRow>,
 }
 
-/// The rows a read admits before [`MAX_READ_ROWS`] and [`MAX_READ_ROW_BYTES`] apply, so a bounded read spends its budget only on rows the caller can use rather than on the rest of the project's surface. commentlint: allow(JUDGE)
+/// The rows a read admits before [`MAX_READ_ROWS`] and [`MAX_READ_ROW_BYTES`] apply, so a bounded read spends its budget only on rows the caller can use rather than on the rest of the project's surface.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RowSelection<'a> {
     All,
-    /// Applied in the kernel query, so a targeted lookup addresses a row the bounded unfiltered read drops. commentlint: allow(JUDGE)
+    /// Applied in the kernel query, so a targeted lookup addresses a row the bounded unfiltered read drops.
     Objects(&'a [String]),
     DomainDecisions(&'a str),
 }
@@ -92,7 +92,7 @@ impl RowSelection<'_> {
     }
 }
 
-/// Orders rows for a max-heap whose maximum is the serving-order-last row: an older `created_commit_seq` ranks greater, and among rows of one commit the greater `object_id` ranks greater, so the heap's peek is exactly the row a full newest-first sort then truncate drops first. commentlint: allow(JUDGE)
+/// Orders rows for a max-heap whose maximum is the serving-order-last row: an older `created_commit_seq` ranks greater, and among rows of one commit the greater `object_id` ranks greater, so the heap's peek is exactly the row a full newest-first sort then truncate drops first.
 struct ServingOrderLast(VisibleRow);
 
 impl Ord for ServingOrderLast {
@@ -120,7 +120,7 @@ impl PartialEq for ServingOrderLast {
 
 impl Eq for ServingOrderLast {}
 
-/// Bounded newest-first selection: keeps at most `cap` rows of the serving order (`created_commit_seq` descending, `object_id` breaking ties) while candidates stream in, so selection costs `O(n log cap)` comparisons and `cap` retained rows instead of a full sort. Each overflow evicts the serving-order-last kept row, so the kept set and its order match a full sort followed by a truncate. commentlint: allow(JUDGE)
+/// Bounded newest-first selection: keeps at most `cap` rows of the serving order (`created_commit_seq` descending, `object_id` breaking ties) while candidates stream in, so selection costs `O(n log cap)` comparisons and `cap` retained rows instead of a full sort. Each overflow evicts the serving-order-last kept row, so the kept set and its order match a full sort followed by a truncate.
 pub struct NewestRows {
     cap: usize,
     heap: BinaryHeap<ServingOrderLast>,
@@ -177,7 +177,7 @@ pub(crate) fn read_visible(
         store.visible_as_of_in_scope(surface, requested, object_ids, Some(project.scope_term()))?;
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
-    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter. commentlint: allow(JUDGE)
+    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
     let mut newest = NewestRows::new(MAX_READ_ROWS);
     for row in visible.rows {
         if selection.keeps(&row) && filter.matches(row.scope_id.as_deref(), &mut terms)? {
@@ -185,7 +185,7 @@ pub(crate) fn read_visible(
         }
     }
     let (mut rows, mut truncated) = newest.finish();
-    // Payload sizes are read before any payload: a project can retain [`MAX_READ_ROWS`] decisions of ~1 MiB each, and materializing them all would allocate gigabytes for rows the serialization budget can never carry. A serialized row is at least its payload bytes, so cutting where cumulative payload size passes the budget keeps every row the serializer could keep. commentlint: allow(JUDGE)
+    // Payload sizes are read before any payload: a project can retain [`MAX_READ_ROWS`] decisions of ~1 MiB each, and materializing them all would allocate gigabytes for rows the serialization budget can never carry. A serialized row is at least its payload bytes, so cutting where cumulative payload size passes the budget keeps every row the serializer could keep.
     let decision_ids: Vec<String> = rows
         .iter()
         .filter(|row| row.object.object_kind == "decision")
@@ -320,7 +320,7 @@ impl Handler {
             Ok(Err(error)) => return state_only(KernelOutcome::from(error)),
             Err(outcome) => return state_only(outcome),
         };
-        // Rows are newest first, so the budget retains a contiguous prefix of the most recent rows. A failed measurement stops collection and sets `truncated`. commentlint: allow(JUDGE)
+        // Rows are newest first, so the budget retains a contiguous prefix of the most recent rows. A failed measurement stops collection and sets `truncated`.
         let mut truncated = response.truncated;
         let mut rows: Vec<Value> = Vec::with_capacity(response.rows.len());
         let mut row_bytes = 0usize;
@@ -330,7 +330,7 @@ impl Handler {
                 response.decisions.get(&row.object.object_id),
                 response.known_as_of,
             );
-            // The `+ 1` charges each row's array separator or bracket byte against the budget. commentlint: allow(JUDGE)
+            // The `+ 1` charges each row's array separator or bracket byte against the budget.
             let cost = crate::dispatch::measure_json(&value)
                 .ok()
                 .and_then(|len| len.checked_add(1));

@@ -30,7 +30,7 @@ interface SessionTracking {
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
 /**
- * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`. commentlint: allow(JUDGE)
+ * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`.
  * Matches only complete date lines, excluding prose mentions and date-shaped examples mid-sentence.
  * The lookarounds keep the matched text to the phrase itself, so the rewrite preserves indentation.
  */
@@ -53,7 +53,7 @@ function segmentOpensWith(
     });
 }
 
-/** Title, summary, and compaction calls share the main session id; tracking their hash would flush the main agent's cache. commentlint: allow(JUDGE) */
+/** Title, summary, and compaction calls share the main session id; tracking their hash would flush the main agent's cache. */
 function isInternalOpenCodeAgent(systemSegments: readonly string[]): boolean {
     return segmentOpensWith(systemSegments, INTERNAL_OPENCODE_AGENT_SIGNATURES);
 }

@@ -51,7 +51,7 @@ export interface AntiMemorySearchResult {
     rejectedStrategy: string;
     rejectionReason: string;
     saferAlternative: string | null;
-    /** Decision rationale served alongside the anti-memory summary; lexical ranking scores it, so renderers that show ranked text include it. commentlint: allow(JUDGE) */
+    /** Decision rationale served alongside the anti-memory summary; lexical ranking scores it, so renderers that show ranked text include it. */
     rationale?: string;
     matchType: "exact" | "lexical" | "semantic";
     policyLabel?: string;
@@ -81,9 +81,9 @@ export type ChunkedObjectRead =
  * text field is redaction-capped well under an eighth of the budget), so
  * halving reaches complete chunks before the single-id floor; a single id
  * whose read still reports truncated without serving its row lands in
- * `unresolvedObjectIds` instead of passing as proven-missing. commentlint: allow(JUDGE)
+ * `unresolvedObjectIds` instead of passing as proven-missing.
  *
- * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`. commentlint: allow(JUDGE)
+ * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
  */
 export async function readObjectRowsChunked(args: {
     client: KernelClient;
@@ -141,7 +141,7 @@ function objectIdFromToken(token: string): string | null {
     return OBJECT_ID_AT_COMMIT.exec(token)?.[1] ?? null;
 }
 
-/** Object ids when the whole query is a list of ids or `id@commit` tokens; `null` for ordinary text. Results render bare ids; the `@commit` suffix is accepted because earlier releases rendered it, and it is ignored for the lookup, since the store serves one live row per id. commentlint: allow(JUDGE) */
+/** Object ids when the whole query is a list of ids or `id@commit` tokens; `null` for ordinary text. Results render bare ids; the `@commit` suffix is accepted because earlier releases rendered it, and it is ignored for the lookup, since the store serves one live row per id. */
 export function parseObjectIdQuery(query: string): string[] | null {
     const tokens = query
         .trim()
@@ -175,7 +175,7 @@ function antiMemoryPayloadFromSummary(summary: string): AntiMemoryPayload | null
     }
 }
 
-/** A rejected-approach row emits `anti_memory`, not `memory`: an unparseable stored summary becomes a conservative warning carrying the raw summary as the rejected strategy, so a legacy or malformed anti-memory cannot resurface as ordinary guidance. commentlint: allow(JUDGE) */
+/** A rejected-approach row emits `anti_memory`, not `memory`: an unparseable stored summary becomes a conservative warning carrying the raw summary as the rejected strategy, so a legacy or malformed anti-memory cannot resurface as ordinary guidance. */
 export function memoryResultFromRow(
     row: ReadRow,
     score: number,
@@ -198,7 +198,7 @@ export function memoryResultFromRow(
                 payload?.rejectionReason ??
                 "stored anti-memory payload is unparseable; the approach stays rejected",
             saferAlternative: payload?.saferAlternative ?? null,
-            // `rowText` ranks the rationale, so the warning carries it too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated. commentlint: allow(JUDGE)
+            // `rowText` ranks the rationale, so the warning carries it too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated.
             ...(decision.payload.rationale ? { rationale: decision.payload.rationale } : {}),
             matchType,
             ...(row.labeled ? { policyLabel: "labeled" } : {}),
@@ -206,7 +206,7 @@ export function memoryResultFromRow(
     }
     return {
         source: "memory",
-        // `rowText` ranks the rationale, so the rationale renders too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated. commentlint: allow(JUDGE)
+        // `rowText` ranks the rationale, so the rationale renders too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated.
         content: decision?.payload.rationale
             ? `${decision.payload.summary}\n${decision.payload.rationale}`
             : (decision?.payload.summary ?? ""),
@@ -228,7 +228,7 @@ export interface KernelMemorySearchArgs {
     nowMs?: number;
 }
 
-/** An anti-memory past its rendered expiry never surfaces as a search hit; an unparseable summary never counts as expired. commentlint: allow(JUDGE) */
+/** An anti-memory past its rendered expiry never surfaces as a search hit; an unparseable summary never counts as expired. */
 function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
     const decision = row.decision;
     if (decision?.decision_kind !== ANTI_MEMORY_CATEGORY) return false;
@@ -236,7 +236,7 @@ function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
     return payload !== null && antiMemoryExpired(payload, nowMs);
 }
 
-/** An object-id query resolves exactly (in id order); text ranks rows by the share of query terms their summary and rationale contain, ties broken by newest first. `excludeObjectIds` applies only to lexical searches; object-id queries ignore `excludeObjectIds` because an explicit id names one object and resolves even when the injected baseline already renders it. Either path returns `null` when nothing matches so the caller can fall through to the other sources. commentlint: allow(JUDGE) */
+/** An object-id query resolves exactly (in id order); text ranks rows by the share of query terms their summary and rationale contain, ties broken by newest first. `excludeObjectIds` applies only to lexical searches; object-id queries ignore `excludeObjectIds` because an explicit id names one object and resolves even when the injected baseline already renders it. Either path returns `null` when nothing matches so the caller can fall through to the other sources. */
 export function searchKernelMemoryRows(
     args: KernelMemorySearchArgs,
 ): KernelMemorySearchResult[] | null {

@@ -485,7 +485,7 @@ export function buildInMemoryTailRawMessages(args: {
 }): InMemoryTailResult | null {
     const { messages, lastCompartmentEnd, anchorMessageId } = args;
 
-    // Mirrors `readRawSessionTailFromDb`: a summary anchor yields no tail. Filtering first would make it look merely absent and fall back to the wrong base ordinal. commentlint: allow(JUDGE)
+    // Mirrors `readRawSessionTailFromDb`: a summary anchor yields no tail. Filtering first would make it look merely absent and fall back to the wrong base ordinal.
     if (anchorMessageId) {
         const anchor = messages.find((m) => m.id === anchorMessageId);
         if (anchor !== undefined && anchor.summary === true && anchor.finish === "stop") {

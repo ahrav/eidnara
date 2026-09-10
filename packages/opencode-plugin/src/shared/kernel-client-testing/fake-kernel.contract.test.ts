@@ -177,7 +177,7 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
             );
         expect(merged.state).toEqual({ kind: "available" });
         expect(h.transport.lastReply()).toEqual(commitAvailableMerge);
-        // The receipt replays with the same merged list; explicit empty tokens skip the client's refresh read of the now-superseded targets. commentlint: allow(JUDGE)
+        // The receipt replays with the same merged list; explicit empty tokens skip the client's refresh read of the now-superseded targets.
         await h.client().commit({
             ...intent("merge"),
             operations: ["decision-object-1", "decision-object-2", "decision-object-3"].map(
@@ -451,7 +451,7 @@ describe("FakeKernel matches the daemon replies recorded in kernel_routes.rs", (
     test("a body project_root other than the bound root is project_mismatch", async () => {
         const h = harness();
         const tip = h.kernel.tip;
-        // The client always mirrors its bound root into the body, so the mismatch is driven through the transport directly. commentlint: allow(JUDGE)
+        // The client always mirrors its bound root into the body, so the mismatch is driven through the transport directly.
         const reply = await h.transport.call({
             sessionId: SESSION,
             projectRoot: PROJECT,

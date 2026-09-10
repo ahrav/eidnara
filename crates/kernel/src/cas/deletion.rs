@@ -771,7 +771,7 @@ fn load_artifact_state(
             if evidence_id.len() > MAX_TEXT_FIELD_BYTES {
                 return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
             }
-            // Ingest admits an evidence id only as an identity, so a selector carrying a detected secret cannot name a stored row; redacting it would alias it onto whichever row holds the placeholder. commentlint: allow(JUDGE)
+            // Ingest admits an evidence id only as an identity, so a selector carrying a detected secret cannot name a stored row; redacting it would alias it onto whichever row holds the placeholder.
             let evidence_id = crate::redaction::identity(evidence_id)
                 .map_err(|_| ArtifactError::new(ArtifactErrorKind::InvalidInput))?;
             let stored: String = connection
@@ -934,7 +934,7 @@ fn receipt_describes_deletion(
     }
 }
 
-/// An already-applied deletion replays its own receipt when the intent has one, so a retry reports the outcome it committed even after later deletion cycles moved the artifact's barrier or commit sequence; without a receipt the current state is reported. commentlint: allow(JUDGE)
+/// An already-applied deletion replays its own receipt when the intent has one, so a retry reports the outcome it committed even after later deletion cycles moved the artifact's barrier or commit sequence; without a receipt the current state is reported.
 fn replay_or_current(
     receipt: Option<StoredDeletionReceipt>,
     state: &ArtifactState,

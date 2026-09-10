@@ -2865,7 +2865,7 @@ impl ProjectionCache {
 pub type ConnectionKeyHook = Box<dyn FnOnce([u8; 32]) -> Result<(), &'static str> + Send + 'static>;
 
 pub struct Handler {
-    /// Runs once with the incarnation bearer key when the host installs it, before publication; the daemon binary commits its harness selection here so the file exists before the daemon is reachable. commentlint: allow(JUDGE)
+    /// Runs once with the incarnation bearer key when the host installs it, before publication; the daemon binary commits its harness selection here so the file exists before the daemon is reachable.
     connection_key_hook: Mutex<Option<ConnectionKeyHook>>,
     /// Failure the connection-key hook reported; `initialize` surfaces it so the host never publishes an incarnation whose startup commit did not land.
     connection_key_hook_failure: Mutex<Option<&'static str>>,
@@ -5243,7 +5243,7 @@ impl Handler {
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary,
-                // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read. commentlint: allow(JUDGE)
+                // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read.
                 memory_enabled: binding.config.memory_enabled,
                 project_memory: project_memory.cloned(),
                 auto_promote: cfg.auto_promote,
@@ -9806,7 +9806,7 @@ impl DreamerRuntime {
                 return stop;
             }
             // The start future has not been polled. A deadline during the ledger
-            // write leaves the attempt unsent. commentlint: allow(JUDGE)
+            // write leaves the attempt unsent.
             if Instant::now() >= deadline {
                 if let Err(stop) = ledger_stop(store.finish_dreamer_attempt(
                     receipt_key,
@@ -9952,7 +9952,7 @@ impl DreamerRuntime {
                     }
                 }
                 // A fenced run no longer owns the request, and the successor may have
-                // adopted this session's run through its recorded handle. commentlint: allow(JUDGE)
+                // adopted this session's run through its recorded handle.
                 if !attempt_fenced {
                     let _ = producer.purge_session(&child_session).await;
                 }
@@ -10099,13 +10099,13 @@ impl DreamerRuntime {
     /// takes the receipt over and dispatches under the next generation. With
     /// one, the model may have run. An attempt that already ended (the
     /// predecessor crashed between the model's answer and the receipt's
-    /// completion) settles as `unknown`. An open attempt is resolved using the commentlint: allow(JUDGE)
-    /// runtime identity recorded at dispatch, not the retry route. commentlint: allow(JUDGE)
-    /// A missing or ended runtime handle, or a marker with no handle, settles commentlint: allow(JUDGE)
-    /// as terminal `unknown` and is never dispatched again. A runtime whose commentlint: allow(JUDGE)
-    /// status cannot be queried answers `unknown` without a write; an active commentlint: allow(JUDGE)
-    /// run is left for a later retry. Unlike the historian's reattach path, commentlint: allow(JUDGE)
-    /// this resolver never refires a missing run. commentlint: allow(JUDGE)
+    /// completion) settles as `unknown`. An open attempt is resolved using the
+    /// runtime identity recorded at dispatch, not the retry route.
+    /// A missing or ended runtime handle, or a marker with no handle, settles
+    /// as terminal `unknown` and is never dispatched again. A runtime whose
+    /// status cannot be queried answers `unknown` without a write; an active
+    /// run is left for a later retry. Unlike the historian's reattach path,
+    /// this resolver never refires a missing run.
     ///
     /// The connect, bind, and `status` probe together run under the request's
     /// remaining `deadline`; a probe that does not finish in time answers
@@ -13533,7 +13533,7 @@ enum PoolFailure {
 
 /// What a classification commit is keyed and stamped by.
 struct ClassifyWriteIdentity<'a> {
-    /// The Dreamer receipt's project; the kernel key includes it because a route digest is the same for every project that held the root in turn. commentlint: allow(JUDGE)
+    /// The Dreamer receipt's project; the kernel key includes it because a route digest is the same for every project that held the root in turn.
     authority_project: &'a str,
     operation_key: &'a str,
     /// The receipt's request digest, reused as the kernel request digest.
@@ -13543,7 +13543,7 @@ struct ClassifyWriteIdentity<'a> {
     known_as_of: i64,
 }
 
-/// The kernel operation key of one classify receipt's commit: the route digest, the producer family, the authority project's digest, and the receipt's operation key. The project id is digested, as the route is, so an id the kernel's secret detector would refuse cannot block the write. commentlint: allow(JUDGE)
+/// The kernel operation key of one classify receipt's commit: the route digest, the producer family, the authority project's digest, and the receipt's operation key. The project id is digested, as the route is, so an id the kernel's secret detector would refuse cannot block the write.
 fn classify_kernel_operation_key(
     project: &kernel_routes::ProjectBinding,
     authority_project: &str,
@@ -13607,7 +13607,7 @@ impl DreamerRuntime {
                 });
             }
         };
-        // `read_visible` drops rows past `MAX_READ_ROW_BYTES` instead of failing; a dropped row would otherwise look like an object the project lacks. commentlint: allow(JUDGE)
+        // `read_visible` drops rows past `MAX_READ_ROW_BYTES` instead of failing; a dropped row would otherwise look like an object the project lacks.
         if read.truncated {
             return Err(request_failure(
                 "payload_too_large",
@@ -13635,7 +13635,7 @@ impl DreamerRuntime {
                     "classify object_ids must name memories the bound project holds".to_string(),
                 ));
             };
-            // The daemon has no local-model notion, so a dispatch is remote egress: the serving view's folded class must be normal, the bar `kernel.egress.decide` sets for an owner bound for a remote destination. `ExplicitSearch` serves sensitive rows, so the surface does not enforce it. commentlint: allow(JUDGE)
+            // The daemon has no local-model notion, so a dispatch is remote egress: the serving view's folded class must be normal, the bar `kernel.egress.decide` sets for an owner bound for a remote destination. `ExplicitSearch` serves sensitive rows, so the surface does not enforce it.
             if row.object.sensitivity != kernel::Sensitivity::Normal {
                 return Err(request_failure(
                     "sensitive_remote",
@@ -13724,7 +13724,7 @@ impl DreamerRuntime {
                         &mut refused,
                     )?;
                     let mut filter = kernel_routes::project::ScopeFilter::new(&project);
-                    // The model's `shareable` is an untrusted judgment. The serving view at commit time floors it: a memory is recorded shareable only when its folded class is normal and it is served at `ExplicitSearch`, the widest surface, so a memory rejected or quarantined since the read, or one no admission serves (`served_rows_for` returns hidden rows and omits unadmitted ones), is never recorded shareable, whatever the model said. commentlint: allow(JUDGE)
+                    // The model's `shareable` is an untrusted judgment. The serving view at commit time floors it: a memory is recorded shareable only when its folded class is normal and it is served at `ExplicitSearch`, the widest surface, so a memory rejected or quarantined since the read, or one no admission serves (`served_rows_for` returns hidden rows and omits unadmitted ones), is never recorded shareable, whatever the model said.
                     let classified_ids: Vec<&str> = classifications
                         .iter()
                         .map(|classification| classification.object_id.as_str())
@@ -13744,7 +13744,7 @@ impl DreamerRuntime {
                                     && row.visibility(kernel::Surface::ExplicitSearch)
                                         != kernel::SurfaceVisibility::Hidden
                             });
-                        // Retire prior classifications in this commit to maintain one live classification per memory. `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may attach such rows to the memory; the query selects only rows this code path wrote (memory domain, `dreamer.classify` source, this project's scope), so the writer holds the lock for its own rows and not for an arbitrary number of another producer's. commentlint: allow(JUDGE)
+                        // Retire prior classifications in this commit to maintain one live classification per memory. `classifies` and `memory_classification` are free-form literals `kernel.commit` does not reserve, so any project, and any producer in this one, may attach such rows to the memory; the query selects only rows this code path wrote (memory domain, `dreamer.classify` source, this project's scope), so the writer holds the lock for its own rows and not for an arbitrary number of another producer's.
                         for prior in envelope.live_dependent_observations(
                             &kernel::DependentObservationQuery {
                                 dependency_object_id: &classification.object_id,
@@ -13906,7 +13906,7 @@ fn memories_authority_for_route(
     }))
 }
 
-/// The failure a classify receipt records instead of writing when `authority_project` no longer holds `MODULE` at `authority_generation` for `route_root`; `None` when it still does. The entry check guards the receipt, but a model call can outlast a drain or a move, and a write under lost authority lands in a store that no longer answers for the project. The authority row is outside the kernel transaction, so this narrows the window from the model call to the commit rather than closing it. commentlint: allow(JUDGE)
+/// The failure a classify receipt records instead of writing when `authority_project` no longer holds `MODULE` at `authority_generation` for `route_root`; `None` when it still does. The entry check guards the receipt, but a model call can outlast a drain or a move, and a write under lost authority lands in a store that no longer answers for the project. The authority row is outside the kernel transaction, so this narrows the window from the model call to the commit rather than closing it.
 fn classify_write_refusal(
     store: &MemoryStore,
     route_root: &str,
@@ -13938,7 +13938,7 @@ fn classify_write_refusal(
         }
         Ok(MemoriesAuthority::Module(_)) => None,
         Ok(MemoriesAuthority::NotModule { message }) => refusal("authority_not_module", message),
-        // `authority_lookup_failed` names the pre-receipt read, which the scheduler retries by re-leasing the slot; a lookup failure here is recorded on the receipt as terminal and replays, so it carries a code the scheduler does not retain. commentlint: allow(JUDGE)
+        // `authority_lookup_failed` names the pre-receipt read, which the scheduler retries by re-leasing the slot; a lookup failure here is recorded on the receipt as terminal and replays, so it carries a code the scheduler does not retain.
         Err(error) => refusal(
             "authority_unverified",
             format!(
@@ -13975,7 +13975,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
 
     /// The newest root speaks for a project: roots collapse by project before
     /// the winner's schedule is read, so a newest binding without a schedule
-    /// unschedules the project. commentlint: allow(JUDGE)
+    /// unschedules the project.
     fn scheduled_projects(&self) -> Result<Vec<dreamer_scheduler::ScheduledProject>, String> {
         let store = &self.store;
         let latest_roots: Vec<(u64, PathBuf, Option<String>)> = self
@@ -14068,7 +14068,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                         serde_json::from_slice(&bytes).ok()
                     })
                     .unwrap_or_else(|| json!({"ok": false, "code": "dreamer_ledger_corrupt"})),
-                // The protocol classifies only these codes as store errors; all others are command responses. `authority_lookup_failed` and `dreamer_ledger_failed` leave no receipt or an open one; `kernel_unavailable` leaves the receipt open without an attempt, so a re-leased command retries the pool read on the next tick. commentlint: allow(JUDGE)
+                // The protocol classifies only these codes as store errors; all others are command responses. `authority_lookup_failed` and `dreamer_ledger_failed` leave no receipt or an open one; `kernel_unavailable` leaves the receipt open without an attempt, so a re-leased command retries the pool read on the next tick.
                 PreparedOutcome::Error { code, message }
                     if code == "authority_lookup_failed"
                         || code == "dreamer_ledger_failed"
@@ -14224,7 +14224,7 @@ pub(crate) struct DreamerRunRequest<'a> {
     pub(crate) authority_generation: u64,
     /// `None` for the wire route, which holds no lease. When set, a route that
     /// resolves to another project is refused before any receipt is written:
-    /// the lease serialises runs on one project only. commentlint: allow(JUDGE)
+    /// the lease serialises runs on one project only.
     pub(crate) leased_project: Option<&'a str>,
     pub(crate) task: &'a ClassifyRequest,
 }
@@ -16809,7 +16809,7 @@ pub fn dev_descriptor_at(data_home: &str) -> StorageDescriptor {
     }
 }
 
-/// The daemon's store is `<data_dir>/eidnara/context/store.db`: the daemon and the direct-host development descriptor open one file, and the contract's `layout` names its directory. commentlint: allow(JUDGE)
+/// The daemon's store is `<data_dir>/eidnara/context/store.db`: the daemon and the direct-host development descriptor open one file, and the contract's `layout` names its directory.
 ///
 /// `StorageBackend::Sqlite` carries the path as a `String`, so a data directory that is not
 /// UTF-8 is refused instead of being re-spelled with replacement characters, which would
@@ -16823,7 +16823,7 @@ pub fn managed_store_descriptor(data_dir: &Path) -> Result<StorageDescriptor, &'
 
 pub const STORE_FILE_NAME: &str = "memory.sqlite";
 
-/// Benches and tests that own a scratch directory place the store directly in `dir`; the daemon uses [`managed_store_descriptor`]. commentlint: allow(JUDGE)
+/// Benches and tests that own a scratch directory place the store directly in `dir`; the daemon uses [`managed_store_descriptor`].
 pub fn store_descriptor_in(dir: &Path) -> StorageDescriptor {
     let path = dir
         .join(STORE_FILE_NAME)
@@ -19125,7 +19125,7 @@ mod tests {
                 .lock()
                 .expect("await timeouts mutex")
                 .push(timeout);
-            // The real producer gives up at `timeout`; a blocked output that outlives it is the timed-out attempt the caller then records. commentlint: allow(JUDGE)
+            // The real producer gives up at `timeout`; a blocked output that outlives it is the timed-out attempt the caller then records.
             match tokio::time::timeout(timeout, self.await_output(run_id)).await {
                 Ok(result) => result,
                 Err(_) => Err(HistorianProducerError::TimedOut),
@@ -19146,7 +19146,7 @@ mod tests {
 
         async fn status(&mut self, run_id: &str) -> Result<RunState, HistorianProducerError> {
             self.state.statuses.fetch_add(1, Ordering::SeqCst);
-            // The real producer routes `status` through the bound session and answers `MissingSession` otherwise. commentlint: allow(JUDGE)
+            // The real producer routes `status` through the bound session and answers `MissingSession` otherwise.
             let Some(session) = self.bound_session.clone() else {
                 return Err(HistorianProducerError::Protocol(
                     "status before bind_session".to_string(),
@@ -29305,7 +29305,7 @@ mod tests {
 
     /// The lease names a project, so the run must execute under that project.
     /// Both projects have equal generations, so generation checking cannot
-    /// distinguish them. commentlint: allow(JUDGE)
+    /// distinguish them.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_scheduler_bridge_refuses_a_root_that_moved_to_another_project() {
         use dreamer_scheduler::SchedulerHost;
@@ -29436,7 +29436,7 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
-    /// A pool read against a kernel that is not ready leaves the receipt open with no attempt; the bridge reports it as `StoreUnavailable` so the slot is retained and the same command id is asked again once the kernel opens, instead of the slot advancing past an orphaned receipt. commentlint: allow(JUDGE)
+    /// A pool read against a kernel that is not ready leaves the receipt open with no attempt; the bridge reports it as `StoreUnavailable` so the slot is retained and the same command id is asked again once the kernel opens, instead of the slot advancing past an orphaned receipt.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_scheduler_bridge_retains_the_slot_while_the_kernel_is_starting() {
         use dreamer_scheduler::SchedulerHost;
@@ -29512,7 +29512,7 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
-    /// An authority read that fails immediately before the canonical write is recorded on the receipt as terminal under `authority_unverified`; the bridge treats that as the command's answer, not a store outage, so the slot is consumed rather than retained against a receipt that replays the same failure forever. commentlint: allow(JUDGE)
+    /// An authority read that fails immediately before the canonical write is recorded on the receipt as terminal under `authority_unverified`; the bridge treats that as the command's answer, not a store outage, so the slot is consumed rather than retained against a receipt that replays the same failure forever.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_scheduler_bridge_consumes_a_slot_whose_write_time_authority_read_failed() {
         use dreamer_scheduler::SchedulerHost;
@@ -30398,7 +30398,7 @@ mod tests {
         }
     }
 
-    /// Each commit retires reclassified memories' prior classifications, leaving one live classification per memory; a memory the later run did not name keeps its classification. commentlint: allow(JUDGE)
+    /// Each commit retires reclassified memories' prior classifications, leaving one live classification per memory; a memory the later run did not name keeps its classification.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_retires_the_prior_classification_of_a_reclassified_memory() {
         let (first, second, other) = (test_memory_id(1), test_memory_id(2), test_memory_id(3));
@@ -30613,7 +30613,7 @@ mod tests {
         );
     }
 
-    /// Two authority projects hold the same root in turn and reuse a session and command id. The Dreamer ledger keys receipts by project, so the second project dispatches; its kernel commit must not replay the first project's receipt, which a key built from the route digest alone would. commentlint: allow(JUDGE)
+    /// Two authority projects hold the same root in turn and reuse a session and command id. The Dreamer ledger keys receipts by project, so the second project dispatches; its kernel commit must not replay the first project's receipt, which a key built from the route digest alone would.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_keys_the_kernel_write_by_authority_project_on_a_shared_root() {
         let memory = test_memory_id(1);
@@ -30709,7 +30709,7 @@ mod tests {
         );
     }
 
-    /// Two roots hold one authority project and share a session and command id. The receipt is keyed by project, so the second root would otherwise replay the first root's completed receipt before its own pool read; the digest carries the kernel scope, so the second root's request is a conflict and neither replays nor dispatches. commentlint: allow(JUDGE)
+    /// Two roots hold one authority project and share a session and command id. The receipt is keyed by project, so the second root would otherwise replay the first root's completed receipt before its own pool read; the digest carries the kernel scope, so the second root's request is a conflict and neither replays nor dispatches.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_does_not_replay_a_receipt_across_roots_of_one_project() {
         let memory = test_memory_id(1);
@@ -30880,7 +30880,7 @@ mod tests {
             .unwrap();
     }
 
-    /// `ExplicitSearch` serves sensitive rows, so the pool read itself must refuse them before a producer connects, and the refusal replays from the receipt. commentlint: allow(JUDGE)
+    /// `ExplicitSearch` serves sensitive rows, so the pool read itself must refuse them before a producer connects, and the refusal replays from the receipt.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_refuses_a_memory_served_above_normal_sensitivity() {
         let producer = Arc::new(ProducerState::default());
@@ -30935,7 +30935,7 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
-    /// A memory served above normal, or hidden on every surface, at commit time is recorded `shareable=false` whatever the manifest said; the pool read refuses or omits such a memory up front, so this guards a class or disposition that changed between the read and the commit. commentlint: allow(JUDGE)
+    /// A memory served above normal, or hidden on every surface, at commit time is recorded `shareable=false` whatever the manifest said; the pool read refuses or omits such a memory up front, so this guards a class or disposition that changed between the read and the commit.
     #[tokio::test(flavor = "current_thread")]
     async fn record_classifications_never_records_a_sensitive_or_hidden_memory_as_shareable() {
         let producer = Arc::new(ProducerState::default());
@@ -31016,7 +31016,7 @@ mod tests {
         assert_eq!(by_memory(&normal).detail["shareable"], json!(true));
     }
 
-    /// `memory_classification` and `classifies` are free-form literals: another project's row citing this memory, and another producer's row in this project, are not this project's classifications; both stay live and the commit succeeds. commentlint: allow(JUDGE)
+    /// `memory_classification` and `classifies` are free-form literals: another project's row citing this memory, and another producer's row in this project, are not this project's classifications; both stay live and the commit succeeds.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_retires_only_the_classification_rows_it_wrote() {
         let memory = test_memory_id(1);
@@ -31116,7 +31116,7 @@ mod tests {
         assert!(live(&own), "this project's classification is written");
     }
 
-    /// The entry check predates the model call, which a drain can outlast; the canonical write reads authority again and a run whose project no longer holds `MODULE` writes nothing and completes its receipt failed. commentlint: allow(JUDGE)
+    /// The entry check predates the model call, which a drain can outlast; the canonical write reads authority again and a run whose project no longer holds `MODULE` writes nothing and completes its receipt failed.
     #[tokio::test(flavor = "current_thread")]
     async fn dreamer_run_task_writes_nothing_when_authority_drains_during_the_model_call() {
         let ids = [test_memory_id(1)];
@@ -31189,7 +31189,7 @@ mod tests {
         assert!(harness.classifications().is_empty());
     }
 
-    /// `read_visible` truncates rows past `MAX_READ_ROW_BYTES` rather than failing, so a dropped memory must not be reported as one the project does not hold: the request is refused as too large and nothing is dispatched. commentlint: allow(JUDGE)
+    /// `read_visible` truncates rows past `MAX_READ_ROW_BYTES` rather than failing, so a dropped memory must not be reported as one the project does not hold: the request is refused as too large and nothing is dispatched.
     /// The stored rationales carry the bytes past `MAX_READ_ROW_BYTES`, while
     /// the rendered summaries remain within the prompt bound.
     #[tokio::test(flavor = "current_thread")]

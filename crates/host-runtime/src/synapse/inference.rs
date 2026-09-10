@@ -118,7 +118,6 @@ fn ensure_ort(identity: &OrtIdentity) -> Result<(), InferenceError> {
         ));
     }
     // `encode_batch` defaults to a process-wide rayon pool; the `cpu` semaphore in `super` admits one native call at a time, so tokenization stays on the calling thread.
-    // commentlint: allow(JUDGE)
     tokenizers::utils::parallelism::set_parallelism(false);
     let builder = ort::init_from(verified.load_path())
         .map_err(|_| InferenceError::Artifact("ONNX Runtime library failed to load".to_owned()))?;
@@ -317,7 +316,7 @@ impl Backend {
         let embedder = TextEmbedding::try_new_from_user_defined(model, options)
             .map_err(|e| InferenceError::Artifact(format!("model construction failed: {e}")))?;
 
-        // The post-processor adds its special tokens independent of the content, so the empty probe is the minimum encoding length for any text. commentlint: allow(JUDGE)
+        // The post-processor adds its special tokens independent of the content, so the empty probe is the minimum encoding length for any text.
         let zero_token_inputs_possible = embedder
             .tokenizer
             .encode("", true)
