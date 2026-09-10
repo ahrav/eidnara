@@ -3923,6 +3923,15 @@ impl MemoryStore {
         response_json: &str,
         now_ms: i64,
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .dreamer_task_complete_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(StoreError::Backend(
+                "injected dreamer task complete failure".to_string(),
+            )));
+        }
         self.complete_task_lease(
             &DREAMER_TASK,
             project,
@@ -5438,6 +5447,10 @@ pub struct MemoryStore {
     /// touches the ledger.
     #[cfg(any(test, feature = "test-support"))]
     dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `complete_dreamer_task` fail as a backend error before
+    /// it touches the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -5829,6 +5842,8 @@ impl MemoryStore {
             authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             dreamer_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            dreamer_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         Ok(store)
@@ -6314,6 +6329,13 @@ impl MemoryStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_next_dreamer_task_acquire_for_test(&self) {
         self.dreamer_task_acquire_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `complete_dreamer_task` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_dreamer_task_complete_for_test(&self) {
+        self.dreamer_task_complete_fail_once
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 

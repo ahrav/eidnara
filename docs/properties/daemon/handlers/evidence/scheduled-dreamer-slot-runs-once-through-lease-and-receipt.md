@@ -12,8 +12,8 @@ billable runs.
 
 ## Evidence trail
 
-Implementation claims are checked against the working tree merging `bc007c9a`
-into `c35a4ad5`. Passing checks for that merge are recorded below. Symbol anchors refer to
+Implementation claims are checked against the working tree merging `1d9d4bd8`
+into `249ab315`. Passing checks for that merge are recorded below. Symbol anchors refer to
 `crates/daemon/src/dreamer_scheduler.rs` unless another path is given;
 merge-time line offsets are not retained. Scheduling is explicit-config-only:
 the user-tier schedule and `MODULE` authority admit lease work, but production
@@ -21,29 +21,45 @@ has no task input builder, so scheduled model dispatch is test-only.
 
 - `DreamerScheduler::tick` reads the clock once for due-ness, asks the
   host for its scheduled projects, and runs those due at or before that
-  instant oldest first (`due_projects`). After `run_slot` returns a non-`Retained`
-  event, `tick` reads the clock again and passes that instant to `advance`.
-  The project's next slot is strictly after that instant: slots crossed during
-  the run are not back-filled, nor are slots missed while the daemon was down.
-  A run that outlasts its period therefore does not leave its own next slot
-  already in the past. When the host
-  returns `Err`, `tick` returns one `TickEvent::Deferred` before the
-  due table is reconciled, so no project is dropped and no due instant moves.
-  A `Retained` slot is not advanced; the tick still processes other due projects.
-- `run` logs every `Skipped`, `Retained`, and `Deferred` event to stderr and,
-  after a retained slot or deferred tick, waits `IDLE_POLL` instead of the
-  distance to the earliest due instant, which would otherwise be zero and
-  re-tick at once against a failing store.
-- `run_slot` leases before it runs: `acquire_dreamer_task` with
-  acquisition id `slot_command_id(task, due_at_ms)`, the scheduler's instance
-  and slot, the registration generation, the task id, and the due instant as
-  the claim's `source_revision`. Every successful acquisition result other
-  than `Claim`, including `Busy`, is a `Skipped` event with no run, and `tick`
-  advances the project past the slot. A store `Err` from registration-generation
-  lookup or acquisition is not a decision: `run_slot` returns
+  instant oldest first (`due_projects`). After a run the project's
+  next instant is recomputed from the clock as the run returns, floored at
+  the slot that ran (`advance`), so slots missed while the daemon was down
+  are not back-filled, a slot that came due while the run itself was in
+  progress is not back-filled either, and a wall clock that steps back during
+  a run cannot select a slot earlier than the one that ran: the next instant
+  is always strictly after `due_at_ms`. A project not in this tick's due set
+  whose instant elapses during another project's run keeps that instant and
+  runs it once on the next tick, late; the post-run advance then bounds it to
+  one run per elapsed period. When the host returns `Err`, `tick` returns
+  one `TickEvent::Deferred` before the due table is reconciled, so no project
+  is dropped and no due instant moves. A `Retained` slot is not advanced; the
+  tick still processes other due projects.
+- `run` logs every `Skipped`, `Retained`, and `Deferred` event to
+  stderr and, after a deferred tick or a retained slot, waits `IDLE_POLL`
+  instead of the distance to the earliest due instant, which would otherwise be
+  zero and re-tick at once against a failing store. The tick is awaited under
+  `select!` with the cancellation token, so cancellation during a run drops
+  the tick where it stands: the run in flight is abandoned to the receipt
+  protocol, which recovers it on restart, and the projects still due behind it
+  are not leased.
+- `run_slot` leases before it runs: `acquire_dreamer_task` with acquisition
+  id `slot_command_id(task, due_at_ms)`, the scheduler's instance and slot,
+  the registration generation, the task id, and the due instant as the claim's
+  `source_revision`. Every acquisition decision other than `Claim`,
+  including `Busy`, is a `Skipped` event with no run, and `tick` advances
+  the project past the slot. A store `Err` from the generation lookup or from
+  the acquisition is not a decision: `run_slot` returns
   `TickEvent::Retained`, `tick` leaves that project's due instant in place,
-  and `run` waits the idle poll. With unchanged scheduling, the next tick retries
-  the same slot under the same acquisition id.
+  and `run` waits the idle poll before the next tick retries the same slot
+  under the same acquisition id. The same holds after the lease: a
+  `TaskRunOutcome::StoreUnavailable` from the host and a store `Err` from
+  `complete_dreamer_task` both retain the slot with its claim live. The next
+  tick's acquisition under the same id rebinds and renews that claim
+  (`acquire_task_lease` replays a live claim by acquisition id), the host is
+  asked for the same command id, and the receipt protocol replays a settled
+  receipt or resumes an open one without a second dispatch, so the retry is
+  safe whether or not the model ran. Every acquisition decision, every other
+  host reply, and a completion `Conflict` consume the slot.
 - The command id the run is dispatched under is derived from the returned
   claim's `source_revision`, not from the slot that came due. The
   shared protocol rebinds a live claim held by the same instance and slot under
@@ -54,8 +70,8 @@ has no task input builder, so scheduled model dispatch is test-only.
   receipt under that command id.
 - The registration generation is allocated on first use from
   `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs`),
-  one above the highest retained generation the instance has on the ledger. A
-  live claim is never reclaimed, so the successor always outranks it; wall time is
+  one above the highest generation the instance has on the ledger. A live
+  claim is never reclaimed, so the successor always outranks it; wall time is
   not used, so a clock step backwards cannot rank the successor below its
   predecessor.
 - Lease and completion instants are read from the clock as each operation
@@ -64,8 +80,8 @@ has no task input builder, so scheduled model dispatch is test-only.
 - `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs`)
   takes the most recently bound binding on each route root
   (`RouteBindings::latest_per_root`; `RouteBindings::insert` stamps each bind
-  with a sequence), including bindings with no schedule, and admits a
-  root only when `memories_authority_for_route` answers
+  with a sequence), with or without a schedule, and admits a root only
+  when `memories_authority_for_route` (`crates/daemon/src/lib.rs`) answers
   `Module`. That helper is the same one `run_dreamer_task` uses, so a store
   `Err` is an `Err` from `scheduled_projects`, not a missing project. Roots
   that resolve to one authority project collapse to the most recently bound
@@ -81,19 +97,25 @@ has no task input builder, so scheduled model dispatch is test-only.
   (`DreamerRuntime::classify_inputs`), and
   otherwise calls `run_dreamer_task` under `SCHEDULER_LEDGER_SESSION`
   with a `ClassifyRequest` containing kernel `object_ids`, a model chain, and
-  a timeout, not caller-rendered prompts. It sets `leased_project` to
-  `Some(&project.project)`. `DreamerRuntime::new` sets its input
-  builder to `None` and `install_task_inputs` is `#[cfg(test)]`, so production
-  slots take the not-runnable path. That reply completes the lease without
-  creating a receipt or starting a model. A lease completion error is logged,
-  not reported as a successful durable completion. The tick still advances
-  after this post-run completion attempt; `Retained` applies only before a
-  claim is returned to the scheduler.
+  a timeout, not caller-rendered prompts, and with `leased_project` set to the
+  project the lease is on. `DreamerRuntime::new` sets its input builder to
+  `None` and `install_task_inputs` is `#[cfg(test)]`, so production slots
+  take the not-runnable path. That reply completes the lease without creating a
+  receipt or starting a model, and is recorded on the lease so the slot is not
+  retried every tick. `run_task` maps the protocol's two store-error codes,
+  `authority_lookup_failed` and `dreamer_ledger_failed`, to
+  `TaskRunOutcome::StoreUnavailable`; every other reply, success or error, is
+  the protocol's answer for the command and is recorded on the lease. A lease
+  completion error is logged, not reported as a successful durable completion,
+  and retains the slot.
 - `binding_for_root` uses `RouteBindings::latest_for_root`, the same newest-bind
-  rule as project discovery, but performs a separate lookup. With no intervening
-  rebind it uses the binding that supplied the schedule. An intervening rebind
-  may change the run's harness or configuration; receipt recovery still probes
-  under the attempt's recorded root, harness, and child session.
+  rule as project discovery, but reads the newest binding on the scheduled root
+  again at dispatch. With no intervening rebind it uses the binding that
+  supplied the schedule; a rebind of that root in between dispatches under the
+  binding the user now presents, and a rebind during the run cannot be observed
+  at all, so the binding is not re-validated against the tick's snapshot.
+  Receipt recovery still probes under the attempt's recorded root, harness, and
+  child session.
 - A slot identifies one receipt, not necessarily one model call. The original
   `run_dreamer_task` chain may try several models. The receipt property prevents
   recovery from starting another attempt after any possible dispatch, and
@@ -160,10 +182,16 @@ the producer answering `status` as
 `MemoryStore::fail_next_authority_route_read_for_test`, which makes one
 `authority_project_for_route` return a backend error. For the retained slot:
 `MemoryStore::fail_next_dreamer_task_acquire_for_test`, which makes one
-`acquire_dreamer_task` return a backend error before it touches the ledger. For
-the refused run: a second `MODULE` authority activated on the leased root
+`acquire_dreamer_task` return a backend error before it touches the ledger;
+`fail_next_dreamer_task_complete_for_test` does the same for
+`complete_dreamer_task`, and `fail_next_authority_route_read_for_test` armed
+before `run_task` makes the protocol's own authority gate fail. For the backward
+clock step: a scripted host that steps the manual clock back an hour during the
+run. For the refused run: a second `MODULE` authority activated on the leased root
 through `activate_module_authority`, so the root resolves to the other project
-at an equal generation. For binding selection:
+at an equal generation. For cancellation mid-tick: two due projects on a host
+whose runs park on a `Notify`, cancelled while the first is parked. For
+binding selection:
 twelve routes bound on one root with distinct schedules and harnesses, so a
 pick by map order almost never matches the newest bind, then a rebind of the
 oldest channel and a newest binding with no schedule. For the post-run
@@ -176,12 +204,13 @@ The bridge tests use the async object-id harness through
 `DreamerHarness::start(&producer).await` in `crates/daemon/src/lib.rs`. The main
 thread's results, with commands and tool version, are recorded in
 [the catalog](../catalog.md#dreamer-dispatched-attempt-always-settles-through-the-receipt):
-the working tree merging `bc007c9a` into `c35a4ad5` passed nextest with 2,327
-tests passed and 5 skipped, workspace clippy with warnings denied, and the
+the working tree merging `1d9d4bd8` into `249ab315` passed
+`cargo nextest run --workspace --all-targets --all-features --locked` with 3,581
+tests passed and 64 skipped, workspace clippy with warnings denied, and the
 formatting check. An incremental read-only review found no actionable findings.
 The 50 Dreamer tests and 50 further runs of those 50 tests at default
 concurrency without retries apply only to `c35a4ad5`; that repetition check was
-not rerun after `bc007c9a`. The checks' adequacy status remains `unaudited`.
+not rerun after later merges. The checks' adequacy status remains `unaudited`.
 The slot oracle must distinguish
 `NotRunnable` from receipt-backed work and allow the original chain's fallback
 attempts while rejecting a second start for any recorded attempt identity.
