@@ -47,12 +47,15 @@ default-production reachability, subject to the route's authority checks.
   and `BindingMismatch` answer `dreamer_request_conflict`; `InProgress` goes
   to `resume_dreamer_receipt`, all before a new producer is constructed.
 - Only a fresh or successfully taken-over generation calls `render_pool`.
-  It reads the named memories at the kernel tip, checks visibility and memory
-  domain membership, and renders escaped bodies through
+  It reads the named memories at the kernel tip, checks visibility, memory
+  domain membership, and the serving view's folded sensitivity, and renders
+  escaped bodies through
   `render_classify_prompt` in `crates/daemon/src/classify.rs`. `PoolFailure`
-  separates recorded request failures (`invalid_params`, `payload_too_large`,
-  or `kernel_read_failed`) from `kernel_unavailable`, which leaves an open
-  receipt with no attempt. A truncated kernel read is `payload_too_large`,
+  separates recorded request failures (`invalid_params`, `sensitive_remote`,
+  `payload_too_large`, or `kernel_read_failed`) from `kernel_unavailable`, which
+  leaves an open receipt with no attempt. A memory served above normal is
+  `sensitive_remote`: the surface serves it, but the prompt goes to a model
+  provider. A truncated kernel read is `payload_too_large`,
   not a missing-object error. A retry may take over that undispatched receipt
   and read again; replay and recovery of a possible dispatch do not read it.
 - `resume_dreamer_receipt` selects the newest current-generation attempt that
@@ -91,11 +94,15 @@ default-production reachability, subject to the route's authority checks.
   rule, not the raw output. `record_classifications` writes one
   `memory_classification` observation per memory, scoped to the project and
   dependent on that memory, with `(ModelInference, DreamerInference)` admission.
+  The model's `shareable` is floored by `Envelope::served_rows_for` in the same
+  commit: a memory served above normal is recorded `shareable=false`.
   Its kernel receipt uses producer `dreamer.classify`, a project-namespaced
   receipt operation key, and the receipt digest. A replay writes nothing new.
-  The same commit retires prior live classifications through
+  The same commit retires this project's prior live classifications through
   `Envelope::live_dependent_observations` in `crates/kernel/src/envelope.rs`
-  and `retire_observation` in `crates/kernel/src/slice/write.rs`.
+  and `retire_observation` in `crates/kernel/src/slice/write.rs`; a row that
+  `scoped_object_state` places outside the project is skipped, since the
+  `classifies` kind is not projected and any project may cite the memory.
 - Normal kernel-write failure is recorded as `dreamer_kernel_write_failed`;
   kernel conflicts retain the `kernel.commit` reason classification. Both
   that completion and the exhausted-chain and success completions distinguish
@@ -215,7 +222,20 @@ the producer is never started again.
    start, no purge, the generation-2 receipt still `in_progress`, and the
    generation-1 attempt still open. The start window performs no await; the
    await window performs exactly one
-   (`dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced`).
+    (`dreamer_run_task_does_not_purge_the_child_session_once_it_is_fenced`).
+13. A memory admitted `Sensitive` in the bound project, shown served at
+   `ExplicitSearch`: assert `sensitive_remote`, no start, no classification,
+   the receipt completed `failed`, and a retry replaying the refusal with no
+   start
+   (`dreamer_run_task_refuses_a_memory_served_above_normal_sensitivity`).
+14. `record_classifications` called directly with `shareable=true` for a
+   `Sensitive` memory and a normal one: assert the sensitive row is recorded
+   `shareable=false` and the normal row `shareable=true`
+   (`record_classifications_never_records_a_sensitive_memory_as_shareable`).
+15. Another project's `memory_classification` observation citing the memory
+   through `classifies`, then a classify of that memory: assert `classified`
+   is 1, the foreign row still live, and this project's row written
+   (`dreamer_run_task_leaves_another_projects_classification_of_the_memory_live`).
 
 The stranded-receipt, fenced-cleanup, and terminal-status tests use the async
 object-id harness:

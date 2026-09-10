@@ -607,7 +607,9 @@ requested timeout, await ceiling, output-token limit, temperature, template and
 schema versions, and system-prompt hash, but not memory bodies or a recovery
 timeout. `ClassifyRequest::parse` rejects caller-rendered `prompt_body` and
 claim-lane `items`. A fresh or taken-over generation calls `render_pool` for
-canonical memories in the bound kernel project. Request failures complete the
+canonical memories in the bound kernel project; a memory the serving view
+classes above normal is refused as `sensitive_remote` before any connect, since
+the prompt goes to a model provider. Request failures complete the
 receipt; `kernel_unavailable` leaves it open without an attempt so a retry can
 take over and read again. A replay or recovery of a possible dispatch skips
 that read.
@@ -645,8 +647,11 @@ they use different identities from the predecessor's runs. The exhausted-chain, 
 each match `Applied`, `Fenced`, and `Err` as separate arms.
 Accepted classifications become project-scoped `memory_classification`
 observations with `(ModelInference, DreamerInference)` admission, keyed by the
-project-namespaced operation key and digest under `dreamer.classify`. The same
-kernel commit retires prior live classifications for each memory. That commit
+project-namespaced operation key and digest under `dreamer.classify`. The model's
+`shareable` is recorded true only for a memory the serving view classes normal at
+commit time. The same kernel commit retires this project's prior live
+classifications for each memory; another project's row citing the memory through
+`classifies` is skipped, not retired and not a failure. That commit
 precedes receipt completion: a crash between them leaves canonical effects but
 an unknown receipt outcome on recovery, not a second dispatch. Normal kernel
 write failure is recorded as `dreamer_kernel_write_failed`; a receipt read-back

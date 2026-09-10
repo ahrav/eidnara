@@ -13914,17 +13914,27 @@ impl DreamerRuntime {
         for id in object_ids {
             // A visible decision from another domain is not a memory, whatever
             // project holds it; the answer does not say which check failed.
-            let Some(decision) = read.decisions.get(id).filter(|_| {
-                read.rows.iter().any(|row| {
+            let Some((row, decision)) = read
+                .rows
+                .iter()
+                .find(|row| {
                     row.object.object_id == *id
                         && row.object.domain_id == canonical_memory::MEMORY_DOMAIN_ID
                 })
-            }) else {
+                .zip(read.decisions.get(id))
+            else {
                 return Err(request_failure(
                     "invalid_params",
                     "classify object_ids must name memories the bound project holds".to_string(),
                 ));
             };
+            // The daemon has no local-model notion, so a dispatch is remote egress: the serving view's folded class must be normal, the bar `kernel.egress.decide` sets for an owner bound for a remote destination. `ExplicitSearch` serves sensitive rows, so the surface does not enforce it. commentlint: allow(JUDGE)
+            if row.object.sensitivity != kernel::Sensitivity::Normal {
+                return Err(request_failure(
+                    "sensitive_remote",
+                    "classify object_ids must name memories served at normal sensitivity; a sensitive memory is not sent to a model provider".to_string(),
+                ));
+            }
             rows.push(ClassifyPoolRow {
                 object_id: id,
                 kind: &decision.decision_kind,
@@ -13946,7 +13956,8 @@ impl DreamerRuntime {
     /// Records `classifications` as one observation per memory in the memory domain.
     /// Each recorded classification depends on the memory it classifies.
     /// Each is admitted under the Dreamer source and taint classes.
-    /// Each retires that memory's earlier classification in the same commit.
+    /// Each retires that memory's earlier classification by this project in the same commit; another project's row citing the memory is left alone.
+    /// `shareable` is recorded true only when the model said so and the serving view classes the memory normal at commit time.
     /// The commit is keyed by the receipt's operation key and digest under the project's namespace, so a repeat under the same receipt replays the kernel's receipt and writes nothing new.
     async fn record_classifications(
         &self,
@@ -14002,6 +14013,12 @@ impl DreamerRuntime {
                         &mut refused,
                     )?;
                     let mut filter = kernel_routes::project::ScopeFilter::new(&project);
+                    // The model's `shareable` is an untrusted judgment. The serving view's folded class at commit time floors it: a memory served above normal is never recorded shareable, whatever the model said, and a memory no admission serves is treated the same way. The pool read applied the same bar; this covers a class that changed between the read and this commit. commentlint: allow(JUDGE)
+                    let classified_ids: Vec<&str> = classifications
+                        .iter()
+                        .map(|classification| classification.object_id.as_str())
+                        .collect();
+                    let served = envelope.served_rows_for(&classified_ids, None)?;
                     for classification in &classifications {
                         // The memory must still be the bound project's at
                         // commit time, not only at the read.
@@ -14010,18 +14027,28 @@ impl DreamerRuntime {
                             &mut filter,
                             &classification.object_id,
                         )?;
+                        let shareable = classification.shareable
+                            && served.get(&classification.object_id).is_some_and(|row| {
+                                row.object.sensitivity == kernel::Sensitivity::Normal
+                            });
                         // Retire prior classifications in this commit to maintain one live classification per memory.
                         for prior in envelope.live_dependent_observations(
                             &classification.object_id,
                             CLASSIFY_DEPENDENCY_KIND,
                             CLASSIFY_OBSERVATION_KIND,
                         )? {
-                            kernel_routes::commit::scoped_object_state(
+                            // `classifies` is not a projected dependency kind, so `kernel.commit` lets any project cite this memory through it; a foreign project's row is not this project's classification and stays live. commentlint: allow(JUDGE)
+                            match kernel_routes::commit::scoped_object_state(
                                 envelope,
                                 &mut filter,
                                 &prior,
-                            )?;
-                            envelope.retire_observation(&prior)?;
+                            ) {
+                                Ok(_) => {
+                                    envelope.retire_observation(&prior)?;
+                                }
+                                Err(kernel::KernelError::NotFound) => {}
+                                Err(error) => return Err(error),
+                            }
                         }
                         let observation_id =
                             classification_object_id(&operation_key, &classification.object_id);
@@ -14037,9 +14064,7 @@ impl DreamerRuntime {
                             payload: kernel::ObservationPayload {
                                 summary: format!(
                                     "importance {}, scope {}, shareable {}",
-                                    classification.importance,
-                                    classification.scope,
-                                    classification.shareable
+                                    classification.importance, classification.scope, shareable
                                 ),
                                 classification: classification.scope.clone(),
                                 detail: Some(
@@ -14047,7 +14072,7 @@ impl DreamerRuntime {
                                         "schema_version": CLASSIFY_SCHEMA_VERSION,
                                         "importance": classification.importance,
                                         "scope": classification.scope,
-                                        "shareable": classification.shareable,
+                                        "shareable": shareable,
                                     })
                                     .to_string(),
                                 ),
@@ -30405,6 +30430,230 @@ mod tests {
         assert_eq!(error_code_of(&outcome), "invalid_params");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
         assert!(harness.classifications().is_empty());
+    }
+
+    fn commit_sensitive_memory(harness: &DreamerHarness, object_id: &str) {
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let scope_id = binding_with_harness(&harness.route_root, "pi", "ses")
+            .kernel_project
+            .scope_id();
+        kernel
+            .commit(
+                kernel_route_fixtures::intent(&format!("{object_id}-sensitive")),
+                |envelope| {
+                    kernel_route_fixtures::ensure_domain(
+                        envelope,
+                        kernel_route_fixtures::MEMORY_DOMAIN,
+                    )?;
+                    let mut spec = kernel_route_fixtures::memory_decision_spec(
+                        object_id,
+                        &scope_id,
+                        "PROJECT_RULES",
+                        "a memory admitted as sensitive",
+                    );
+                    spec.sensitivity = kernel::Sensitivity::Sensitive;
+                    envelope.insert_decision(spec)?;
+                    kernel_route_fixtures::verify_decision(envelope, object_id)?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
+    /// `ExplicitSearch` serves sensitive rows, so the pool read itself must refuse them before a producer connects, and the refusal replays from the receipt. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_refuses_a_memory_served_above_normal_sensitivity() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let sensitive = "memory:sensitive".to_string();
+        commit_sensitive_memory(&harness, &sensitive);
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let binding = binding_with_harness(&harness.route_root, "pi", "ses").kernel_project;
+        let read = kernel_routes::read::read_visible(
+            &kernel,
+            &binding,
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::Objects(std::slice::from_ref(&sensitive)),
+        )
+        .unwrap();
+        let row = read
+            .rows
+            .iter()
+            .find(|row| row.object.object_id == sensitive)
+            .expect("the explicit-search surface serves the sensitive memory");
+        assert_eq!(row.object.sensitivity, kernel::Sensitivity::Sensitive);
+
+        let ids = [test_memory_id(1), sensitive.clone()];
+        let outcome = harness
+            .classify(
+                classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS),
+                "sensitive",
+            )
+            .await;
+        assert_eq!(error_code_of(&outcome), "sensitive_remote");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(harness.classifications().is_empty());
+        let receipt = harness.receipt("sensitive");
+        assert!(
+            matches!(
+                receipt.state,
+                DreamerReceiptState::Complete {
+                    terminal_kind: DreamerTerminalKind::Failed,
+                    ..
+                }
+            ),
+            "{receipt:?}"
+        );
+        let replay = harness
+            .classify(
+                classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS),
+                "sensitive",
+            )
+            .await;
+        assert_eq!(error_code_of(&replay), "sensitive_remote");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// A memory served above normal at commit time is recorded `shareable=false` whatever the manifest said; the pool read refuses such a memory up front, so this guards a class that changed between the read and the commit. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_classifications_never_records_a_sensitive_memory_as_shareable() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer).await;
+        let sensitive = "memory:sensitive".to_string();
+        commit_sensitive_memory(&harness, &sensitive);
+        let binding = binding_with_harness(&harness.route_root, "pi", "ses").kernel_project;
+        let normal = test_memory_id(1);
+        let commit = harness
+            .handler
+            .dreamer
+            .record_classifications(
+                &binding,
+                &ClassifyWriteIdentity {
+                    operation_key: &dreamer_operation_key("ses", "floor"),
+                    request_digest: &"d".repeat(64),
+                    cause: "ses:floor",
+                    generation: 1,
+                    known_as_of: 1,
+                },
+                &[
+                    Classification {
+                        object_id: sensitive.clone(),
+                        importance: 50,
+                        scope: "project".to_string(),
+                        shareable: true,
+                    },
+                    Classification {
+                        object_id: normal.clone(),
+                        importance: 50,
+                        scope: "project".to_string(),
+                        shareable: true,
+                    },
+                ],
+            )
+            .await
+            .expect("the write succeeds");
+        assert_eq!(commit.classified, 2);
+        let written = harness.classifications();
+        let by_memory = |memory: &str| {
+            written
+                .iter()
+                .find(|row| row.depends_on.as_deref() == Some(memory))
+                .unwrap_or_else(|| panic!("{memory}: {written:?}"))
+        };
+        assert_eq!(by_memory(&sensitive).detail["shareable"], json!(false));
+        assert_eq!(by_memory(&normal).detail["shareable"], json!(true));
+    }
+
+    /// Another project's `memory_classification` row citing this memory through the non-projected `classifies` kind is not this project's classification: it stays live and the commit succeeds. commentlint: allow(JUDGE)
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_run_task_leaves_another_projects_classification_of_the_memory_live() {
+        let memory = test_memory_id(1);
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(ProducerOutput {
+                text: classify_manifest(std::slice::from_ref(&memory)),
+                length_capped: false,
+            }));
+        let harness = DreamerHarness::start(&producer).await;
+        let other_root = harness._dir.path().join("other-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other = binding_with_harness(other_root.to_str().unwrap(), "pi", "ses").kernel_project;
+        let other_scope = other.scope_id();
+        let kernel = harness.handler.kernel.kernel_store().unwrap();
+        let foreign = "observation:foreign-classification".to_string();
+        kernel
+            .commit(
+                kernel_route_fixtures::intent("foreign-classification"),
+                |envelope| {
+                    let mut domains = HashSet::new();
+                    let mut ready = false;
+                    let mut refused = None;
+                    kernel_routes::commit::ensure_scope(
+                        envelope,
+                        &other,
+                        &mut ready,
+                        &mut domains,
+                        &mut refused,
+                    )?;
+                    envelope.insert_observation(kernel::ObservationSpec {
+                        observation_id: foreign.clone(),
+                        object_id: foreign.clone(),
+                        domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
+                        proposition_id: None,
+                        scope_id: Some(other_scope.clone()),
+                        anchor_id: None,
+                        evidence_id: None,
+                        observation_kind: CLASSIFY_OBSERVATION_KIND.to_string(),
+                        payload: kernel::ObservationPayload {
+                            summary: "importance 1, scope project, shareable false".to_string(),
+                            classification: "project".to_string(),
+                            detail: None,
+                        },
+                        observed_at: 1,
+                        dependencies: vec![kernel::ObservationDependencySpec {
+                            dependency_object_id: memory.clone(),
+                            dependency_kind: CLASSIFY_DEPENDENCY_KIND.to_string(),
+                            dependency_payload: None,
+                        }],
+                        source_kind: "repo".to_string(),
+                        source_id: "foreign".to_string(),
+                        source_revision: 1,
+                        sensitivity: kernel::Sensitivity::Normal,
+                    })?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        assert_eq!(kernel_dependency(&kernel, &foreign), memory);
+
+        let response = response_of(
+            harness
+                .classify(
+                    classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS),
+                    "own-run",
+                )
+                .await,
+        );
+        assert_eq!(response["classified"], json!(1));
+        let live = |object_id: &str| {
+            let (_, states) = kernel.object_states(&[object_id.to_string()]).unwrap();
+            states[0]
+                .clone()
+                .unwrap_or_else(|| panic!("{object_id} is in the store"))
+                .object
+                .invalidated_commit_seq
+                .is_none()
+        };
+        assert!(
+            live(&foreign),
+            "the foreign row is not this project's to retire"
+        );
+        let own = classification_object_id(&harness.kernel_operation_key("own-run"), &memory);
+        assert!(live(&own), "this project's classification is written");
     }
 
     /// A pool whose escaped rendering passes the byte bound is refused before
