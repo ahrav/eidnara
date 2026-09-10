@@ -2,9 +2,12 @@
 //! cites at one canonical sequence S, for one registered consumer, in one
 //! store incarnation, under one source policy, until a finite expiry. The
 //! capture runs under the kernel writer, so S and the protection of its bytes
-//! are one step and nothing can be reclaimed between them. Admission runs from
-//! counts before a reference is written, and an over-bound corpus is refused
-//! whole rather than narrowed.
+//! are one step and nothing can be reclaimed between them. The same hold is
+//! later extended over catch-up windows `(S, through]`, and the consumer's
+//! checkpoint moves to `through` only through a hold that already covers the
+//! window. Every admission runs from counts over the whole hold before a
+//! reference is written, and an over-bound hold is refused whole rather than
+//! narrowed. Every use of a hold in another store incarnation is refused.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -13,12 +16,13 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::backup::release_capture_pin_in_tx;
 use super::cas::{ObjectPresence, is_artifact_digest};
 use super::envelope::check_fence;
+use super::outbox::acknowledge_outbox_in_tx;
 use super::source_descriptor::SOURCE_DESCRIPTOR_KIND;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 const SOURCE_HOLD_KIND: &str = "source_hold";
 
-/// Unreleased holds one owner may have at once. Admission bounds one capture;
+/// Unreleased holds one owner may have at once. Admission bounds one hold;
 /// this bounds what repeated captures can pin together.
 pub const MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER: usize = 32;
 
@@ -36,13 +40,21 @@ pub struct SourceHoldBinding {
     pub source_policy_version: String,
 }
 
-/// Admission bounds for one capture, checked from `COUNT` and `SUM` before
-/// any reference row exists.
+/// What one hold may reference in total, checked from `COUNT` and `SUM`
+/// before any reference row exists. A capture and every later extension of
+/// the same hold are each admitted against the whole hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceHoldBounds {
+pub struct SourceHoldAdmission {
     pub max_references: NonZeroUsize,
     pub max_encoded_bytes: NonZeroU64,
-    /// Finite lifetime of the hold from capture, in the store's millisecond clock.
+}
+
+/// Admission plus the finite lifetime a capture gives the hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceHoldBounds {
+    pub admission: SourceHoldAdmission,
+    /// Finite lifetime of the hold from capture, in the store's millisecond
+    /// clock. An extension never renews it.
     pub expiry_ms: NonZeroU64,
 }
 
@@ -113,7 +125,7 @@ pub enum SourceHoldError {
     #[error("source hold was captured in another store incarnation")]
     IncarnationMismatch,
     #[error(
-        "source hold at S would reference {references} evidence rows totalling {encoded_bytes} bytes, over the admitted bound"
+        "source hold would reference {references} evidence rows totalling {encoded_bytes} bytes in all, over the admitted bound"
     )]
     Unadmitted {
         references: usize,
@@ -121,6 +133,10 @@ pub enum SourceHoldError {
     },
     #[error("source hold owner already has {MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER} unreleased holds")]
     HoldLimitReached,
+    #[error(
+        "source hold does not reference {uncovered} evidence rows cited by descriptors through the commit being acknowledged"
+    )]
+    ExtensionIncomplete { uncovered: usize },
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
     #[error("source hold is not valid: {0:?}")]
@@ -149,22 +165,79 @@ fn owner_id(binding: &SourceHoldBinding) -> String {
     )
 }
 
-/// Evidence cited by descriptors live at `?1`: the descriptor was created at
-/// or before it, and neither the descriptor nor the evidence it cites was
-/// invalidated at or before it. A logical delete or a purge invalidates the
-/// evidence row, so a descriptor over deleted bytes is not a candidate rather
-/// than a held reference that can never be read. Shared by the count, the
-/// insert, and the page so they cannot disagree.
-fn live_descriptors_sql() -> String {
-    format!(
-        "FROM observations b
-         JOIN object_registry o ON o.object_id=b.object_id
-         JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-         WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
-           AND b.created_commit_seq<=?1
-           AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)
-           AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?1)"
-    )
+/// Which descriptors in a commit window cite evidence a hold protects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Descriptors {
+    /// Descriptors live at the window's end: a capture over `(0, S]` drops
+    /// descriptors invalidated at or before S, because the projection at S
+    /// never sees them.
+    LiveAtEnd,
+    /// Every descriptor created in the window, including one invalidated
+    /// inside it, because a consumer replaying the window still meets its
+    /// creation.
+    CreatedInWindow,
+}
+
+/// One commit window `(after, through]` of descriptor creations.
+#[derive(Clone, Copy)]
+struct Window {
+    after: i64,
+    through: i64,
+    descriptors: Descriptors,
+}
+
+impl Window {
+    fn at_snapshot(snapshot: i64) -> Self {
+        Self {
+            after: 0,
+            through: snapshot,
+            descriptors: Descriptors::LiveAtEnd,
+        }
+    }
+
+    fn catch_up(snapshot: i64, through: i64) -> Self {
+        Self {
+            after: snapshot,
+            through,
+            descriptors: Descriptors::CreatedInWindow,
+        }
+    }
+
+    /// Evidence cited by the window's descriptors whose evidence row is not
+    /// invalidated at or before `?1`, the window's end; `?2` is its start. A
+    /// logical delete or a purge invalidates the evidence row, so a descriptor
+    /// over deleted bytes is not a candidate rather than a held reference that
+    /// can never be read. Shared by every count, insert, and page so they
+    /// cannot disagree.
+    fn cited_evidence_sql(self) -> String {
+        let descriptor_liveness = match self.descriptors {
+            Descriptors::LiveAtEnd => {
+                "AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)"
+            }
+            Descriptors::CreatedInWindow => "",
+        };
+        format!(
+            "FROM observations b
+             JOIN object_registry o ON o.object_id=b.object_id
+             JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+             WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+               AND b.created_commit_seq>?2 AND b.created_commit_seq<=?1
+               {descriptor_liveness}
+               AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?1)"
+        )
+    }
+
+    /// Distinct cited evidence that hold `?3` does not reference yet, with
+    /// its byte length.
+    fn unreferenced_evidence_sql(self) -> String {
+        format!(
+            "SELECT e.evidence_id,e.byte_length {}
+               AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
+                              WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
+             GROUP BY e.evidence_id",
+            self.cited_evidence_sql()
+        )
+    }
 }
 
 fn is_token(value: &str) -> bool {
@@ -247,46 +320,26 @@ impl KernelStore {
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
-        let (references, encoded_bytes): (i64, Option<i64>) = tx
-            .query_row_cached(
-                &format!(
-                    "SELECT COUNT(*),SUM(byte_length) FROM (
-                         SELECT e.evidence_id,e.byte_length {}
-                         GROUP BY e.evidence_id
-                     )",
-                    live_descriptors_sql()
-                ),
-                [snapshot],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let hold_id: String = tx
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
             .map_err(sqlite)?;
-        let references = usize::try_from(references).map_err(corrupt)?;
-        let encoded_bytes = u64::try_from(encoded_bytes.unwrap_or(0)).map_err(corrupt)?;
-        if let Some(hook) = at_admission {
-            let refs_in_tx: i64 = tx
-                .query_row("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
-                    row.get(0)
-                })
-                .map_err(sqlite)?;
-            hook(refs_in_tx);
-        }
-        if references > bounds.max_references.get()
-            || encoded_bytes > bounds.max_encoded_bytes.get()
-        {
-            return Err(SourceHoldError::Unadmitted {
-                references,
-                encoded_bytes,
-            });
-        }
         let captured_at = current_time_ms();
         let expires_at = captured_at
             .checked_add(expiry)
             .ok_or(SourceHoldError::InvalidRequest)?;
-        let hold_id: String = tx
-            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
-            .map_err(sqlite)?;
         let epoch = i64::try_from(self.lease_epoch()).map_err(|_| KernelError::InvalidInput)?;
-        tx.execute(
+        let admitted = admit_references(
+            &tx,
+            HoldRow {
+                hold_id: &hold_id,
+                expires_at,
+            },
+            Window::at_snapshot(snapshot),
+            (0, 0),
+            bounds.admission,
+            at_admission,
+        )?;
+        tx.execute_cached(
             "INSERT INTO capture_pins(
                  capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
                  created_at,expires_at
@@ -302,27 +355,8 @@ impl KernelStore {
             ],
         )
         .map_err(sqlite)?;
-        let inserted = tx
-            .execute_cached(
-                &format!(
-                    "INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
-                     SELECT ?2,evidence_id,?3 FROM (
-                         SELECT e.evidence_id {}
-                         GROUP BY e.evidence_id
-                     ) LIMIT ?4",
-                    live_descriptors_sql()
-                ),
-                params![
-                    snapshot,
-                    hold_id,
-                    expires_at,
-                    i64::try_from(bounds.max_references.get()).unwrap_or(i64::MAX),
-                ],
-            )
-            .map_err(sqlite)?;
-        if inserted != references {
-            return Err(KernelError::CorruptCanonicalRow.into());
-        }
+        admitted.materialize(&tx)?;
+        let (references, encoded_bytes) = (admitted.references, admitted.encoded_bytes);
         tx.commit().map_err(sqlite)?;
         Ok(SourceHold {
             hold_id,
@@ -333,6 +367,123 @@ impl KernelStore {
             references,
             encoded_bytes,
         })
+    }
+
+    /// Extends the hold to the evidence cited by descriptors created in
+    /// `(S, through]`, so a consumer can finish the catch-up batch that ends
+    /// at `through` with every byte protected. Runs under the writer against
+    /// the whole hold's admission; an over-bound extension is refused whole
+    /// and writes nothing. Replaying an extension adds no reference twice,
+    /// charges nothing twice, and never renews the expiry.
+    pub fn extend_source_hold(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.extend_source_hold_inner(binding, hold_id, through, admission, None)
+    }
+
+    /// [`Self::extend_source_hold`] with `at_admission` run inside the writer
+    /// transaction after the admission decision and before any reference is
+    /// written, receiving the number of `capture_pin_refs` rows visible there.
+    #[cfg(feature = "test-support")]
+    pub fn extend_source_hold_with_hook_for_test(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+        mut at_admission: impl FnMut(i64),
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.extend_source_hold_inner(
+            binding,
+            hold_id,
+            through,
+            admission,
+            Some(&mut at_admission),
+        )
+    }
+
+    fn extend_source_hold_inner(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+        at_admission: Option<&mut dyn FnMut(i64)>,
+    ) -> Result<SourceHold, SourceHoldError> {
+        let mut writer = self.lock_writer()?;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite)?;
+        check_fence(&tx, self.lease_epoch())?;
+        let hold = self.load_valid_hold(&tx, binding, hold_id, current_time_ms())?;
+        check_window(&tx, &hold, through)?;
+        let admitted = admit_references(
+            &tx,
+            HoldRow {
+                hold_id,
+                expires_at: hold.expires_at,
+            },
+            Window::catch_up(hold.snapshot, through),
+            (hold.references, hold.encoded_bytes),
+            admission,
+            at_admission,
+        )?;
+        admitted.materialize(&tx)?;
+        tx.commit().map_err(sqlite)?;
+        Ok(SourceHold {
+            references: admitted.references,
+            encoded_bytes: admitted.encoded_bytes,
+            ..hold
+        })
+    }
+
+    /// Moves the consumer's checkpoint to `through` only when the hold is
+    /// valid and already references every byte a replay of `(S, through]`
+    /// needs, in the same writer transaction. A failed or skipped extension
+    /// therefore cannot authorize acknowledgement, and the hold keeps the
+    /// bytes protected after the checkpoint moves until it is released.
+    /// Acknowledging through a hold asserts that the consumer's state
+    /// reflects the corpus at S plus the window, so a checkpoint below S
+    /// moves over `(checkpoint, S]` on the strength of the S baseline.
+    pub fn acknowledge_through_source_hold(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        updated_at: i64,
+    ) -> Result<(), SourceHoldError> {
+        if updated_at < 0 {
+            return Err(SourceHoldError::InvalidRequest);
+        }
+        let mut writer = self.lock_writer()?;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite)?;
+        check_fence(&tx, self.lease_epoch())?;
+        let hold = self.load_valid_hold(&tx, binding, hold_id, current_time_ms())?;
+        check_window(&tx, &hold, through)?;
+        let uncovered: i64 = tx
+            .query_row_cached(
+                &format!(
+                    "SELECT COUNT(*) FROM ({})",
+                    Window::catch_up(hold.snapshot, through).unreferenced_evidence_sql()
+                ),
+                params![through, hold.snapshot, hold_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if uncovered != 0 {
+            return Err(SourceHoldError::ExtensionIncomplete {
+                uncovered: usize::try_from(uncovered).map_err(corrupt)?,
+            });
+        }
+        acknowledge_outbox_in_tx(&tx, &binding.consumer_id, through, updated_at)?;
+        tx.commit().map_err(sqlite)?;
+        Ok(())
     }
 
     /// Whether the hold still protects every byte it captured at `now`.
@@ -407,20 +558,28 @@ impl KernelStore {
             None => ("", "", -1),
         };
         let fetch = i64::try_from(limit.get().saturating_add(1)).unwrap_or(i64::MAX);
+        let window = Window::at_snapshot(hold.snapshot);
         let mut statement = tx
             .prepare_cached(&format!(
                 "SELECT o.source_kind,o.object_id,o.source_revision,e.evidence_id,
                         e.artifact_digest,e.byte_length,b.invalidated_commit_seq
                  {}
-                   AND (o.source_kind,o.object_id,o.source_revision)>(?2,?3,?4)
+                   AND (o.source_kind,o.object_id,o.source_revision)>(?3,?4,?5)
                  ORDER BY o.source_kind,o.object_id,o.source_revision
-                 LIMIT ?5",
-                live_descriptors_sql()
+                 LIMIT ?6",
+                window.cited_evidence_sql()
             ))
             .map_err(sqlite)?;
         let mut rows = statement
             .query_map(
-                params![hold.snapshot, class, object_id, revision, fetch],
+                params![
+                    window.through,
+                    window.after,
+                    class,
+                    object_id,
+                    revision,
+                    fetch
+                ],
                 |row| {
                     Ok((
                         HeldDescriptor {
@@ -536,6 +695,9 @@ impl KernelStore {
         binding: &SourceHoldBinding,
         hold_id: &str,
     ) -> Result<Option<StoredHold>, SourceHoldError> {
+        if binding.lease_epoch != self.lease_epoch() {
+            return Err(SourceHoldError::IncarnationMismatch);
+        }
         let row = tx
             .query_row_cached(
                 "SELECT pin_kind,owner_id,commit_seq,lease_epoch,created_at,expires_at,
@@ -617,6 +779,131 @@ impl KernelStore {
             None => Ok(stored.hold),
         }
     }
+}
+
+/// The pin an admitted set is written to, fixed at admission time so the set
+/// cannot be counted against one pin and written to another.
+#[derive(Clone, Copy)]
+struct HoldRow<'a> {
+    hold_id: &'a str,
+    expires_at: i64,
+}
+
+/// An admitted set of additions, counted but not yet written.
+struct Admitted<'a> {
+    row: HoldRow<'a>,
+    window: Window,
+    /// Distinct evidence rows the window adds to the hold.
+    added: usize,
+    /// Whole-hold totals after the additions.
+    references: usize,
+    encoded_bytes: u64,
+}
+
+impl Admitted<'_> {
+    /// Writes the admitted references with one `INSERT ... SELECT` bounded
+    /// by the admitted count. `OR IGNORE` makes a replayed extension a no-op
+    /// per reference, and the whole-hold count is checked afterwards.
+    fn materialize(&self, tx: &Transaction<'_>) -> Result<(), SourceHoldError> {
+        tx.execute_cached(
+            &format!(
+                "INSERT OR IGNORE INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
+                 SELECT ?3,evidence_id,?4 FROM ({}) LIMIT ?5",
+                self.window.unreferenced_evidence_sql()
+            ),
+            params![
+                self.window.through,
+                self.window.after,
+                self.row.hold_id,
+                self.row.expires_at,
+                i64::try_from(self.added).map_err(corrupt)?,
+            ],
+        )
+        .map_err(sqlite)?;
+        let total: i64 = tx
+            .query_row_cached(
+                "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1",
+                [self.row.hold_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if usize::try_from(total).map_err(corrupt)? != self.references {
+            return Err(KernelError::CorruptCanonicalRow.into());
+        }
+        Ok(())
+    }
+}
+
+/// Counts the distinct unreferenced evidence in `window`, adds it to the
+/// hold's current totals, and refuses whole when the result exceeds
+/// `admission`. Runs before any reference row is written.
+fn admit_references<'a>(
+    tx: &Transaction<'_>,
+    row: HoldRow<'a>,
+    window: Window,
+    current: (usize, u64),
+    admission: SourceHoldAdmission,
+    at_admission: Option<&mut dyn FnMut(i64)>,
+) -> Result<Admitted<'a>, SourceHoldError> {
+    let (added, added_bytes): (i64, Option<i64>) = tx
+        .query_row_cached(
+            &format!(
+                "SELECT COUNT(*),SUM(byte_length) FROM ({})",
+                window.unreferenced_evidence_sql()
+            ),
+            params![window.through, window.after, row.hold_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sqlite)?;
+    let added = usize::try_from(added).map_err(corrupt)?;
+    let references = current.0.checked_add(added).ok_or_else(|| corrupt(()))?;
+    let encoded_bytes = current
+        .1
+        .checked_add(u64::try_from(added_bytes.unwrap_or(0)).map_err(corrupt)?)
+        .ok_or_else(|| corrupt(()))?;
+    if let Some(hook) = at_admission {
+        let refs_in_tx: i64 = tx
+            .query_row_cached("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
+                row.get(0)
+            })
+            .map_err(sqlite)?;
+        hook(refs_in_tx);
+    }
+    if references > admission.max_references.get()
+        || encoded_bytes > admission.max_encoded_bytes.get()
+    {
+        return Err(SourceHoldError::Unadmitted {
+            references,
+            encoded_bytes,
+        });
+    }
+    Ok(Admitted {
+        row,
+        window,
+        added,
+        references,
+        encoded_bytes,
+    })
+}
+
+/// `through` must lie in `[S, tip]`: an extension or acknowledgement can
+/// neither move before S nor name a commit that does not exist yet.
+fn check_window(
+    tx: &Transaction<'_>,
+    hold: &SourceHold,
+    through: i64,
+) -> Result<(), SourceHoldError> {
+    let tip: i64 = tx
+        .query_row_cached(
+            "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite)?;
+    if through < hold.snapshot || through > tip {
+        return Err(SourceHoldError::InvalidRequest);
+    }
+    Ok(())
 }
 
 struct PinRow {
