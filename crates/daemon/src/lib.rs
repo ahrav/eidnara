@@ -13878,6 +13878,14 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                         serde_json::from_slice(&bytes).ok()
                     })
                     .unwrap_or_else(|| json!({"ok": false, "code": "dreamer_ledger_corrupt"})),
+                // The protocol classifies only these codes as store errors; all others are command responses.
+                PreparedOutcome::Error { code, message }
+                    if code == "authority_lookup_failed" || code == "dreamer_ledger_failed" =>
+                {
+                    return dreamer_scheduler::TaskRunOutcome::StoreUnavailable {
+                        reason: format!("{code}: {message}"),
+                    };
+                }
                 PreparedOutcome::Error { code, message } => {
                     json!({"ok": false, "code": code, "message": message})
                 }
@@ -28776,6 +28784,56 @@ mod tests {
                 "{project}: no receipt is written for a refused run"
             );
         }
+    }
+
+    /// A store failure inside the durable protocol is not the protocol's
+    /// answer for the command: the bridge reports the store unavailable so the
+    /// scheduler keeps the slot due instead of recording the failure on the
+    /// lease and moving on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dreamer_scheduler_bridge_reports_a_store_failure_inside_the_run_as_unavailable() {
+        use dreamer_scheduler::SchedulerHost;
+        let claims = [test_claim_id(1)];
+        let producer = Arc::new(ProducerState::default());
+        let harness = DreamerHarness::start(&producer);
+        harness.schedule(Some("*/15 * * * *"));
+        harness.install_task_inputs(&claim_native_payload(&claims, TEST_CLASSIFY_TIMEOUT_MS));
+        let bridge = harness.scheduler_bridge();
+        let projects = bridge.scheduled_projects().unwrap();
+        assert_eq!(projects.len(), 1);
+
+        harness.store.fail_next_authority_route_read_for_test();
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "unavailable",
+            )
+            .await;
+        assert!(
+            matches!(
+                &outcome,
+                dreamer_scheduler::TaskRunOutcome::StoreUnavailable { reason }
+                    if reason.starts_with("authority_lookup_failed:")
+            ),
+            "{outcome:?}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(scheduler_receipt(&harness.store, "unavailable").is_none());
+
+        // The store answers again: the same command runs through the protocol.
+        let outcome = bridge
+            .run_task(
+                &projects[0],
+                dreamer_scheduler::REVIEW_USER_MEMORIES_TASK,
+                "unavailable",
+            )
+            .await;
+        assert!(
+            matches!(outcome, dreamer_scheduler::TaskRunOutcome::Ran { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
     /// A scheduled slot runs through the same durable protocol as the wire

@@ -15,37 +15,50 @@ billable runs.
 Verified at HEAD. References are to `crates/daemon/src/dreamer_scheduler.rs`
 unless stated.
 
-- `DreamerScheduler::tick` (`:242`) reads the clock once for due-ness, asks the
+- `DreamerScheduler::tick` (`:244`) reads the clock once for due-ness, asks the
   host for its scheduled projects, and runs those due at or before that
-  instant oldest first (`due_projects`, `:262`). After a run the project's
-  next instant is recomputed from the clock as the run returns (`advance`,
-  `:295`, called at `:253`), so slots missed while the daemon was down are not
-  back-filled, and a slot that came due while the run itself was in progress
-  is not back-filled either: the loop waits for the next instant after the
-  run rather than re-ticking at once on an instant already in the past. When
-  the host returns `Err`, `tick` returns one `TickEvent::Deferred` (`:246`)
+  instant oldest first (`due_projects`, `:265`). After a run the project's
+  next instant is recomputed from the clock as the run returns, floored at
+  the slot that ran (`advance`, `:298`, called at `:256`), so slots
+  missed while the daemon was down are not back-filled, a slot that came due
+  while the run itself was in progress is not back-filled either, and a wall
+  clock that steps back during a run cannot select a slot earlier than the one
+  that ran: the next instant is always strictly after `due_at_ms`. A project
+  not in this tick's due set whose instant elapses during another project's
+  run keeps that instant and runs it once on the next tick, late; the post-run
+  advance then bounds it to one run per elapsed period. When
+  the host returns `Err`, `tick` returns one `TickEvent::Deferred` (`:248`)
   before the due table is reconciled, so no project is dropped and no due
   instant moves.
-- `run` (`:161`) logs every `Skipped`, `Retained`, and `Deferred` event to
+- `run` (`:163`) logs every `Skipped`, `Retained`, and `Deferred` event to
   stderr and, after a deferred tick or a retained slot, waits the idle poll
   instead of the distance to the earliest due instant, which would otherwise be
   zero and re-tick at once against a failing store. The tick is awaited under
-  `select!` with the cancellation token (`:170`), so cancellation during
+  `select!` with the cancellation token (`:172`), so cancellation during
   a run drops the tick where it stands: the run in flight is abandoned to the
   receipt protocol, which recovers it on restart, and the projects still due
   behind it are not leased.
-- `run_slot` (`:310`) leases before it runs:
+- `run_slot` (`:313`) leases before it runs:
   `acquire_dreamer_task` with acquisition id `slot_command_id(task, due_at_ms)`,
   the scheduler's instance and slot, the registration generation, the task id,
   and the due instant as the claim's `source_revision`. Every acquisition
   decision other than `Claim` is a `Skipped` event with no run, and `tick`
   advances the project past the slot. A store `Err` from the generation lookup
   or from the acquisition is not a decision: `run_slot` returns
-  `TickEvent::Retained` (`:322`), `tick` leaves that project's
-  due instant in place (`:252`), and `run` waits the idle poll
+  `TickEvent::Retained` (`:325`), `tick` leaves that project's
+  due instant in place (`:254`), and `run` waits the idle poll
   before the next tick retries the same slot under the same acquisition id.
+  The same holds after the lease: a `TaskRunOutcome::StoreUnavailable` from
+  the host (`:377`) and a store `Err` from `complete_dreamer_task`
+  (`:402`) both retain the slot with its claim live. The next
+  tick's acquisition under the same id rebinds and renews that claim
+  (`acquire_task_lease` replays a live claim by acquisition id), the host is
+  asked for the same command id, and the receipt protocol replays a settled
+  receipt or resumes an open one without a second dispatch, so the retry is
+  safe whether or not the model ran. Every acquisition decision, every other
+  host reply, and a completion `Conflict` consume the slot.
 - The command id the run is dispatched under is derived from the returned
-  claim's `source_revision` (`:364`), not from the slot that came due. The
+  claim's `source_revision` (`:367`), not from the slot that came due. The
   shared protocol rebinds a live claim held by the same instance and slot under
   an older registration generation (`crates/memory-store/src/task_lease.rs`,
   slot recovery in `acquire_task_lease`), and a rebound claim keeps its
@@ -53,13 +66,13 @@ unless stated.
   runs the predecessor's slot and `run_dreamer_task` finds the interrupted
   receipt under that command id.
 - The registration generation is allocated on first use from
-  `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs:3966`),
+  `next_dreamer_scheduler_generation` (`crates/memory-store/src/lib.rs:3975`),
   one above the highest generation the instance has on the ledger. A live
   claim is never reclaimed, so the successor always outranks it; wall time is
   not used, so a clock step backwards cannot rank the successor below its
   predecessor.
 - Lease and completion instants are read from the clock as each operation
-  happens (`:339`, `:385`), so a long run for one project does not shorten the
+  happens (`:342`, `:393`), so a long run for one project does not shorten the
   lease of the project behind it in the same tick.
 - `SchedulerBridge::scheduled_projects` (`crates/daemon/src/lib.rs:13789`)
   takes the most recently bound binding on each route root
@@ -88,6 +101,11 @@ unless stated.
   now presents, and a rebind during the run cannot be observed at all, so the
   binding is not re-validated against the tick's snapshot. The not-runnable
   reply is recorded on the lease so the slot is not retried every tick.
+  `run_task` maps the protocol's two store-error codes,
+  `authority_lookup_failed` and `dreamer_ledger_failed`, to
+  `TaskRunOutcome::StoreUnavailable` (`lib.rs:13883`); every other
+  reply, success or error, is the protocol's answer for the command and is
+  recorded on the lease.
 - `run_dreamer_task` resolves the route again at its authority gate
   (`lib.rs:9540`). The generation check alone does not pin the
   project: a root rebound to another `MODULE` project at an equal generation
@@ -138,8 +156,12 @@ tick future dropped while the producer blocks on output, then a second
 `MemoryStore::fail_next_authority_route_read_for_test`, which makes one
 `authority_project_for_route` return a backend error. For the retained slot:
 `MemoryStore::fail_next_dreamer_task_acquire_for_test`, which makes one
-`acquire_dreamer_task` return a backend error before it touches the ledger. For
-the refused run: a second `MODULE` authority activated on the leased root
+`acquire_dreamer_task` return a backend error before it touches the ledger;
+`fail_next_dreamer_task_complete_for_test` does the same for
+`complete_dreamer_task`, and `fail_next_authority_route_read_for_test` armed
+before `run_task` makes the protocol's own authority gate fail. For the backward
+clock step: a scripted host that steps the manual clock back an hour during the
+run. For the refused run: a second `MODULE` authority activated on the leased root
 through `activate_module_authority`, so the root resolves to the other project
 at an equal generation. For cancellation mid-tick: two due projects on a host
 whose runs park on a `Notify`, cancelled while the first is parked. For
