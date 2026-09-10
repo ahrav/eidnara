@@ -1,0 +1,1702 @@
+{
+  "version": 1,
+  "specification": "https://github.com/ahrav/eidnara/issues/347",
+  "ticket": "https://github.com/ahrav/eidnara/issues/352",
+  "expected_marker_counts": {
+    "export-recovery": 23,
+    "projection-coverage": 24,
+    "embedding": 16
+  },
+  "result_marker": "search_projection_acceptance_situations_witnessed",
+  "acceptance_criteria": [
+    "AC1",
+    "AC2",
+    "AC3",
+    "AC4",
+    "AC5",
+    "AC6",
+    "AC7",
+    "AC8",
+    "AC9",
+    "AC10",
+    "AC11",
+    "AC12"
+  ],
+  "seams": [
+    "T1",
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T7",
+    "T8",
+    "T9"
+  ],
+  "hooks": [
+    "search_projection.message_cleanup",
+    "search_projection.embedding.bootstrap",
+    "search_projection.embedding.routing",
+    "search_projection.embedding.registry",
+    "search_projection.embedding.backfill",
+    "search_projection.embedding.identity_gc",
+    "search_projection.promoted_memory.embeddings",
+    "search_projection.git.ingest",
+    "search_projection.git.durable_rows",
+    "search_projection.git.jobs",
+    "search_projection.git.sweeps",
+    "search_projection.git.leases"
+  ],
+  "entry_points": [
+    "startup",
+    "reload",
+    "dispatch",
+    "explicit"
+  ],
+  "source_classes": [
+    "messages",
+    "canonical_claims",
+    "promoted_memory",
+    "git_commits",
+    "raw_tool_spans"
+  ],
+  "harnesses": [
+    "opencode",
+    "pi"
+  ],
+  "witness_record_fields": [
+    "matrix_version",
+    "marker",
+    "scenario_id",
+    "run_id",
+    "observed_event",
+    "product_revision",
+    "toolchain",
+    "features",
+    "shard",
+    "configuration_hash",
+    "source_identities_and_hashes",
+    "seed",
+    "minimized_history",
+    "fault_boundary",
+    "external_barrier_kill_reopen_receipt",
+    "attempts",
+    "acknowledgements",
+    "unknown_outcomes",
+    "effects_per_identity",
+    "resource_and_time_observations",
+    "limit_manifest_version",
+    "approval_digest",
+    "certification_identity"
+  ],
+  "cells": [
+    {
+      "marker": "search_projection_export_writes_between_pages",
+      "part": "export-recovery",
+      "property": "export-fixed-s-exactly-once",
+      "acceptance_criteria": [
+        "AC1"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "insert_between_pages",
+        "revise_between_pages",
+        "delete_between_pages"
+      ],
+      "independent_oracle": "Fixture ledger E(S) built from seeded canonical operations before export; every key appears once with its S bytes.",
+      "negative_control": "Oracle derived from projector output, or a page that reflects a post-S mutation, must fail.",
+      "integration_observation": "U1f export over a real kernel store while U1a-visible commits land between page requests.",
+      "constructing_tickets": [
+        360
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_export_operator_remediation_during_snapshot",
+      "part": "export-recovery",
+      "property": "export-fixed-s-exactly-once",
+      "acceptance_criteria": [
+        "AC1",
+        "AC10"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "name_only_remediation_after_s"
+      ],
+      "independent_oracle": "Independent reconstruction of mapped input bytes before and after the remediation under CC7; construction-contracts.json records remediation_applicability.mapping_consumes_field=false for domains.name.",
+      "negative_control": "A mapping that invents a byte dependency on domains.name, or a page whose bytes change without a source revision change, must fail.",
+      "integration_observation": "Real operator_remediation commit after S while an export attempt is active and before T is fixed.",
+      "constructing_tickets": [
+        358,
+        360
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_export_prune_with_fence",
+      "part": "export-recovery",
+      "property": "export-retention-fence-covers-read",
+      "acceptance_criteria": [
+        "AC1"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "prune_attempt_under_fence"
+      ],
+      "independent_oracle": "Consumer registration row and retained outbox history read independently of the exporter.",
+      "negative_control": "A prune that removes history below a registered fence, or an export that completes after such a prune, must fail.",
+      "integration_observation": "U1d capture hold plus real prune_outbox attempt on the same store.",
+      "constructing_tickets": [
+        358,
+        359
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_export_retention_lost_mid_build",
+      "part": "export-recovery",
+      "property": "export-retention-fence-covers-read",
+      "acceptance_criteria": [
+        "AC1"
+      ],
+      "seams": [
+        "T7",
+        "T4"
+      ],
+      "scenario_ids": [
+        "fence_witness_invalidated",
+        "source_bytes_removed",
+        "history_pruned_below_s"
+      ],
+      "independent_oracle": "Harness-recorded invalidation event and candidate state before the next export, catch-up, or publication decision.",
+      "negative_control": "Publication after source or history loss, or cleanup errors swallowed, must fail.",
+      "integration_observation": "U1d/U1e validity checks against a real store with GC and purge degradation injected.",
+      "constructing_tickets": [
+        358,
+        359,
+        360
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_export_oversize_row_present",
+      "part": "export-recovery",
+      "property": "export-predecode-bounds",
+      "acceptance_criteria": [
+        "AC1"
+      ],
+      "seams": [
+        "T6"
+      ],
+      "scenario_ids": [
+        "oversize_first_row",
+        "oversize_later_row"
+      ],
+      "independent_oracle": "Independently measured encoded size of the fixture row against the declared standalone cap, observed before decoder entry.",
+      "negative_control": "A skipped row, a truncated row, or a decoder entry before admission must fail.",
+      "integration_observation": "U1f page request whose next key is the oversized row.",
+      "constructing_tickets": [
+        360
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_export_page_budget_edge",
+      "part": "export-recovery",
+      "property": "export-predecode-bounds",
+      "acceptance_criteria": [
+        "AC1"
+      ],
+      "seams": [
+        "T6"
+      ],
+      "scenario_ids": [
+        "row_budget_edge",
+        "byte_budget_edge"
+      ],
+      "independent_oracle": "Independent row and byte accounting of the page; the deferred row appears intact exactly once on the next page.",
+      "negative_control": "A row split across pages, dropped, or duplicated must fail.",
+      "integration_observation": "U1f paging with admitted input and one fitting-alone row.",
+      "constructing_tickets": [
+        360
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_catchup_split_commit",
+      "part": "export-recovery",
+      "property": "catchup-complete-commit-prefix",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "multi_ordinal_over_batch_cut"
+      ],
+      "independent_oracle": "Complete canonical transaction ledger with every ordinal of the commit.",
+      "negative_control": "Progress advanced after a partial ordinal set must fail.",
+      "integration_observation": "U1a reader returning only complete commits over a real commit_log.",
+      "constructing_tickets": [
+        355,
+        362
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_catchup_published_retained",
+      "part": "export-recovery",
+      "property": "catchup-complete-commit-prefix",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "published_above_checkpoint"
+      ],
+      "independent_oracle": "Retained change_event inventory compared with outbox rows regardless of published_at.",
+      "negative_control": "A reader that omits published rows, or reports them as an empty commit, must fail.",
+      "integration_observation": "U1a read after another publisher marks rows published.",
+      "constructing_tickets": [
+        355
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_catchup_empty_commit",
+      "part": "export-recovery",
+      "property": "catchup-complete-commit-prefix",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "empty_commit_in_range"
+      ],
+      "independent_oracle": "commit_log entry with zero outbox rows distinguished from missing data by the retained inventory.",
+      "negative_control": "An empty commit reported as end-of-stream or missing data must fail.",
+      "integration_observation": "U1a read across an empty commit inside (after_commit, through_commit].",
+      "constructing_tickets": [
+        355
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_ack_local_commit_interrupted",
+      "part": "export-recovery",
+      "property": "ack-follows-local-release",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "kill_after_local_commit_before_ack"
+      ],
+      "independent_oracle": "Child stdout barrier after local COMMIT, external kill, reopened search state and kernel checkpoint read independently.",
+      "negative_control": "Ack observed before the local COMMIT barrier, or reopened checkpoint ahead of durable rows, must fail.",
+      "integration_observation": "U2c ack path under the shared CAS crash pattern.",
+      "constructing_tickets": [
+        363
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_ack_writer_contended",
+      "part": "export-recovery",
+      "property": "ack-follows-local-release",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "writer_held_at_ack"
+      ],
+      "independent_oracle": "Ownership event order: local transaction released before kernel writer acquisition.",
+      "negative_control": "Both transactions held at once, or local rows visible only after ack, must fail.",
+      "integration_observation": "U2c ack while another operation holds the kernel writer.",
+      "constructing_tickets": [
+        363
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_ack_response_lost",
+      "part": "export-recovery",
+      "property": "ack-follows-local-release",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "ack_commit_response_suppressed"
+      ],
+      "independent_oracle": "Durable kernel checkpoint read back after the suppressed response; per-identity attempt and effect counts.",
+      "negative_control": "Treating the lost response as rollback, or re-acking beyond the paired durable prefix, must fail.",
+      "integration_observation": "U2c replay after an ack whose response is lost.",
+      "constructing_tickets": [
+        363
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_replacement_switch_interrupted",
+      "part": "export-recovery",
+      "property": "replacement-selects-complete-compatible-state",
+      "acceptance_criteria": [
+        "AC6"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "selector_stage_written",
+        "selector_verify_complete",
+        "selector_selection_durable",
+        "selector_old_release_pending"
+      ],
+      "independent_oracle": "One selected identity per read, canonical O(T), compatible tuple, and consumer-release order read after reopen.",
+      "negative_control": "A read that observes mixed or partial state, or old consumers released before durable selection, must fail.",
+      "integration_observation": "U5e selection interrupted at each declared boundary with a concurrent reader.",
+      "constructing_tickets": [
+        385,
+        386
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_rebuild_missing_db_after_prune",
+      "part": "export-recovery",
+      "property": "rebuild-after-pruning-converges",
+      "acceptance_criteria": [
+        "AC7"
+      ],
+      "seams": [
+        "T9"
+      ],
+      "scenario_ids": [
+        "missing_db_after_prune"
+      ],
+      "independent_oracle": "Independent reads prove pre-S history pruned, local state removed, retained canonical source nonempty; canonical O(T) at a stable T.",
+      "negative_control": "Rebuild that never reaches Current, or that reaches Current with a moved T, must fail.",
+      "integration_observation": "U5h rebuild episode after confirmed pruning.",
+      "constructing_tickets": [
+        388
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_rebuild_quiet_window_admitted",
+      "part": "export-recovery",
+      "property": "rebuild-after-pruning-converges",
+      "acceptance_criteria": [
+        "AC7"
+      ],
+      "seams": [
+        "T9"
+      ],
+      "scenario_ids": [
+        "quiet_window_admitted"
+      ],
+      "independent_oracle": "Admission record with fixed finite T, retained inputs within approved caps, dependencies available, injection stopped.",
+      "negative_control": "Admission without stopped injection or without a fixed T must fail.",
+      "integration_observation": "U5h episode admission after a fault or load phase.",
+      "constructing_tickets": [
+        388
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_healthy_lagged_target_admitted",
+      "part": "export-recovery",
+      "property": "catchup-and-authorized-recovery-converge",
+      "acceptance_criteria": [
+        "AC7"
+      ],
+      "seams": [
+        "T9"
+      ],
+      "scenario_ids": [
+        "healthy_backlog_admitted"
+      ],
+      "independent_oracle": "Admission record with local prefix below finite T, healthy stores, retained inputs, all gate acceptances, approved caps.",
+      "negative_control": "A retry that moves T or resets the clock, or safety without progress, must fail.",
+      "integration_observation": "U5d/U5h ordinary CatchingUp episode.",
+      "constructing_tickets": [
+        384,
+        388
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_authorized_recovery_current_observed",
+      "part": "export-recovery",
+      "property": "catchup-and-authorized-recovery-converge",
+      "acceptance_criteria": [
+        "AC7",
+        "AC9"
+      ],
+      "seams": [
+        "T9"
+      ],
+      "scenario_ids": [
+        "authorized_recovery_current"
+      ],
+      "independent_oracle": "Durable recovery authorization record, gate acceptances, and an independent Current observation through the episode's T.",
+      "negative_control": "Recovery without explicit authorization, or Current claimed by a no-op, must fail.",
+      "integration_observation": "U5h Disabled-to-Current recovery episode on a real store.",
+      "constructing_tickets": [
+        388
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_disable_pending_consumer",
+      "part": "export-recovery",
+      "property": "disable-preserves-consumer-obligations",
+      "acceptance_criteria": [
+        "AC9"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "disable_lagging"
+      ],
+      "independent_oracle": "Consumer rows and kernel pre-operation tip read independently; ConsumerPending outcome recorded.",
+      "negative_control": "Silent deregistration of a lagging consumer must fail.",
+      "integration_observation": "U5g disable request with checkpoint below tip.",
+      "constructing_tickets": [
+        387
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_disable_last_consumer",
+      "part": "export-recovery",
+      "property": "disable-preserves-consumer-obligations",
+      "acceptance_criteria": [
+        "AC9"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "deregister_last"
+      ],
+      "independent_oracle": "Registered-consumer census and gated-read outcome NoRequiredConsumer.",
+      "negative_control": "Pruning with no consumer, or gated reads served without a consumer, must fail.",
+      "integration_observation": "U5g deregistration of the only caught-up consumer.",
+      "constructing_tickets": [
+        387
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_abandon_request_with_barrier",
+      "part": "export-recovery",
+      "property": "disable-preserves-consumer-obligations",
+      "acceptance_criteria": [
+        "AC9"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "abandon_with_barrier"
+      ],
+      "independent_oracle": "Audit record ConsumerAbandonment and the incomplete deletion barrier row.",
+      "negative_control": "Abandonment without an audit record, or a barrier dropped by abandonment, must fail.",
+      "integration_observation": "U5g authorized abandonment naming a barrier-recorded consumer.",
+      "constructing_tickets": [
+        387
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_recovery_stale_authority",
+      "part": "export-recovery",
+      "property": "recovery-preserves-canonical-authority",
+      "acceptance_criteria": [
+        "AC6"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "stale_grant_invalidated",
+        "stale_grant_revised"
+      ],
+      "independent_oracle": "Independent canonical mutation ledger and final verdicts from the kernel authority.",
+      "negative_control": "A projected grant honored after canonical invalidation or revision must fail.",
+      "integration_observation": "U5h recovery or egress attempt against a valid old projection.",
+      "constructing_tickets": [
+        353,
+        388
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_recovery_contract_mismatch",
+      "part": "export-recovery",
+      "property": "recovery-preserves-canonical-authority",
+      "acceptance_criteria": [
+        "AC6"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "schema",
+        "tokenizer",
+        "model",
+        "policy",
+        "identity"
+      ],
+      "independent_oracle": "Persisted projection tuple compared with the active tuple, one dimension changed per scenario.",
+      "negative_control": "Serving after a mismatch on any single dimension must fail.",
+      "integration_observation": "U5a/U5e open with each mismatch dimension.",
+      "constructing_tickets": [
+        381,
+        385
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_recovery_authority_unavailable",
+      "part": "export-recovery",
+      "property": "recovery-preserves-canonical-authority",
+      "acceptance_criteria": [
+        "AC6"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "authority_read_failed"
+      ],
+      "independent_oracle": "Injected canonical read failure and the egress outcome.",
+      "negative_control": "Unavailable authority turned into a projected grant must fail.",
+      "integration_observation": "U5h egress while the canonical read is failed.",
+      "constructing_tickets": [
+        353,
+        388
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_atomic_uncommitted_kill",
+      "part": "projection-coverage",
+      "property": "projection-commit-checkpoint-pending-atomic",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "kill_before_local_commit"
+      ],
+      "independent_oracle": "Reopened rows, tombstones, checkpoint, and Pending compared with the whole prior state.",
+      "negative_control": "A mixed prefix after reopen must fail.",
+      "integration_observation": "U2b multirow dense-required commit killed before COMMIT.",
+      "constructing_tickets": [
+        362
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_old_prefix_after_delete",
+      "part": "projection-coverage",
+      "property": "projection-replay-does-not-resurrect",
+      "acceptance_criteria": [
+        "AC2",
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "old_prefix_after_delete"
+      ],
+      "independent_oracle": "Ledger tombstone for the lineage and the reopened row set.",
+      "negative_control": "A resurrected occurrence after old-prefix delivery must fail.",
+      "integration_observation": "U2b replay of an old prefix after a deletion commit.",
+      "constructing_tickets": [
+        362
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_duplicate_after_reopen",
+      "part": "projection-coverage",
+      "property": "projection-replay-does-not-resurrect",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "duplicate_after_reopen"
+      ],
+      "independent_oracle": "Ledger multiplicity and Pending identity set after identical redelivery.",
+      "negative_control": "Duplicate rows or duplicate outstanding jobs must fail.",
+      "integration_observation": "U2b redelivery of an applied prefix after reopen.",
+      "constructing_tickets": [
+        362
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_equal_bytes_distinct_tuples",
+      "part": "projection-coverage",
+      "property": "projection-occurrence-payload-separation",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T1"
+      ],
+      "scenario_ids": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits",
+        "raw_tool_spans",
+        "claim_promoted_dual_membership"
+      ],
+      "independent_oracle": "Fixture-owned tuples in source-identity-fixtures.json encoded with the CC4 reference encoder; payload bytes equal by construction.",
+      "negative_control": "Collapsing occurrence identity to payload identity must fail.",
+      "integration_observation": "U2a write, close, and reopen of the fixture records.",
+      "constructing_tickets": [
+        361
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_forced_payload_collision",
+      "part": "projection-coverage",
+      "property": "projection-occurrence-payload-separation",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T1"
+      ],
+      "scenario_ids": [
+        "unequal_bytes_equal_digest"
+      ],
+      "independent_oracle": "Injected identical digest for two unequal buffers; byte comparison result.",
+      "negative_control": "Sharing storage or replacing evidence on a digest match without byte equality must fail.",
+      "integration_observation": "U1b/U2a collision injection through the test-support digest seam.",
+      "constructing_tickets": [
+        356,
+        361
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_messages_revised",
+      "part": "projection-coverage",
+      "property": "projection-source-inventory-complete",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "opencode",
+        "pi"
+      ],
+      "independent_oracle": "Independent message inventory E(c,p) with both revisions from the harness fixture.",
+      "negative_control": "Omitting the revised message from the report and denominator must fail.",
+      "integration_observation": "U4a message ingest for each supported harness.",
+      "constructing_tickets": [
+        372
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_claims_deleted",
+      "part": "projection-coverage",
+      "property": "projection-source-inventory-complete",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "claim_retired"
+      ],
+      "independent_oracle": "Canonical claim creation and retirement commits in the operation ledger.",
+      "negative_control": "A retired claim still reported as covered must fail.",
+      "integration_observation": "U4c claim occurrence integration over a real kernel.",
+      "constructing_tickets": [
+        374
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_promoted_memory_revised",
+      "part": "projection-coverage",
+      "property": "projection-source-inventory-complete",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "promoted_replaced"
+      ],
+      "independent_oracle": "Positive stable-memory-domain decisions and their canonical replacement in the ledger.",
+      "negative_control": "A replaced promoted memory reported under its old revision must fail.",
+      "integration_observation": "U4c promoted-memory integration over a real kernel.",
+      "constructing_tickets": [
+        374
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_git_rows_removed",
+      "part": "projection-coverage",
+      "property": "projection-source-inventory-complete",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "git_source_policy_removal"
+      ],
+      "independent_oracle": "Durable commit-source entries and the source-policy removal event in the ledger.",
+      "negative_control": "Rows retained after removal, or rows deleted on a failed scan, must fail.",
+      "integration_observation": "U4d/U4e git inventory reconciliation.",
+      "constructing_tickets": [
+        375,
+        376
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_tool_selection_changed",
+      "part": "projection-coverage",
+      "property": "projection-source-inventory-complete",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "opencode:whole_block_then_span",
+        "pi:whole_block_then_span"
+      ],
+      "independent_oracle": "Two declared span selections over one retained buffer; occurrence tuples differ only in span.",
+      "negative_control": "Merging the two selections or normalizing the buffer must fail.",
+      "integration_observation": "U4b raw tool projection for each supported harness.",
+      "constructing_tickets": [
+        373
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_complete_declared_nonempty_inventory",
+      "part": "projection-coverage",
+      "property": "projection-source-inventory-complete",
+      "acceptance_criteria": [
+        "AC3",
+        "AC11"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "messages",
+        "canonical_claims",
+        "promoted_memory",
+        "git_commits",
+        "raw_tool_spans"
+      ],
+      "independent_oracle": "Independent nonempty inventory E(c,p) per class; the product's completeness declaration for that checkpoint and policy.",
+      "negative_control": "A declaration over an empty or unknown inventory, or an aggregate denominator hiding a class, must fail.",
+      "integration_observation": "U4f coverage report per class over a real store.",
+      "constructing_tickets": [
+        379
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_raw_multibyte_default",
+      "part": "projection-coverage",
+      "property": "projection-raw-tools-exact-and-lexical",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T1"
+      ],
+      "scenario_ids": [
+        "multibyte_crlf_overlapping_spans"
+      ],
+      "independent_oracle": "Independently captured native buffer bytes and CC3 span offsets.",
+      "negative_control": "Normalized bytes or a dense job created under default policy must fail.",
+      "integration_observation": "U4b raw tool indexing with default dense-tool policy disabled.",
+      "constructing_tickets": [
+        373
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_raw_multipart_error",
+      "part": "projection-coverage",
+      "property": "projection-raw-tools-exact-and-lexical",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T1"
+      ],
+      "scenario_ids": [
+        "multipart_error_result"
+      ],
+      "independent_oracle": "Native multipart error result captured before any projection conversion.",
+      "negative_control": "Joined parts or a lossy conversion must fail.",
+      "integration_observation": "U1b/U4b capture of a multipart error result.",
+      "constructing_tickets": [
+        356,
+        373
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_missing_gate_evidence",
+      "part": "projection-coverage",
+      "property": "projection-n13-hooks-stay-gated",
+      "acceptance_criteria": [
+        "AC9"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "search_projection.message_cleanup@startup",
+        "search_projection.message_cleanup@reload",
+        "search_projection.message_cleanup@dispatch",
+        "search_projection.message_cleanup@explicit",
+        "search_projection.embedding.bootstrap@startup",
+        "search_projection.embedding.bootstrap@reload",
+        "search_projection.embedding.bootstrap@dispatch",
+        "search_projection.embedding.bootstrap@explicit",
+        "search_projection.embedding.routing@startup",
+        "search_projection.embedding.routing@reload",
+        "search_projection.embedding.routing@dispatch",
+        "search_projection.embedding.routing@explicit",
+        "search_projection.embedding.registry@startup",
+        "search_projection.embedding.registry@reload",
+        "search_projection.embedding.registry@dispatch",
+        "search_projection.embedding.registry@explicit",
+        "search_projection.embedding.backfill@startup",
+        "search_projection.embedding.backfill@reload",
+        "search_projection.embedding.backfill@dispatch",
+        "search_projection.embedding.backfill@explicit",
+        "search_projection.embedding.identity_gc@startup",
+        "search_projection.embedding.identity_gc@reload",
+        "search_projection.embedding.identity_gc@dispatch",
+        "search_projection.embedding.identity_gc@explicit",
+        "search_projection.promoted_memory.embeddings@startup",
+        "search_projection.promoted_memory.embeddings@reload",
+        "search_projection.promoted_memory.embeddings@dispatch",
+        "search_projection.promoted_memory.embeddings@explicit",
+        "search_projection.git.ingest@startup",
+        "search_projection.git.ingest@reload",
+        "search_projection.git.ingest@dispatch",
+        "search_projection.git.ingest@explicit",
+        "search_projection.git.durable_rows@startup",
+        "search_projection.git.durable_rows@reload",
+        "search_projection.git.durable_rows@dispatch",
+        "search_projection.git.durable_rows@explicit",
+        "search_projection.git.jobs@startup",
+        "search_projection.git.jobs@reload",
+        "search_projection.git.jobs@dispatch",
+        "search_projection.git.jobs@explicit",
+        "search_projection.git.sweeps@startup",
+        "search_projection.git.sweeps@reload",
+        "search_projection.git.sweeps@dispatch",
+        "search_projection.git.sweeps@explicit",
+        "search_projection.git.leases@startup",
+        "search_projection.git.leases@reload",
+        "search_projection.git.leases@dispatch",
+        "search_projection.git.leases@explicit"
+      ],
+      "independent_oracle": "Independent hook manifest and absent evidence for the named gate; the refused activation names gate and entry point.",
+      "negative_control": "Activation with absent evidence must fail.",
+      "integration_observation": "U4h gate evaluation at each entry point.",
+      "constructing_tickets": [
+        380
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_failed_gate_evidence",
+      "part": "projection-coverage",
+      "property": "projection-n13-hooks-stay-gated",
+      "acceptance_criteria": [
+        "AC9"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "search_projection.message_cleanup@startup",
+        "search_projection.message_cleanup@reload",
+        "search_projection.message_cleanup@dispatch",
+        "search_projection.message_cleanup@explicit",
+        "search_projection.embedding.bootstrap@startup",
+        "search_projection.embedding.bootstrap@reload",
+        "search_projection.embedding.bootstrap@dispatch",
+        "search_projection.embedding.bootstrap@explicit",
+        "search_projection.embedding.routing@startup",
+        "search_projection.embedding.routing@reload",
+        "search_projection.embedding.routing@dispatch",
+        "search_projection.embedding.routing@explicit",
+        "search_projection.embedding.registry@startup",
+        "search_projection.embedding.registry@reload",
+        "search_projection.embedding.registry@dispatch",
+        "search_projection.embedding.registry@explicit",
+        "search_projection.embedding.backfill@startup",
+        "search_projection.embedding.backfill@reload",
+        "search_projection.embedding.backfill@dispatch",
+        "search_projection.embedding.backfill@explicit",
+        "search_projection.embedding.identity_gc@startup",
+        "search_projection.embedding.identity_gc@reload",
+        "search_projection.embedding.identity_gc@dispatch",
+        "search_projection.embedding.identity_gc@explicit",
+        "search_projection.promoted_memory.embeddings@startup",
+        "search_projection.promoted_memory.embeddings@reload",
+        "search_projection.promoted_memory.embeddings@dispatch",
+        "search_projection.promoted_memory.embeddings@explicit",
+        "search_projection.git.ingest@startup",
+        "search_projection.git.ingest@reload",
+        "search_projection.git.ingest@dispatch",
+        "search_projection.git.ingest@explicit",
+        "search_projection.git.durable_rows@startup",
+        "search_projection.git.durable_rows@reload",
+        "search_projection.git.durable_rows@dispatch",
+        "search_projection.git.durable_rows@explicit",
+        "search_projection.git.jobs@startup",
+        "search_projection.git.jobs@reload",
+        "search_projection.git.jobs@dispatch",
+        "search_projection.git.jobs@explicit",
+        "search_projection.git.sweeps@startup",
+        "search_projection.git.sweeps@reload",
+        "search_projection.git.sweeps@dispatch",
+        "search_projection.git.sweeps@explicit",
+        "search_projection.git.leases@startup",
+        "search_projection.git.leases@reload",
+        "search_projection.git.leases@dispatch",
+        "search_projection.git.leases@explicit"
+      ],
+      "independent_oracle": "Present evidence that fails its gate; the refused activation names gate and entry point.",
+      "negative_control": "Activation with failed evidence must fail.",
+      "integration_observation": "U4h gate evaluation at each entry point.",
+      "constructing_tickets": [
+        380
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_unsupported_or_inapplicable_evidence",
+      "part": "projection-coverage",
+      "property": "projection-n13-hooks-stay-gated",
+      "acceptance_criteria": [
+        "AC9",
+        "AC12"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "search_projection.message_cleanup@startup@unsupported",
+        "search_projection.message_cleanup@startup@inapplicable",
+        "search_projection.message_cleanup@reload@unsupported",
+        "search_projection.message_cleanup@reload@inapplicable",
+        "search_projection.message_cleanup@dispatch@unsupported",
+        "search_projection.message_cleanup@dispatch@inapplicable",
+        "search_projection.message_cleanup@explicit@unsupported",
+        "search_projection.message_cleanup@explicit@inapplicable",
+        "search_projection.embedding.bootstrap@startup@unsupported",
+        "search_projection.embedding.bootstrap@startup@inapplicable",
+        "search_projection.embedding.bootstrap@reload@unsupported",
+        "search_projection.embedding.bootstrap@reload@inapplicable",
+        "search_projection.embedding.bootstrap@dispatch@unsupported",
+        "search_projection.embedding.bootstrap@dispatch@inapplicable",
+        "search_projection.embedding.bootstrap@explicit@unsupported",
+        "search_projection.embedding.bootstrap@explicit@inapplicable",
+        "search_projection.embedding.routing@startup@unsupported",
+        "search_projection.embedding.routing@startup@inapplicable",
+        "search_projection.embedding.routing@reload@unsupported",
+        "search_projection.embedding.routing@reload@inapplicable",
+        "search_projection.embedding.routing@dispatch@unsupported",
+        "search_projection.embedding.routing@dispatch@inapplicable",
+        "search_projection.embedding.routing@explicit@unsupported",
+        "search_projection.embedding.routing@explicit@inapplicable",
+        "search_projection.embedding.registry@startup@unsupported",
+        "search_projection.embedding.registry@startup@inapplicable",
+        "search_projection.embedding.registry@reload@unsupported",
+        "search_projection.embedding.registry@reload@inapplicable",
+        "search_projection.embedding.registry@dispatch@unsupported",
+        "search_projection.embedding.registry@dispatch@inapplicable",
+        "search_projection.embedding.registry@explicit@unsupported",
+        "search_projection.embedding.registry@explicit@inapplicable",
+        "search_projection.embedding.backfill@startup@unsupported",
+        "search_projection.embedding.backfill@startup@inapplicable",
+        "search_projection.embedding.backfill@reload@unsupported",
+        "search_projection.embedding.backfill@reload@inapplicable",
+        "search_projection.embedding.backfill@dispatch@unsupported",
+        "search_projection.embedding.backfill@dispatch@inapplicable",
+        "search_projection.embedding.backfill@explicit@unsupported",
+        "search_projection.embedding.backfill@explicit@inapplicable",
+        "search_projection.embedding.identity_gc@startup@unsupported",
+        "search_projection.embedding.identity_gc@startup@inapplicable",
+        "search_projection.embedding.identity_gc@reload@unsupported",
+        "search_projection.embedding.identity_gc@reload@inapplicable",
+        "search_projection.embedding.identity_gc@dispatch@unsupported",
+        "search_projection.embedding.identity_gc@dispatch@inapplicable",
+        "search_projection.embedding.identity_gc@explicit@unsupported",
+        "search_projection.embedding.identity_gc@explicit@inapplicable",
+        "search_projection.promoted_memory.embeddings@startup@unsupported",
+        "search_projection.promoted_memory.embeddings@startup@inapplicable",
+        "search_projection.promoted_memory.embeddings@reload@unsupported",
+        "search_projection.promoted_memory.embeddings@reload@inapplicable",
+        "search_projection.promoted_memory.embeddings@dispatch@unsupported",
+        "search_projection.promoted_memory.embeddings@dispatch@inapplicable",
+        "search_projection.promoted_memory.embeddings@explicit@unsupported",
+        "search_projection.promoted_memory.embeddings@explicit@inapplicable",
+        "search_projection.git.ingest@startup@unsupported",
+        "search_projection.git.ingest@startup@inapplicable",
+        "search_projection.git.ingest@reload@unsupported",
+        "search_projection.git.ingest@reload@inapplicable",
+        "search_projection.git.ingest@dispatch@unsupported",
+        "search_projection.git.ingest@dispatch@inapplicable",
+        "search_projection.git.ingest@explicit@unsupported",
+        "search_projection.git.ingest@explicit@inapplicable",
+        "search_projection.git.durable_rows@startup@unsupported",
+        "search_projection.git.durable_rows@startup@inapplicable",
+        "search_projection.git.durable_rows@reload@unsupported",
+        "search_projection.git.durable_rows@reload@inapplicable",
+        "search_projection.git.durable_rows@dispatch@unsupported",
+        "search_projection.git.durable_rows@dispatch@inapplicable",
+        "search_projection.git.durable_rows@explicit@unsupported",
+        "search_projection.git.durable_rows@explicit@inapplicable",
+        "search_projection.git.jobs@startup@unsupported",
+        "search_projection.git.jobs@startup@inapplicable",
+        "search_projection.git.jobs@reload@unsupported",
+        "search_projection.git.jobs@reload@inapplicable",
+        "search_projection.git.jobs@dispatch@unsupported",
+        "search_projection.git.jobs@dispatch@inapplicable",
+        "search_projection.git.jobs@explicit@unsupported",
+        "search_projection.git.jobs@explicit@inapplicable",
+        "search_projection.git.sweeps@startup@unsupported",
+        "search_projection.git.sweeps@startup@inapplicable",
+        "search_projection.git.sweeps@reload@unsupported",
+        "search_projection.git.sweeps@reload@inapplicable",
+        "search_projection.git.sweeps@dispatch@unsupported",
+        "search_projection.git.sweeps@dispatch@inapplicable",
+        "search_projection.git.sweeps@explicit@unsupported",
+        "search_projection.git.sweeps@explicit@inapplicable",
+        "search_projection.git.leases@startup@unsupported",
+        "search_projection.git.leases@startup@inapplicable",
+        "search_projection.git.leases@reload@unsupported",
+        "search_projection.git.leases@reload@inapplicable",
+        "search_projection.git.leases@dispatch@unsupported",
+        "search_projection.git.leases@dispatch@inapplicable",
+        "search_projection.git.leases@explicit@unsupported",
+        "search_projection.git.leases@explicit@inapplicable"
+      ],
+      "independent_oracle": "Capability disposition from CC8 and evidence target identity; bounded scenario value distinguishes the two cases.",
+      "negative_control": "Simulated capability or evidence applied to the wrong target must fail.",
+      "integration_observation": "U4h gate evaluation with an unsupported adapter and with inapplicable evidence.",
+      "constructing_tickets": [
+        380
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_stale_grant_after_retirement",
+      "part": "projection-coverage",
+      "property": "projection-canonical-eligibility-authority",
+      "acceptance_criteria": [
+        "AC6"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "retired_after_grant"
+      ],
+      "independent_oracle": "Canonical retirement in the ledger; both adapter validations requested.",
+      "negative_control": "A retained projected grant honored by either adapter must fail.",
+      "integration_observation": "P2 kernel eligibility and daemon parity; U4c retrieval adapter.",
+      "constructing_tickets": [
+        353,
+        374
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_pinned_adapter_pair",
+      "part": "projection-coverage",
+      "property": "projection-canonical-eligibility-authority",
+      "acceptance_criteria": [
+        "AC6"
+      ],
+      "seams": [
+        "T7"
+      ],
+      "scenario_ids": [
+        "daemon_vs_kernel",
+        "retrieval_vs_kernel"
+      ],
+      "independent_oracle": "Independently authored expected verdicts for a mixed batch on pinned facts.",
+      "negative_control": "Divergent verdicts, or a verdict from a joined snapshot, must fail.",
+      "integration_observation": "P2 kernel and daemon parity; U4c retrieval parity.",
+      "constructing_tickets": [
+        353,
+        374
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_lexical_current_vector_old",
+      "part": "projection-coverage",
+      "property": "projection-lexical-dense-coverage-distinct",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "older_revision_vector",
+        "older_model_vector"
+      ],
+      "independent_oracle": "Fixture-owned vector metadata naming an older revision or model; independent M = R minus V.",
+      "negative_control": "Counting the old vector as valid coverage must fail.",
+      "integration_observation": "U4f coverage report with old vector metadata.",
+      "constructing_tickets": [
+        379
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_same_render_new_revision",
+      "part": "projection-coverage",
+      "property": "projection-lexical-dense-coverage-distinct",
+      "acceptance_criteria": [
+        "AC3"
+      ],
+      "seams": [
+        "T4"
+      ],
+      "scenario_ids": [
+        "equal_text_new_revision"
+      ],
+      "independent_oracle": "Two revisions with equal rendered text and different canonical revision identities.",
+      "negative_control": "Treating equal text as current dense coverage for the new revision must fail.",
+      "integration_observation": "U4f coverage report after a same-text revision.",
+      "constructing_tickets": [
+        379
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_pending_full_next_commit",
+      "part": "projection-coverage",
+      "property": "projection-bounded-admission-preserves-progress",
+      "acceptance_criteria": [
+        "AC5",
+        "AC7"
+      ],
+      "seams": [
+        "T6"
+      ],
+      "scenario_ids": [
+        "pending_cap_reached"
+      ],
+      "independent_oracle": "Independent Pending count at the approved cap and the offered complete commit.",
+      "negative_control": "Skipping the commit, dropping a job, or advancing progress at capacity must fail.",
+      "integration_observation": "U2b admission when Pending equals its cap.",
+      "constructing_tickets": [
+        362
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_complete_commit_over_cap",
+      "part": "projection-coverage",
+      "property": "projection-bounded-admission-preserves-progress",
+      "acceptance_criteria": [
+        "AC2"
+      ],
+      "seams": [
+        "T6"
+      ],
+      "scenario_ids": [
+        "rows_over_cap",
+        "bytes_over_cap"
+      ],
+      "independent_oracle": "Fixture-measured rows and bytes of one complete commit against the declared local cap before admission.",
+      "negative_control": "Splitting the commit, enlarging bounds, or truncation after decode must fail.",
+      "integration_observation": "U2b admission of an oversized complete commit.",
+      "constructing_tickets": [
+        362
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_remediation_without_revision_change",
+      "part": "projection-coverage",
+      "property": "projection-remediation-invalidates-derived-bytes",
+      "acceptance_criteria": [
+        "AC10"
+      ],
+      "seams": [
+        "T3"
+      ],
+      "scenario_ids": [
+        "applicability_decision_recorded",
+        "name_only_control"
+      ],
+      "independent_oracle": "CC7 records that the approved mapping excludes domains.name; the control reconstructs mapped input bytes before and after remediation and finds them equal.",
+      "negative_control": "A fabricated passing witness, or changed input bytes under an excluded field, must fail.",
+      "integration_observation": "U1c/U1f name-only remediation control over a real store.",
+      "constructing_tickets": [
+        357,
+        360
+      ],
+      "cell_kind": "conditional-applicability",
+      "applicability_decision": "CC7: the approved mapping excludes domains.name; premise absent from scope"
+    },
+    {
+      "marker": "search_projection_acceptance_situations_witnessed",
+      "part": "projection-coverage",
+      "property": "projection-acceptance-situations-witnessed",
+      "acceptance_criteria": [
+        "AC11"
+      ],
+      "seams": [
+        "T1",
+        "T2",
+        "T3",
+        "T4",
+        "T5",
+        "T6",
+        "T7",
+        "T8",
+        "T9"
+      ],
+      "scenario_ids": [
+        "completed_campaign"
+      ],
+      "independent_oracle": "Every required cell in this matrix has a known witness record.",
+      "negative_control": "Removing any required witness from an otherwise passing report must fail the campaign verdict.",
+      "integration_observation": "Campaign verdict over the frozen matrix.",
+      "constructing_tickets": [
+        352
+      ],
+      "cell_kind": "result"
+    },
+    {
+      "marker": "search_projection_embedding_full_sequence_straddles_window",
+      "part": "embedding",
+      "property": "embedding-count-authority-is-untruncated",
+      "acceptance_criteria": [
+        "AC4"
+      ],
+      "seams": [
+        "T1"
+      ],
+      "scenario_ids": [
+        "straddle_window_bytes_fit"
+      ],
+      "independent_oracle": "Pinned complete token sequence from the independent token fixture; both tokenizer artifact identities observed.",
+      "negative_control": "Counting only a truncated prefix must fail.",
+      "integration_observation": "U3a exact count over the verified artifact.",
+      "constructing_tickets": [
+        364
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_invalid_input_offered_to_ready_lane",
+      "part": "embedding",
+      "property": "embedding-input-is-rejected-before-inference",
+      "acceptance_criteria": [
+        "AC4"
+      ],
+      "seams": [
+        "T2"
+      ],
+      "scenario_ids": [
+        "token_limit_plus_one",
+        "byte_cap_overflow",
+        "count_unavailable",
+        "identity_unavailable"
+      ],
+      "independent_oracle": "Deterministic engine attempt counter baselined after certification; valid exact-limit control input.",
+      "negative_control": "Counter growth for invalid input, or silent truncation, must fail.",
+      "integration_observation": "U3a preflight in front of the real engine.",
+      "constructing_tickets": [
+        364
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_pending_rediscovered_after_descriptor_loss",
+      "part": "embedding",
+      "property": "embedding-pending-drives-one-job-table",
+      "acceptance_criteria": [
+        "AC5"
+      ],
+      "seams": [
+        "T8"
+      ],
+      "scenario_ids": [
+        "rediscovered_twice",
+        "admission_response_suppressed",
+        "capacity_pressure"
+      ],
+      "independent_oracle": "Durable Pending readback plus admission and worker observations.",
+      "negative_control": "A second worker or queue for one K, or Pending erased by refusal, must fail.",
+      "integration_observation": "U3d dispatch of durable Pending through the existing JobTable.",
+      "constructing_tickets": [
+        368
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_identity_changed_with_result_held",
+      "part": "embedding",
+      "property": "embedding-completion-is-identity-fenced",
+      "acceptance_criteria": [
+        "AC5"
+      ],
+      "seams": [
+        "T3"
+      ],
+      "scenario_ids": [
+        "revision",
+        "model",
+        "fingerprint",
+        "dimension",
+        "epoch",
+        "input_hash",
+        "tombstone"
+      ],
+      "independent_oracle": "Independent current-source oracle after one dimension changes while a validated old result is held.",
+      "negative_control": "Completion that ignores any single dimension must fail.",
+      "integration_observation": "U3b guard at the mutation boundary.",
+      "constructing_tickets": [
+        365
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_process_killed_at_persistence_boundary",
+      "part": "embedding",
+      "property": "embedding-complete-requires-durable-vector",
+      "acceptance_criteria": [
+        "AC5",
+        "AC2"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "vector_write_issued_before_commit",
+        "vector_committed_before_completion_mark"
+      ],
+      "independent_oracle": "Reopened identity plus vector bytes after termination at each boundary.",
+      "negative_control": "Completion marked without a durable matching vector must fail.",
+      "integration_observation": "U3c persistence under the shared crash pattern.",
+      "constructing_tickets": [
+        367
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_restart_has_stable_pending_and_service",
+      "part": "embedding",
+      "property": "embedding-restart-retries-durable-pending",
+      "acceptance_criteria": [
+        "AC7"
+      ],
+      "seams": [
+        "T9"
+      ],
+      "scenario_ids": [
+        "restart_fresh_jobtable"
+      ],
+      "independent_oracle": "Pre-crash durable Pending(K), fresh process and table, unchanged identity, healthy service window.",
+      "negative_control": "Endless restart, no work, or a moved deadline must fail.",
+      "integration_observation": "U3d/U3e restart episode with a fresh JobTable over durable Pending.",
+      "constructing_tickets": [
+        368,
+        369
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_query_arrives_during_backfill_saturation",
+      "part": "embedding",
+      "property": "embedding-backfill-preserves-query-admission",
+      "acceptance_criteria": [
+        "AC8"
+      ],
+      "seams": [
+        "T8"
+      ],
+      "scenario_ids": [
+        "query_under_cap_during_saturation"
+      ],
+      "independent_oracle": "Offered-query ledger with offered, admitted, started, and completed states; backfill envelope full.",
+      "negative_control": "FIFO starvation of the query must fail.",
+      "integration_observation": "U3g backfill saturation with an offered query.",
+      "constructing_tickets": [
+        371
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_gc_candidate_has_concurrent_holder",
+      "part": "embedding",
+      "property": "embedding-identity-gc-preserves-live-work",
+      "acceptance_criteria": [
+        "AC5"
+      ],
+      "seams": [
+        "T3"
+      ],
+      "scenario_ids": [
+        "held_result",
+        "live_reference",
+        "identity_update_race",
+        "dispatch_race"
+      ],
+      "independent_oracle": "Independent live-reference census during the GC slice.",
+      "negative_control": "Deleting a live holder must fail.",
+      "integration_observation": "U3f GC racing a holder.",
+      "constructing_tickets": [
+        370
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_stop_occurs_with_native_work_held",
+      "part": "embedding",
+      "property": "embedding-supervisor-shares-budget-and-joins",
+      "acceptance_criteria": [
+        "AC8"
+      ],
+      "seams": [
+        "T8"
+      ],
+      "scenario_ids": [
+        "cancel_with_native_held",
+        "deadline_with_native_held",
+        "shutdown_with_slice_due"
+      ],
+      "independent_oracle": "Task, permit, and live-charge census observed independently until physical exit.",
+      "negative_control": "Charges released on future drop, or shutdown completing before owners exit, must fail.",
+      "integration_observation": "U3g/U4g supervisor stop with native work held.",
+      "constructing_tickets": [
+        371,
+        377
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_verified_path_replaced_after_load",
+      "part": "embedding",
+      "property": "embedding-count-authority-is-untruncated",
+      "acceptance_criteria": [
+        "AC4"
+      ],
+      "seams": [
+        "T1"
+      ],
+      "scenario_ids": [
+        "artifact_path_replaced"
+      ],
+      "independent_oracle": "Retained verified bytes and the replaced pathname observed before counting.",
+      "negative_control": "Counting from the replaced path must fail.",
+      "integration_observation": "U3a count after artifact path replacement.",
+      "constructing_tickets": [
+        364
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_model_name_changes_without_fingerprint_change",
+      "part": "embedding",
+      "property": "embedding-completion-is-identity-fenced",
+      "acceptance_criteria": [
+        "AC5",
+        "AC6"
+      ],
+      "seams": [
+        "T3"
+      ],
+      "scenario_ids": [
+        "model_name_only"
+      ],
+      "independent_oracle": "Model name changed with fingerprint and dimension held equal.",
+      "negative_control": "Completion or serving keyed on fingerprint alone must fail.",
+      "integration_observation": "U3b guard and U5a mismatch detection.",
+      "constructing_tickets": [
+        365,
+        381
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_shared_payload_has_distinct_occurrences",
+      "part": "embedding",
+      "property": "embedding-identity-gc-preserves-live-work",
+      "acceptance_criteria": [
+        "AC3",
+        "AC5"
+      ],
+      "seams": [
+        "T3"
+      ],
+      "scenario_ids": [
+        "completion_phase",
+        "gc_phase"
+      ],
+      "independent_oracle": "Two occurrence IDs with identical payload bytes in the fixture set.",
+      "negative_control": "Completing or collecting by payload identity must fail.",
+      "integration_observation": "U3c completion and U3f GC over shared payloads.",
+      "constructing_tickets": [
+        367,
+        370
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_vector_commit_response_is_lost",
+      "part": "embedding",
+      "property": "embedding-complete-requires-durable-vector",
+      "acceptance_criteria": [
+        "AC5"
+      ],
+      "seams": [
+        "T5"
+      ],
+      "scenario_ids": [
+        "commit_response_suppressed"
+      ],
+      "independent_oracle": "Durable vector readback after the suppressed response.",
+      "negative_control": "Completion attempted on a response-less commit without readback must fail.",
+      "integration_observation": "U3c completion after a lost storage response.",
+      "constructing_tickets": [
+        367
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_retryable_failure_precedes_recovery",
+      "part": "embedding",
+      "property": "embedding-restart-retries-durable-pending",
+      "acceptance_criteria": [
+        "AC7"
+      ],
+      "seams": [
+        "T9"
+      ],
+      "scenario_ids": [
+        "retryable_failure_then_window"
+      ],
+      "independent_oracle": "Injected retryable failure before the fault-free window and the durable disposition.",
+      "negative_control": "Retry that exceeds the approved attempt bound or resets the clock must fail.",
+      "integration_observation": "U3e retry disposition then recovery window.",
+      "constructing_tickets": [
+        369
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_budget_crosses_between_stages",
+      "part": "embedding",
+      "property": "embedding-supervisor-shares-budget-and-joins",
+      "acceptance_criteria": [
+        "AC8"
+      ],
+      "seams": [
+        "T8"
+      ],
+      "scenario_ids": [
+        "queue_to_embed",
+        "embed_to_sqlite",
+        "sqlite_to_dense_checkpoint"
+      ],
+      "independent_oracle": "Original EvalBudget deadline D observed independently at each stage entry.",
+      "negative_control": "A stage that renews the budget must fail.",
+      "integration_observation": "U3g stage transitions with the shared budget.",
+      "constructing_tickets": [
+        371
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_gc_obsolete_identity_is_unreferenced",
+      "part": "embedding",
+      "property": "embedding-identity-gc-preserves-live-work",
+      "acceptance_criteria": [
+        "AC5"
+      ],
+      "seams": [
+        "T3"
+      ],
+      "scenario_ids": [
+        "obsolete_unreferenced_before_slice"
+      ],
+      "independent_oracle": "Independently identified obsolete identity with no live reference before the bounded slice.",
+      "negative_control": "A completed sweep that leaves it in place must fail.",
+      "integration_observation": "U3f eligible cleanup slice over a real store.",
+      "constructing_tickets": [
+        370
+      ],
+      "cell_kind": "required"
+    }
+  ],
+  "gate_controls": {
+    "valid_supported_activation": "Required once the U4h gate exists, for every hook at every entry point; recorded beside the gate cells as a control, not as a marker cell."
+  },
+  "marker_definition_sites": {
+    "export-recovery": "docs/properties/search-projection/export-recovery/fault-map.md",
+    "projection-coverage": "docs/properties/search-projection/projection-coverage/fault-map.md",
+    "embedding": "docs/properties/search-projection/embedding/fault-map.md"
+  }
+}

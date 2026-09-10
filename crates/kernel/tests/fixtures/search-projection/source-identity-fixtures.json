@@ -1,0 +1,880 @@
+{
+  "version": 1,
+  "identity_contract_version": "search-projection-identity-v1",
+  "records": [
+    {
+      "id": "m1",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "message_id": "msg-001",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "Deploy failed",
+      "expected_occurrence_id": "bb0c61298d0f40c00af42c5ecbe966564a857158d9b73b087d8933dbafaef9d0",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+    },
+    {
+      "id": "m2",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "message_id": "msg-002",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "Deploy failed",
+      "expected_occurrence_id": "70dcf471a50d62b165ad8ab6501488ab7eb7db5c03cf475feca3673dfa281158",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+    },
+    {
+      "id": "m1r2",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "message_id": "msg-001",
+        "block_index": "0"
+      },
+      "revision": "2",
+      "representation": "text",
+      "payload": "Deploy failed",
+      "expected_occurrence_id": "01582fe67b37aa8a72d2f2f6fcacce78a4f4079598c63e5a5cb488a8567d1645",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+    },
+    {
+      "id": "m1dup",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "message_id": "msg-001",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "Deploy failed",
+      "expected_occurrence_id": "bb0c61298d0f40c00af42c5ecbe966564a857158d9b73b087d8933dbafaef9d0",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+    },
+    {
+      "id": "m_pi",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "pi",
+        "session_id": "sess-01",
+        "message_id": "msg-001",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "Deploy failed",
+      "expected_occurrence_id": "851f1f6f43c40a80eee80fe51b152773184df1cdce261d629bffc27e4e1b8a28",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+    },
+    {
+      "id": "c1",
+      "class": "canonical_claims",
+      "identity": {
+        "object_id": "obj-77"
+      },
+      "revision": "3",
+      "representation": "decision_summary",
+      "payload": "Use SQLite WAL for the projection.",
+      "expected_occurrence_id": "1a9ba84150ee401ebaaad21bf07849c33ef1f163f73c873208d9dd0218977f14",
+      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c"
+    },
+    {
+      "id": "c1r",
+      "class": "canonical_claims",
+      "identity": {
+        "object_id": "obj-77"
+      },
+      "revision": "3",
+      "representation": "rationale",
+      "payload": "Use SQLite WAL for the projection.",
+      "expected_occurrence_id": "4a350b496b77b665a6a0f8924b6e4db8ee78b8f64f867eda1202b5bdc0ca2e01",
+      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c"
+    },
+    {
+      "id": "pm1",
+      "class": "promoted_memory",
+      "identity": {
+        "decision_object_id": "obj-77"
+      },
+      "revision": "3",
+      "representation": "summary",
+      "payload": "Use SQLite WAL for the projection.",
+      "expected_occurrence_id": "991feaae9ceafeca2a42ad58fa6161ca787a3dc52634e130a2a9044d5dc2b462",
+      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c"
+    },
+    {
+      "id": "g1",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-1",
+        "object_format": "sha1",
+        "oid": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "Fix the thing\n\nBody line.\n",
+      "expected_occurrence_id": "2afd9fcb2dacfc2e2a18ee9299b761c7063048b9ab8fcd03ffdeb63e5a8ff5ee",
+      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771"
+    },
+    {
+      "id": "g2",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-2",
+        "object_format": "sha1",
+        "oid": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "Fix the thing\n\nBody line.\n",
+      "expected_occurrence_id": "f678512f181d8fd6907f1d13bda1bbdea473f1e12fee5cf45a8ba48648c0f9c7",
+      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771"
+    },
+    {
+      "id": "t_whole",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
+      "expected_occurrence_id": "9ff91f81694cc79e20f6e10e63ea7b617ff48ccaaf86a922115f75b85b314bbd",
+      "expected_payload_id": "77dd5c73d21e122b86d5cb1d017fa357398e586ef8efc590a9d6fde9be69f52d"
+    },
+    {
+      "id": "t_span",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
+      "span": [
+        0,
+        13
+      ],
+      "expected_occurrence_id": "f3bef9317aa1766fbba18da1fa759c0d7bc163a028768f9d7da614ed3efa4af1",
+      "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776"
+    },
+    {
+      "id": "t_span_overlap",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
+      "span": [
+        7,
+        40
+      ],
+      "expected_occurrence_id": "21f462e8cc96bc5c9c6ce9f0b26a739df949091eee01ea96f4744c15a3937070",
+      "expected_payload_id": "e9f0840907fad4b9c6212b5dcd8beffa0c2d94b9a31d569617cee682c1e97199"
+    },
+    {
+      "id": "t_err",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "1"
+      },
+      "revision": "1",
+      "representation": "tool_error",
+      "payload": "Traceback (most recent call last):\n  File \"x.py\"\n",
+      "expected_occurrence_id": "4f7d42171c33746acfa5e9e4218a5db256235a32dcd8072bd1e3c7a3a5277d0b",
+      "expected_payload_id": "3fb92bc84f586a29bd00d77434d1ddf3cc429a2d6c9e277708bdfaec3ff5183b"
+    },
+    {
+      "id": "t_empty",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "pi",
+        "session_id": "sess-02",
+        "parent_message_id": "msg-010",
+        "tool_call_id": "call-1",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "",
+      "expected_occurrence_id": "1cc8254630f757c1611d817066df14dd53aa6c590f3ed2c2369b6db37866488b",
+      "expected_payload_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "ws",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-03",
+        "message_id": "msg-030",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "  leading\ttab\r\nCRLF and trailing  \n\n",
+      "expected_occurrence_id": "3471110d745b02a5f12141753cbed29bab85fbcbf50f22b9ee72e55121630a3d",
+      "expected_payload_id": "ea6fc312ae018cda0cc4f95514ee36a9630444223732f8e4ae690487c32f4623"
+    },
+    {
+      "id": "uni",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-03",
+        "message_id": "msg-031",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "naïve — 日本語 🎉 ​ zero-width",
+      "expected_occurrence_id": "74d5cee4c6896c0a9e7a5b78e0b3e010178a1cb5a2618bc49a83ff605f225204",
+      "expected_payload_id": "532e1e8f5430c827b23af2c2fdba55b9d06f6e71a8b81aa99aed0362ee2e0822"
+    },
+    {
+      "id": "sep_a",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "a|b",
+        "message_id": "c",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_occurrence_id": "fe7fce5f82e29d6de1d269b78007b6347175456663689fabd90519d38e837e81",
+      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    },
+    {
+      "id": "sep_b",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "a",
+        "message_id": "b|c",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_occurrence_id": "8aad9a0a10a3235e7ee644b1e754fecc54c0256cc5a7ad8c21480137608544ee",
+      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    },
+    {
+      "id": "sep_c",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "a",
+        "message_id": "b",
+        "block_index": "|c0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_occurrence_id": "b1017b5c486b898410b67a4530b184c780a2257a2a13d59a5208ca3655c1d3e2",
+      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    },
+    {
+      "id": "g_sha256",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-1",
+        "object_format": "sha256",
+        "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "Fix the thing\n\nBody line.\n",
+      "expected_occurrence_id": "9b0fc6527cde07de966603587c80ca025e250fd73aae9a6f0daa1a4a03a646d6",
+      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771"
+    },
+    {
+      "id": "t_first_line",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "2"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "error: line 1",
+      "expected_occurrence_id": "f65f18ad4a021393af6c0ea7b19f1dd4a7562b7a80889f6a15db12fb69dfa8e7",
+      "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776"
+    }
+  ],
+  "expectations": {
+    "distinct_occurrences": [
+      [
+        "m1",
+        "m2"
+      ],
+      [
+        "m1",
+        "m1r2"
+      ],
+      [
+        "m1",
+        "m_pi"
+      ],
+      [
+        "c1",
+        "c1r"
+      ],
+      [
+        "c1",
+        "pm1"
+      ],
+      [
+        "g1",
+        "g2"
+      ],
+      [
+        "t_whole",
+        "t_span"
+      ],
+      [
+        "t_span",
+        "t_span_overlap"
+      ],
+      [
+        "sep_a",
+        "sep_b"
+      ],
+      [
+        "sep_b",
+        "sep_c"
+      ],
+      [
+        "sep_a",
+        "sep_c"
+      ],
+      [
+        "g1",
+        "g_sha256"
+      ],
+      [
+        "t_span",
+        "t_first_line"
+      ]
+    ],
+    "equal_occurrences": [
+      [
+        "m1",
+        "m1dup"
+      ]
+    ],
+    "equal_payloads": [
+      [
+        "m1",
+        "m2"
+      ],
+      [
+        "m1",
+        "m1r2"
+      ],
+      [
+        "c1",
+        "c1r"
+      ],
+      [
+        "c1",
+        "pm1"
+      ],
+      [
+        "g1",
+        "g2"
+      ],
+      [
+        "sep_a",
+        "sep_b"
+      ],
+      [
+        "m1",
+        "m_pi"
+      ],
+      [
+        "t_span",
+        "t_first_line"
+      ],
+      [
+        "g1",
+        "g_sha256"
+      ]
+    ],
+    "distinct_payloads": [
+      [
+        "t_whole",
+        "t_err"
+      ],
+      [
+        "t_whole",
+        "t_empty"
+      ]
+    ],
+    "span_payloads": {
+      "t_span": "error: line 1",
+      "t_span_overlap": "line 1\r\nwarning: naïve 日本語"
+    },
+    "exact_round_trip": {
+      "ws": "  leading\ttab\r\nCRLF and trailing  \n\n",
+      "uni": "naïve — 日本語 🎉 ​ zero-width",
+      "t_whole": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
+      "t_err": "Traceback (most recent call last):\n  File \"x.py\"\n",
+      "t_empty": "",
+      "g1": "Fix the thing\n\nBody line.\n"
+    }
+  },
+  "invalid_records": [
+    {
+      "id": "missing_block_index",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "missing_identity_field"
+    },
+    {
+      "id": "extra_unknown_field",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0",
+        "channel": "tools"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "unknown_identity_field"
+    },
+    {
+      "id": "domain_name_as_identity",
+      "class": "promoted_memory",
+      "identity": {
+        "decision_object_id": "obj-1",
+        "domain_name": "work"
+      },
+      "revision": "1",
+      "representation": "summary",
+      "payload": "x",
+      "expected_refusal": "unknown_identity_field"
+    },
+    {
+      "id": "unknown_class",
+      "class": "user_memories",
+      "identity": {
+        "id": "1"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "unknown_class"
+    },
+    {
+      "id": "wrong_representation",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "parent_message_id": "m",
+        "tool_call_id": "c",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "unknown_representation"
+    },
+    {
+      "id": "span_not_utf8_aligned",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "parent_message_id": "m",
+        "tool_call_id": "c",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "日本",
+      "span": [
+        0,
+        2
+      ],
+      "expected_refusal": "span_not_utf8_aligned"
+    },
+    {
+      "id": "span_out_of_range",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "parent_message_id": "m",
+        "tool_call_id": "c",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        0,
+        4
+      ],
+      "expected_refusal": "span_out_of_range"
+    },
+    {
+      "id": "span_reversed",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "parent_message_id": "m",
+        "tool_call_id": "c",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        2,
+        1
+      ],
+      "expected_refusal": "span_reversed"
+    },
+    {
+      "id": "empty_revision",
+      "class": "canonical_claims",
+      "identity": {
+        "object_id": "obj-1"
+      },
+      "revision": "",
+      "representation": "decision_summary",
+      "payload": "x",
+      "expected_refusal": "missing_revision"
+    },
+    {
+      "id": "unknown_harness",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "omp",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "unknown_harness"
+    },
+    {
+      "id": "short_oid",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-1",
+        "object_format": "sha1",
+        "oid": "0123456"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "x",
+      "expected_refusal": "malformed_oid"
+    },
+    {
+      "id": "mixed_case_oid",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-1",
+        "object_format": "sha1",
+        "oid": "0123456789ABCDEF0123456789abcdef01234567"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "x",
+      "expected_refusal": "malformed_oid"
+    },
+    {
+      "id": "sha1_length_declared_sha256",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-1",
+        "object_format": "sha256",
+        "oid": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "x",
+      "expected_refusal": "malformed_oid"
+    },
+    {
+      "id": "unknown_object_format",
+      "class": "git_commits",
+      "identity": {
+        "repository_id": "repo-1",
+        "object_format": "md5",
+        "oid": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "revision": "1",
+      "representation": "commit_message",
+      "payload": "x",
+      "expected_refusal": "malformed_oid"
+    },
+    {
+      "id": "numeric_identity_value",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": 0
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "missing_identity_field"
+    },
+    {
+      "id": "null_identity",
+      "class": "messages",
+      "identity": null,
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "missing_identity_field"
+    },
+    {
+      "id": "payload_not_string",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": [
+        "x"
+      ],
+      "expected_refusal": "payload_not_string"
+    },
+    {
+      "id": "span_one_element",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        1
+      ],
+      "expected_refusal": "malformed_span"
+    },
+    {
+      "id": "span_three_elements",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        0,
+        1,
+        2
+      ],
+      "expected_refusal": "malformed_span"
+    },
+    {
+      "id": "span_negative",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        -1,
+        2
+      ],
+      "expected_refusal": "malformed_span"
+    },
+    {
+      "id": "precedence_unknown_harness_before_span",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "omp",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        2,
+        1
+      ],
+      "expected_refusal": "unknown_harness"
+    },
+    {
+      "id": "precedence_missing_field_before_representation",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "abc",
+      "expected_refusal": "missing_identity_field"
+    },
+    {
+      "id": "precedence_revision_before_span",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "",
+      "representation": "tool_output",
+      "payload": "abc",
+      "span": [
+        0,
+        9
+      ],
+      "expected_refusal": "missing_revision"
+    },
+    {
+      "id": "precedence_class_before_everything",
+      "class": "user_memories",
+      "identity": null,
+      "revision": "",
+      "representation": "x",
+      "payload": 5,
+      "expected_refusal": "unknown_class"
+    }
+  ],
+  "refusal_precedence": [
+    "unknown_class",
+    "missing_identity_field",
+    "unknown_identity_field",
+    "unknown_harness",
+    "malformed_oid",
+    "missing_revision",
+    "unknown_representation",
+    "payload_not_string",
+    "malformed_span",
+    "span_reversed",
+    "span_out_of_range",
+    "span_not_utf8_aligned"
+  ]
+}

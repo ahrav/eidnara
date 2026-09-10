@@ -47,5 +47,6 @@ evidence.
 | `memory-store`, `daemon` | `part-3-store-core` (as `memory-store/`), `part-4a` through `part-4f` (as `daemon/<area>/`), and the `part-4-module` scope lens, all in the host source repository at `eb6da6109` | U4 |
 | `authority-transition`, `lkg`, `retrieval`, `dreamer`, `embeddings`, `git-ingestion` | `part-5a-storage`, `part-5c-transform-ts`, discovery | U5 |
 | `cli`, `historian-ts` | `part-5d-cli`, `part-5b-historian-ts` | U7 |
+| `search-projection` | the RP2.1 specification ([#347](https://github.com/ahrav/eidnara/issues/347)) and its companion catalogs for embedding, export and recovery, and projection coverage, authored against Eidnara `913234433` | RP2.1 P1 |
 
 Part directories do not exist before their assigned waves.
