@@ -401,8 +401,10 @@ mod tests {
         let memory_properties = memory_schema["properties"]
             .as_object()
             .expect("ctx_memory schema has properties");
-        assert!(memory_properties.contains_key("publicClaimId"));
-        assert!(memory_properties.contains_key("publicClaimIds"));
+        assert!(memory_properties.contains_key("objectId"));
+        assert!(memory_properties.contains_key("objectIds"));
+        assert!(!memory_properties.contains_key("publicClaimId"));
+        assert!(!memory_properties.contains_key("mutationToken"));
 
         for guidance in [
             GUIDANCE_FULL_PRIMARY,

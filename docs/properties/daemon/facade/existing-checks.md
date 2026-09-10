@@ -23,6 +23,40 @@ record and are also real: the scope map cites `:167-168` and lens A cites
 `:171-172`, which are the `name:` and `run:` lines of the same step at the two
 commits. All four describe one step; only the file moved.
 
+Reconciliation at this repository's HEAD. The six claim commands, their
+handlers, `claim_route_root`, `claim_mirror_error`, the `memory_tool` claim
+adapters, and the `ctx_memory` mirror reads are gone from `crates/daemon`; the
+facade routes the five `ctx_*` names only. Every entry below that names a claim
+handler, `list_committed_claims`, `stage_claim_intent`,
+`inspect_claim_intents`, or `acknowledge_claim_intent` describes the source
+tree; at HEAD the check it describes has no subject. Two checks replace them,
+both in `lib.rs` `mod tests`, both status `unaudited`:
+
+- `retired_claim_facade_names_are_unsupported` sends each of the six names
+  through the `name`, `kind`, and `method` envelopes and asserts
+  `facade_envelope_not_supported` or `unrecognized_request_shape`, then sends
+  `ctx_memory` `get` and asserts a tool error naming canonical kernel state,
+  and sends `ctx_memory` `list` and asserts the unknown-action error, since
+  `list` is no longer an advertised action.
+- `daemon_production_source_names_no_claim_lane_identifier` walks every `.rs`
+  file under `crates/daemon/src`, splits off each file's `#[cfg(test)] mod
+  tests`, and asserts that no production line names a claim-mirror,
+  claim-intent, claim-lane, or snapshot-vector identifier. It is the whole-crate
+  absence guard for the deletion this paragraph records.
+
+The rows and totals below are the source tree's and are not recomputed at HEAD.
+The deltas this deletion makes to them are: the `memory_tool.rs` row under
+"File-local tests in the 4d files" names
+`list_committed_claims_excludes_anti_memory_even_when_requested`, which is
+deleted; at HEAD the file's one test is
+`case_insensitive_match_offsets_map_back_to_the_source_text`, a search-adapter
+test the source tree did not carry. The three `claim_intent`, `claim_effects`,
+and `claim.mirror` rows under "Targets in scope with zero test-module
+references" name targets that no longer exist, so the zero is no longer a gap.
+The 102 in-crate total is the source tree's count; at HEAD it is one lower on
+the file-local side and two higher on the `lib.rs` side for this deletion
+alone, before any other drift since the source snapshot.
+
 Three corrections to references handed to this synthesis, made per METHOD.md rule
 1 and recorded rather than silently applied.
 
@@ -199,7 +233,7 @@ in the drain test:
 
 | Site | What it installs |
 | --- | --- |
-| `module-state-sync.test.ts:1405-1415` | The `drainClaimEffectPrefix` call under test, whose `deliver` option is a closure returning `{ ackedEffectId: receipt.effects.at(-1)?.id ?? 0 }` (`:1414`) — the value the producer is about to require |
+| `module-state-sync.test.ts:1405-1415` | The `drainClaimEffectPrefix` call under test, whose `deliver` option is a closure returning `{ ackedEffectId: receipt.effects.at(-1)?.id ?? 0 }` (`:1414`) - the value the producer is about to require |
 
 That covers the drain's ordering and its per-receipt checkpoint atomicity, which
 are real properties. What it does not cover is any module behaviour, because the
@@ -221,7 +255,7 @@ wire validator at `module-wire.ts:717`, has **zero** test references anywhere in
 
 **State it plainly: the module's ack is checked by nothing, the producer's drain
 and checkpoint advance are checked against a closure in the test file, and the
-composition — a real module ack advancing a real durable checkpoint — is checked
+composition - a real module ack advancing a real durable checkpoint - is checked
 nowhere.** There is no harness that could check it: `direct_host.rs` contains
 **zero** 4d method literals, so the facade has no end-to-end coverage through a
 real `Handler` at all.
@@ -236,8 +270,8 @@ comment above it: a future cursor makes the prune boundary that future id, and
 effects allocated below it afterwards are deleted having never been published. So
 a module ack cannot advance the checkpoint past effects the producer has not
 written; it can only skip effects the producer has. Those guards are themselves
-covered — `storage-claim-operations.test.ts` carries 12 `ackedEffectId` sites at
-`:852-1077` — under `ci.yml:257` (source-catalog line, not present at HEAD). The mitigation narrows the blast radius to
+covered - `storage-claim-operations.test.ts` carries 12 `ackedEffectId` sites at
+`:852-1077` - under `ci.yml:257` (source-catalog line, not present at HEAD). The mitigation narrows the blast radius to
 *skipped* effects rather than fabricated ones. It does not close the gap, and it
 lives entirely on the side that is not the one making the claim.
 
@@ -464,7 +498,7 @@ impossibility into a production panic. `:15735`,
 `unreachable!("the connect-failure CAS loop returns from both attempts")`, is the
 sole written statement of that loop's invariant. Neither has a named test.
 
-**`.expect(`: 40 across the two `lib.rs` ranges** — 4 in `:10042-11917`
+**`.expect(`: 40 across the two `lib.rs` ranges** - 4 in `:10042-11917`
 (`:10946`, `:11022`, `:11082`, `:11186`, all four note-evaluator mutex labels) and
 36 in `:11919-16001`, concentrated in the health and status envelope
 (`:12053-12099`, 14 sites) and the native serializers (`:12588`, `:13003`,
@@ -489,8 +523,8 @@ note-evaluation protocol), `encode_failed` (4), `route_unbound` (3),
 `claim_intent_encode_failed` (3) and `bad_request` (3). The note-evaluation
 protocol contributes `protocol_unsupported`, `protocol_retired`,
 `positive_wait_unsupported` and `registration_unknown`. **The claim ledger's three
-codes are one per handler** — `claim_intent_stage_failed`,
-`claim_intent_inspect_failed`, `claim_intent_ack_failed` — each collapsing every
+codes are one per handler** - `claim_intent_stage_failed`,
+`claim_intent_inspect_failed`, `claim_intent_ack_failed` - each collapsing every
 `Err` including an identity conflict, which is why a digest conflict and a store
 fault are indistinguishable to a caller. Two codes exist purely to convert a
 nominally successful transform into a typed error,
@@ -514,8 +548,8 @@ at `:15846`, `:15929`, `:15950` and `:15963`. Three strictness tiers, one surfac
 it appears on three of the eleven routed names; `cycle_exhausted` is a single-site
 field carrying a two-cause distinction `PARITY.md:41-52` spends twelve lines on.
 
-**Discarded results: three `let _` sites**, all in `:11919-16001` — `:12337`,
-`:12539`, `:12617` — and **zero in `:10042-11917`**. Lower than 4c's six. Whether
+**Discarded results: three `let _` sites**, all in `:11919-16001` - `:12337`,
+`:12539`, `:12617` - and **zero in `:10042-11917`**. Lower than 4c's six. Whether
 each is licensed by a comment was not read; `:12539` is `let _ = mode;`, which is
 a parameter suppression rather than a discarded fallible call.
 
@@ -607,7 +641,7 @@ Ranked by the gap between what the code decides and what any check proves.
    the language boundary, and the module's own doc says nothing about the ack
    being validation-only. Contrast the neighbouring
    `handle_claim_intent_stage`, which does pass the route root to the store at
-   `:10100` — one of four, with no stated reason for the asymmetry.
+   `:10100` - one of four, with no stated reason for the asymmetry.
 
 2. **Six success-shaped error paths, one tested.** An error delivered inside a
    transport success, with `isError: false` or with no field distinguishing it
@@ -679,8 +713,8 @@ Ranked by the gap between what the code decides and what any check proves.
    exercises.
 
 9. **`facade_arguments`' unwrap branch is unreached and its sibling is tested.**
-   `:25333` proves the precedence half — with a primary field present, the
-   `reduced`/`summary` envelope is preserved verbatim and a stray key survives —
+   `:25333` proves the precedence half - with a primary field present, the
+   `reduced`/`summary` envelope is preserved verbatim and a stray key survives -
    and no test drives the branch where the envelope becomes the argument map
    (`:14421-14434`).
 
