@@ -1695,8 +1695,8 @@
     "valid_supported_activation": "Required once the U4h gate exists, for every hook at every entry point; recorded beside the gate cells as a control, not as a marker cell."
   },
   "marker_definition_sites": {
-    "export-recovery": "docs/properties/rp2-1/export-recovery/fault-map.md",
-    "projection-coverage": "docs/properties/rp2-1/projection-coverage/fault-map.md",
-    "embedding": "docs/properties/rp2-1/embedding/fault-map.md"
+    "export-recovery": "docs/properties/search-projection/export-recovery/fault-map.md",
+    "projection-coverage": "docs/properties/search-projection/projection-coverage/fault-map.md",
+    "embedding": "docs/properties/search-projection/embedding/fault-map.md"
   }
 }

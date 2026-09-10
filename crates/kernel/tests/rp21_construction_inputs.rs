@@ -537,7 +537,7 @@ fn table_rows(body: &str) -> Vec<String> {
 #[test]
 fn markdown_matrix_restates_the_fixture_exactly() {
     let matrix = fixture("witness-matrix.json");
-    let text = read(&repo_root().join("docs/properties/rp2-1/witness-matrix.md"));
+    let text = read(&repo_root().join("docs/properties/search-projection/witness-matrix.md"));
 
     let expected_rows: Vec<String> = required_cells(&matrix)
         .iter()
