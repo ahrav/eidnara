@@ -8,8 +8,8 @@
 //! outside this disposable database.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
@@ -156,7 +156,13 @@ impl SearchProjection {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> Quarantine {
-        let quarantine = self.record_quarantine(kind, error);
+        let mut state = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quarantine = state
+            .get_or_insert_with(|| Quarantine::new(kind, error))
+            .clone();
         self.quarantined.store(true, Ordering::Release);
         quarantine
     }
@@ -167,16 +173,12 @@ impl SearchProjection {
         quarantine
     }
 
-    fn record_quarantine(&self, kind: QuarantineKind, error: &dyn std::fmt::Display) -> Quarantine {
-        self.quarantine
+    pub(crate) fn acknowledgement_guard(&self) -> Option<MutexGuard<'_, Option<Quarantine>>> {
+        let state = self
+            .quarantine
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_or_insert_with(|| Quarantine::new(kind, error))
-            .clone()
-    }
-
-    pub(crate) fn allows_acknowledgement(&self) -> bool {
-        !self.quarantined.load(Ordering::Acquire)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.is_some() { None } else { Some(state) }
     }
 
     /// Forces quarantine without constructing a storage failure, so tests can

@@ -611,29 +611,29 @@ impl KernelStore {
     ) -> Result<(), SourceHoldError> {
         let acknowledged =
             self.acknowledge_through_source_hold_if(binding, hold_id, through, updated_at, || {
-                true
+                Some(())
             })?;
         debug_assert!(acknowledged);
         Ok(())
     }
 
-    /// Moves the checkpoint only when `allow` still returns true after the kernel writer is acquired.
-    /// This lets a consumer coordinate an external-store validity check without holding that store's lock while waiting for the kernel writer.
-    pub fn acknowledge_through_source_hold_if(
+    /// Moves the checkpoint only when `authorize` returns a token after the kernel writer is acquired.
+    /// The token remains live until the checkpoint transaction ends.
+    pub fn acknowledge_through_source_hold_if<Authorization>(
         &self,
         binding: &SourceHoldBinding,
         hold_id: &str,
         through: i64,
         updated_at: i64,
-        allow: impl FnOnce() -> bool,
+        authorize: impl FnOnce() -> Option<Authorization>,
     ) -> Result<bool, SourceHoldError> {
         if updated_at < 0 {
             return Err(SourceHoldError::InvalidRequest);
         }
         let mut writer = self.lock_writer()?;
-        if !allow() {
+        let Some(_authorization) = authorize() else {
             return Ok(false);
-        }
+        };
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite)?;

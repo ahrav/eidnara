@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use host_runtime::synapse::inference::validate_unit_vector;
 use kernel::{
-    CurrentInputExpectation, CurrentInputGuard, EligibilityBinding, EligibilityVerdict,
-    KernelError, KernelStore, StaleInput,
+    CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
+    EligibilityVerdict, KernelError, KernelStore, StaleInput,
 };
 use retrieval::batch::VectorGeneration;
 use retrieval::vectors::{
@@ -27,7 +27,7 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 /// One vector ready to publish: the descriptor it was produced for, the generation it belongs to, and the accounting the inference charged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorPublication<'a> {
-    pub expectation: CurrentInputExpectation,
+    pub input: CurrentInputDescriptor,
     pub generation: &'a VectorGeneration,
     pub vector: &'a [f32],
     pub input_bytes: u64,
@@ -57,8 +57,6 @@ pub enum PublicationEvent {
 pub enum ObsoleteCause {
     /// The kernel's descriptor no longer matches the expectation.
     Canonical(StaleInput),
-    /// The projection's own row disagrees with the vector's identity.
-    Projected(ObsoleteReason),
     /// Reconciliation found an obsolete job whose exact cause was not stored.
     ProjectedReconciled,
 }
@@ -205,36 +203,45 @@ impl<'a> EmbeddingPublisher<'a> {
         observer(PublicationEvent::VectorValidated);
 
         observer(PublicationEvent::GuardRequested);
-        let guard =
-            match self
-                .kernel
-                .guard_current_input(&publication.expectation, eligibility, deadline)
+        let expectation = CurrentInputExpectation {
+            object_id: publication.input.object_id.clone(),
+            source_revision: publication.input.source_revision,
+            occurrence_id: publication.input.detail.occurrence_id.clone(),
+            payload_id: publication.input.detail.payload_id.clone(),
+            artifact_digest: publication.input.detail.artifact_digest.clone(),
+        };
+        let guard = match self
+            .kernel
+            .guard_current_input(&expectation, eligibility, deadline)
+        {
+            Ok(Ok(guard)) => guard,
+            // Every other stale verdict is a fact about the input; this one is a fact about the binding.
+            Ok(Err(stale))
+                if matches!(
+                    stale.reason(),
+                    StaleInput::Ineligible(EligibilityVerdict::WrongScope)
+                ) =>
             {
-                Ok(Ok(guard)) => guard,
-                // Every other stale verdict is a fact about the input; this one is a fact about the binding.
-                Ok(Err(stale))
-                    if matches!(
-                        stale.reason(),
-                        StaleInput::Ineligible(EligibilityVerdict::WrongScope)
-                    ) =>
-                {
-                    return Err(PublicationError::WrongScope);
-                }
-                Ok(Err(stale)) => {
-                    let reason = stale.reason().clone();
-                    let result = self.obsolete(
-                        publication,
-                        stale.database_incarnation_id(),
-                        deadline,
-                        now,
-                        reason,
-                    );
-                    drop(stale);
-                    return result;
-                }
-                Err(KernelError::Deadline) => return Err(PublicationError::GuardDeadline),
-                Err(error) => return Err(error.into()),
-            };
+                return Err(PublicationError::WrongScope);
+            }
+            Ok(Err(stale)) => {
+                let reason = stale.reason().clone();
+                let result = self.obsolete(
+                    publication,
+                    stale.database_incarnation_id(),
+                    deadline,
+                    now,
+                    reason,
+                );
+                drop(stale);
+                return result;
+            }
+            Err(KernelError::Deadline) => return Err(PublicationError::GuardDeadline),
+            Err(error) => return Err(error.into()),
+        };
+        if guard.descriptor() != &publication.input {
+            return Err(PublicationError::Refused(ProjectionError::IdentityMismatch));
+        }
         observer(PublicationEvent::GuardAcquired);
         let outcome = self.commit(publication, &guard, deadline, now, observer);
         let quarantine = match &outcome {
@@ -259,7 +266,7 @@ impl<'a> EmbeddingPublisher<'a> {
                 let status = self.projection.read(|conn| {
                     completion_status(
                         conn,
-                        &publication.expectation.occurrence_id,
+                        &publication.input.detail.occurrence_id,
                         &publication.generation.generation_id,
                     )
                 });
@@ -309,7 +316,7 @@ impl<'a> EmbeddingPublisher<'a> {
                 CompletionOutcome::Embedded => Publication::Embedded,
                 CompletionOutcome::Replayed => Publication::Replayed,
                 CompletionOutcome::Obsolete(ObsoleteReason::Tombstoned) => {
-                    Publication::Obsolete(ObsoleteCause::Projected(ObsoleteReason::Tombstoned))
+                    return Err(ProjectionError::CorruptRow);
                 }
                 CompletionOutcome::Obsolete(ObsoleteReason::PayloadChanged) => {
                     return Err(ProjectionError::CorruptRow);
@@ -392,11 +399,11 @@ impl<'a> EmbeddingPublisher<'a> {
         now: i64,
         stale: StaleInput,
     ) -> Result<Publication, PublicationError> {
-        let occurrence_id = &publication.expectation.occurrence_id;
+        let occurrence_id = &publication.input.detail.occurrence_id;
         let generation_id = &publication.generation.generation_id;
         let marked = self.projection.write_within(deadline, |conn| {
             require_kernel_incarnation(conn, kernel_incarnation_id)?;
-            obsolete_embedding(conn, &publication.expectation, generation_id, now)
+            obsolete_embedding(conn, &publication.input, generation_id, now)
         });
         match marked {
             Ok(Obsoletion::Marked | Obsoletion::AlreadyTerminal) => {

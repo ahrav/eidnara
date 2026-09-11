@@ -592,7 +592,7 @@ impl<'a> SearchCatchUp<'a> {
             &consumer.hold_id,
             through,
             now,
-            || self.projection.allows_acknowledgement(),
+            || self.projection.acknowledgement_guard(),
         );
         if self.fault == Some(EpisodeFault::LoseAcknowledgementReply)
             && matches!(acknowledged, Ok(true))

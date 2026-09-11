@@ -22,7 +22,7 @@ use kernel::source_identity::Occurrence;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
     ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputExpectation, DomainSpec,
+    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputDescriptor, DomainSpec,
     EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress,
     RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission,
     SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourcePageBounds, SourceRow,
@@ -562,6 +562,29 @@ fn export_all(
             Some(next) => cursor = Some(next),
             None => return rows,
         }
+    }
+}
+
+fn snapshot_descriptor(
+    kernel: &KernelStore,
+    binding: &SourceHoldBinding,
+    hold: &SourceHold,
+) -> CurrentInputDescriptor {
+    let rows = export_all(
+        kernel,
+        binding,
+        &hold.hold_id,
+        hold.captured_at,
+        ExportWindow::Snapshot,
+    );
+    let row = rows.first().unwrap();
+    CurrentInputDescriptor {
+        object_id: row.object_id.clone(),
+        source_revision: row.revision,
+        detail: row.detail.clone(),
+        domain_id: row.domain_id.clone(),
+        sensitivity: row.sensitivity,
+        created_commit_seq: row.created_commit_seq,
     }
 }
 
@@ -1693,6 +1716,7 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);
     let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let input = snapshot_descriptor(&corpus.kernel, &consumer.binding, &hold);
     grow(&corpus, true);
     mutate(&search_path(dir.path()))
         .execute_batch("DROP TABLE projection_checkpoint")
@@ -1708,18 +1732,11 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
     // The projection quarantine blocks all writers, including `EmbeddingPublisher`.
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
     let project = ProjectScope::new(&"a".repeat(64)).unwrap();
-    let expectation = CurrentInputExpectation {
-        object_id: "srcdesc:never:1".to_string(),
-        source_revision: 1,
-        occurrence_id: "never".to_string(),
-        payload_id: format!("{:x}", Sha256::digest(b"payload")),
-        artifact_digest: format!("{:x}", Sha256::digest(b"artifact")),
-    };
     let generation = generation();
     let mut vector = vec![0.0f32; 8];
     vector[0] = 1.0;
     let publication = VectorPublication {
-        expectation,
+        input,
         generation: &generation,
         vector: &vector,
         input_bytes: 1,
@@ -1804,6 +1821,7 @@ fn a_quarantine_entered_after_the_local_commit_stops_the_acknowledgement() {
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);
     let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let input = snapshot_descriptor(&corpus.kernel, &consumer.binding, &hold);
     grow(&corpus, true);
     let search = search_path(dir.path());
     let mut quarantined = false;
@@ -1826,13 +1844,7 @@ fn a_quarantine_entered_after_the_local_commit_stops_the_acknowledgement() {
                 vector[0] = 1.0;
                 let refused = publisher.publish(
                     &VectorPublication {
-                        expectation: CurrentInputExpectation {
-                            object_id: "srcdesc:never:1".to_string(),
-                            source_revision: 1,
-                            occurrence_id: "never".to_string(),
-                            payload_id: format!("{:x}", Sha256::digest(b"payload")),
-                            artifact_digest: format!("{:x}", Sha256::digest(b"artifact")),
-                        },
+                        input: input.clone(),
                         generation: &generation,
                         vector: &vector,
                         input_bytes: 1,

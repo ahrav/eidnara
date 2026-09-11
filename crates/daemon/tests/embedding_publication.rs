@@ -32,7 +32,7 @@ use retrieval::batch::{
 };
 use retrieval::vectors::{
     CompletionOutcome, ObsoleteReason, VectorCompletion, complete_embedding_observed,
-    completion_status, encode,
+    completion_status, encode, obsolete_embedding,
 };
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
@@ -537,7 +537,7 @@ fn publication<'a>(
     vector: &'a [f32],
 ) -> VectorPublication<'a> {
     VectorPublication {
-        expectation: expectation_for(row),
+        input: descriptor_for(row),
         generation,
         vector,
         input_bytes: row.text.as_ref().map_or(0, |text| text.len() as u64),
@@ -993,13 +993,13 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
             PublicationEvent::GuardRequested
         ]
     );
-    let (state, bytes) = durable(dir.path(), &stale_guarded.expectation.occurrence_id);
+    let (state, bytes) = durable(dir.path(), &stale_guarded.input.detail.occurrence_id);
     assert_eq!((state.as_deref(), bytes), (Some("obsolete"), None));
     assert_kernel_writable(&corpus, "after-control");
 }
 
 #[test]
-fn a_stale_verdict_cannot_obsolete_a_different_live_input() {
+fn a_mismatched_publication_cannot_change_a_live_input() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -1010,19 +1010,22 @@ fn a_stale_verdict_cannot_obsolete_a_different_live_input() {
     let vector = unit(8);
     let publication = publication(row_for(&rows, &victim), &generation, &vector);
     let mut wrong_object = publication.clone();
-    wrong_object.expectation.object_id = "srcdesc:never:1".to_string();
+    wrong_object.input.object_id = "srcdesc:never:1".to_string();
     let mut wrong_artifact = publication.clone();
-    wrong_artifact.expectation.artifact_digest = "0".repeat(64);
+    wrong_artifact.input.detail.artifact_digest = "0".repeat(64);
     let mut wrong_payload = publication.clone();
-    wrong_payload.expectation.payload_id = "1".repeat(64);
+    wrong_payload.input.detail.payload_id = "1".repeat(64);
+    let mut wrong_creation = publication.clone();
+    wrong_creation.input.created_commit_seq += 1;
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
 
     for (label, forged) in [
         ("object", wrong_object),
         ("artifact", wrong_artifact),
         ("payload", wrong_payload),
+        ("creation", wrong_creation),
     ] {
-        let (result, _) = publish_once(&mut publisher, &forged, &project);
+        let (result, events) = publish_once(&mut publisher, &forged, &project);
         assert!(
             matches!(
                 result,
@@ -1031,11 +1034,20 @@ fn a_stale_verdict_cannot_obsolete_a_different_live_input() {
             "{label}: {result:?}",
         );
         assert_eq!(
-            durable(dir.path(), &forged.expectation.occurrence_id),
+            durable(dir.path(), &forged.input.detail.occurrence_id),
             (Some("pending".to_string()), None),
             "a stale verdict about another {label} obsoleted the live job: {result:?}",
         );
+        assert_eq!(
+            events,
+            [
+                PublicationEvent::VectorValidated,
+                PublicationEvent::GuardRequested,
+            ],
+            "{label}",
+        );
     }
+    assert!(publisher.quarantine().is_none());
 }
 
 #[test]
@@ -1068,7 +1080,7 @@ fn a_quarantine_entered_after_the_guard_stops_the_commit() {
         "a publication committed into a quarantined projection: {result:?}",
     );
     assert_eq!(
-        durable(dir.path(), &publication.expectation.occurrence_id),
+        durable(dir.path(), &publication.input.detail.occurrence_id),
         (Some("pending".to_string()), None),
     );
 }
@@ -1101,7 +1113,7 @@ fn a_projection_from_another_kernel_incarnation_refuses_the_completion() {
         "eligibility from one kernel completed work in another kernel's projection: {result:?}",
     );
     assert_eq!(
-        durable(dir.path(), &publication.expectation.occurrence_id),
+        durable(dir.path(), &publication.input.detail.occurrence_id),
         (Some("pending".to_string()), None),
     );
 
@@ -1115,7 +1127,7 @@ fn a_projection_from_another_kernel_incarnation_refuses_the_completion() {
         "a stale verdict from one kernel obsoleted work in another kernel's projection: {stale:?}",
     );
     assert_eq!(
-        durable(dir.path(), &publication.expectation.occurrence_id),
+        durable(dir.path(), &publication.input.detail.occurrence_id),
         (Some("pending".to_string()), None),
     );
 }
@@ -1964,7 +1976,7 @@ fn stale_obsoletion_quarantines_a_terminal_job_missing_its_vector() {
 }
 
 #[test]
-fn projection_only_staleness_obsoletes_guarded_publication() {
+fn a_projection_tombstone_that_contradicts_the_guard_quarantines() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -1987,13 +1999,13 @@ fn projection_only_staleness_obsoletes_guarded_publication() {
         &publication(row, &generation, &unit(8)),
         &project,
     );
-    assert_eq!(
-        result.unwrap(),
-        Publication::Obsolete(ObsoleteCause::Projected(ObsoleteReason::Tombstoned)),
-    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a guarded tombstone disagreement must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
-        (Some("obsolete".to_string()), None),
+        (Some("pending".to_string()), None),
     );
 }
 
@@ -2043,7 +2055,7 @@ fn guarded_payload_disagreement_publishes_quarantine_before_releasing_the_guard(
 }
 
 #[test]
-fn a_committed_projected_obsoletion_is_reconciled_after_a_lost_reply() {
+fn a_lost_reply_fault_does_not_mask_projection_corruption() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -2071,13 +2083,13 @@ fn a_committed_projected_obsoletion_is_reconciled_after_a_lost_reply() {
         &mut |_| {},
         PublicationFault::LoseLocalCommitReply,
     );
-    assert_eq!(
-        result.unwrap(),
-        Publication::Obsolete(ObsoleteCause::ProjectedReconciled),
-    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a guarded tombstone disagreement must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
-        (Some("obsolete".to_string()), None),
+        (Some("pending".to_string()), None),
     );
 }
 
@@ -2182,7 +2194,7 @@ fn corrupted_projection_provenance_quarantines_guarded_publication() {
 }
 
 #[test]
-fn completion_compares_every_immutable_occurrence_field() {
+fn completion_and_obsoletion_compare_every_immutable_occurrence_field() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -2270,6 +2282,18 @@ fn completion_compares_every_immutable_occurrence_field() {
             ),
             "{label}: {result:?}",
         );
+        let result =
+            projection.write(|conn| obsolete_embedding(conn, &input, &generation.generation_id, 3));
+        let rejected = match &result {
+            Err(SearchProjectionError::Projection(ProjectionError::IdentityMismatch)) => {
+                matches!(label, "source object" | "artifact")
+            }
+            Err(SearchProjectionError::Projection(ProjectionError::CorruptRow)) => {
+                !matches!(label, "source object" | "artifact")
+            }
+            _ => false,
+        };
+        assert!(rejected, "stale obsoletion {label}: {result:?}",);
         let (span_start, span_end) = row.detail.span.map_or((None, None), |(start, end)| {
             (
                 Some(i64::try_from(start).unwrap()),
@@ -2379,6 +2403,18 @@ fn decode_expectation(text: &str) -> CurrentInputExpectation {
     }
 }
 
+fn current_descriptor(
+    kernel: &KernelStore,
+    expectation: &CurrentInputExpectation,
+    project: &ProjectScope,
+) -> CurrentInputDescriptor {
+    let guard = kernel
+        .guard_current_input(expectation, eligibility(project), deadline())
+        .unwrap()
+        .expect("the crash fixture input is current");
+    guard.descriptor().clone()
+}
+
 /// The child reopens both stores the parent prepared and publishes one vector, parking at the named boundary until the parent kills it.
 #[test]
 #[ignore = "re-executed by the crash-cut test with its environment set"]
@@ -2391,10 +2427,11 @@ fn crash_child_entrypoint_reexecuted_by_the_parent() {
     let generation = generation(8);
     let vector = unit(8);
     let project = ProjectScope::new(PROJECT).unwrap();
+    let input = current_descriptor(&kernel, &expectation, &project);
     let mut publisher = EmbeddingPublisher::new(&kernel, &projection);
     let result = publisher.publish(
         &VectorPublication {
-            expectation,
+            input,
             generation: &generation,
             vector: &vector,
             input_bytes: 13,
@@ -2459,14 +2496,15 @@ fn run_crash_child(root: &Path, cut: Cut, expectation: &CurrentInputExpectation)
 fn crash_cuts_reopen_to_both_durable_records_or_neither() {
     for cut in [Cut::VectorStaged, Cut::LocalStaged, Cut::LocalReleased] {
         let dir = tempfile::tempdir().unwrap();
-        let (expectation, tip) = {
+        let (input, expectation, tip) = {
             let corpus = Corpus::open(dir.path());
             corpus.seed();
             let object = corpus.publish("a", "msg-a", "1", "first message");
             let generation = generation(8);
             let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
             drop(projection);
-            (expectation_for(row_for(&rows, &object)), corpus.tip())
+            let row = row_for(&rows, &object);
+            (descriptor_for(row), expectation_for(row), corpus.tip())
         };
         run_crash_child(dir.path(), cut, &expectation);
         let expected = match cut {
@@ -2499,7 +2537,7 @@ fn crash_cuts_reopen_to_both_durable_records_or_neither() {
         let (result, events) = publish_once(
             &mut publisher,
             &VectorPublication {
-                expectation: expectation.clone(),
+                input: input.clone(),
                 generation: &generation,
                 vector: &vector,
                 input_bytes: 13,

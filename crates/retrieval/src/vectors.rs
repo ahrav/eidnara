@@ -9,7 +9,7 @@ use storage::GuardedConn;
 
 use crate::ProjectionError;
 use crate::batch::{VectorGeneration, registered_generation};
-use kernel::{CurrentInputDescriptor, CurrentInputExpectation};
+use kernel::CurrentInputDescriptor;
 
 /// One vector for one occurrence, with the identity it was produced under.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +66,7 @@ pub enum CompletionPhase {
 
 /// Completes the job for `completion.occurrence_id` under `completion.generation` inside the caller's transaction, reporting each mutation to `observer` as it lands while the transaction is still open.
 /// Only a `pending` or `admitted` job accepts a vector or becomes obsolete; a job already `embedded` or `published` is judged by its stored vector alone (a replay or a conflict), and a job in any other state is closed to completion.
+/// A caller holding a current-input guard treats an obsolete outcome as projection corruption and rolls the transaction back, because the guard has already ruled out ordinary staleness.
 ///
 /// # Errors
 ///
@@ -103,7 +104,7 @@ pub fn complete_embedding_observed(
             occurrence_id: occurrence_id.clone(),
         });
     };
-    if !occurrence_matches(conn, completion.input)? {
+    if occurrence_matches(conn, completion.input)? != Some(true) {
         return Err(ProjectionError::CorruptRow);
     }
     let job_state: Option<String> = conn
@@ -231,11 +232,11 @@ pub enum Obsoletion {
 /// Marks the pair's open job obsolete because the kernel no longer holds its input.
 pub fn obsolete_embedding(
     conn: &GuardedConn<'_>,
-    input: &CurrentInputExpectation,
+    input: &CurrentInputDescriptor,
     generation_id: &str,
     now: i64,
 ) -> Result<Obsoletion, ProjectionError> {
-    let occurrence_id = &input.occurrence_id;
+    let occurrence_id = &input.detail.occurrence_id;
     let job_state: Option<String> = conn
         .query_row(
             "SELECT state FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2",
@@ -264,10 +265,13 @@ pub fn obsolete_embedding(
         return Err(ProjectionError::CorruptRow);
     };
     if stored_object_id != input.object_id
-        || stored_artifact_digest != input.artifact_digest
-        || stored_payload_id != input.payload_id
+        || stored_artifact_digest != input.detail.artifact_digest
+        || stored_payload_id != input.detail.payload_id
     {
         return Err(ProjectionError::IdentityMismatch);
+    }
+    if occurrence_matches(conn, input)? != Some(true) {
+        return Err(ProjectionError::CorruptRow);
     }
     if matches!(job_state.as_str(), "embedded" | "published") {
         let has_vector: bool = conn.query_row(
@@ -298,11 +302,11 @@ pub fn obsolete_embedding(
 fn occurrence_matches(
     conn: &GuardedConn<'_>,
     input: &CurrentInputDescriptor,
-) -> Result<bool, ProjectionError> {
+) -> Result<Option<bool>, ProjectionError> {
     let detail = &input.detail;
     conn.query_row(
         "SELECT tuple,lineage_id,class,revision,representation,span_start,span_end,
-                payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
+                domain_id,sensitivity,source_object_id,source_evidence_id,
                 source_artifact_digest,created_commit_seq
          FROM occurrences WHERE occurrence_id=?1",
         [&detail.occurrence_id],
@@ -323,14 +327,15 @@ fn occurrence_matches(
                 && row.get::<_, i64>(3)? == input.source_revision
                 && row.get_ref(4)?.as_str()? == detail.representation
                 && span_matches
-                && row.get_ref(8)?.as_str()? == input.domain_id
-                && row.get_ref(9)?.as_str()? == input.sensitivity.as_str()
-                && row.get_ref(10)?.as_str()? == input.object_id
-                && row.get_ref(11)?.as_str()? == detail.evidence_id
-                && row.get_ref(12)?.as_str()? == detail.artifact_digest
-                && row.get::<_, i64>(13)? == input.created_commit_seq)
+                && row.get_ref(7)?.as_str()? == input.domain_id
+                && row.get_ref(8)?.as_str()? == input.sensitivity.as_str()
+                && row.get_ref(9)?.as_str()? == input.object_id
+                && row.get_ref(10)?.as_str()? == detail.evidence_id
+                && row.get_ref(11)?.as_str()? == detail.artifact_digest
+                && row.get::<_, i64>(12)? == input.created_commit_seq)
         },
     )
+    .optional()
     .map_err(Into::into)
 }
 
