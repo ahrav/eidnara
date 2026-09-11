@@ -150,11 +150,11 @@ not whether the focused tests ran.
 | [ctx-reduce-availability.test.ts:241][permission-evaluator] | `permissionDisabled` last-match semantics, session overlay after agent rules, wildcard escaping, and distinct active-agent inputs. | unaudited |
 | [hook.test.ts:167][permission-witness] | Rejection and fake-time timeout after a stored deny reach the constant P5 marker for transform and capture; outcome checks require false wire verdicts and no capture. The marker establishes reachability, not a distinct fallback outcome. | unaudited |
 | [hook.test.ts:245][permission-hit] | Transform and capture share fresh hits without another SDK permission read; missing-client cases suppress both. | unaudited |
-| [hook.test.ts:290][permission-lifecycle] | Session update, native compaction, and flush invalidate every agent for one session; deletion clears entries; another session stays fresh. An overlapping capture allow cannot clear a newer transform deny. | unaudited |
-| [hook.test.ts:413][permission-overlap] | Real transform and capture hooks share one fill. Empty host agents normalize to absence: SDK agents are empty, session allow/deny rules decide, and undefined or empty capture reuses the same key. | unaudited |
+| [hook.test.ts:292][permission-lifecycle] | Session update, native compaction, and flush invalidate every agent for one session; deletion clears entries; another session stays fresh. An overlapping capture allow cannot clear a newer transform deny. | unaudited |
+| [hook.test.ts:415][permission-overlap] | Real transform and capture hooks share one fill. Empty host agents normalize to absence: the agent-list API is not called, session allow/deny rules decide, and undefined or empty capture reuses the same key. | unaudited |
 | [ctx-reduce-availability.test.ts:347][permission-lifetime] | Identity isolation, shared pending reads and timeout, 30 s read-start expiry at lookup and settlement, empty/allow/deny failures, missing named agents, malformed/error SDK payloads, invalidation fencing, and settled/pending LRU eviction. | unaudited |
-| [ctx-reduce-availability.test.ts:26-122][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row. | unaudited |
-| [Frozen differential and example states][tmidturn] | Every valid example compares against the frozen base before and after rollback-scoped second-session rows. The reference file and shared primitives are hash-pinned. Malformed/dynamic values and tuple sentinels remain covered. Approved inconsistent associations have both old-false/new-true and old-true/new-false checks. Equality applies to static snapshots only. | unaudited |
+| [ctx-reduce-availability.test.ts:29-125][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row. | unaudited |
+| [Frozen differential and example states][tmidturn] | Every valid example compares against the frozen base before and after rollback-scoped second-session rows. The reference file is hash-pinned; its shared primitives are live on both sides. Malformed/dynamic values and tuple sentinels remain covered. Approved inconsistent associations have both old-false/new-true and old-true/new-false checks. Equality applies to static snapshots only. | unaudited |
 | [Native cache contract][session-db-cache] | Both adapters exercise native retirement after eviction, oversized SQL/binds, throwing execution, close, and replacement without GC. Real time/part reads grow from 801 to 870 IDs across 70 remainders with mid-turn reads between them: all five statements stay warm on one connection, with zero closes. Timestamp maps, ordered message/part outputs and frozen input lists are checked. Binding limits, arrays, named binds and partless users remain covered; finalizer failure still closes the database, and 128-query pressure leaves at most 64 live natives. | unaudited |
 | [Transform hook witness][session-db-hook] | Four real transform calls send `mid_turn` values false, false, true after a committed edit, then false after same-path replacement. | unaudited |
 | [isMidTurn wrapper][tismidturn] | Idle DB, missing DB, unreadable DB returns mid-turn. | unaudited |
@@ -165,7 +165,7 @@ not whether the focused tests ran.
 | [module-wire.test.ts:1308][t1308] | Unpaged `bytes` equals a later `JSON.stringify` length. | unaudited |
 | [module-wire.test.ts:1371][t1371] | Each paged `bytes` equals a later `JSON.stringify` length. | unaudited |
 | [module-wire.test.ts:1391][t1391] | The pageable array field list matches the daemon's Rust literal. | unaudited |
-| [rust-mode-transform.test.ts:532, 570, 609][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
+| [rust-mode-transform.test.ts:537, 575, 614][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
 | [frame-channel.test.ts:181, 193][t181] | The declared byte length equals written bytes for lone surrogates, including across a segment boundary. | unaudited |
 | [Joint pager and native-writer fake][serialized-writer] | Frozen corpus checks carried UTF-8 bytes against the raw header and captured byte array through the real module transport, client encoder, and writer. Exact first/final lengths and page counts are asserted. | unaudited |
 | [Module transport snapshot][serialized-transport] | A getter changes on a second read, source and inspection values mutate, and a stringify spy rejects any send-time serialization. The public connection factory and channel injection exercise the transport without private-field assignments. | unaudited |
@@ -174,8 +174,8 @@ not whether the focused tests ran.
 | [Pager serialization spy][serialized-pager] | The full input and every emitted envelope serialize once. `toJSON` runs once. Digest and packing serializations remain outside that claim. | unaudited |
 | [Live transform hook][serialized-hook] | The real hook passes a carrier with the matching transform/session discriminator. | unaudited |
 | [Real-host corpus][serialized-host] | A registered Cargo integration test compiles in normal CI and is ignored until a generated corpus is supplied. The one-command wrapper requires one named pass. It verifies byte/hash receipts, twelve complete transforms equal to unpaged controls, nine staged pages, six unchanged surrogate refusals, one pager refusal, exact intermediate/final boundaries, and the 24-byte f64 witness. | unaudited |
-| [rust-mode-transform.test.ts:1441, 1577][tinplace] | In-place mutation of an older message forces a full send; recovery after repeated rejection. | unaudited |
-| [rust-mode-transform.test.ts:244][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog`). | unaudited |
+| [rust-mode-transform.test.ts:1446, 1582][tinplace] | In-place mutation of an older message forces a full send; recovery after repeated rejection. | unaudited |
+| [rust-mode-transform.test.ts:248][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog`). | unaudited |
 | [logger.test.ts:358][t358] | Control characters are removed; entry size is bounded; no forged fourth line. | unaudited |
 | [logger.test.ts:381][t381] | The default log is `0600` under `0700` directories; a planted symlink is not followed. | unaudited |
 | [logger.test.ts:342, 408][t342] | Swallowed-write counter; exit flush without holding the process. | unaudited |
@@ -208,8 +208,8 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [permission-evaluator]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L241
 [permission-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L167
 [permission-hit]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L245
-[permission-lifecycle]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L290
-[permission-overlap]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L413
+[permission-lifecycle]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L292
+[permission-overlap]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L415
 [permission-lifetime]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347
 
 Suspiciously quiet: `transform-stage-logger.ts` has no test file;
@@ -423,15 +423,15 @@ not a claim that no related check exists anywhere in the repository.
 [t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15309
 [t-sync]: ../../../../crates/storage/src/lib.rs#L3397
 
-[tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L532
-[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
-[tinplace]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1441
-[tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L26
-[tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L871
-[tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1117-L1148
-[tdbpath]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1150-L1218
+[tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L537
+[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
+[tinplace]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1446
+[tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L29-L125
+[tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L892
+[tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1138-L1169
+[tdbpath]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1171-L1239
 [session-db-cache]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/session-db-cache-contract.ts#L1-L392
-[session-db-hook]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1612-L1666
+[session-db-hook]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1613-L1667
 [tordinal]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.test.ts#L173
 [tsqlite]: ../../../../packages/opencode-plugin/src/shared/sqlite.test.ts#L279
 [tbind]: ../../../../packages/opencode-plugin/src/shared/sqlite-bind-style.test.ts#L32

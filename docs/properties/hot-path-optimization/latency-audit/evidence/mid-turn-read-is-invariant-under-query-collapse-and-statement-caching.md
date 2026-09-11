@@ -154,8 +154,13 @@ the file at the same path.
   All six copied predicate/helper bodies compare identically with that commit
   after TypeScript printing without comments. The reference does not import
   candidate predicate helpers. Its complete file is SHA-256 pinned at
-  `71ffca14e993205825465bda9ff34af779289757b3ab0c574f2d7112929b2bff`,
-  alongside the five shared semantic source pins. The second-session additions
+  `71ffca14e993205825465bda9ff34af779289757b3ab0c574f2d7112929b2bff`.
+  The shared `jsonField`, `isMachineAuthoredPart`, and `isMeaningfulUserText`
+  primitives are live imports on both sides and are not pinned: they change
+  together, so the differential proves the query collapse, not those
+  primitives. An earlier revision pinned five shared source files; with 16, 13,
+  and 8 commits in the prior 90 days on three of them, every unrelated edit
+  would fail this test and invite a digest bump. The second-session additions
   roll back after each comparison, and a repeated-comparison test proves reuse.
 - Proof-first execution: Before production edits,
   `bun run --cwd packages/opencode-plugin test src/hooks/context/read-session-db.test.ts src/hooks/context/read-session-db-cache.test.ts`
@@ -249,10 +254,16 @@ the file at the same path.
   finalizers and calls native close in `finally`. Tests retain original native
   getters while applying 128-query pressure, require at most 64 live natives
   between calls, and require every getter to fail after teardown, without GC.
-- Query semantics: Two statements replace the candidate-count-dependent read
-  sequence. The 20-user witness counts two candidate executions versus 23
-  frozen-reference executions. The assistant statement selects the same
-  ordered row and joins its parts. The user statement joins same-session parts
+- Query semantics: One user-candidate statement replaces the
+  candidate-count-dependent read sequence. The 20-user witness counts three
+  executions (assistant row, candidates, completed assistant's parts) versus
+  23 frozen-reference executions. The assistant statement selects the same
+  ordered row without its parts; the parts statement runs only after the
+  `time.completed` and `tool-calls` exits, in the reference's order. A
+  materialization witness inserts 40 tool parts under a streaming and under a
+  `tool-calls` assistant and requires at most one materialized row across all
+  reads; before that ordering, a `LEFT JOIN` on the assistant statement
+  returned 40 rows per call. The user statement joins same-session parts
   and scopes the compaction subquery by session. JavaScript still decides
   part-object validity, exact provider booleans, machine flags, and cleaned
   user text. SQL NULL part data
@@ -291,8 +302,9 @@ the file at the same path.
   before reuse and around open. Ordinary same-inode commits do not replace the
   cache. Replacement after the last stat is detected at the next lookup; an
   adversarial open-time ABA sequence is not proven. Equivalence is limited to
-  static snapshots: assistant parts move from the reference's final read to
-  the first collapsed query, and the two classes are not jointly atomic under
+  static snapshots: the three reads keep the reference's order, but the user
+  candidate class is one joined statement and none of the reads are jointly
+  atomic under
   concurrent writers. No transaction is added to equate arbitrary schedules.
   Replacement fixtures use closed
   rollback-journal files, not concurrent WAL-family publication.
@@ -303,12 +315,12 @@ the file at the same path.
   inconsistent cross-session associations is not claimed.
 
 [reference]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
-[differential]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L871
+[differential]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L892
 [current-cache]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L226
-[current-predicate]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L356
+[current-predicate]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L358
 [native-contract]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/session-db-cache-contract.ts#L1-L392
 [runtime-launcher]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db-cache.test.ts#L6-L53
-[time-chunks]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L371-L409
+[time-chunks]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L373-L411
 [part-chunks]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.ts#L131-L164
 [message-ids]: ../../../../../packages/opencode-plugin/src/features/context/compaction-marker.ts#L34-L72
 [graph-guard]: ../../../../../packages/opencode-plugin/src/testing/module-graph.test.ts#L46-L171

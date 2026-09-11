@@ -247,17 +247,19 @@ describe("eidnara hook", () => {
         const sessionId = "ses-permission-hit";
         clearToolPermissionDenied(sessionId);
         const client = createClientMock();
-        const agents = mock(async () => ({ data: [] }));
+        const agents = mock(async () => ({ data: [{ name: "build" }] }));
         client.app.agents = agents as never;
         const fake = createFakeModuleClient(() => ({ native_messages: [] }));
         const hook = requireHook(
             createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
         );
         const messages = installOneRawMessage(sessionId);
+        Object.assign(messages[0]!.info!, { agent: "build" });
         await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
         await hook["tool.execute.after"]({
             tool: "todowrite",
             sessionID: sessionId,
+            agent: "build",
             args: { todos: [{ content: "Allowed", status: "pending", priority: "high" }] },
         });
         await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
@@ -417,19 +419,19 @@ describe("eidnara hook", () => {
             const started = Promise.withResolvers<void>();
             const response = Promise.withResolvers<unknown>();
             const client = createClientMock();
-            client.session.get = mock(async () => ({
-                data: { permission: { todowrite: action } },
-            })) as never;
-            const agents = mock(() => {
+            const get = mock(() => {
                 started.resolve();
                 return response.promise;
             });
+            const agents = mock(async () => ({ data: agent ? [{ name: agent }] : [] }));
             client.app.agents = agents as never;
             const resolver = spyOn(permissionAvailability, "todowritePermissionDenied");
             const fake = createFakeModuleClient(() => ({ native_messages: [] }));
             const hook = requireHook(
                 createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
             );
+            await hook.resolveSessionDirectory(sessionId);
+            client.session.get = get as never;
             const messages = installOneRawMessage(sessionId);
             Object.assign(messages[0]!.info!, { agent });
             const transform = hook["experimental.chat.messages.transform"](
@@ -445,7 +447,7 @@ describe("eidnara hook", () => {
             });
             await Bun.sleep(0);
             expect(resolver).toHaveBeenCalledTimes(2);
-            response.resolve({ data: agent ? [{ name: agent }] : [] });
+            response.resolve({ data: { permission: { todowrite: action } } });
             await Promise.all([transform, capture]);
             await hook["tool.execute.after"]({
                 tool: "todowrite",
@@ -460,7 +462,8 @@ describe("eidnara hook", () => {
             expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(
                 action === "allow" ? 2 : 0,
             );
-            expect(agents).toHaveBeenCalledTimes(1);
+            expect(agents).toHaveBeenCalledTimes(agent ? 1 : 0);
+            expect(get).toHaveBeenCalledTimes(1);
         });
     }
 
