@@ -154,6 +154,8 @@ pub struct EpisodeReport {
 pub enum CatchUpError {
     #[error("the search projection is quarantined: {}", .0.detail)]
     Quarantined(Quarantine),
+    #[error("the search projection writer was fenced before catch-up")]
+    ProjectionFenced,
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -409,7 +411,7 @@ impl<'a> SearchCatchUp<'a> {
             Err(SearchProjectionError::Projection(ProjectionError::IdentityMismatch)) => {
                 return Err(Blocked::ProjectionIdentity.into());
             }
-            Err(error) => return Err(self.quarantine_from(error).into()),
+            Err(error) => return Err(self.stop_from_projection_error(error)),
         };
         if checkpoint.hold_id != consumer.hold_id {
             return Err(Blocked::BaselineMismatch {
@@ -489,11 +491,16 @@ impl<'a> SearchCatchUp<'a> {
                     .enter_quarantine(QuarantineKind::Integrity, &error)
                     .into())
             }
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Rejected =>
+            {
+                Err(CatchUpError::ProjectionFenced.into())
+            }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
             Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(&batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
                 Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
-                Err(error) => Err(self.quarantine_from(error).into()),
+                Err(error) => Err(self.stop_from_projection_error(error)),
             },
         }
     }
@@ -615,9 +622,22 @@ impl<'a> SearchCatchUp<'a> {
         Ok(())
     }
 
-    fn quarantine_from(&mut self, error: SearchProjectionError) -> CatchUpError {
+    fn stop_from_projection_error(&mut self, error: SearchProjectionError) -> Stop {
         if let SearchProjectionError::Quarantined(quarantine) = &error {
-            return CatchUpError::Quarantined(quarantine.clone());
+            return CatchUpError::Quarantined(quarantine.clone()).into();
+        }
+        if matches!(
+            &error,
+            SearchProjectionError::Projection(error) if classify(error) == Refusal::Identity
+        ) {
+            return Blocked::ProjectionIdentity.into();
+        }
+        if matches!(
+            &error,
+            SearchProjectionError::Store(error)
+                if classify_store_failure(error) == StoreFailure::Rejected
+        ) {
+            return CatchUpError::ProjectionFenced.into();
         }
         let kind = match &error {
             SearchProjectionError::Projection(error) if classify(error) == Refusal::Integrity => {
@@ -631,7 +651,7 @@ impl<'a> SearchCatchUp<'a> {
             }
             _ => QuarantineKind::Storage,
         };
-        self.enter_quarantine(kind, &error)
+        self.enter_quarantine(kind, &error).into()
     }
 
     /// Another writer can quarantine the projection while an episode runs, so

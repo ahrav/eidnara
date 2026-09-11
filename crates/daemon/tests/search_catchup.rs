@@ -1542,6 +1542,42 @@ fn corruption_and_storage_failures_quarantine_the_driver_without_acknowledgement
 }
 
 #[test]
+fn identity_change_during_commit_reconciliation_blocks_without_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let search = search_path(dir.path());
+    let mut changed = false;
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+
+    let report = driver
+        .run_episode_with_fault_for_test(
+            &consumer,
+            &bounds(),
+            3,
+            &mut |event| {
+                if matches!(event, EpisodeEvent::LocalReleased { .. }) && !changed {
+                    mutate(&search)
+                        .execute(
+                            "UPDATE projection_identity SET kernel_incarnation_id='other' WHERE singleton=1",
+                            [],
+                        )
+                        .unwrap();
+                    changed = true;
+                }
+            },
+            EpisodeFault::LoseLocalCommitReply,
+        )
+        .unwrap();
+    assert_eq!(blocked(&report), &Blocked::ProjectionIdentity);
+    assert!(driver.quarantine().is_none());
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
 fn a_negative_episode_clock_is_refused_before_anything_durable_moves() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
@@ -1741,7 +1777,7 @@ fn quarantine_between_ack_request_and_kernel_write_preserves_the_checkpoint() {
 }
 
 #[test]
-fn a_superseded_projection_writer_quarantines_catch_up() {
+fn a_superseded_projection_writer_rejects_catch_up_without_quarantine() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -1756,10 +1792,8 @@ fn a_superseded_projection_writer_quarantines_catch_up() {
     let error = driver
         .run_episode(&consumer, &bounds(), 3, &mut |_| {})
         .unwrap_err();
-    let CatchUpError::Quarantined(quarantine) = error else {
-        panic!("a superseded writer must quarantine catch-up: {error:?}");
-    };
-    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert!(matches!(error, CatchUpError::ProjectionFenced));
+    assert!(driver.quarantine().is_none());
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
 }
 

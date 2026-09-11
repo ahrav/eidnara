@@ -246,7 +246,7 @@ fn the_guard_excludes_canonical_mutations_until_it_drops_and_times_out_behind_a_
             .guard_current_input(&other, binding(&project), soon())
             .unwrap()
             .err()
-            .map(|stale| stale.into_parts().0),
+            .map(|stale| stale.reason().clone()),
         Some(StaleInput::Retracted)
     );
     // Reading under a fresh guard succeeds again; the earlier deadline granted nothing.
@@ -258,7 +258,7 @@ fn the_guard_excludes_canonical_mutations_until_it_drops_and_times_out_behind_a_
 }
 
 #[test]
-fn every_stale_dimension_is_named_and_releases_the_writer_at_once() {
+fn every_stale_dimension_is_named_and_retains_the_writer_until_dropped() {
     let fixture = Fixture::open();
     let project = ProjectScope::new(PROJECT).unwrap();
     let superseded = fixture.publish("a", "msg-a", "1", "first message", true, true);
@@ -335,10 +335,22 @@ fn every_stale_dimension_is_named_and_releases_the_writer_at_once() {
             .guard_current_input(expectation, binding(&project), soon())
             .unwrap();
         let stale_input = judged.expect_err(label);
-        let (reason, incarnation_id) = stale_input.into_parts();
-        assert_eq!(reason, stale, "{label}");
-        assert_eq!(incarnation_id, current_incarnation, "{label}");
-        // A refusal holds nothing: a bounded commit goes straight through.
+        assert_eq!(stale_input.reason(), &stale, "{label}");
+        assert_eq!(
+            stale_input.database_incarnation_id(),
+            current_incarnation,
+            "{label}"
+        );
+        if label == "superseded" {
+            let blocked = fixture.store.commit_before(
+                Instant::now() + Duration::from_millis(50),
+                intent("while-stale-held"),
+                |_| Ok(String::new()),
+            );
+            assert!(matches!(blocked, Err(KernelError::Deadline)), "{blocked:?}");
+        }
+        drop(stale_input);
+        // Once the consumer has acted on the stale verdict, dropping it releases the writer.
         fixture
             .store
             .commit_before(soon(), intent(&format!("after-{label}")), |_| {
@@ -381,7 +393,7 @@ fn a_descriptor_whose_cited_evidence_was_logically_deleted_is_retracted() {
             .guard_current_input(&expectation, local, soon())
             .unwrap()
             .err()
-            .map(|stale| stale.into_parts().0),
+            .map(|stale| stale.reason().clone()),
         Some(StaleInput::Retracted),
         "the guard granted a descriptor whose evidence was canonically deleted",
     );
@@ -506,4 +518,88 @@ fn a_corrupt_stored_descriptor_is_refused_rather_than_granted() {
         .guard_current_input(&current, binding(&project), soon())
         .unwrap()
         .expect("the restored descriptor is current");
+}
+
+#[test]
+fn registry_and_observation_metadata_must_agree_with_the_descriptor() {
+    let fixture = Fixture::open();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let current = fixture.publish("a", "msg-a", "1", "first message", true, true);
+    fixture
+        .store
+        .commit(intent("later-metadata-test-tip"), |_| Ok(String::new()))
+        .unwrap();
+    let db_path = fixture._root.path().join("kernel.sqlite");
+    let original_source_id: String = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT source_id FROM object_registry WHERE object_id=?1",
+            [&current.object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .execute_batch("DROP TRIGGER object_registry_append_only_update;")
+        .unwrap();
+
+    for (label, corrupt, restore) in [
+        (
+            "source id",
+            "UPDATE object_registry SET source_id='tampered' WHERE object_id=?1",
+            "",
+        ),
+        (
+            "source kind",
+            "UPDATE object_registry SET source_kind='canonical_claims' WHERE object_id=?1",
+            "UPDATE object_registry SET source_kind='messages' WHERE object_id=?1",
+        ),
+        (
+            "object kind",
+            "UPDATE object_registry SET object_kind='decision' WHERE object_id=?1",
+            "UPDATE object_registry SET object_kind='observation' WHERE object_id=?1",
+        ),
+        (
+            "observation kind",
+            "UPDATE observations SET observation_kind='other' WHERE object_id=?1",
+            "UPDATE observations SET observation_kind='source_descriptor' WHERE object_id=?1",
+        ),
+        (
+            "observation liveness",
+            "UPDATE observations SET invalidated_commit_seq=(SELECT MAX(commit_seq) FROM commit_log) WHERE object_id=?1",
+            "UPDATE observations SET invalidated_commit_seq=NULL WHERE object_id=?1",
+        ),
+        (
+            "sensitivity",
+            "UPDATE observations SET sensitivity_class='secret' WHERE object_id=?1",
+            "UPDATE observations SET sensitivity_class='normal' WHERE object_id=?1",
+        ),
+    ] {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute(corrupt, [&current.object_id]).unwrap();
+        drop(db);
+        let refused = fixture
+            .store
+            .guard_current_input(&current, binding(&project), soon());
+        assert!(
+            matches!(refused, Err(KernelError::CorruptCanonicalRow)),
+            "{label}: {refused:?}"
+        );
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        if label == "source id" {
+            db.execute(
+                "UPDATE object_registry SET source_id=?2 WHERE object_id=?1",
+                rusqlite::params![&current.object_id, &original_source_id],
+            )
+            .unwrap();
+        } else {
+            db.execute(restore, [&current.object_id]).unwrap();
+        }
+    }
+
+    fixture
+        .store
+        .guard_current_input(&current, binding(&project), soon())
+        .unwrap()
+        .expect("the restored metadata is current");
 }

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "76b08f606bb595d679b2b7ec448abc71323bd63c9696379a19cdc27970392421";
+    "e37a7ed70222f80a9f3a71e74c2b77cd2320292b91197057084c998e2ffd36fb";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -3129,6 +3129,7 @@ enum IdsPredicate {
 }
 
 /// The served-class query text for one `ids` shape. It embeds only constants, so each shape is identical on every call.
+// policy-digest:serving-start
 fn served_classes_sql(ids: IdsPredicate) -> String {
     let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
     let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
@@ -3224,6 +3225,7 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
              ORDER BY o.object_id"
     )
 }
+// policy-digest:serving-end
 
 /// Returns served rows before a surface is applied.
 fn served_classes(

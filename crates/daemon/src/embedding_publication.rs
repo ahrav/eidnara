@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use host_runtime::synapse::inference::validate_unit_vector;
 use kernel::{
-    CurrentInputExpectation, EligibilityBinding, EligibilityVerdict, KernelError, KernelStore,
-    StaleInput,
+    CurrentInputExpectation, CurrentInputGuard, EligibilityBinding, EligibilityVerdict,
+    KernelError, KernelStore, StaleInput,
 };
 use retrieval::batch::VectorGeneration;
 use retrieval::vectors::{
@@ -93,6 +93,9 @@ pub enum PublicationError {
     /// The search transaction may or may not have committed and the durable rows do not show its effect; the result lease is retained.
     #[error("the local commit outcome is unresolved")]
     LocalCommitUnresolved,
+    /// Another projection writer advanced the durable fence before this write began.
+    #[error("the search projection writer was fenced before publication")]
+    ProjectionFenced,
     /// The projection refused the completion before writing: no job, no occurrence, or another generation.
     #[error(transparent)]
     Refused(ProjectionError),
@@ -218,26 +221,22 @@ impl<'a> EmbeddingPublisher<'a> {
                     return Err(PublicationError::WrongScope);
                 }
                 Ok(Err(stale)) => {
-                    let (reason, kernel_incarnation_id) = stale.into_parts();
-                    return self.obsolete(
+                    let reason = stale.reason().clone();
+                    let result = self.obsolete(
                         publication,
-                        &kernel_incarnation_id,
+                        stale.database_incarnation_id(),
                         deadline,
                         now,
                         reason,
                     );
+                    drop(stale);
+                    return result;
                 }
                 Err(KernelError::Deadline) => return Err(PublicationError::GuardDeadline),
                 Err(error) => return Err(error.into()),
             };
         observer(PublicationEvent::GuardAcquired);
-        let outcome = self.commit(
-            publication,
-            guard.database_incarnation_id(),
-            deadline,
-            now,
-            observer,
-        );
+        let outcome = self.commit(publication, &guard, deadline, now, observer);
         drop(guard);
         observer(PublicationEvent::GuardReleased);
         match outcome {
@@ -274,24 +273,21 @@ impl<'a> EmbeddingPublisher<'a> {
     fn commit(
         &mut self,
         publication: &VectorPublication<'_>,
-        kernel_incarnation_id: &str,
+        guard: &CurrentInputGuard<'_>,
         deadline: Instant,
         now: i64,
         observer: &mut dyn FnMut(PublicationEvent),
     ) -> Result<Settled, PublicationError> {
         let completion = VectorCompletion {
-            occurrence_id: &publication.expectation.occurrence_id,
+            input: guard.descriptor(),
             generation: publication.generation,
-            source_object_id: &publication.expectation.object_id,
-            source_artifact_digest: &publication.expectation.artifact_digest,
-            payload_id: &publication.expectation.payload_id,
             vector: publication.vector,
             input_bytes: publication.input_bytes,
             input_tokens: publication.input_tokens,
         };
         let roll_back = self.fault == Some(PublicationFault::LoseLocalCommit);
         let mut applied = self.projection.write_within(deadline, |conn| {
-            require_kernel_incarnation(conn, kernel_incarnation_id)?;
+            require_kernel_incarnation(conn, guard.database_incarnation_id())?;
             let outcome = complete_embedding_observed(conn, &completion, now, &mut |phase| {
                 observer(match phase {
                     CompletionPhase::VectorInserted => PublicationEvent::VectorStaged,
@@ -361,6 +357,7 @@ impl<'a> EmbeddingPublisher<'a> {
             }),
             Err(SearchProjectionError::Store(error)) => match classify_store_failure(&error) {
                 StoreFailure::Deadline => Err(PublicationError::SearchDeadline),
+                StoreFailure::Rejected => Err(PublicationError::ProjectionFenced),
                 StoreFailure::Integrity => Ok(Settled::Quarantine {
                     kind: QuarantineKind::Integrity,
                     detail: error.to_string(),
@@ -370,7 +367,7 @@ impl<'a> EmbeddingPublisher<'a> {
         }
     }
 
-    /// Records that the job's input is gone from the kernel, outside any guard.
+    /// Records that the job's input is gone from the kernel while the stale verdict retains the kernel writer.
     ///
     /// The obsoletion is one keyed, state-predicated update, so a store failure whose effect is unknown is settled from the durable job state rather than by quarantine; only a refusal the store classifies as integrity or storage damage quarantines.
     fn obsolete(
@@ -385,15 +382,7 @@ impl<'a> EmbeddingPublisher<'a> {
         let generation_id = &publication.generation.generation_id;
         let marked = self.projection.write_within(deadline, |conn| {
             require_kernel_incarnation(conn, kernel_incarnation_id)?;
-            obsolete_embedding(
-                conn,
-                occurrence_id,
-                generation_id,
-                &publication.expectation.object_id,
-                &publication.expectation.artifact_digest,
-                &publication.expectation.payload_id,
-                now,
-            )
+            obsolete_embedding(conn, &publication.expectation, generation_id, now)
         });
         match marked {
             Ok(Obsoletion::Marked | Obsoletion::AlreadyTerminal) => {
@@ -434,6 +423,7 @@ impl<'a> EmbeddingPublisher<'a> {
             }
             Err(SearchProjectionError::Store(error)) => match classify_store_failure(&error) {
                 StoreFailure::Deadline => Err(PublicationError::SearchDeadline),
+                StoreFailure::Rejected => Err(PublicationError::ProjectionFenced),
                 StoreFailure::Integrity => {
                     Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
                 }

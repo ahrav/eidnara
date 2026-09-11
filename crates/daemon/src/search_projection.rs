@@ -52,6 +52,7 @@ pub enum SearchProjectionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreFailure {
     Deadline,
+    Rejected,
     Integrity,
     Unknown,
 }
@@ -62,8 +63,8 @@ pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
         StoreError::Baseline(_)
         | StoreError::FenceCorrupt { .. }
         | StoreError::FenceMissing
-        | StoreError::FenceExhausted { .. }
-        | StoreError::Fenced { .. } => StoreFailure::Integrity,
+        | StoreError::FenceExhausted { .. } => StoreFailure::Integrity,
+        StoreError::Fenced { .. } => StoreFailure::Rejected,
         StoreError::Lease(_)
         | StoreError::UnsupportedBackend(_)
         | StoreError::Backend(_)
