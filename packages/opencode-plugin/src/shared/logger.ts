@@ -180,11 +180,28 @@ function serializeData(data: unknown): string {
     }
 }
 
-export function log(message: string, data?: unknown): void {
+/** Ordered levels for EIDNARA_LOG_LEVEL; `off` admits no new entries. */
+export const LogLevel = Object.freeze({ debug: 0, info: 1, warn: 2, error: 3, off: 4 } as const);
+export type LogLevel = (typeof LogLevel)[keyof typeof LogLevel];
+
+function writeLog(
+    level: Exclude<LogLevel, typeof LogLevel.off>,
+    message: string,
+    data?: unknown,
+    sessionId?: string,
+): void {
     if (isTestEnv) return;
     try {
+        // Read per call, like EIDNARA_LOG_PATH. Unknown values use debug to preserve full diagnostics.
+        const configured = process.env.EIDNARA_LOG_LEVEL;
+        const minimum =
+            configured !== undefined && Object.hasOwn(LogLevel, configured)
+                ? LogLevel[configured as keyof typeof LogLevel]
+                : LogLevel.debug;
+        if (level < minimum) return;
+        const text = sessionId === undefined ? message : `[eidnara][${sessionId}] ${message}`;
         const timestamp = new Date().toISOString();
-        buffer.push(`[${timestamp}] ${sanitizeField(message)}${serializeData(data)}\n`);
+        buffer.push(`[${timestamp}] ${sanitizeField(text)}${serializeData(data)}\n`);
         if (buffer.length >= BUFFER_SIZE_LIMIT) {
             flush();
         } else {
@@ -195,9 +212,28 @@ export function log(message: string, data?: unknown): void {
     }
 }
 
-export function sessionLog(sessionId: string, message: string, data?: unknown): void {
-    log(`[eidnara][${sessionId}] ${message}`, data);
+/** Untagged calls use info regardless of message wording; no level prefix is added. */
+export function log(message: string, data?: unknown): void {
+    writeLog(LogLevel.info, message, data);
 }
+
+log.debug = (message: string, data?: unknown): void => writeLog(LogLevel.debug, message, data);
+log.info = (message: string, data?: unknown): void => writeLog(LogLevel.info, message, data);
+log.warn = (message: string, data?: unknown): void => writeLog(LogLevel.warn, message, data);
+log.error = (message: string, data?: unknown): void => writeLog(LogLevel.error, message, data);
+
+export function sessionLog(sessionId: string, message: string, data?: unknown): void {
+    writeLog(LogLevel.info, message, data, sessionId);
+}
+
+sessionLog.debug = (sessionId: string, message: string, data?: unknown): void =>
+    writeLog(LogLevel.debug, message, data, sessionId);
+sessionLog.info = (sessionId: string, message: string, data?: unknown): void =>
+    writeLog(LogLevel.info, message, data, sessionId);
+sessionLog.warn = (sessionId: string, message: string, data?: unknown): void =>
+    writeLog(LogLevel.warn, message, data, sessionId);
+sessionLog.error = (sessionId: string, message: string, data?: unknown): void =>
+    writeLog(LogLevel.error, message, data, sessionId);
 
 export function getLoggerDiagnostics(): LoggerDiagnostics {
     return {
@@ -207,7 +243,7 @@ export function getLoggerDiagnostics(): LoggerDiagnostics {
     };
 }
 
-/* */
+/** Flush admitted entries even when EIDNARA_LOG_LEVEL is off; failed batches still count. */
 export function flushLogger(): void {
     flush();
 }

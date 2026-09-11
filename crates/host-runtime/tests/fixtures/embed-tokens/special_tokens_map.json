@@ -9,7 +9,8 @@
   "rstrip": false,
   "normalized": false
  },
+ "mask_token": "[SEP TOK]",
  "additional_special_tokens": [
-  "[SEP TOK]"
+  "[ARRAY TOK]"
  ]
 }

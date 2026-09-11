@@ -652,6 +652,86 @@ fn reopen(
     (projection, after)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_scope_and_search_deadline_preserve_admission_without_recharging() {
+    for blocked in [Blocked::WrongScope, Blocked::SearchDeadline] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("publication-blocked", "admitted input");
+        let (projection, rows) = corpus.bootstrap(dir.path());
+        let occurrence = occurrence_of(&rows, &object);
+        let engine = TestEngine::new();
+        let synapse = component(&engine, SynapseLimits::default());
+        let project = ProjectScope::new(if blocked == Blocked::WrongScope {
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        } else {
+            PROJECT
+        })
+        .unwrap();
+        let mut bounds = bounds(Duration::from_secs(5));
+        bounds.guard_deadline = Duration::from_millis(300);
+        let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+        let mut events = Vec::new();
+        let mut at_admission = None;
+        let mut write_lock = None;
+        let end = dispatcher
+            .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+                if matches!(event, DispatchEvent::Admitted { .. }) {
+                    at_admission = Some(ledger(dir.path(), occurrence));
+                    if blocked == Blocked::SearchDeadline {
+                        let conn = Connection::open(search_path(dir.path())).unwrap();
+                        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                        write_lock = Some(conn);
+                    }
+                }
+                events.push(event);
+            })
+            .unwrap();
+        assert_eq!(end, Some(blocked));
+        let admitted_row = at_admission.expect("publication follows admission");
+        assert_eq!(admitted_row.state, "admitted");
+        assert_eq!(admitted_row.attempts, 1);
+        assert_eq!(ledger(dir.path(), occurrence), admitted_row);
+        assert!(stopped(&events).is_empty());
+        assert!(retried(&events).is_empty());
+        assert!(published(&events).is_empty());
+        assert_eq!(engine.calls(), 1);
+        assert!(projection.quarantine().is_none());
+
+        drop(write_lock);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        events.clear();
+        assert_eq!(
+            dispatcher
+                .run_pass(eligibility(&project), &bounds, NOW + 1, &mut |event| {
+                    events.push(event)
+                })
+                .unwrap(),
+            None
+        );
+        let completed = ledger(dir.path(), occurrence);
+        assert_eq!(completed.state, "embedded");
+        assert_eq!(completed.attempts, admitted_row.attempts);
+        assert_eq!(completed.host_job_id, admitted_row.host_job_id);
+        assert_eq!(completed.episode, admitted_row.episode);
+        assert_eq!(
+            completed.vector,
+            Some(encode(&TestEngine::vector_for("admitted input")))
+        );
+        assert!(admitted(&events).is_empty());
+        assert_eq!(
+            published(&events),
+            vec![(completed.job_id, Publication::Embedded)]
+        );
+        assert_eq!(
+            engine.calls(),
+            1,
+            "publication must reuse the retained result"
+        );
+    }
+}
+
 fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

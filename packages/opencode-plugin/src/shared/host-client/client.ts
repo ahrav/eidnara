@@ -47,6 +47,7 @@ import {
     type RouteHandle,
     StaleRouteHandleError,
 } from "./route-handle";
+import { serializedJsonText } from "./serialized-json-body";
 import type {
     AuthenticatedPeer,
     BindIdentity,
@@ -1514,7 +1515,7 @@ export class HostClient {
 
 function encodeBody(body: unknown): DirectFrameBody {
     if (body instanceof Uint8Array) return bytesFrameBody(body);
-    const text = JSON.stringify(body);
+    const text = serializedJsonText(body) ?? JSON.stringify(body);
     if (text === undefined) throw new TypeError("request body is not JSON serializable");
     return utf8FrameBody(text);
 }

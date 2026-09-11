@@ -6,21 +6,22 @@
 //! The local transaction is committed and released before the kernel writer is taken, so the two databases never hold transactions at the same time.
 //!
 //! A refusal ends the episode without moving either checkpoint.
+//! A window that carries an artifact deletion is refused, because the descriptor export carries no tombstone for it and acknowledging it would report the deletion as propagated.
 //! An unknown local commit outcome is reconciled from the projection's durable rows.
 //! An unknown acknowledgement outcome is reconciled from the kernel's durable consumer checkpoint.
-//! Integrity and storage failures quarantine the driver, which then refuses further episodes, so no acknowledgement can rest on a projection whose contents are in doubt.
+//! Integrity and storage failures quarantine the projection, so no acknowledgement can rest on a projection whose contents are in doubt.
 
 use std::num::NonZeroUsize;
 
 use kernel::{
-    CommitPageBounds, CommitReadError, CommitReadRequest, ExportWindow, KernelError, KernelStore,
-    PageEnd, SourceExportError, SourceHoldAdmission, SourceHoldBinding, SourceHoldError,
-    SourcePageBounds, SourceRow,
+    ARTIFACT_DELETION_SOURCE_KIND, CommitPageBounds, CommitReadError, CommitReadRequest,
+    CompleteCommit, ExportWindow, KernelError, KernelStore, PageEnd, SourceExportError,
+    SourceHoldAdmission, SourceHoldBinding, SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::{
-    BatchBounds, BatchStatus, MutationIdentity, ProjectionBatch, batch_from_rows, read_checkpoint,
-    row_identities,
+    BatchBounds, BatchStatus, MutationIdentity, ProjectionBatch, ProjectionCheckpoint,
+    batch_from_rows, read_checkpoint, row_identities,
 };
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
@@ -78,6 +79,11 @@ pub enum EpisodeEvent {
 /// Nothing durable moved for the window that was refused; the next episode starts from the same prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blocked {
+    /// The kernel rejects negative episode times at acknowledgement, so the
+    /// episode refuses them before persisting an unacknowledgeable window.
+    NegativeTime {
+        now: i64,
+    },
     /// No batch has ever committed, so there is no prefix to extend.
     NoLocalBaseline,
     /// The projection's checkpoint names another hold.
@@ -102,6 +108,11 @@ pub enum Blocked {
     TargetUnreachable {
         after: i64,
         target: i64,
+    },
+    /// The window holds an artifact deletion, and the projection has no way to tombstone the deleted occurrences.
+    /// Acknowledging it would satisfy the consumer's deletion barrier while the deleted text is still served.
+    DeletionUnpropagated {
+        commit_seq: i64,
     },
     HoldExtension(SourceHoldError),
     Export(SourceExportError),
@@ -161,7 +172,6 @@ pub enum EpisodeFault {
 pub struct SearchCatchUp<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
-    quarantine: Option<Quarantine>,
     fault: Option<EpisodeFault>,
 }
 
@@ -194,13 +204,12 @@ impl<'a> SearchCatchUp<'a> {
         Self {
             kernel,
             projection,
-            quarantine: None,
             fault: None,
         }
     }
 
-    pub fn quarantine(&self) -> Option<&Quarantine> {
-        self.quarantine.as_ref()
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        self.projection.quarantine()
     }
 
     /// Captures a target, brings the kernel checkpoint up to the durable local prefix, then applies and acknowledges one window at a time until the target is reached or a step refuses.
@@ -209,7 +218,7 @@ impl<'a> SearchCatchUp<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`CatchUpError::Quarantined`] when a stored row contradicts the batch that wrote it, or when the projection store fails and its effect cannot be read back; the driver stays quarantined.
+    /// Returns [`CatchUpError::Quarantined`] when a stored row contradicts the batch that wrote it, or when the projection store fails and its effect cannot be read back; the projection stays quarantined.
     /// Returns [`CatchUpError::Kernel`] when the kernel fails in a way that leaves no durable fact to reconcile against, such as a failed read or a hold extension that did not run.
     pub fn run_episode(
         &mut self,
@@ -243,8 +252,8 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
-        if let Some(quarantine) = &self.quarantine {
-            return Err(CatchUpError::Quarantined(quarantine.clone()));
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(CatchUpError::Quarantined(quarantine));
         }
         let target = self.kernel.capture_commit_read_target()?;
         let mut report = EpisodeReport {
@@ -281,11 +290,15 @@ impl<'a> SearchCatchUp<'a> {
         incarnation: kernel::CommitReadIncarnation,
         report: &mut EpisodeReport,
     ) -> Result<(), Stop> {
+        if now < 0 {
+            return Err(Blocked::NegativeTime { now }.into());
+        }
         report.acknowledged_through = self
             .kernel
             .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?
             .ok_or(Blocked::Read(CommitReadError::UnknownConsumer))?;
-        let local = self.local_prefix(consumer)?;
+        let checkpoint = self.local_prefix(consumer)?;
+        let local = checkpoint.checkpoint_commit_seq;
         if report.acknowledged_through > local {
             return Err(Blocked::AcknowledgedBeyondLocalPrefix {
                 local,
@@ -295,6 +308,32 @@ impl<'a> SearchCatchUp<'a> {
         }
         // A durable local prefix the kernel has not acknowledged is a lost reply from an earlier episode; the same prefix is acknowledged again.
         if report.acknowledged_through < local {
+            observer(EpisodeEvent::HoldExtensionRequested { through: local });
+            let hold = self
+                .kernel
+                .extend_source_hold(
+                    &consumer.binding,
+                    &consumer.hold_id,
+                    local,
+                    bounds.hold_admission,
+                )
+                .map_err(|error| match error {
+                    SourceHoldError::Kernel(error) => Stop::from(error),
+                    error => Blocked::HoldExtension(error).into(),
+                })?;
+            if hold.snapshot != checkpoint.snapshot_commit_seq {
+                return Err(self
+                    .enter_quarantine(
+                        QuarantineKind::Integrity,
+                        &format!(
+                            "the projection checkpoint claims baseline {}, but hold {} was \
+                             captured at {}; acknowledging that claim would let kernel pruning \
+                             advance over commits the projection never applied",
+                            checkpoint.snapshot_commit_seq, consumer.hold_id, hold.snapshot
+                        ),
+                    )
+                    .into());
+            }
             self.acknowledge(consumer, local, now, observer)?;
             report.acknowledged_through = local;
         }
@@ -339,6 +378,13 @@ impl<'a> SearchCatchUp<'a> {
                 }
                 .into());
             }
+            // The export delivers creations, supersessions, and retirements; a deletion arrives only as a control row, and the batch it would need is not built here.
+            if let Some(deletion) = first_deletion(&page.commits) {
+                return Err(Blocked::DeletionUnpropagated {
+                    commit_seq: deletion,
+                }
+                .into());
+            }
             let through = page.through;
             self.apply_window(consumer, bounds, after, through, now, observer)?;
             report.batches_applied += 1;
@@ -350,8 +396,8 @@ impl<'a> SearchCatchUp<'a> {
         Ok(())
     }
 
-    /// The last complete commit the projection durably holds under this consumer's hold.
-    fn local_prefix(&mut self, consumer: &CatchUpConsumer) -> Result<i64, Stop> {
+    /// Reads the projection's checkpoint; the checkpoint's hold id must match `consumer.hold_id`.
+    fn local_prefix(&mut self, consumer: &CatchUpConsumer) -> Result<ProjectionCheckpoint, Stop> {
         let read = self
             .projection
             .read(|conn| read_checkpoint(conn, &consumer.kernel_incarnation_id));
@@ -370,7 +416,7 @@ impl<'a> SearchCatchUp<'a> {
             }
             .into());
         }
-        Ok(checkpoint.checkpoint_commit_seq)
+        Ok(checkpoint)
     }
 
     /// Extends the hold through `through`, exports the window's delta, and commits it as one batch.
@@ -384,6 +430,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<(), Stop> {
+        self.refuse_if_quarantined()?;
         observer(EpisodeEvent::HoldExtensionRequested { through });
         let hold = self
             .kernel
@@ -516,6 +563,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<(), Stop> {
+        self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
         let mut acknowledged = self.kernel.acknowledge_through_source_hold(
             &consumer.binding,
@@ -557,15 +605,34 @@ impl<'a> SearchCatchUp<'a> {
         self.enter_quarantine(kind, &error)
     }
 
+    /// Another writer can quarantine the projection while an episode runs, so
+    /// `refuse_if_quarantined` re-reads shared state.
+    fn refuse_if_quarantined(&self) -> Result<(), Stop> {
+        match self.projection.quarantine() {
+            Some(quarantine) => Err(CatchUpError::Quarantined(quarantine).into()),
+            None => Ok(()),
+        }
+    }
+
     fn enter_quarantine(
         &mut self,
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> CatchUpError {
-        let quarantine = Quarantine::new(kind, error);
-        self.quarantine = Some(quarantine.clone());
-        CatchUpError::Quarantined(quarantine)
+        CatchUpError::Quarantined(self.projection.enter_quarantine(kind, error))
     }
+}
+
+fn first_deletion(commits: &[CompleteCommit]) -> Option<i64> {
+    commits
+        .iter()
+        .find(|commit| {
+            commit
+                .rows
+                .iter()
+                .any(|row| row.source_kind == ARTIFACT_DELETION_SOURCE_KIND)
+        })
+        .map(|commit| commit.commit_seq)
 }
 
 /// An acknowledgement that failed this way may still have committed, because the failure can strike after the kernel's COMMIT or while waiting for its writer, so the durable checkpoint decides.
@@ -599,17 +666,19 @@ pub(crate) fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::NonPositiveSequence { .. }
         | ProjectionError::NonPositiveTombstoneSequence { .. }
         | ProjectionError::TombstoneNotAfterCreation { .. }
-        | ProjectionError::UnknownOccurrence { .. }
         | ProjectionError::MutationConflict
         | ProjectionError::MalformedBatch
         | ProjectionError::BatchOverBound { .. }
         | ProjectionError::UnknownGeneration { .. }
+        | ProjectionError::RetiredGeneration { .. }
         | ProjectionError::NoPendingWork { .. } => Refusal::Admission,
         ProjectionError::InvalidVector { .. } | ProjectionError::VectorConflict { .. } => {
             Refusal::OperatorRepair
         }
         ProjectionError::IdentityMismatch => Refusal::Identity,
-        ProjectionError::OccurrenceCollision { .. }
+        // An admitted invalidation names an occurrence at or below the durable checkpoint; a missing row contradicts the applied prefix.
+        ProjectionError::UnknownOccurrence { .. }
+        | ProjectionError::OccurrenceCollision { .. }
         | ProjectionError::PayloadCollision { .. }
         | ProjectionError::TombstoneCollision { .. }
         | ProjectionError::CorruptRow => Refusal::Integrity,

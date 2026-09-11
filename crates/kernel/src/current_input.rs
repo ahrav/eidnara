@@ -16,7 +16,7 @@ use super::eligibility::{
 };
 use super::envelope::check_fence;
 use super::open::AcquireLimit;
-use super::source_descriptor::stored_detail;
+use super::source_descriptor::{descriptor_object_id, reencoded_identity, stored_detail};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
 /// The descriptor a consumer believes it is publishing work for, as it read it when the work began.
@@ -81,7 +81,7 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Deadline`] when the writer stays held past `deadline`, [`KernelError::InvalidInput`] for an expectation outside the eligibility bounds, [`KernelError::FenceLost`] for a superseded writer, [`KernelError::CorruptCanonicalRow`] for a descriptor row that cannot be decoded or is missing behind a live registry row, and [`KernelError::Busy`] or [`KernelError::Io`] for a store that cannot be read.
+    /// Returns [`KernelError::Deadline`] when the writer stays held past `deadline`, [`KernelError::InvalidInput`] for an expectation outside the eligibility bounds, [`KernelError::FenceLost`] for a superseded writer, [`KernelError::CorruptCanonicalRow`] for a descriptor row that cannot be decoded, contradicts its own identity, or is missing behind a live registry row, and [`KernelError::Busy`] or [`KernelError::Io`] for a store that cannot be read.
     pub fn guard_current_input(
         &self,
         expected: &CurrentInputExpectation,
@@ -149,16 +149,25 @@ fn revalidate(
         }
         verdict => return Ok(Err(StaleInput::Ineligible(*verdict))),
     }
-    let payload: Vec<u8> = tx
+    let (payload, evidence_id): (Vec<u8>, Option<String>) = tx
         .query_row_cached(
-            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            "SELECT observation_payload, evidence_id FROM observations WHERE object_id=?1",
             [&expected.object_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(map_sqlite)?
         .ok_or(KernelError::CorruptCanonicalRow)?;
     let detail = stored_detail(&payload)?;
+    // Mismatches indicate canonical-row corruption, not staleness.
+    if descriptor_object_id(&detail.lineage_id, &detail.revision) != expected.object_id
+        || detail.revision != expected.source_revision.to_string()
+        || evidence_id.as_deref() != Some(detail.evidence_id.as_str())
+        || reencoded_identity(&detail).is_none()
+        || (detail.span.is_none() && detail.payload_id != detail.artifact_digest)
+    {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
     if detail.occurrence_id != expected.occurrence_id
         || detail.payload_id != expected.payload_id
         || detail.artifact_digest != expected.artifact_digest

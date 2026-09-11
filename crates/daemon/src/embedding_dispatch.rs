@@ -72,6 +72,10 @@ pub enum Blocked {
     HostClosing,
     /// The kernel writer stayed busy past the guard deadline; the row keeps its admitted state and result so the next pass publishes without a new charge.
     GuardDeadline,
+    /// The eligibility binding names another project; the admitted row is unchanged so publication can resume under the right scope without a new charge.
+    WrongScope,
+    /// The search write lock stayed busy past the deadline; the admitted row is unchanged so publication can resume without a new charge.
+    SearchDeadline,
     /// The completion's outcome is unknown; the row keeps its admitted state so the next pass reconciles it from the durable vector instead of charging again.
     LocalCommitUnresolved,
 }
@@ -488,6 +492,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                 self.stop(job, "idempotency_conflict", pass.now, observer)
             }
             Err(PublicationError::GuardDeadline) => Ok(Some(Blocked::GuardDeadline)),
+            Err(PublicationError::WrongScope) => Ok(Some(Blocked::WrongScope)),
+            Err(PublicationError::SearchDeadline) => Ok(Some(Blocked::SearchDeadline)),
             Err(PublicationError::LocalCommitUnresolved) => {
                 Ok(Some(Blocked::LocalCommitUnresolved))
             }

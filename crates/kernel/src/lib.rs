@@ -52,17 +52,17 @@ pub use backup::{
     RestoreFault, RestorePhase, owner_is_current_for_test, restore_marker_is_valid_for_test,
     sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test,
 };
+pub use cas::{
+    ARTIFACT_DELETION_SOURCE_KIND, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts,
+    ArtifactEligibility, ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle,
+    ArtifactIngestRequest, BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason,
+    MAX_PAYLOAD_BYTES, ProviderEgress,
+};
 #[cfg(feature = "test-support")]
 pub use cas::{
     ArtifactDeletionFault, ArtifactDeletionHook, ArtifactGcFault, ArtifactIngestFault,
     ArtifactIngestHook,
-};
-pub use cas::{
-    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
-    ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts, ArtifactEligibility,
-    ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle, ArtifactIngestRequest,
-    BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, MAX_PAYLOAD_BYTES,
-    ProviderEgress,
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,

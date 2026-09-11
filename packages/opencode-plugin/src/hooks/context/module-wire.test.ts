@@ -1,8 +1,9 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isRecord } from "../../shared/record-type-guard";
 import {
     __moduleWireTest,
     buildPagedModuleTransformPayloads,
@@ -1313,7 +1314,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         };
         const pages = buildPagedModuleTransformPayloads(body);
         expect(pages).toHaveLength(1);
-        expect(pages[0]?.page).toBe(body);
+        expect(pages[0]?.page as Record<string, unknown>).toEqual(body);
         expect(pages[0]?.bytes).toBe(Buffer.byteLength(JSON.stringify(body)));
     });
 
@@ -1420,4 +1421,106 @@ describe("transform page array fields", () => {
             buildPagedModuleTransformPayloads,
         );
     });
+});
+
+it("snapshots source toJSON once and serializes each emitted envelope once", async () => {
+    const { serializedJsonText } = await import("../../shared/host-client/serialized-json-body");
+    let calls = 0;
+    const body = {
+        method: "transform",
+        session_id: "serialized-getter",
+        messages: Array.from({ length: 80 }, (_, index) => ({
+            index,
+            text: "x".repeat(8_000),
+        })),
+        marker: { toJSON: () => `snapshot-${++calls}` },
+    };
+    const stringify = spyOn(JSON, "stringify");
+    try {
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages.length).toBeGreaterThan(1);
+        expect(calls).toBe(1);
+        expect(stringify.mock.calls.filter(([value]) => value === body)).toHaveLength(1);
+        expect(pages.at(-1)?.page.marker).toBe("snapshot-1");
+        for (const { page } of pages) {
+            expect(
+                stringify.mock.results.filter(
+                    (result) => result.value === serializedJsonText(page),
+                ),
+            ).toHaveLength(1);
+        }
+    } finally {
+        stringify.mockRestore();
+    }
+});
+
+it("builds the unpaged carrier without parsing the body", async () => {
+    const { serializedJsonText } = await import("../../shared/host-client/serialized-json-body");
+    const body = {
+        method: "transform",
+        session_id: "serialized-unpaged",
+        messages: Array.from({ length: 200 }, (_, index) => ({
+            index,
+            ck: { role: "user", content: [{ kind: { type: "text", text: `m${index}` } }] },
+        })),
+    };
+    const parse = spyOn(JSON, "parse");
+    try {
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages).toHaveLength(1);
+        expect(parse).not.toHaveBeenCalled();
+        expect(serializedJsonText(pages[0]!.page)).toBe(JSON.stringify(body));
+        expect(pages[0]!.page.messages).toBe(body.messages);
+    } finally {
+        parse.mockRestore();
+    }
+});
+
+it("measures each paged item once across convergence attempts", () => {
+    const body = {
+        method: "transform",
+        session_id: "serialized-bounds",
+        messages: Array.from({ length: 80 }, (_, index) => ({
+            index,
+            text: "x".repeat(8_000),
+        })),
+    };
+    const stringify = spyOn(JSON, "stringify");
+    const parse = spyOn(JSON, "parse");
+    try {
+        const pages = buildPagedModuleTransformPayloads(body);
+        // Two pages force a second convergence attempt after the first assumes one page.
+        expect(pages).toHaveLength(2);
+        const itemMeasurements = stringify.mock.calls.filter(
+            ([value]) => isRecord(value) && value.index === 0 && typeof value.text === "string",
+        );
+        expect(itemMeasurements).toHaveLength(1);
+        // One snapshot of the body for stable bounds; emitted pages are not parsed again.
+        const bodyParses = parse.mock.calls.filter(
+            ([text]) => typeof text === "string" && text.startsWith('{"method":"transform"'),
+        );
+        expect(bodyParses).toHaveLength(1);
+    } finally {
+        stringify.mockRestore();
+        parse.mockRestore();
+    }
+});
+
+it("keeps unpaged boundary bodies accepted when Rust numbers expand", async () => {
+    const { serializedTransformCorpus } = await import("./__tests__/serialized-transform-corpus");
+    const { serializedJsonText } = await import("../../shared/host-client/serialized-json-body");
+    const cases = serializedTransformCorpus().filter((fixture) =>
+        ["scalar-number-over", "raw-exponent-over", "raw-negative-zero-over"].includes(
+            fixture.name,
+        ),
+    );
+    expect(cases).toHaveLength(3);
+    for (const fixture of cases) {
+        const expected = JSON.stringify(fixture.body);
+        expect(Buffer.byteLength(expected)).toBe(MODULE_PAGE_MAX_BYTES);
+        const pages = buildPagedModuleTransformPayloads(fixture.body);
+        expect(pages).toHaveLength(1);
+        expect(pages[0]?.page.transform_page_index).toBeUndefined();
+        expect(serializedJsonText(pages[0]!.page)).toBe(expected);
+    }
 });
