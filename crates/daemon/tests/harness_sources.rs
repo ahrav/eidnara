@@ -1,6 +1,6 @@
 //! Both harness adapters against a real kernel and a real projection: native identity is bound or refused, equal text stays distinct, tool strings survive exactly, secret-bearing bytes retain nothing, replay returns receipts, revisions succeed atomically, and only message text creates dense work.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::Arc;
@@ -524,6 +524,14 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         (units[1].identity[6].1.as_str(), units[1].text.as_str()),
         ("1", "")
     );
+    // A Pi tool result whose native id is a composite `call|item` value keeps the composite verbatim: the identity is the harness's spelling, not the wire codec's canonical call id.
+    let mut composite = pi_tool_result("pi-t2", "pi-a1", false, 7778);
+    composite["message"]["toolCallId"] = json!("call_65aZ|item-2");
+    let units = pi_units(&pi_session(), &composite).unwrap();
+    assert_eq!(
+        units[0].identity[4],
+        ("tool_call_id", "call_65aZ|item-2".to_string())
+    );
     let units = pi_units(&pi_session(), &pi_assistant("pi-a1", 6000)).unwrap();
     assert_eq!(
         units.len(),
@@ -567,6 +575,23 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
     assert_eq!(
         opencode_units(&opencode_session(), &ignored).unwrap(),
         vec![]
+    );
+    // An in-progress assistant record carries `completed` as an explicit null; its revision is `created`, the same as when the key is absent.
+    let mut in_progress = opencode_assistant("msg_p", 5000);
+    in_progress["info"]["time"]["completed"] = Value::Null;
+    let units = opencode_units(&opencode_session(), &in_progress).unwrap();
+    assert_eq!(units.len(), 4);
+    assert_eq!(
+        units[0].revision, "4000",
+        "completed - 1000 is the created stamp"
+    );
+    in_progress["info"]["time"]
+        .as_object_mut()
+        .unwrap()
+        .remove("completed");
+    assert_eq!(
+        opencode_units(&opencode_session(), &in_progress).unwrap(),
+        units
     );
     // Debug output of a unit names identities and sizes, never text.
     let debug = format!(
@@ -750,7 +775,8 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
     assert_eq!(distinct.len(), 3, "equal bytes, three native occurrences");
     let tip = corpus.tip();
 
-    // Replay: the same unit returns the stored receipts, names the same occurrence, and commits nothing.
+    // Replay: the same unit returns the stored receipts, names the same occurrence, commits nothing, and stages no bytes: the descriptor receipt is consulted before the artifact is offered to the store.
+    let staged = corpus.kernel.staged_artifacts_for_test();
     let again = publisher.publish(&first[0], NOW + 1).unwrap();
     assert!(again.replayed);
     assert_eq!(
@@ -758,16 +784,20 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
         (a.object_id.as_str(), a.occurrence_id.as_str())
     );
     assert_eq!(corpus.tip(), tip, "a replay is not a commit");
+    assert_eq!(
+        corpus.kernel.staged_artifacts_for_test(),
+        staged,
+        "a replay stages no artifact"
+    );
     // The same identity and revision with other bytes is a conflict, not a replay and not a second retention.
     let mut changed = first[0].clone();
     changed.text = "different words".to_owned();
     assert!(matches!(
         publisher.publish(&changed, NOW + 1),
-        Err(PublishError::Artifact(
-            ArtifactErrorKind::OperationKeyReused
-        ))
+        Err(PublishError::IdentityReused)
     ));
     assert_eq!(corpus.tip(), tip);
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
     // The same unit published into another scope is a conflict too: a receipt never moves a row.
     let elsewhere = SourcePublisher {
         scope_id: "project:b",
@@ -775,10 +805,21 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
     };
     assert!(matches!(
         elsewhere.publish(&first[0], NOW + 1),
-        Err(PublishError::Artifact(
-            ArtifactErrorKind::OperationKeyReused
-        ))
+        Err(PublishError::IdentityReused)
     ));
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+    // A native timestamp far ahead of the observation is not a revision this publisher can order: refused before any byte is retained, so it cannot pin the lineage.
+    let mut ahead = first[0].clone();
+    ahead.revision = i64::MAX.to_string();
+    assert!(matches!(
+        publisher.publish(&ahead, NOW + 1),
+        Err(PublishError::RevisionAhead {
+            revision: i64::MAX,
+            observed_at
+        }) if observed_at == NOW + 1
+    ));
+    assert_eq!(corpus.tip(), tip);
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
 
     // Succession: the message edited later carries a newer revision, invalidates the predecessor atomically, and a stale revision is refused.
     let edited = opencode_units(
@@ -801,27 +842,44 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
         &opencode_user("msg_1", "older words", 120),
     )
     .unwrap();
-    assert!(matches!(
-        publisher.publish(&stale[0], NOW + 3),
-        Err(PublishError::Descriptor(
-            SourceDescriptorError::RevisionNotAdvanced
-        ))
-    ));
-    // The refused block's evidence was retained and then retired: no descriptor names it and it is not a live source.
+    let refused = publisher.publish(&stale[0], NOW + 3).unwrap_err();
+    let PublishError::Descriptor {
+        refusal: SourceDescriptorError::RevisionNotAdvanced,
+        evidence: Some(evidence),
+    } = refused
+    else {
+        panic!("a stale revision is refused after its evidence was retained: {refused:?}");
+    };
+    // The refused block's evidence was retained and then retired in the compensating commit: the evidence object is invalidated, so it is not a live source and no descriptor names it.
+    assert_eq!(evidence.retired, Ok(()), "{evidence:?}");
+    let (_, states) = corpus
+        .kernel
+        .object_states(std::slice::from_ref(&evidence.object_id))
+        .unwrap();
+    let state = states[0]
+        .as_ref()
+        .expect("the evidence object was registered");
+    assert_eq!(state.object.object_kind, "evidence");
+    assert!(
+        state.object.invalidated_commit_seq.is_some(),
+        "the refused block's evidence is still live: {state:?}"
+    );
     assert!(
         !inventory(&corpus)
             .iter()
             .any(|(_, text, _)| text == "older words")
     );
-    assert!(
-        matches!(
-            publisher.publish(&stale[0], NOW + 3),
-            Err(PublishError::Descriptor(
-                SourceDescriptorError::RevisionNotAdvanced | SourceDescriptorError::EvidenceMissing
-            ))
-        ),
-        "a repeated stale publication still refuses"
-    );
+    // Publishing the stale unit again replays its artifact receipt, which now names retired evidence, so the descriptor is refused for that reason and the replayed compensation reports the evidence retired.
+    let again = publisher.publish(&stale[0], NOW + 3).unwrap_err();
+    let PublishError::Descriptor {
+        refusal: SourceDescriptorError::EvidenceMissing,
+        evidence: Some(evidence_again),
+    } = again
+    else {
+        panic!("a repeated stale publication is refused: {again:?}");
+    };
+    assert_eq!(evidence_again.object_id, evidence.object_id);
+    assert_eq!(evidence_again.retired, Ok(()));
 
     // Tool bytes: exact through publication, export, and reopen.
     let tool = opencode_units(&opencode_session(), &opencode_assistant("msg_a", 5000)).unwrap();
@@ -895,9 +953,10 @@ fn refused_bytes_and_identities_retain_nothing() {
     assert!(
         matches!(
             refused,
-            Err(PublishError::Descriptor(SourceDescriptorError::Occurrence(
-                _
-            )))
+            Err(PublishError::Descriptor {
+                refusal: SourceDescriptorError::Occurrence(_),
+                evidence: None,
+            })
         ),
         "{refused:?}"
     );
@@ -925,52 +984,58 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
     let publisher = corpus.publisher();
     let mut expected_messages = BTreeSet::new();
     let mut expected_tools = BTreeSet::new();
+    const USER: (SourceClass, TaintClass) = (SourceClass::ExplicitUser, TaintClass::UserExplicit);
+    const ASSISTANT: (SourceClass, TaintClass) =
+        (SourceClass::ModelInference, TaintClass::AssistantInference);
+    const TOOL: (SourceClass, TaintClass) = (
+        SourceClass::TrustedToolResult,
+        TaintClass::ToolUntrustedOutput,
+    );
+    // Each fixture names the admission classes of its units in unit order, independently of the role the adapter read.
     let records = [
         (
-            opencode_session(),
             opencode_units(
                 &opencode_session(),
                 &opencode_user("msg_u", "please run the audit", 100),
             )
             .unwrap(),
+            vec![USER],
         ),
         (
-            opencode_session(),
             opencode_units(&opencode_session(), &opencode_assistant("msg_a", 5000)).unwrap(),
+            vec![ASSISTANT, TOOL, TOOL, ASSISTANT],
         ),
         (
-            pi_session(),
             pi_units(&pi_session(), &pi_user("pi-u1", "run it", 5500)).unwrap(),
+            vec![USER],
         ),
         (
-            pi_session(),
             pi_units(&pi_session(), &pi_assistant("pi-a1", 6000)).unwrap(),
+            vec![ASSISTANT],
         ),
         (
-            pi_session(),
             pi_units(
                 &pi_session(),
                 &pi_tool_result("pi-t1", "pi-a1", false, 7777),
             )
             .unwrap(),
+            vec![TOOL, TOOL],
         ),
     ];
     let mut empty_block = None;
-    for (_, units) in &records {
-        for unit in units {
+    let mut evidence_objects = BTreeMap::new();
+    for (units, expected) in &records {
+        assert_eq!(units.len(), expected.len(), "{units:?}");
+        for (unit, expected_provenance) in units.iter().zip(expected) {
             let published = publisher.publish(unit, NOW).unwrap();
-            let expected_provenance = match (unit.class, unit.role.as_str()) {
-                (OccurrenceClass::RawToolSpans, _) => (
-                    SourceClass::TrustedToolResult,
-                    TaintClass::ToolUntrustedOutput,
-                ),
-                (_, "user") => (SourceClass::ExplicitUser, TaintClass::UserExplicit),
-                _ => (SourceClass::ModelInference, TaintClass::AssistantInference),
-            };
-            assert_eq!(published.provenance, expected_provenance, "{unit:?}");
+            assert_eq!(published.provenance, *expected_provenance, "{unit:?}");
             if unit.class == OccurrenceClass::Messages && unit.text.is_empty() {
                 empty_block = Some(published.occurrence_id.clone());
             }
+            evidence_objects.insert(
+                published.occurrence_id.clone(),
+                published.evidence_object_id.clone(),
+            );
             match unit.class {
                 OccurrenceClass::Messages => expected_messages.insert(published.occurrence_id),
                 _ => expected_tools.insert(published.occurrence_id),
@@ -981,6 +1046,21 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
     let empty_block = empty_block.unwrap();
 
     let (projection, rows) = corpus.bootstrap(dir.path());
+    // Every descriptor records the class the store recorded for its evidence: the store folds harness text asserted `Normal` up to `Sensitive`, and the descriptor is read from the store, not re-derived.
+    for row in &rows {
+        let evidence_object_id = &evidence_objects[&row.detail.occurrence_id];
+        let (_, states) = corpus
+            .kernel
+            .object_states(std::slice::from_ref(evidence_object_id))
+            .unwrap();
+        let evidence = states[0].as_ref().unwrap();
+        assert_eq!(
+            (row.sensitivity, evidence.object.sensitivity),
+            (Sensitivity::Sensitive, Sensitivity::Sensitive),
+            "{}",
+            row.detail.occurrence_id
+        );
+    }
     let conn = Connection::open_with_flags(
         dir.path().join("search").join("search.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,

@@ -2,7 +2,7 @@
 //!
 //! Identity is native or refused. A message occurrence names the project, harness, durable session, native message, and block position; a raw tool occurrence names the parent message, tool call, result revision, and output block. A payload hash never stands in for a missing identity. An OpenCode record names its session and is refused when it names another; Pi entries carry no session, so the caller's binding of the session file is the session identity. Message parts that are not text (reasoning, steps, files, patches, images) are not text sources and contribute nothing; a tool result whose content is not text is refused, because the tool string is the source and a non-text one has no disposition here. Tool strings are retained exactly as the codec received them and are never joined; a tool result is never part of a message's text, and its class creates no dense work downstream.
 //!
-//! Publication goes through the kernel's shared source operation: the block is retained as an exact artifact (which runs the bounded secret scan and refuses rewritten or unscannable bytes), then one commit publishes the descriptor with its canonical revision and records the admission. Both steps carry receipt keys derived from the canonical occurrence identity, revision, and representation, and a request digest over the text and the publishing context, so a replay returns the stored receipt instead of a second row, the same unit under another scope or with other text is a conflict, and a newer revision of the same lineage invalidates its predecessor in the same commit. A descriptor refusal after the artifact was retained retires the evidence in a compensating commit, so no refused block stays a live source.
+//! Publication goes through the kernel's shared source operation: the block is retained as an exact artifact (which runs the bounded secret scan and refuses rewritten or unscannable bytes), then one commit publishes the descriptor with the class the store recorded for that evidence and records the admission. Both steps carry receipt keys derived from the canonical occurrence identity, revision, and representation, and a request digest over the text and the publishing context. The descriptor receipt is consulted first, so a replay returns the stored receipt without offering the bytes again, the same unit under another scope or with other text is a conflict, and a newer revision of the same lineage invalidates its predecessor in the same commit. A native revision far ahead of the observation is refused before retention, since nothing later could advance the lineage past it. A descriptor refusal after the artifact was retained retires the evidence object in a compensating commit and reports whether that commit landed, so no refused block stays a live source unnoticed.
 
 use kernel::source_identity::{
     HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
@@ -18,6 +18,7 @@ use kernel::{
     SourceDescriptorError, SourceDescriptorPolicy, SourceDescriptorRequest, TaintClass,
 };
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
@@ -202,8 +203,11 @@ pub fn opencode_units(
     let time = info
         .get("time")
         .ok_or(AdapterRefusal::MissingIdentity("time"))?;
+    // An in-progress record carries `completed` as an explicit null, which is the same absence as a missing key.
     let message_revision = revision(
-        time.get("completed").or_else(|| time.get("created")),
+        time.get("completed")
+            .filter(|completed| !completed.is_null())
+            .or_else(|| time.get("created")),
         "time",
     )?;
     let mut units = Vec::new();
@@ -255,7 +259,7 @@ pub fn opencode_units(
     Ok(units)
 }
 
-/// Units of one Pi session entry: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. Entries of other types contribute nothing.
+/// Units of one Pi session entry: for a user or assistant message, every text content item in position order (a bare string is one block); for a tool result, every text content item as its own block under the call it answers. Entries of other types contribute nothing. `tool_call_id` is the entry's `toolCallId` verbatim, including a provider's composite `call|item` spelling; the wire codec's canonical call id is a different value and is not an identity here.
 ///
 /// # Errors
 ///
@@ -329,6 +333,8 @@ fn content_items(message: &Value) -> Result<&Vec<Value>, AdapterRefusal> {
 pub struct Published {
     pub object_id: String,
     pub occurrence_id: String,
+    /// The evidence object retaining the unit's exact bytes.
+    pub evidence_object_id: String,
     /// The predecessor revision this publication invalidated in the same commit.
     pub replaced_object_id: Option<String>,
     /// The kernel answered from a stored receipt: the same unit was published before.
@@ -337,18 +343,45 @@ pub struct Published {
     pub provenance: (SourceClass, TaintClass),
 }
 
+/// What became of the evidence a refused publication had already retained. The artifact is retained before the descriptor commit, so a refusal leaves an evidence object behind; `retired` is `Ok` once the compensating commit invalidated it and `Err` when the object is still a live evidence row the caller must reconcile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedEvidence {
+    pub object_id: String,
+    pub retired: Result<(), KernelError>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
-    /// The exact artifact was refused: the bytes were rewritten by the scanner, could not be scanned, exceed the store's bounds, or differ from bytes already retained under the same identity and revision. Nothing new was retained.
+    /// The exact artifact was refused: the bytes were rewritten by the scanner, could not be scanned, or exceed the store's bounds. Nothing new was retained.
     #[error("the block's bytes were refused: {0:?}")]
     Artifact(ArtifactErrorKind),
-    #[error("the descriptor was refused: {0}")]
-    Descriptor(SourceDescriptorError),
-    #[error(transparent)]
-    Kernel(#[from] KernelError),
+    /// The identity and revision were already published with other bytes or under another domain, scope, role, or asserted sensitivity. A receipt never moves a row, so nothing new was retained.
+    #[error("the identity and revision were already published under another request")]
+    IdentityReused,
+    /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
+    #[error("the native revision {revision} leads the observation at {observed_at}")]
+    RevisionAhead { revision: i64, observed_at: i64 },
+    /// The descriptor was refused: a malformed or oversized identity before any byte was retained (`evidence` is `None`), or a stale revision, a colliding tuple, or a mismatched domain after the evidence was retained.
+    #[error("the descriptor was refused: {refusal}")]
+    Descriptor {
+        refusal: SourceDescriptorError,
+        evidence: Option<RetainedEvidence>,
+    },
+    /// The store failed. `evidence` is present when the failure came after the artifact was retained.
+    #[error("{error}")]
+    Kernel {
+        error: KernelError,
+        evidence: Option<RetainedEvidence>,
+    },
 }
 
 const PRODUCER: &str = "eidnara-daemon/harness-sources";
+
+/// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
+pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
+
+/// How long `publish` waits for a kernel reader to consult the stored receipt before offering bytes to the store.
+const RECEIPT_WAIT: Duration = Duration::from_secs(30);
 
 /// Publishes units into one kernel under one domain and scope. `egress` is the caller's provider policy for the retained evidence.
 pub struct SourcePublisher<'a> {
@@ -360,11 +393,11 @@ pub struct SourcePublisher<'a> {
 }
 
 impl SourcePublisher<'_> {
-    /// Retains the unit's text as an exact artifact, then publishes its descriptor and records its admission in one commit. Both receipts are keyed by the unit's identity and revision, so publishing the same unit again replays them.
+    /// Retains the unit's text as an exact artifact, then publishes its descriptor and records its admission in one commit. Both receipts are keyed by the unit's identity and revision; a unit published before answers from its descriptor receipt without offering its bytes to the store again. `observed_at` is the caller's Unix millisecond clock at the time it read the record.
     ///
     /// # Errors
     ///
-    /// Returns [`PublishError::Artifact`] when the bytes are refused before anything is retained, [`PublishError::Descriptor`] when the kernel refuses the descriptor (a stale revision, a colliding tuple, a mismatched domain), and [`PublishError::Kernel`] for store failures.
+    /// Returns [`PublishError::RevisionAhead`] and [`PublishError::IdentityReused`] before anything is retained, [`PublishError::Artifact`] when the bytes are refused before anything is retained, [`PublishError::Descriptor`] when the kernel refuses the descriptor (a stale revision, a colliding tuple, a mismatched domain), and [`PublishError::Kernel`] for store failures. A refusal after retention carries the evidence object and whether the compensating retirement committed.
     pub fn publish(&self, unit: &SourceUnit, observed_at: i64) -> Result<Published, PublishError> {
         let identity: Vec<(&str, &str)> = unit
             .identity
@@ -379,8 +412,17 @@ impl SourcePublisher<'_> {
             span: None,
         };
         // The tuple is judged before any byte is retained, so an oversized or malformed identity refuses without partial publication.
-        let encoded = encode_preserving_span(&occurrence)
-            .map_err(|refusal| PublishError::Descriptor(SourceDescriptorError::from(refusal)))?;
+        let encoded =
+            encode_preserving_span(&occurrence).map_err(|refusal| PublishError::Descriptor {
+                refusal: SourceDescriptorError::from(refusal),
+                evidence: None,
+            })?;
+        if encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS) {
+            return Err(PublishError::RevisionAhead {
+                revision: encoded.revision,
+                observed_at,
+            });
+        }
         let key = identity_digest(
             format!(
                 "{}\u{1f}{}\u{1f}{}",
@@ -391,19 +433,44 @@ impl SourcePublisher<'_> {
             .as_bytes(),
         );
         let request_digest = self.request_digest(unit);
-        // Harness text has no affirmative provenance, so the store folds an asserted `Normal` up to `Sensitive`; the descriptor records the same class.
-        let sensitivity = match self.sensitivity {
-            Sensitivity::Normal => Sensitivity::Sensitive,
-            other => other,
-        };
         let harness = unit.value("harness").to_owned();
+        let evidence_object_id = format!("srcev-object:{key}");
+        let provenance = provenance(unit);
+        // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
+        let descriptor_intent = self.intent(
+            &format!("source-descriptor:{key}"),
+            &request_digest,
+            &harness,
+        );
+        let (_, stored) = self
+            .kernel
+            .preview(Instant::now() + RECEIPT_WAIT, |preview| {
+                preview.stored_receipt(descriptor_intent.clone())
+            })
+            .map_err(|error| match error {
+                KernelError::Conflict => PublishError::IdentityReused,
+                error => PublishError::Kernel {
+                    error,
+                    evidence: None,
+                },
+            })?;
+        if let Some(receipt) = stored {
+            return Ok(Published {
+                object_id: receipt.result,
+                occurrence_id: encoded.occurrence_id,
+                evidence_object_id,
+                replaced_object_id: None,
+                replayed: true,
+                provenance,
+            });
+        }
         let handle = self
             .kernel
             .ingest_exact_artifact(ArtifactIngestRequest {
                 intent: self.intent(&format!("source-evidence:{key}"), &request_digest, &harness),
                 payload: unit.text.as_bytes().to_vec(),
                 evidence_id: format!("srcev:{key}"),
-                object_id: format!("srcev-object:{key}"),
+                object_id: evidence_object_id.clone(),
                 object_kind: "evidence".to_owned(),
                 domain_id: self.domain_id.to_owned(),
                 source_kind: unit.class.code().to_owned(),
@@ -412,90 +479,133 @@ impl SourcePublisher<'_> {
                 media_type: "text/plain".to_owned(),
                 retention_class: "canonical".to_owned(),
                 retain_until: None,
-                asserted_sensitivity: sensitivity,
+                asserted_sensitivity: self.sensitivity,
                 provider_egress: self.egress,
                 provenance: None,
             })
-            .map_err(|error| PublishError::Artifact(error.kind()))?;
-        let provenance = provenance(unit);
+            .map_err(|error| match error.kind() {
+                ArtifactErrorKind::OperationKeyReused => PublishError::IdentityReused,
+                kind => PublishError::Artifact(kind),
+            })?;
+        // The store classifies the evidence it retains (harness text without affirmative provenance is at least `Sensitive`), and the descriptor records that class rather than a second derivation of the rule.
+        let sensitivity = match self.stored_sensitivity(&evidence_object_id) {
+            Ok(sensitivity) => sensitivity,
+            Err(error) => {
+                let evidence = Some(self.retire_evidence(&key, &request_digest, &harness));
+                return Err(PublishError::Kernel { error, evidence });
+            }
+        };
         let mut outcome = None;
-        let receipt = self.kernel.commit(
-            self.intent(
-                &format!("source-descriptor:{key}"),
-                &request_digest,
-                &harness,
-            ),
-            |envelope| {
-                let published = envelope
-                    .publish_source_descriptor(&SourceDescriptorRequest {
-                        occurrence: occurrence.clone(),
-                        source_policy: SourceDescriptorPolicy::Native,
-                        domain_id: self.domain_id,
-                        scope_id: Some(self.scope_id),
-                        evidence_id: &handle.evidence_id,
-                        artifact_digest: &handle.digest,
-                        buffer: &unit.text,
-                        sensitivity,
-                        observed_at,
-                    })
-                    .map_err(|refusal| {
-                        outcome = Some(Err(refusal));
-                        KernelError::InvalidInput
-                    })?;
-                envelope.record_admission(AdmissionRequest {
-                    candidate_id: None,
-                    subject_object_id: Some(published.object_id.clone()),
-                    source_class: Some(provenance.0),
-                    taint_class: Some(provenance.1),
-                    event: AdmissionEvent {
-                        kind: EventKind::Other,
-                        trigger_object_id: None,
-                        approval_object_id: None,
-                        evidence_id: Some(handle.evidence_id.clone()),
-                        reason: "harness source publication".to_owned(),
-                    },
+        let receipt = self.kernel.commit(descriptor_intent, |envelope| {
+            let published = envelope
+                .publish_source_descriptor(&SourceDescriptorRequest {
+                    occurrence: occurrence.clone(),
+                    source_policy: SourceDescriptorPolicy::Native,
+                    domain_id: self.domain_id,
+                    scope_id: Some(self.scope_id),
+                    evidence_id: &handle.evidence_id,
+                    artifact_digest: &handle.digest,
+                    buffer: &unit.text,
+                    sensitivity,
+                    observed_at,
+                })
+                .map_err(|refusal| {
+                    outcome = Some(Err(refusal));
+                    KernelError::InvalidInput
                 })?;
-                let result = published.object_id.clone();
-                outcome = Some(Ok(published));
-                Ok(result)
-            },
-        );
+            envelope.record_admission(AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some(published.object_id.clone()),
+                source_class: Some(provenance.0),
+                taint_class: Some(provenance.1),
+                event: AdmissionEvent {
+                    kind: EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: Some(handle.evidence_id.clone()),
+                    reason: "harness source publication".to_owned(),
+                },
+            })?;
+            let result = published.object_id.clone();
+            outcome = Some(Ok(published));
+            Ok(result)
+        });
         match (receipt, outcome) {
             (Ok(receipt), Some(Ok(published))) => Ok(Published {
                 object_id: published.object_id,
                 occurrence_id: published.occurrence_id,
+                evidence_object_id,
                 replaced_object_id: published.replaced_object_id,
                 replayed: receipt.replayed,
                 provenance,
             }),
-            // A replayed receipt ran no operation; its result is the object id the first publication returned.
+            // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned.
             (Ok(receipt), _) => Ok(Published {
                 object_id: receipt.result,
                 occurrence_id: encoded.occurrence_id,
+                evidence_object_id,
                 replaced_object_id: None,
                 replayed: true,
                 provenance,
             }),
             (Err(error), outcome) => {
                 // The evidence was retained for a descriptor the kernel refused; retiring it leaves no live source behind.
-                let object_id = format!("srcev-object:{key}");
-                let _ = self.kernel.commit(
-                    self.intent(
-                        &format!("source-evidence-retire:{key}"),
-                        &request_digest,
-                        &harness,
-                    ),
-                    |envelope| {
-                        envelope.retire_observation(&object_id)?;
-                        Ok(String::new())
-                    },
-                );
+                let evidence = Some(self.retire_evidence(&key, &request_digest, &harness));
                 Err(match outcome {
-                    Some(Err(refusal)) => PublishError::Descriptor(refusal),
-                    _ => PublishError::Kernel(error),
+                    Some(Err(refusal)) => PublishError::Descriptor { refusal, evidence },
+                    _ => PublishError::Kernel { error, evidence },
                 })
             }
         }
+    }
+
+    /// The class the store recorded for the evidence object at ingest.
+    fn stored_sensitivity(&self, evidence_object_id: &str) -> Result<Sensitivity, KernelError> {
+        let (_, states) = self
+            .kernel
+            .object_states(std::slice::from_ref(&evidence_object_id.to_owned()))?;
+        states
+            .into_iter()
+            .next()
+            .flatten()
+            .map(|state| state.object.sensitivity)
+            .ok_or(KernelError::NotFound)
+    }
+
+    /// An already-invalidated object counts as retired: a replayed artifact receipt for an already-compensated unit names exactly that object.
+    fn retire_evidence(&self, key: &str, request_digest: &str, harness: &str) -> RetainedEvidence {
+        let object_id = format!("srcev-object:{key}");
+        let retired = self
+            .kernel
+            .commit(
+                self.intent(
+                    &format!("source-evidence-retire:{key}"),
+                    request_digest,
+                    harness,
+                ),
+                |envelope| {
+                    envelope.retire_evidence(&object_id)?;
+                    Ok(String::new())
+                },
+            )
+            .map(|_| ());
+        let retired = match retired {
+            Err(KernelError::NotFound) => {
+                match self.kernel.object_states(std::slice::from_ref(&object_id)) {
+                    Ok((_, states))
+                        if states[0]
+                            .as_ref()
+                            .is_some_and(|state| state.object.invalidated_commit_seq.is_some()) =>
+                    {
+                        Ok(())
+                    }
+                    Ok(_) => Err(KernelError::NotFound),
+                    Err(error) => Err(error),
+                }
+            }
+            other => other,
+        };
+        RetainedEvidence { object_id, retired }
     }
 
     fn intent(&self, operation: &str, request_digest: &str, harness: &str) -> CommitIntent {
