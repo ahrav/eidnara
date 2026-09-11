@@ -1568,6 +1568,7 @@ fn a_missing_occurrence_behind_the_checkpoint_quarantines_the_driver() {
     let deleted = corruptor.execute("DELETE FROM occurrences", []).unwrap();
     assert!(deleted >= 1);
     corpus.publish("revise", &[("msg-a", "2", "first message, revised")]);
+    let before = durable(dir.path());
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
     let error = driver
         .run_episode(&consumer, &bounds(), 3, &mut |_| {})
@@ -1581,10 +1582,12 @@ fn a_missing_occurrence_behind_the_checkpoint_quarantines_the_driver() {
         hold.snapshot,
         "no acknowledgement"
     );
+    assert_eq!(durable(dir.path()), before);
     let again = driver
         .run_episode(&consumer, &bounds(), 4, &mut |_| panic!("no work runs"))
         .unwrap_err();
     assert!(matches!(again, CatchUpError::Quarantined(q) if q == quarantine));
+    assert_eq!(durable(dir.path()), before);
 }
 
 #[test]
@@ -1617,6 +1620,7 @@ fn a_checkpoint_that_contradicts_the_hold_snapshot_quarantines_instead_of_acknow
         )
         .unwrap();
     assert_eq!(changed, 1);
+    let before = durable(dir.path());
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
     let error = driver
         .run_episode(&consumer, &bounds(), 3, &mut |_| {})
@@ -1630,6 +1634,12 @@ fn a_checkpoint_that_contradicts_the_hold_snapshot_quarantines_instead_of_acknow
         hold.snapshot,
         "no acknowledgement"
     );
+    assert_eq!(durable(dir.path()), before);
+    let again = driver
+        .run_episode(&consumer, &bounds(), 4, &mut |_| panic!("no work runs"))
+        .unwrap_err();
+    assert!(matches!(again, CatchUpError::Quarantined(q) if q == quarantine));
+    assert_eq!(durable(dir.path()), before);
 }
 
 // ---- Named-boundary process crashes ----------------------------------------
