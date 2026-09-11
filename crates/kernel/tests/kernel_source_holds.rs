@@ -950,6 +950,154 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn hold_status_observes_invalidation_during_object_verification() {
+    for purge in [true, false] {
+        let mut fixture = Fixture::open();
+        fixture.seed_five_classes();
+        let binding = fixture.binding();
+        let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+        let digest = fixture.held_all(&hold, 64)[0].artifact_digest.clone();
+        let expected = if purge {
+            SourceHoldInvalidity::PurgeDegraded
+        } else {
+            SourceHoldInvalidity::Released
+        };
+        let result = fixture.store.source_hold_status_with_hook_for_test(
+            &binding,
+            &hold.hold_id,
+            hold.captured_at,
+            || {
+                if purge {
+                    let error = fixture
+                        .store
+                        .delete_artifact_with_fault_for_test(
+                            ArtifactDeletionRequest {
+                                intent: intent("purge-during-verification"),
+                                identity: ArtifactDeletionIdentity::Digest(digest.clone()),
+                                kind: ArtifactDeletionKind::Purge,
+                                operator_id: Some("operator".to_string()),
+                                target_locator: Some("incident://verification".to_string()),
+                                reason: Some("retired".to_string()),
+                                deleted_at: hold.captured_at,
+                            },
+                            kernel::ArtifactDeletionFault::AfterCommit,
+                        )
+                        .unwrap_err();
+                    assert_eq!(error.kind(), kernel::ArtifactErrorKind::PurgeUnlinkPending);
+                    assert!(
+                        fixture
+                            .root
+                            .path()
+                            .join("artifacts/objects")
+                            .join(&digest[..2])
+                            .join(&digest[2..])
+                            .is_file()
+                    );
+                } else {
+                    fixture
+                        .store
+                        .release_source_hold(&binding, &hold.hold_id, hold.captured_at)
+                        .unwrap();
+                }
+            },
+        );
+        assert_eq!(
+            result,
+            Err(SourceHoldError::Invalid(expected)),
+            "purge={purge}"
+        );
+    }
+}
+
+#[test]
+fn future_release_times_do_not_extend_hold_retention() {
+    for removal in ["release", "deregister", "abandon", "reconcile"] {
+        for maximum in [true, false] {
+            let mut fixture = Fixture::open();
+            fixture.seed_five_classes();
+            let binding = fixture.binding();
+            let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+            let released_at = if maximum {
+                i64::MAX
+            } else {
+                hold.expires_at + 1
+            };
+            match removal {
+                "release" => fixture
+                    .store
+                    .release_source_hold(&binding, &hold.hold_id, released_at)
+                    .unwrap(),
+                "deregister" => {
+                    fixture
+                        .store
+                        .acknowledge_outbox(CONSUMER, fixture.store.tip().unwrap(), 1)
+                        .unwrap();
+                    fixture
+                        .store
+                        .commit(intent("deregister-future"), |envelope| {
+                            envelope.deregister_outbox_consumer(CONSUMER, released_at)?;
+                            Ok(String::new())
+                        })
+                        .unwrap();
+                }
+                "abandon" => {
+                    fixture
+                        .store
+                        .commit(intent("abandon-future"), |envelope| {
+                            envelope.abandon_outbox_consumer(
+                                CONSUMER,
+                                kernel::ConsumerAbandonment {
+                                    operator_id: "operator".to_string(),
+                                    reason: "retired".to_string(),
+                                    abandoned_at: released_at,
+                                    barrier_id: None,
+                                },
+                            )?;
+                            Ok(String::new())
+                        })
+                        .unwrap();
+                }
+                "reconcile" => {
+                    fixture = fixture.reopen();
+                    assert_eq!(
+                        fixture
+                            .store
+                            .reconcile_source_holds(CONSUMER, released_at)
+                            .unwrap(),
+                        std::slice::from_ref(&hold.hold_id)
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let connection = fixture.inspect();
+            let stored: i64 = connection
+                .query_row(
+                    "SELECT released_at FROM capture_pins WHERE capture_pin_id=?1",
+                    [&hold.hold_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                stored, hold.expires_at,
+                "{removal}: release extended the hold lifetime"
+            );
+            let references: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1 AND released_at=?2",
+                rusqlite::params![hold.hold_id, stored], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(usize::try_from(references).unwrap(), hold.references);
+            fixture
+                .store
+                .run_capture_pin_maintenance(
+                    hold.expires_at + 14 * i64::try_from(DAY_MS).unwrap() + 1,
+                )
+                .unwrap();
+            assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+        }
+    }
+}
+
+#[test]
 fn repeated_purges_preserve_the_first_hold_degradation() {
     let mut fixture = Fixture::open();
     fixture.seed_five_classes();

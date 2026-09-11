@@ -1002,9 +1002,8 @@ fn capture_state_inner(
     })
 }
 
-/// Marks the pin and every reference it owns released at `released_at`,
-/// inside the caller's transaction. Returns `false` when the pin was already
-/// released or does not exist, so callers decide whether that is an error.
+/// A finite expiry caps `released_at` so release cannot extend retention.
+/// Returns `false` when the pin is already released or does not exist.
 pub(crate) fn release_capture_pin_in_tx(
     tx: &rusqlite::Transaction<'_>,
     capture_pin_id: &str,
@@ -1012,7 +1011,7 @@ pub(crate) fn release_capture_pin_in_tx(
 ) -> Result<bool, KernelError> {
     let changed = tx
         .execute(
-            "UPDATE capture_pins SET released_at=?1
+            "UPDATE capture_pins SET released_at=MIN(?1,COALESCE(expires_at,?1))
              WHERE capture_pin_id=?2 AND released_at IS NULL",
             params![released_at, capture_pin_id],
         )
@@ -1021,9 +1020,10 @@ pub(crate) fn release_capture_pin_in_tx(
         return Ok(false);
     }
     tx.execute(
-        "UPDATE capture_pin_refs SET released_at=?1
-         WHERE capture_pin_id=?2 AND released_at IS NULL",
-        params![released_at, capture_pin_id],
+        "UPDATE capture_pin_refs
+         SET released_at=(SELECT released_at FROM capture_pins WHERE capture_pin_id=?1)
+         WHERE capture_pin_id=?1 AND released_at IS NULL",
+        [capture_pin_id],
     )
     .map_err(|_| KernelError::Io)?;
     Ok(true)
