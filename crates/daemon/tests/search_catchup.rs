@@ -12,6 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use daemon::embedding_publication::{EmbeddingPublisher, PublicationError, VectorPublication};
 use daemon::search_catchup::{
     Blocked, CatchUpConsumer, CatchUpError, EpisodeBounds, EpisodeEnd, EpisodeEvent, EpisodeFault,
     EpisodeReport, QuarantineKind, SearchCatchUp,
@@ -19,8 +20,9 @@ use daemon::search_catchup::{
 use daemon::search_projection::SearchProjection;
 use kernel::source_identity::Occurrence;
 use kernel::{
-    ArtifactIngestRequest, CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest,
-    DomainSpec, ExportWindow, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
+    ArtifactDestination, ArtifactIngestRequest, CommitIntent, CommitPageBounds, CommitReadError,
+    CommitReadRequest, CurrentInputExpectation, DomainSpec, EligibilityBinding, ExportWindow,
+    KernelStore, ProjectScope, ProviderEgress, RepositoryProvenance, Sensitivity,
     SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourceHoldError, SourcePageBounds, SourceRow,
 };
@@ -1391,7 +1393,7 @@ fn corruption_and_storage_failures_quarantine_the_driver_without_acknowledgement
         panic!("{error:?}");
     };
     assert_eq!(quarantine.kind, QuarantineKind::Integrity);
-    assert_eq!(driver.quarantine(), Some(&quarantine));
+    assert_eq!(driver.quarantine(), Some(quarantine.clone()));
     assert_eq!(
         corpus.kernel_checkpoint(),
         hold.snapshot,
@@ -1423,6 +1425,73 @@ fn corruption_and_storage_failures_quarantine_the_driver_without_acknowledgement
     };
     assert_eq!(quarantine.kind, QuarantineKind::Storage);
     assert_eq!(other_corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
+fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    mutate(&search_path(dir.path()))
+        .execute_batch("DROP TABLE projection_checkpoint")
+        .unwrap();
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| panic!("no window runs"))
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+
+    // The projection quarantine blocks all writers, including `EmbeddingPublisher`.
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let project = ProjectScope::new(&"a".repeat(64)).unwrap();
+    let expectation = CurrentInputExpectation {
+        object_id: "srcdesc:never:1".to_string(),
+        source_revision: 1,
+        occurrence_id: "never".to_string(),
+        payload_id: format!("{:x}", Sha256::digest(b"payload")),
+        artifact_digest: format!("{:x}", Sha256::digest(b"artifact")),
+    };
+    let generation = generation();
+    let mut vector = vec![0.0f32; 8];
+    vector[0] = 1.0;
+    let publication = VectorPublication {
+        expectation,
+        generation: &generation,
+        vector: &vector,
+        input_bytes: 1,
+        input_tokens: 1,
+    };
+    let refused = publisher.publish(
+        &publication,
+        EligibilityBinding {
+            project: &project,
+            destination: ArtifactDestination::Local,
+        },
+        std::time::Instant::now() + Duration::from_secs(5),
+        4,
+        &mut |event| panic!("a quarantined projection accepts no work: {event:?}"),
+    );
+    match refused {
+        Err(PublicationError::Quarantined(q)) => assert_eq!(q, quarantine),
+        other => panic!("{other:?}"),
+    }
+
+    // A newly constructed driver consults the same projection state.
+    let mut fresh = SearchCatchUp::new(&corpus.kernel, &projection);
+    let again = fresh
+        .run_episode(&consumer, &bounds(), 5, &mut |_| panic!("no work runs"))
+        .unwrap_err();
+    assert!(matches!(again, CatchUpError::Quarantined(q) if q == quarantine));
+    assert_eq!(
+        corpus.kernel_checkpoint(),
+        hold.snapshot,
+        "no acknowledgement"
+    );
 }
 
 // ---- Named-boundary process crashes ----------------------------------------
@@ -1635,7 +1704,6 @@ fn crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_earl
             }
             assert_eq!(kernel_checkpoint(dir.path()), expected_kernel);
             assert_matches_ledger(dir.path(), &ledger, expected_local);
-            drop(driver);
             drop(projection);
             drop(kernel);
         }

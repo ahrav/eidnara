@@ -8,7 +8,7 @@
 //! A refusal ends the episode without moving either checkpoint.
 //! An unknown local commit outcome is reconciled from the projection's durable rows.
 //! An unknown acknowledgement outcome is reconciled from the kernel's durable consumer checkpoint.
-//! Integrity and storage failures quarantine the driver, which then refuses further episodes, so no acknowledgement can rest on a projection whose contents are in doubt.
+//! Integrity and storage failures quarantine the projection, so no acknowledgement can rest on a projection whose contents are in doubt.
 
 use std::num::NonZeroUsize;
 
@@ -161,7 +161,6 @@ pub enum EpisodeFault {
 pub struct SearchCatchUp<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
-    quarantine: Option<Quarantine>,
     fault: Option<EpisodeFault>,
 }
 
@@ -194,13 +193,12 @@ impl<'a> SearchCatchUp<'a> {
         Self {
             kernel,
             projection,
-            quarantine: None,
             fault: None,
         }
     }
 
-    pub fn quarantine(&self) -> Option<&Quarantine> {
-        self.quarantine.as_ref()
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        self.projection.quarantine()
     }
 
     /// Captures a target, brings the kernel checkpoint up to the durable local prefix, then applies and acknowledges one window at a time until the target is reached or a step refuses.
@@ -209,7 +207,7 @@ impl<'a> SearchCatchUp<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`CatchUpError::Quarantined`] when a stored row contradicts the batch that wrote it, or when the projection store fails and its effect cannot be read back; the driver stays quarantined.
+    /// Returns [`CatchUpError::Quarantined`] when a stored row contradicts the batch that wrote it, or when the projection store fails and its effect cannot be read back; the projection stays quarantined.
     /// Returns [`CatchUpError::Kernel`] when the kernel fails in a way that leaves no durable fact to reconcile against, such as a failed read or a hold extension that did not run.
     pub fn run_episode(
         &mut self,
@@ -243,8 +241,8 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
-        if let Some(quarantine) = &self.quarantine {
-            return Err(CatchUpError::Quarantined(quarantine.clone()));
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(CatchUpError::Quarantined(quarantine));
         }
         let target = self.kernel.capture_commit_read_target()?;
         let mut report = EpisodeReport {
@@ -562,9 +560,7 @@ impl<'a> SearchCatchUp<'a> {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> CatchUpError {
-        let quarantine = Quarantine::new(kind, error);
-        self.quarantine = Some(quarantine.clone());
-        CatchUpError::Quarantined(quarantine)
+        CatchUpError::Quarantined(self.projection.enter_quarantine(kind, error))
     }
 }
 

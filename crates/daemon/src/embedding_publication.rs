@@ -2,7 +2,7 @@
 //!
 //! The vector is validated before the guard is taken, the guard is taken without a search transaction, the descriptor is revalidated under it, and the vector and its completion commit in one bounded search transaction.
 //! The transaction ends and its connection is released before the guard drops; nothing under the guard runs inference, decodes source, waits on the network, or sleeps.
-//! A stale descriptor makes the job obsolete instead of completing it. An unknown local commit is reconciled from the durable vector. A conflicting vector or an invalid shape stops automatic dispatch for operator repair. Integrity and storage failures quarantine the publisher.
+//! A stale descriptor makes the job obsolete instead of completing it. An unknown local commit is reconciled from the durable vector. A conflicting vector or an invalid shape stops automatic dispatch for operator repair. Integrity and storage failures quarantine the projection for every writer.
 
 use std::time::Instant;
 
@@ -112,7 +112,6 @@ enum Settled {
 pub struct EmbeddingPublisher<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
-    quarantine: Option<Quarantine>,
     fault: Option<PublicationFault>,
 }
 
@@ -130,13 +129,12 @@ impl<'a> EmbeddingPublisher<'a> {
         Self {
             kernel,
             projection,
-            quarantine: None,
             fault: None,
         }
     }
 
-    pub fn quarantine(&self) -> Option<&Quarantine> {
-        self.quarantine.as_ref()
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        self.projection.quarantine()
     }
 
     /// Validates the vector, takes the current-input guard by `deadline`, revalidates the descriptor for `eligibility`, and commits the vector with its completion.
@@ -181,8 +179,8 @@ impl<'a> EmbeddingPublisher<'a> {
         now: i64,
         observer: &mut dyn FnMut(PublicationEvent),
     ) -> Result<Publication, PublicationError> {
-        if let Some(quarantine) = &self.quarantine {
-            return Err(PublicationError::Quarantined(quarantine.clone()));
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(PublicationError::Quarantined(quarantine));
         }
         validate_unit_vector(
             publication.generation.vector_dimension as usize,
@@ -359,8 +357,6 @@ impl<'a> EmbeddingPublisher<'a> {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> PublicationError {
-        let quarantine = Quarantine::new(kind, error);
-        self.quarantine = Some(quarantine.clone());
-        PublicationError::Quarantined(quarantine)
+        PublicationError::Quarantined(self.projection.enter_quarantine(kind, error))
     }
 }

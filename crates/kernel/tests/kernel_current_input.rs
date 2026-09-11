@@ -339,3 +339,74 @@ fn every_stale_dimension_is_named_and_releases_the_writer_at_once() {
         .unwrap()
         .expect("the current descriptor is admitted");
 }
+
+#[test]
+fn a_corrupt_stored_descriptor_is_refused_rather_than_granted() {
+    let fixture = Fixture::open();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let current = fixture.publish("a", "msg-a", "1", "first message", true, true);
+    let db_path = fixture._root.path().join("kernel.sqlite");
+    let pristine: Vec<u8> =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT observation_payload FROM observations WHERE object_id=?1",
+                [&current.object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+    // Each tamper corrupts one detail field the guard does not compare against the expectation.
+    for (label, field, value) in [
+        ("lineage", "lineage_id", serde_json::json!("tampered")),
+        ("revision", "revision", serde_json::json!("7")),
+    ] {
+        let mut stored: serde_json::Value = serde_json::from_slice(&pristine).unwrap();
+        let mut detail: serde_json::Value =
+            serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+        detail[field] = value;
+        stored["detail"] = serde_json::Value::String(serde_json::to_string(&detail).unwrap());
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![serde_json::to_vec(&stored).unwrap(), &current.object_id],
+        )
+        .unwrap();
+        drop(db);
+        let refused = fixture
+            .store
+            .guard_current_input(&current, binding(&project), soon());
+        assert!(
+            matches!(refused, Err(KernelError::CorruptCanonicalRow)),
+            "{label}: {refused:?}"
+        );
+        // The refusal holds nothing: a bounded commit goes straight through.
+        fixture
+            .store
+            .commit_before(soon(), intent(&format!("after-{label}")), |_| {
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    let db = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+        rusqlite::params![&pristine, &current.object_id],
+    )
+    .unwrap();
+    drop(db);
+    fixture
+        .store
+        .guard_current_input(&current, binding(&project), soon())
+        .unwrap()
+        .expect("the restored descriptor is current");
+}

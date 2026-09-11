@@ -16,7 +16,7 @@ use super::eligibility::{
 };
 use super::envelope::check_fence;
 use super::open::AcquireLimit;
-use super::source_descriptor::stored_detail;
+use super::source_descriptor::{descriptor_object_id, stored_detail};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
 /// The descriptor a consumer believes it is publishing work for, as it read it when the work began.
@@ -81,7 +81,7 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Deadline`] when the writer stays held past `deadline`, [`KernelError::InvalidInput`] for an expectation outside the eligibility bounds, [`KernelError::FenceLost`] for a superseded writer, [`KernelError::CorruptCanonicalRow`] for a descriptor row that cannot be decoded or is missing behind a live registry row, and [`KernelError::Busy`] or [`KernelError::Io`] for a store that cannot be read.
+    /// Returns [`KernelError::Deadline`] when the writer stays held past `deadline`, [`KernelError::InvalidInput`] for an expectation outside the eligibility bounds, [`KernelError::FenceLost`] for a superseded writer, [`KernelError::CorruptCanonicalRow`] for a descriptor row that cannot be decoded, contradicts its own identity, or is missing behind a live registry row, and [`KernelError::Busy`] or [`KernelError::Io`] for a store that cannot be read.
     pub fn guard_current_input(
         &self,
         expected: &CurrentInputExpectation,
@@ -159,6 +159,15 @@ fn revalidate(
         .map_err(map_sqlite)?
         .ok_or(KernelError::CorruptCanonicalRow)?;
     let detail = stored_detail(&payload)?;
+    // Publication derives the object id from lineage and revision and gives a
+    // whole-buffer descriptor its artifact digest as payload id, so a mismatch is
+    // corruption, not staleness.
+    if descriptor_object_id(&detail.lineage_id, &detail.revision) != expected.object_id
+        || detail.revision != expected.source_revision.to_string()
+        || (detail.span.is_none() && detail.payload_id != detail.artifact_digest)
+    {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
     if detail.occurrence_id != expected.occurrence_id
         || detail.payload_id != expected.payload_id
         || detail.artifact_digest != expected.artifact_digest

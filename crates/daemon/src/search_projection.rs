@@ -8,6 +8,7 @@
 //! outside this disposable database.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
@@ -15,6 +16,8 @@ use retrieval::{BASELINE, ProjectionError};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, StoreError, open_sqlite,
 };
+
+use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The page cache the projection connection is allowed, in KiB.
 pub const CACHE_KIB: u32 = 8 * 1024;
@@ -46,6 +49,8 @@ pub enum SearchProjectionError {
 pub struct SearchProjection {
     store: SqliteStore,
     path: PathBuf,
+    /// Shares one quarantine among the projection's writers.
+    quarantine: Mutex<Option<Quarantine>>,
 }
 
 impl SearchProjection {
@@ -83,7 +88,11 @@ impl SearchProjection {
             },
         };
         let store = open_sqlite(&descriptor, BASELINE)?;
-        let projection = Self { store, path };
+        let projection = Self {
+            store,
+            path,
+            quarantine: Mutex::new(None),
+        };
         projection.pin_connection()?;
         projection.verify_connection()?;
         Ok(projection)
@@ -91,6 +100,27 @@ impl SearchProjection {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        self.quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The shared quarantine state preserves the first cause so every writer
+    /// returns the same [`Quarantine`].
+    pub(crate) fn enter_quarantine(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        self.quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(|| Quarantine::new(kind, error))
+            .clone()
     }
 
     /// Bounds the page cache and keeps transient sort and index storage in
