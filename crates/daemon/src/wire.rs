@@ -376,7 +376,9 @@ pub(crate) fn project_messages_incremental(
     cached: &FlatProjection,
     prefix_messages: usize,
 ) -> Result<FlatProjection, WireError> {
-    MessageProjection::new(messages).project_incremental(cached, prefix_messages)
+    MessageProjection::new(messages)
+        .project_incremental(cached, prefix_messages)
+        .map(|(projection, _)| projection)
 }
 
 /// Tracks synthetic message IDs separately from ingress messages.
@@ -411,31 +413,36 @@ impl<'a> MessageProjection<'a> {
         project_messages_from_state(self, FlatProjectionBuilder::default())
     }
 
-    /// Projects a suffix while reusing a validated cached prefix.
+    /// The tuple contains the projection and the number of messages reused from the cached prefix.
     ///
-    /// Zero, out-of-range, or incomplete local prefix metadata falls back to a full
-    /// projection. Projection errors have the same meaning as [`project_messages`].
+    /// Invalid prefix bounds, missing identities, or changed synthetic status fall
+    /// back to a full projection with zero reused messages. Projection errors have
+    /// the same meaning as [`project_messages`].
     pub(crate) fn project_incremental(
         &self,
         cached: &FlatProjection,
         prefix_messages: usize,
-    ) -> Result<FlatProjection, WireError> {
+    ) -> Result<(FlatProjection, usize), WireError> {
         let messages = self.messages;
         if prefix_messages == 0
             || prefix_messages > messages.len()
             || prefix_messages > cached.message_count()
         {
-            return self.project();
+            return Ok((self.project()?, 0));
         }
 
         let prefix_block_end = cached.message_block_ends[prefix_messages - 1];
         let mut identity_by_mid = BTreeMap::new();
-        for message in &messages[..prefix_messages] {
-            if self.is_synthetic(message) {
+        for (index, message) in messages[..prefix_messages].iter().enumerate() {
+            let synthetic = self.is_synthetic(message);
+            if cached.message_meta[index].meta.synthetic != synthetic {
+                return Ok((self.project()?, 0));
+            }
+            if synthetic {
                 continue;
             }
             let Some(identities) = cached.identity_by_mid.get(&message.mid) else {
-                return self.project();
+                return Ok((self.project()?, 0));
             };
             identity_by_mid.insert(message.mid.clone(), identities.clone());
         }
@@ -449,7 +456,7 @@ impl<'a> MessageProjection<'a> {
                 .as_ref()
                 .clone(),
         };
-        project_messages_from_state(self, builder)
+        Ok((project_messages_from_state(self, builder)?, prefix_messages))
     }
 }
 
@@ -1604,5 +1611,38 @@ mod tests {
         let replayed = serde_json::to_value(&reattached[0].ck).unwrap();
         assert_eq!(replayed.get("future_field"), None);
         assert_eq!(replayed["content"][0]["future_block_field"], Value::from(2));
+    }
+
+    #[test]
+    fn incremental_projection_checks_effective_synthetic_status() {
+        let messages = [
+            text_msg("m0", 0, "user", "prefix"),
+            text_msg("m1", 1, "user", "tail"),
+        ];
+        for cached_synthetic in [false, true] {
+            let mut prior = MessageProjection::new(&messages);
+            if cached_synthetic {
+                prior.mark_synthetic(&messages[0]);
+            }
+            let cached = prior.project().unwrap();
+            for synthetic in [false, true] {
+                let mut current = MessageProjection::new(&messages);
+                if synthetic {
+                    current.mark_synthetic(&messages[0]);
+                }
+                let (incremental, reused_messages) =
+                    current.project_incremental(&cached, 1).unwrap();
+                assert_eq!(reused_messages, usize::from(cached_synthetic == synthetic));
+                assert_eq!(incremental, current.project().unwrap());
+                assert_eq!(
+                    Arc::ptr_eq(&incremental.blocks[0].wire, &cached.blocks[0].wire),
+                    cached_synthetic == synthetic,
+                );
+                assert_eq!(
+                    Arc::ptr_eq(&incremental.blocks[0].bytes, &cached.blocks[0].bytes),
+                    cached_synthetic == synthetic,
+                );
+            }
+        }
     }
 }

@@ -2888,12 +2888,12 @@ fn apply_once(
             && cache.replace_from <= ingress_req.messages.len()
             && cache.replace_from <= cache.projection.message_count()
     });
-    let initial_projection = if let Some(cache) = reusable_projection {
+    let (initial_projection, reused_messages) = if let Some(cache) = reusable_projection {
         ingress_req
             .projection
             .project_incremental(&cache.projection, cache.replace_from)?
     } else {
-        ingress_req.projection.project()?
+        (ingress_req.projection.project()?, 0)
     };
     let trusted_projection_prefix = reusable_projection.and_then(|cache| {
         cache
@@ -2902,7 +2902,7 @@ fn apply_once(
             .map(|blocks| (cache.prior_fingerprint.as_str(), blocks))
     });
     timings.projection = elapsed_ms(projection_started_at);
-    timings.projection_reused_messages = reusable_projection.map_or(0, |cache| cache.replace_from);
+    timings.projection_reused_messages = reused_messages;
     timings.projection_projected_messages = ingress_req
         .messages
         .len()

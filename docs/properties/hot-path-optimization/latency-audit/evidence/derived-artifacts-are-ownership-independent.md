@@ -235,13 +235,13 @@ Clippy, format, comment-marker, and diff checks passed. Full gates require a
 controller rerun after these edits; earlier execution evidence above remains
 historical.
 
-[shared-expansion]: ../../../../../crates/daemon/src/lib.rs#L4156
+[shared-expansion]: ../../../../../crates/daemon/src/lib.rs#L4157
 [shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L56
-[shared-ingress]: ../../../../../crates/daemon/src/lib.rs#L13027-L13079
-[shared-replay-check]: ../../../../../crates/daemon/src/lib.rs#L20653
-[shared-ingress-check]: ../../../../../crates/daemon/src/lib.rs#L20872
-[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L70
-[raw-allocation-check]: ../../../../../crates/daemon/src/lib.rs#L20983
+[shared-ingress]: ../../../../../crates/daemon/src/lib.rs#L13028-L13080
+[shared-replay-check]: ../../../../../crates/daemon/src/lib.rs#L20654
+[shared-ingress-check]: ../../../../../crates/daemon/src/lib.rs#L20873
+[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L71
+[raw-allocation-check]: ../../../../../crates/daemon/src/lib.rs#L20984
 
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
 [flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
@@ -249,8 +249,8 @@ historical.
 [reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L141-L144
 [reattach]: ../../../../../crates/daemon/src/wire.rs#L145-L186
 [diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L736
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L826-L835
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L680-L743
+[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011
