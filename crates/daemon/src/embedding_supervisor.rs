@@ -120,6 +120,8 @@ pub struct EmbeddingSupervisor {
     tracker: TaskTracker,
     shutdown: CancellationToken,
     slices: AtomicUsize,
+    /// Set by the first `run`; the loop it starts is the only one this supervisor ever runs.
+    started: AtomicBool,
     stop: Mutex<Option<Stop>>,
     /// Host jobs this supervisor submitted and has not seen published, by host job identifier. An entry outlives its row's disposition: the host runs the call to completion whatever the row says, and a row reopened under a new episode submits a second host job beside the first.
     admitted: Mutex<BTreeMap<String, HostJob>>,
@@ -149,6 +151,7 @@ impl EmbeddingSupervisor {
             tracker: TaskTracker::new(),
             shutdown: CancellationToken::new(),
             slices: AtomicUsize::new(0),
+            started: AtomicBool::new(false),
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
             sweep_cursor: Mutex::new(None),
@@ -174,17 +177,20 @@ impl EmbeddingSupervisor {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fault);
     }
 
-    /// Runs slices until shutdown or a stop. Must run inside a Tokio runtime; each slice is a tracked blocking task, and the loop yields between slices. The loop itself holds a tracker token, so `shutdown` cannot report a drain while a slice could still start.
+    /// Runs slices until shutdown or a stop. Must run inside a Tokio runtime; each slice is a tracked blocking task, and the loop yields between slices. The loop itself holds a tracker token, so `shutdown` cannot report a drain while a slice could still start. One supervisor runs one loop: a later call returns at once, whether the first loop is still running or has stopped, since two loops would interleave slices and their events over the same census and a stop is terminal.
     pub async fn run(self: Arc<Self>) {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
         let _running = self.tracker.token();
         let mut kind = SliceKind::Backfill;
         // Whether each kind's last slice found nothing to do; the loop waits only when both did, so a dry sweep never throttles a backfill with a backlog and a blocked backfill never spins while the sweep is also dry.
         let mut idle = Idle::default();
         loop {
-            // A stop is terminal for this supervisor: a later `run` on the same value schedules nothing and leaves the recorded reason in place.
-            if self.stopped() {
-                return;
-            }
             if self.shutdown.is_cancelled() {
                 self.stop_with(Stop::Shutdown);
                 return;
@@ -375,13 +381,6 @@ impl EmbeddingSupervisor {
                 }
             }
         }
-    }
-
-    fn stopped(&self) -> bool {
-        self.stop
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
     }
 
     fn stop_with(&self, stop: Stop) {

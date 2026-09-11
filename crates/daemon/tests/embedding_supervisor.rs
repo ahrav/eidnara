@@ -1460,3 +1460,50 @@ async fn a_census_during_a_blocked_charge_keeps_the_result_the_charge_then_claim
         .unwrap()
         .unwrap();
 }
+
+/// One supervisor runs one loop: a second `run` on another clone returns at once while the first keeps scheduling, so two loops never interleave slices over the same census.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_second_run_returns_while_the_first_loop_owns_the_schedule() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("a", "a text");
+    let (projection, _) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), synapse),
+        slice_bounds(Duration::from_secs(5)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    assert!(matches!(
+        next_event(&mut events).await,
+        SupervisorEvent::SliceStarted {
+            kind: SliceKind::Backfill,
+            ..
+        }
+    ));
+    tokio::time::timeout(Duration::from_secs(2), Arc::clone(&supervisor).run())
+        .await
+        .expect("a second run returns while the first loop runs");
+    assert_eq!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill {
+            end: None,
+            admitted: 1,
+            published: 1,
+            dispositions: 0,
+        },
+        "the first loop's slice is the only one that ran"
+    );
+    let report = supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(report.stop, Some(Stop::Shutdown));
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(engine.calls(), 1, "one loop ran one inference");
+}
