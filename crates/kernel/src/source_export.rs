@@ -23,7 +23,15 @@ use super::source_hold::{
     Descriptors, HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, check_coverage,
     check_window, descriptor_rows_sql,
 };
+use super::source_identity::{
+    Occurrence, Span, encode_metadata, payload_id, select, validate_span,
+};
 use super::{KernelError, KernelStore, map_sqlite};
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static RAW_ROWS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Which descriptors a page exports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +41,14 @@ pub enum ExportWindow {
     /// Descriptors created in `(S, through]`, each with its text, and
     /// descriptors live at S that were invalidated in the window, without text.
     CatchUp { through: i64 },
+}
+
+/// An exporter-issued continuation for one hold and one fixed window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCursor {
+    hold_id: String,
+    window: ExportWindow,
+    key: HeldCursor,
 }
 
 /// Logical admission bounds for one page, judged before any object is read.
@@ -61,6 +77,7 @@ pub struct SourcePageCharge {
 pub struct SourceRow {
     pub object_id: String,
     pub revision: i64,
+    /// A spanned invalidation-only row carries a format-checked `payload_id`; its absent payload bytes cannot be verified.
     pub detail: SourceDescriptorDetail,
     pub created_commit_seq: i64,
     /// The commit that invalidated this descriptor, when one has, at any
@@ -68,6 +85,7 @@ pub struct SourceRow {
     pub invalidated_commit_seq: Option<i64>,
     /// The exact UTF-8 text the descriptor's span selects, present exactly
     /// when the row's creation lies inside the exported window.
+    /// Payload bytes are read and verified only for rows that export text.
     pub text: Option<String>,
 }
 
@@ -75,7 +93,7 @@ pub struct SourceRow {
 pub struct SourcePage {
     pub rows: Vec<SourceRow>,
     /// `None` when this page ends the window's inventory.
-    pub next: Option<HeldCursor>,
+    pub next: Option<SourceCursor>,
     pub charge: SourcePageCharge,
 }
 
@@ -149,7 +167,7 @@ struct Preflight {
     row: SourceRow,
     digest: String,
     byte_length: u64,
-    span: Option<(u64, u64)>,
+    span: Option<Span>,
     exports_text: bool,
 }
 
@@ -158,69 +176,82 @@ impl Preflight {
         match (self.exports_text, self.span) {
             (false, _) => 0,
             (true, None) => self.byte_length,
-            (true, Some((start, end))) => end.saturating_sub(start),
+            (true, Some(span)) => span.end.saturating_sub(span.start),
         }
     }
 }
 
 impl KernelStore {
+    /// Returns and resets the number of source-export SQL rows read on this thread.
+    #[cfg(feature = "test-support")]
+    pub fn take_source_export_row_reads_for_test() -> usize {
+        RAW_ROWS_READ.with(|count| count.replace(0))
+    }
+
     /// One admitted page of `window` after `cursor`, read at the hold's S in
     /// one short transaction and materialized from the object store after
     /// that transaction closes. The hold must be valid at `now`. A catch-up
     /// window's first page also proves the hold is extended through its end;
     /// coverage remains valid while `through` is fixed and the hold remains
     /// valid, so a page continued from a cursor does not repeat that proof.
+    /// A cursor from another hold or window is rejected before reading the store.
     pub fn export_source_page(
         &self,
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
         window: ExportWindow,
-        cursor: Option<&HeldCursor>,
+        cursor: Option<&SourceCursor>,
         bounds: SourcePageBounds,
     ) -> Result<SourcePage, SourceExportError> {
+        if cursor.is_some_and(|cursor| cursor.hold_id != hold_id || cursor.window != window) {
+            return Err(SourceHoldError::InvalidRequest.into());
+        }
         let (admitted, next, charge) = {
             let mut reader = self.lock_reader()?;
             let tx = reader.transaction_with_behavior(TransactionBehavior::Deferred)?;
-            let hold = self.load_valid_hold(&tx, binding, hold_id, now)?;
+            let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
             let (body, end, start) = match window {
-                ExportWindow::Snapshot => (
-                    Descriptors::LiveAtEnd.cited_evidence_sql(),
-                    hold.snapshot,
-                    0,
-                ),
+                ExportWindow::Snapshot => {
+                    (Descriptors::LiveAtEnd.cited_evidence_sql(), pin.snapshot, 0)
+                }
                 ExportWindow::CatchUp { through } => {
-                    check_window(&tx, &hold, through)?;
+                    check_window(&tx, pin.snapshot, through)?;
                     if cursor.is_none() {
-                        check_coverage(&tx, &hold, through)?;
+                        check_coverage(&tx, pin.snapshot, hold_id, through)?;
                     }
-                    (catch_up_body(), through, hold.snapshot)
+                    (catch_up_body(), through, pin.snapshot)
                 }
             };
-            let keyset = Keyset::after(cursor, bounds.max_rows);
+            let keyset = Keyset::after(cursor.map(|cursor| &cursor.key), bounds.max_rows);
             let mut statement = tx.prepare_cached(&Keyset::sql(ROW_SELECT, &body))?;
-            let rows = statement
-                .query_map(
-                    rusqlite::params_from_iter(keyset.params(end, start)),
-                    |row| {
-                        Ok(RawRow {
-                            class: row.get(0)?,
-                            object_id: row.get(1)?,
-                            revision: row.get(2)?,
-                            evidence_id: row.get(3)?,
-                            digest: row.get(4)?,
-                            byte_length: row.get(5)?,
-                            payload: row.get(6)?,
-                            created: row.get(7)?,
-                            invalidated: row.get(8)?,
-                        })
-                    },
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            admit(rows, hold.snapshot, window, bounds, &keyset)?
+            let rows = statement.query_map(
+                rusqlite::params_from_iter(keyset.params(end, start)),
+                |row| {
+                    #[cfg(feature = "test-support")]
+                    RAW_ROWS_READ.with(|count| count.set(count.get() + 1));
+                    Ok(RawRow {
+                        class: row.get(0)?,
+                        object_id: row.get(1)?,
+                        revision: row.get(2)?,
+                        evidence_id: row.get(3)?,
+                        digest: row.get(4)?,
+                        byte_length: row.get(5)?,
+                        payload: row.get(6)?,
+                        created: row.get(7)?,
+                        invalidated: row.get(8)?,
+                    })
+                },
+            )?;
+            admit(rows, pin.snapshot, window, bounds, &keyset)?
         };
         // The read transaction is closed; only admitted rows touch the disk.
         let rows = self.materialize(admitted)?;
+        let next = next.map(|key| SourceCursor {
+            hold_id: hold_id.to_string(),
+            window,
+            key,
+        });
         Ok(SourcePage { rows, next, charge })
     }
 
@@ -246,23 +277,16 @@ impl KernelStore {
                     buffers.insert(preflight.digest.clone(), buffer);
                 }
                 let buffer = &buffers[&preflight.digest];
-                let text = match preflight.span {
-                    None => buffer.as_str(),
-                    Some((start, end)) => {
-                        let start =
-                            usize::try_from(start).map_err(|_| malformed(&row.object_id))?;
-                        let end = usize::try_from(end).map_err(|_| malformed(&row.object_id))?;
-                        if start > end
-                            || end > buffer.len()
-                            || !buffer.is_char_boundary(start)
-                            || !buffer.is_char_boundary(end)
-                        {
-                            return Err(malformed(&row.object_id));
-                        }
-                        &buffer[start..end]
-                    }
-                };
-                row.text = Some(text.to_string());
+                validate_span(preflight.span, buffer).map_err(|_| malformed(&row.object_id))?;
+                let selected = select(preflight.span, buffer);
+                if preflight.span.is_some() && payload_id(selected) != row.detail.payload_id {
+                    return Err(malformed(&row.object_id));
+                }
+                row.text = Some(
+                    std::str::from_utf8(selected)
+                        .map_err(|_| malformed(&row.object_id))?
+                        .to_string(),
+                );
             }
             rows.push(row);
         }
@@ -305,18 +329,22 @@ fn catch_up_body() -> String {
 /// first row; a row that cannot fit an empty page fails. Returns the admitted
 /// rows, the cursor for the next page, and the charge.
 fn admit(
-    rows: Vec<RawRow>,
+    rows: impl Iterator<Item = rusqlite::Result<RawRow>>,
     snapshot: i64,
     window: ExportWindow,
     bounds: SourcePageBounds,
     keyset: &Keyset<'_>,
 ) -> Result<(Vec<Preflight>, Option<HeldCursor>, SourcePageCharge), SourceExportError> {
-    let lookahead = keyset.overflows(&rows);
     let mut admitted: Vec<Preflight> = Vec::new();
     let mut charge = SourcePageCharge::default();
     let mut charged_digests: HashSet<String> = HashSet::new();
-    let mut deferred = false;
-    for raw in rows.into_iter().take(bounds.max_rows.get()) {
+    let mut continues = false;
+    for raw in rows {
+        let raw = raw?;
+        if admitted.len() == bounds.max_rows.get() {
+            continues = true;
+            break;
+        }
         let preflight = preflight(raw, snapshot, window)?;
         let text_bytes = preflight.text_bytes();
         // A row an empty page could not admit can never be exported at these
@@ -345,7 +373,7 @@ fn admit(
         let fits = charge.encoded_bytes.saturating_add(encoded) <= bounds.max_encoded_bytes.get()
             && charge.decoded_bytes.saturating_add(text_bytes) <= bounds.max_decoded_bytes.get();
         if !fits {
-            deferred = true;
+            continues = true;
             break;
         }
         charge.rows += 1;
@@ -356,7 +384,6 @@ fn admit(
         }
         admitted.push(preflight);
     }
-    let continues = deferred || lookahead;
     let next = keyset.finish(&mut admitted, continues, |last| HeldCursor {
         class: last.row.detail.class.clone(),
         object_id: last.row.object_id.clone(),
@@ -399,12 +426,42 @@ fn preflight(
     {
         return Err(malformed(&object_id));
     }
+    let span = detail.span.map(|(start, end)| Span { start, end });
+    let identity: Vec<_> = detail
+        .identity
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let encoded = encode_metadata(
+        &Occurrence {
+            class: &detail.class,
+            identity: &identity,
+            revision: &detail.revision,
+            representation: &detail.representation,
+            span,
+        },
+        byte_length,
+    )
+    .map_err(|_| malformed(&object_id))?;
+    if encoded.occurrence_id != detail.occurrence_id
+        || encoded.lineage_id != detail.lineage_id
+        || encoded.tuple != detail.occurrence_tuple
+        || encoded.span != span
+        || !is_artifact_digest(&detail.payload_id)
+        || (span.is_none() && detail.payload_id != raw.digest)
+    {
+        return Err(malformed(&object_id));
+    }
+    detail
+        .source_policy
+        .validate_for(encoded.class)
+        .map_err(|_| malformed(&object_id))?;
     let exports_text = match window {
         ExportWindow::Snapshot => true,
         ExportWindow::CatchUp { .. } => raw.created > snapshot,
     };
     Ok(Preflight {
-        span: detail.span,
+        span,
         row: SourceRow {
             object_id,
             revision: raw.revision,

@@ -135,10 +135,15 @@ impl Envelope<'_> {
         &mut self,
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
-        self.guarded(|envelope| envelope.insert_observation_inner(spec))
+        self.guarded(|envelope| {
+            if crate::source_descriptor::uses_descriptor_namespace(&spec) {
+                return Err(KernelError::InvalidInput);
+            }
+            envelope.insert_observation_inner(spec)
+        })
     }
 
-    fn insert_observation_inner(
+    pub(crate) fn insert_observation_inner(
         &mut self,
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
@@ -361,10 +366,23 @@ impl Envelope<'_> {
         replaced_object_id: &str,
         replacement: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
-        self.guarded(|envelope| envelope.correct_observation_inner(replaced_object_id, replacement))
+        self.guarded(|envelope| {
+            if crate::source_descriptor::uses_descriptor_namespace(&replacement) {
+                return Err(KernelError::InvalidInput);
+            }
+            let descriptor: bool = envelope.tx.query_row_cached(
+                "SELECT EXISTS(SELECT 1 FROM observations WHERE object_id=?1 AND observation_kind=?2)",
+                params![replaced_object_id, crate::SOURCE_DESCRIPTOR_KIND],
+                |row| row.get(0),
+            ).map_err(map_sqlite)?;
+            if descriptor {
+                return Err(KernelError::InvalidInput);
+            }
+            envelope.correct_observation_inner(replaced_object_id, replacement)
+        })
     }
 
-    fn correct_observation_inner(
+    pub(crate) fn correct_observation_inner(
         &mut self,
         replaced_object_id: &str,
         replacement: ObservationSpec,

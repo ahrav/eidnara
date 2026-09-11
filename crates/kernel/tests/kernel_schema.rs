@@ -175,7 +175,7 @@ fn kernel_schema_has_one_ordered_full_shape() {
 const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 const PINNED_SCHEMA_DIGEST: &str =
-    "75a1f1b8623ee18399329dc46e1f48f2b700d807c3d0dceaac7086765ebdc717";
+    "005ec115d43d177625188128786e3f7edf5e10a43330f9a3bd1f1374f0a1c3e1";
 
 #[test]
 fn cas_control_tables_and_lookup_indexes_are_frozen() {
@@ -2049,6 +2049,7 @@ fn kernel_schema_object_inventory_is_pinned_by_kind_and_name() {
         ("index", "idx_objects_domain_fk"),
         ("index", "idx_objects_known_as_of"),
         ("index", "idx_objects_source"),
+        ("index", "idx_objects_source_descriptor_page"),
         ("index", "idx_objects_superseded_fk"),
         ("index", "idx_observation_dependency_fk"),
         ("index", "idx_observations_anchor_fk"),

@@ -13,8 +13,8 @@ use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest,
     CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelStore, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission,
-    SourceHoldBinding, SourceHoldBounds, SourceHoldError,
+    RepositoryProvenance, Sensitivity, SourceDescriptorPolicy, SourceDescriptorRequest, SourceHold,
+    SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -287,6 +287,13 @@ impl Fixture {
                 revision: &revision_text,
                 representation: representation(class),
                 span: span.map(|(start, end)| Span { start, end }),
+            },
+            source_policy: if class == "git_commits" {
+                SourceDescriptorPolicy::Git {
+                    version: POLICY.to_string(),
+                }
+            } else {
+                SourceDescriptorPolicy::Native
             },
             domain_id: DOMAIN,
             scope_id: None,

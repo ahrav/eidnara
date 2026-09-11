@@ -10,11 +10,283 @@ use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use kernel::{
-    ArtifactDeletionKind, ArtifactErrorKind, ExportWindow, HeldCursor, KernelError,
-    ObservationPayload, PageBound, SourceDescriptorDetail, SourceExportError, SourceHold,
-    SourceHoldError, SourceHoldInvalidity, SourcePage, SourcePageBounds, SourceRow,
+    ArtifactDeletionKind, ArtifactErrorKind, ExportWindow, KernelError,
+    MAX_SOURCE_HOLD_LIFETIME_MS, ObservationPayload, PageBound, SourceCursor,
+    SourceDescriptorDetail, SourceExportError, SourceHold, SourceHoldError, SourceHoldInvalidity,
+    SourcePage, SourcePageBounds, SourceRow,
 };
 use source_fixture::*;
+
+#[test]
+fn continuations_are_bound_to_their_hold_and_window() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let held = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let unextended = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let other = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    fixture.publish("messages", "late", 1, "late message");
+    fixture.publish("raw_tool_spans", "late", 1, "late tool");
+    let through = fixture.store.tip().unwrap();
+    for hold in [&held, &other] {
+        fixture
+            .store
+            .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+            .unwrap();
+    }
+    let window = ExportWindow::CatchUp { through };
+    let first = fixture
+        .store
+        .export_source_page(
+            &binding,
+            &held.hold_id,
+            held.captured_at,
+            window,
+            None,
+            page_bounds(1, 1024),
+        )
+        .unwrap();
+    assert_eq!(first.rows[0].detail.class, "messages");
+    let cursor = first.next.unwrap();
+    let snapshot_cursor = fixture
+        .store
+        .export_source_page(
+            &binding,
+            &held.hold_id,
+            held.captured_at,
+            ExportWindow::Snapshot,
+            None,
+            page_bounds(1, 1024),
+        )
+        .unwrap()
+        .next
+        .unwrap();
+
+    let before_cursor = fixture.publish("canonical_claims", "late", 1, "earlier key");
+    let later = fixture.store.tip().unwrap();
+    fixture
+        .store
+        .extend_source_hold(&binding, &held.hold_id, later, wide_admission())
+        .unwrap();
+    let complete = fixture
+        .store
+        .export_source_page(
+            &binding,
+            &held.hold_id,
+            held.captured_at,
+            ExportWindow::CatchUp { through: later },
+            None,
+            roomy(),
+        )
+        .unwrap();
+    assert_eq!(complete.rows[0].object_id, before_cursor);
+    let valid = fixture
+        .store
+        .export_source_page(
+            &binding,
+            &held.hold_id,
+            held.captured_at,
+            window,
+            Some(&cursor),
+            roomy(),
+        )
+        .unwrap();
+    assert_eq!(valid.rows.len(), 1);
+    assert_eq!(valid.rows[0].detail.class, "raw_tool_spans");
+    assert!(valid.next.is_none());
+
+    let mut accepted = Vec::new();
+    for (case, hold, requested, cursor) in [
+        (
+            "changed through",
+            &held,
+            ExportWindow::CatchUp { through: later },
+            &cursor,
+        ),
+        ("swapped extended hold", &other, window, &cursor),
+        ("swapped unextended hold", &unextended, window, &cursor),
+        (
+            "catch-up to snapshot",
+            &held,
+            ExportWindow::Snapshot,
+            &cursor,
+        ),
+        ("snapshot to catch-up", &held, window, &snapshot_cursor),
+    ] {
+        let result = fixture.store.export_source_page(
+            &binding,
+            &hold.hold_id,
+            held.captured_at,
+            requested,
+            Some(cursor),
+            roomy(),
+        );
+        if result != Err(SourceExportError::Hold(SourceHoldError::InvalidRequest)) {
+            accepted.push(case);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted mismatched continuations: {accepted:?}"
+    );
+}
+
+#[test]
+fn export_revalidates_descriptor_identity_and_selected_payload() {
+    let mut accepted = Vec::new();
+    for invalidation_only in [false, true] {
+        let mut fixture = Fixture::open();
+        let text = "alpha β gamma";
+        let evidence = fixture.retain("identity-check", text);
+        let object_id = fixture.publish_span(
+            "raw_tool_spans",
+            "identity-check",
+            1,
+            text,
+            Some((6, 8)),
+            evidence,
+        );
+        let hold = fixture
+            .store
+            .capture_source_hold(&fixture.binding(), wide())
+            .unwrap();
+        let window = if invalidation_only {
+            let through = fixture.retire(&object_id);
+            fs::remove_file(fixture.object_path(&fixture.ledger[&object_id].digest)).unwrap();
+            ExportWindow::CatchUp { through }
+        } else {
+            ExportWindow::Snapshot
+        };
+        let original_payload: Vec<u8> = fixture
+            .inspect()
+            .query_row(
+                "SELECT observation_payload FROM observations WHERE object_id=?1",
+                [&object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let original: ObservationPayload = serde_json::from_slice(&original_payload).unwrap();
+        let detail: SourceDescriptorDetail =
+            serde_json::from_str(original.detail.as_deref().unwrap()).unwrap();
+        let baseline = fixture
+            .store
+            .export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                window,
+                None,
+                roomy(),
+            )
+            .unwrap();
+        assert_eq!(
+            baseline.rows[0].text.as_deref(),
+            (!invalidation_only).then_some("β")
+        );
+        for field in [
+            "identity",
+            "representation",
+            "occurrence_id",
+            "payload_id",
+            "occurrence_tuple",
+            "source_policy",
+            "span",
+        ] {
+            let mut changed = detail.clone();
+            match field {
+                "identity" => changed.identity[0].1 = "different-project".to_string(),
+                "representation" => changed.representation = "tool_error".to_string(),
+                "occurrence_id" => changed.occurrence_id = "0".repeat(64),
+                "payload_id" => changed.payload_id = "0".repeat(64),
+                "occurrence_tuple" => changed.occurrence_tuple[0] ^= 1,
+                "source_policy" => {
+                    changed.source_policy = kernel::SourceDescriptorPolicy::Git {
+                        version: POLICY.to_string(),
+                    }
+                }
+                "span" => changed.span = Some((0, text.len() as u64)),
+                _ => unreachable!(),
+            }
+            let mut payload = original.clone();
+            payload.detail = Some(serde_json::to_string(&changed).unwrap());
+            fixture.tamper_observation_payload(&object_id, &serde_json::to_vec(&payload).unwrap());
+            let result = fixture.store.export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                window,
+                None,
+                roomy(),
+            );
+            if invalidation_only && field == "payload_id" {
+                let page = result.unwrap();
+                assert!(
+                    page.rows[0].text.is_none(),
+                    "absent text has no payload verification"
+                );
+            } else if result
+                != Err(SourceExportError::MalformedRow {
+                    object_id: object_id.clone(),
+                })
+            {
+                accepted.push((invalidation_only, field));
+            }
+        }
+        fixture.tamper_observation_payload(&object_id, &original_payload);
+        assert_eq!(
+            fixture
+                .store
+                .export_source_page(
+                    &hold.binding,
+                    &hold.hold_id,
+                    hold.captured_at,
+                    window,
+                    None,
+                    roomy(),
+                )
+                .unwrap(),
+            baseline
+        );
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted corrupt descriptor fields (invalidation-only, field): {accepted:?}"
+    );
+}
+
+#[test]
+fn byte_admission_stops_raw_candidate_reads_at_the_deferred_row() {
+    let mut fixture = Fixture::open();
+    for index in 0..20 {
+        fixture.publish("messages", &format!("row-{index}"), 1, "four");
+    }
+    let hold = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), wide())
+        .unwrap();
+    for bounds in [page_bounds(64, 4), page_bounds(1, 1024)] {
+        kernel::KernelStore::take_source_export_row_reads_for_test();
+        let page = fixture
+            .store
+            .export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                ExportWindow::Snapshot,
+                None,
+                bounds,
+            )
+            .unwrap();
+        let raw_reads = kernel::KernelStore::take_source_export_row_reads_for_test();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.charge.decoded_bytes, 4);
+        assert!(page.next.is_some());
+        assert_eq!(
+            raw_reads, 2,
+            "only the admitted row and first deferred raw row may be fetched"
+        );
+    }
+}
 
 fn page_bounds(max_rows: usize, max_decoded_bytes: u64) -> SourcePageBounds {
     SourcePageBounds {
@@ -150,7 +422,7 @@ fn all_pages(
     bounds: SourcePageBounds,
     mut between: impl FnMut(&mut Fixture, &SourcePage),
 ) -> Vec<SourcePage> {
-    let mut cursor: Option<HeldCursor> = None;
+    let mut cursor = None;
     let mut pages = Vec::new();
     loop {
         let page = fixture
@@ -320,26 +592,23 @@ fn concatenated_pages_equal_the_five_class_ledger_at_s_while_sources_mutate() {
             !pages.last().unwrap().rows.is_empty(),
             "no empty final page"
         );
-        // Exhausted cursor: an empty page ends the inventory.
-        let last = pages.last().unwrap().rows.last().unwrap();
-        let past = HeldCursor {
-            class: last.detail.class.clone(),
-            object_id: last.object_id.clone(),
-            revision: last.revision,
-        };
-        let empty = fixture
+        let resume = pages
+            .iter()
+            .rev()
+            .nth(1)
+            .and_then(|page| page.next.as_ref());
+        let last_again = fixture
             .store
             .export_source_page(
                 &hold.binding,
                 &hold.hold_id,
                 hold.captured_at,
                 ExportWindow::Snapshot,
-                Some(&past),
+                resume,
                 bounds,
             )
             .unwrap();
-        assert!(empty.rows.is_empty() && empty.next.is_none());
-        assert_eq!(empty.charge, Default::default());
+        assert_eq!(&last_again, pages.last().unwrap());
     }
     let observed = expected.clone();
     // Every class boundary is crossed inside the walk.
@@ -837,7 +1106,7 @@ fn catch_up_pages_cover_the_window_through_t_and_bytes_outlive_acknowledgement()
     let binding = fixture.binding();
     let hold = fixture
         .store
-        .capture_source_hold(&binding, bounds(60 * DAY_MS))
+        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
         .unwrap();
     // The window holds published commits, a control commit with no descriptor,
     // a revision of an S row, a retirement of an S row, and a row created and
@@ -887,7 +1156,7 @@ fn catch_up_pages_cover_the_window_through_t_and_bytes_outlive_acknowledgement()
 
     // The window must be within [S, tip] and covered by the hold.
     let catch_up = |through| ExportWindow::CatchUp { through };
-    let page = |fixture: &Fixture, window, cursor: Option<&HeldCursor>| {
+    let page = |fixture: &Fixture, window, cursor: Option<&SourceCursor>| {
         fixture.store.export_source_page(
             &binding,
             &hold.hold_id,
