@@ -36,6 +36,7 @@ pub struct IdentitySweeper<'a> {
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
     quarantine: Option<Quarantine>,
+    cursor: Option<String>,
     lose_reclaim_reply: bool,
 }
 
@@ -45,6 +46,7 @@ impl<'a> IdentitySweeper<'a> {
             projection,
             synapse,
             quarantine: None,
+            cursor: None,
             lose_reclaim_reply: false,
         }
     }
@@ -55,7 +57,7 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Selects finished, unreferenced identities and reclaims at most `max_candidates` of those no holder protects. Held rows do not consume the bound: selection resumes past them, so a long-held row cannot starve reclaimable identities that sort after it.
+    /// Inspects at most `max_candidates` finished, unreferenced identities and reclaims those no holder protects. Selection resumes across calls, so held rows consume this call's bound without starving later identities.
     ///
     /// # Errors
     ///
@@ -65,25 +67,22 @@ impl<'a> IdentitySweeper<'a> {
             return Err(SweepError::Quarantined(quarantine.clone()));
         }
         let mut report = SweepReport::default();
-        let mut free: Vec<Candidate> = Vec::new();
-        let mut cursor: Option<String> = None;
-        while let Some(remaining) = NonZeroUsize::new(max_candidates.get() - free.len()) {
-            let page = self
-                .projection
-                .read(|conn| candidates(conn, remaining, cursor.as_deref()))
-                .map_err(SweepError::Read)?;
-            report.candidates += page.len();
-            let exhausted = page.len() < remaining.get();
-            cursor = page.last().map(|candidate| candidate.job_id.clone());
-            for candidate in page {
-                if self.holds(&candidate) {
-                    report.held.push(candidate);
-                } else {
-                    free.push(candidate);
-                }
-            }
-            if exhausted {
-                break;
+        let page = self
+            .projection
+            .read(|conn| candidates(conn, max_candidates, self.cursor.as_deref()))
+            .map_err(SweepError::Read)?;
+        report.candidates = page.len();
+        self.cursor = if page.len() < max_candidates.get() {
+            None
+        } else {
+            page.last().map(|candidate| candidate.job_id.clone())
+        };
+        let mut free = Vec::with_capacity(page.len());
+        for candidate in page {
+            if self.holds(&candidate) {
+                report.held.push(candidate);
+            } else {
+                free.push(candidate);
             }
         }
         if free.is_empty() {

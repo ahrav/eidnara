@@ -1310,14 +1310,13 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     assert!(inventory(dir.path()).is_empty());
 }
 
-/// A held candidate at the head of the selection order must not consume the sweep's whole bound:
-/// the sweep pages past held rows and still reclaims free identities that sort after them.
+/// Held candidates consume the inspection bound without starving free identities across sweeps.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_candidates_do_not_starve_free_identities_behind_them() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
-    for name in ["a", "b"] {
+    for name in ["a", "b", "c", "d"] {
         corpus.publish(name, &format!("{name} text"));
     }
     let (projection, _) = corpus.bootstrap(dir.path());
@@ -1332,45 +1331,45 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
             .collect::<Result<Vec<String>, _>>()
             .unwrap()
     };
-    let (held_occ, free_occ) = (ordered[0].as_str(), ordered[1].as_str());
+    let (held_occurrences, free_occurrence) = ordered.split_at(3);
     // The free identity dies before dispatch, so no host ever held it.
-    tombstone(&projection, free_occ, 50);
+    tombstone(&projection, &free_occurrence[0], 50);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let synapse = component(&engine, SynapseLimits::default());
-    let (_, events) = pass(
+    pass(
         &corpus,
         &projection,
         &synapse,
         &bounds(Duration::from_millis(50)),
         NOW,
     );
-    gate.release();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, DispatchEvent::Admitted { .. }))
-            .count(),
-        1
-    );
-    let settled = std::time::Instant::now();
-    while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(5));
+    for occurrence in held_occurrences {
+        tombstone(&projection, occurrence, 60);
     }
-    tombstone(&projection, held_occ, 60);
 
-    let report = sweep(&projection, &synapse, NonZeroUsize::new(1).unwrap());
-    assert_eq!(report.held.len(), 1, "the held identity survives");
+    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    for occurrence in held_occurrences {
+        let report = sweeper.run_sweep(NonZeroUsize::new(1).unwrap()).unwrap();
+        assert_eq!(report.candidates, 1, "one candidate is inspected");
+        assert_eq!(report.held.len(), 1, "one held identity survives");
+        assert_eq!(&report.held[0].occurrence_id, occurrence);
+        assert_eq!(report.jobs_reclaimed, 0);
+    }
+    let report = sweeper.run_sweep(NonZeroUsize::new(1).unwrap()).unwrap();
+    assert_eq!(report.candidates, 1, "one candidate is inspected");
+    assert!(report.held.is_empty());
     assert_eq!(
         report.jobs_reclaimed, 1,
-        "the free identity after the held row is reclaimed"
+        "the free identity is eventually reclaimed"
     );
     assert!(
         inventory(dir.path())
             .iter()
-            .all(|(occurrence, _, _)| occurrence == held_occ),
-        "only the held identity remains"
+            .all(|(occurrence, _, _)| held_occurrences.contains(occurrence)),
+        "only held identities remain"
     );
+    gate.release();
 }
 
 /// AC5: a reclamation whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
