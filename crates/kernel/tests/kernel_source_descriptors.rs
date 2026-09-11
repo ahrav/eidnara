@@ -67,7 +67,6 @@ fn encode_record(record: &Value) -> Result<(String, String, String), &'static st
         representation: record["representation"].as_str().unwrap_or(""),
         span: None,
     };
-    encode(&occurrence).map_err(OccurrenceRefusal::name)?;
     let payload = record["payload"].as_str().ok_or("payload_not_string")?;
     let span = match record.get("span") {
         None | Some(Value::Null) => None,
@@ -79,17 +78,17 @@ fn encode_record(record: &Value) -> Result<(String, String, String), &'static st
             record_span(record)
         }
     };
-    let encoded = encode(&Occurrence { span, ..occurrence }).map_err(OccurrenceRefusal::name)?;
-    validate_span(span, payload).map_err(OccurrenceRefusal::name)?;
+    let encoded =
+        encode(&Occurrence { span, ..occurrence }, payload).map_err(OccurrenceRefusal::name)?;
     Ok((
         encoded.occurrence_id,
         encoded.lineage_id,
-        payload_id(select(span, payload)),
+        payload_id(select(encoded.span, payload)),
     ))
 }
 
 #[test]
-fn the_kernel_encoder_reproduces_every_golden_identifier_and_refusal() {
+fn the_kernel_encoder_matches_golden_identifiers_and_string_payload_refusals() {
     let fixtures = fixture("source-identity-fixtures.json");
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
@@ -144,6 +143,10 @@ fn the_kernel_encoder_reproduces_every_golden_identifier_and_refusal() {
         let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
         assert_ne!(encoded[a].0, encoded[b].0, "{a}/{b}");
     }
+    for pair in expectations["equal_occurrences"].as_array().unwrap() {
+        let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+        assert_eq!(encoded[a], encoded[b], "{a}/{b} are one occurrence");
+    }
     for pair in expectations["equal_lineages"].as_array().unwrap() {
         let (a, b) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
         assert_eq!(encoded[a].1, encoded[b].1, "{a}/{b} lineage");
@@ -179,7 +182,12 @@ fn the_kernel_encoder_reproduces_every_golden_identifier_and_refusal() {
         .filter(|name| *name != "payload_not_string")
         .collect();
     assert_eq!(kernel_names, expected);
-    for record in fixtures["invalid_records"].as_array().unwrap() {
+    for record in fixtures["invalid_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["payload"].is_string())
+    {
         let id = record["id"].as_str().unwrap();
         let expected = record["expected_refusal"].as_str().unwrap();
         match encode_record(record) {
@@ -263,7 +271,7 @@ impl Fixture {
             .read_complete_commits(
                 &kernel::CommitReadRequest {
                     consumer_id: CONSUMER.to_string(),
-                    lease_epoch: self.store.lease_epoch(),
+                    incarnation: self.store.capture_commit_read_target().unwrap().incarnation,
                     after_commit: seq - 1,
                     through_commit: seq,
                 },
@@ -395,6 +403,37 @@ impl Fixture {
             .as_ref()
             .map(|state| state.object.invalidated_commit_seq.is_none())
     }
+
+    fn publish_batch(
+        &self,
+        key: &str,
+        requests: &[SourceDescriptorRequest<'_>],
+    ) -> Result<Vec<kernel::SourceDescriptorOutcome>, SourceDescriptorError> {
+        let mut outcome = None;
+        let receipt = self.store.commit(intent(key), |envelope| {
+            let published = envelope.publish_source_descriptors(requests);
+            let result = match &published {
+                Ok(_) => Ok(String::new()),
+                Err(SourceDescriptorError::Kernel(error)) => Err(*error),
+                Err(_) => Err(KernelError::InvalidInput),
+            };
+            outcome = Some(published);
+            result
+        });
+        let outcome = outcome.expect("the operation ran");
+        assert_eq!(outcome.is_ok(), receipt.is_ok());
+        outcome
+    }
+
+    fn descriptor_object_ids_at_tip(&self) -> Vec<String> {
+        let snapshot = self.store.slice_as_of(self.store.tip().unwrap()).unwrap();
+        snapshot
+            .observations
+            .iter()
+            .filter(|row| row.observation_kind == SOURCE_DESCRIPTOR_KIND)
+            .map(|row| row.object_id.clone())
+            .collect()
+    }
 }
 
 fn message<'a>(identity: &'a [(&'a str, &'a str)], revision: &'a str) -> Occurrence<'a> {
@@ -438,6 +477,7 @@ fn request<'a>(
 ) -> SourceDescriptorRequest<'a> {
     SourceDescriptorRequest {
         occurrence,
+        source_policy: kernel::SourceDescriptorPolicy::Native,
         domain_id: DOMAIN,
         scope_id: Some(SCOPE),
         evidence_id: &evidence.0,
@@ -459,15 +499,18 @@ fn descriptors_match_an_independent_ledger_and_identical_text_stays_distinct() {
 
     // The ledger: what the test expects each publication to produce, computed
     // from the fixture's own inputs.
-    let expected_a = encode(&message(MSG_A, "1")).unwrap();
-    let expected_b = encode(&message(MSG_B, "1")).unwrap();
-    let expected_tool = encode(&Occurrence {
-        class: "raw_tool_spans",
-        identity: TOOL,
-        revision: "1",
-        representation: "tool_output",
-        span,
-    })
+    let expected_a = encode(&message(MSG_A, "1"), text).unwrap();
+    let expected_b = encode(&message(MSG_B, "1"), text).unwrap();
+    let expected_tool = encode(
+        &Occurrence {
+            class: "raw_tool_spans",
+            identity: TOOL,
+            revision: "1",
+            representation: "tool_output",
+            span,
+        },
+        tool_text,
+    )
     .unwrap();
     assert_ne!(expected_a.occurrence_id, expected_b.occurrence_id);
     assert_eq!(payload_id(text.as_bytes()), evidence.1);
@@ -506,18 +549,24 @@ fn descriptors_match_an_independent_ledger_and_identical_text_stays_distinct() {
     );
     assert!(a.replaced_object_id.is_none());
 
-    for (outcome, occurrence, evidence, span) in [
-        (&a, message(MSG_A, "1"), &evidence, None),
-        (&b, message(MSG_B, "1"), &evidence, None),
+    for (outcome, occurrence, evidence, span, buffer) in [
+        (&a, message(MSG_A, "1"), &evidence, None, text),
+        (&b, message(MSG_B, "1"), &evidence, None, text),
         (
             &tool,
             tool_request.occurrence.clone(),
             &tool_evidence,
             Some((0u64, 13u64)),
+            tool_text,
         ),
     ] {
         let detail = fixture.detail(&outcome.object_id).unwrap();
         assert_eq!(detail.occurrence_id, outcome.occurrence_id);
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap()["occurrence_tuple"],
+            serde_json::json!(encode(&occurrence, buffer).unwrap().tuple),
+            "the stored descriptor retains the exact occurrence encoding"
+        );
         assert_eq!(detail.lineage_id, outcome.lineage_id);
         assert_eq!(detail.payload_id, outcome.payload_id);
         assert_eq!(detail.artifact_digest, evidence.1);
@@ -984,6 +1033,18 @@ fn malformed_requests_fail_closed_before_any_row_is_written() {
             SourceDescriptorError::Occurrence(OccurrenceRefusal::SpanOutOfRange),
         ),
         (
+            "invalid span precedes missing evidence",
+            SourceDescriptorRequest {
+                evidence_id: "missing-evidence",
+                occurrence: Occurrence {
+                    span: Some(Span { start: 0, end: 99 }),
+                    ..message(MSG_A, "1")
+                },
+                ..request(message(MSG_A, "1"), &evidence, "some text")
+            },
+            SourceDescriptorError::Occurrence(OccurrenceRefusal::SpanOutOfRange),
+        ),
+        (
             "reversed span",
             SourceDescriptorRequest {
                 occurrence: Occurrence {
@@ -1114,6 +1175,132 @@ fn malformed_requests_fail_closed_before_any_row_is_written() {
 }
 
 #[test]
+fn every_request_in_a_batch_proves_its_buffer_against_the_artifact() {
+    let fixture = Fixture::open();
+    let text = "some text";
+    let evidence = fixture.retain("text", text);
+    // The second request reuses `evidence` but supplies `forged`: the span
+    // fits `forged` but exceeds the retained artifact, and `forged` has a
+    // different digest.
+    let forged = "some text that runs on";
+    let requests = [
+        request(message(MSG_A, "1"), &evidence, text),
+        SourceDescriptorRequest {
+            occurrence: Occurrence {
+                class: "raw_tool_spans",
+                identity: TOOL,
+                revision: "1",
+                representation: "tool_output",
+                span: Some(Span { start: 10, end: 14 }),
+            },
+            ..request(message(MSG_B, "1"), &evidence, forged)
+        },
+    ];
+    let tip = fixture.store.tip().unwrap();
+    let error = fixture.publish_batch("forged", &requests).unwrap_err();
+    assert_eq!(error, SourceDescriptorError::BufferMismatch);
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+}
+
+#[test]
+fn a_swallowed_refusal_still_fails_the_commit() {
+    let fixture = Fixture::open();
+    let evidence = fixture.retain("text", "some text");
+    let good = request(message(MSG_A, "1"), &evidence, "some text");
+    let bad = SourceDescriptorRequest {
+        occurrence: Occurrence {
+            class: "user_memories",
+            ..message(MSG_B, "1")
+        },
+        ..request(message(MSG_B, "1"), &evidence, "some text")
+    };
+    let tip = fixture.store.tip().unwrap();
+    // The closure discards the refusal and asks to commit anyway.
+    let receipt = fixture.store.commit(intent("swallowed"), |envelope| {
+        let _ = envelope.publish_source_descriptors(&[good.clone(), bad.clone()]);
+        Ok(String::new())
+    });
+    assert!(
+        receipt.is_err(),
+        "a refused batch must not commit: {receipt:?}"
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    // The commit rejects a refusal raised before any row is written.
+    let receipt = fixture.store.commit(intent("swallowed-first"), |envelope| {
+        let _ = envelope.publish_source_descriptor(&bad);
+        Ok(String::new())
+    });
+    assert!(receipt.is_err());
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+}
+
+#[test]
+fn retirement_preserves_domain_ownership_without_reusing_old_revision_ids() {
+    let fixture = Fixture::open();
+    let v1 = fixture.retain("v1", "first text");
+    let v2 = fixture.retain("v2", "second text");
+    let v3 = fixture.retain("v3", "third text");
+    fixture
+        .publish("rev-1", &request(message(MSG_A, "1"), &v1, "first text"))
+        .unwrap();
+    let (third, _, _) = fixture
+        .publish("rev-3", &request(message(MSG_A, "3"), &v3, "third text"))
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("retire-3"), |envelope| {
+            envelope.retire_observation(&third.object_id)?;
+            envelope.insert_domain(DomainSpec {
+                domain_id: "other-domain".to_string(),
+                object_id: "other-domain-object".to_string(),
+                name: "other".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "other-domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    let foreign = SourceDescriptorRequest {
+        domain_id: "other-domain",
+        ..request(message(MSG_A, "4"), &v3, "third text")
+    };
+    assert_eq!(
+        fixture.publish("foreign-after-retirement", &foreign).err(),
+        Some(SourceDescriptorError::DomainMismatch)
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    // With no live head, revision 2 starts a fresh chain.
+    let (second, _, _) = fixture
+        .publish("rev-2", &request(message(MSG_A, "2"), &v2, "second text"))
+        .unwrap();
+    assert!(second.replaced_object_id.is_none());
+    // Revision 3 advances the live head but its object id is already taken
+    // by the retired row: that is a registry conflict, not a stale revision.
+    let error = fixture
+        .publish(
+            "rev-3-again",
+            &request(message(MSG_A, "3"), &v3, "third text"),
+        )
+        .unwrap_err();
+    assert_eq!(error, SourceDescriptorError::Kernel(KernelError::Conflict));
+    assert_eq!(fixture.live(&second.object_id), Some(true));
+    // A revision that does not advance is still named as such.
+    let error = fixture
+        .publish(
+            "rev-2-again",
+            &request(message(MSG_A, "2"), &v2, "second text"),
+        )
+        .unwrap_err();
+    assert_eq!(error, SourceDescriptorError::RevisionNotAdvanced);
+}
+
+#[test]
 fn a_lineage_id_never_replaces_native_identity() {
     let fixture = Fixture::open();
     let evidence = fixture.retain("text", "some text");
@@ -1162,6 +1349,512 @@ fn a_lineage_id_never_replaces_native_identity() {
 }
 
 #[test]
+fn duplicate_lineages_are_refused_explicitly_within_one_commit() {
+    for separate_calls in [false, true] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let first = request(message(MSG_A, "1"), &evidence, text);
+        let second = request(
+            Occurrence {
+                span: Some(Span {
+                    start: 0,
+                    end: text.len() as u64,
+                }),
+                ..message(MSG_A, "2")
+            },
+            &evidence,
+            text,
+        );
+        let tip = fixture.store.tip().unwrap();
+        let receipt = fixture
+            .store
+            .commit(intent("duplicate-lineage"), |envelope| {
+                let error = if separate_calls {
+                    envelope.publish_source_descriptor(&first).unwrap();
+                    envelope.publish_source_descriptor(&second).unwrap_err()
+                } else {
+                    envelope
+                        .publish_source_descriptors(&[first, second])
+                        .unwrap_err()
+                };
+                assert_eq!(
+                    error.to_string(),
+                    "descriptor lineage is published twice in one commit"
+                );
+                Ok(String::new())
+            });
+        assert!(
+            receipt.is_err(),
+            "discarding the refusal cannot commit partial work"
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    }
+}
+
+#[test]
+fn descriptor_bound_covers_all_calls_in_the_envelope() {
+    let max = kernel::MAX_DESCRIPTORS_PER_COMMIT;
+    for chunk_size in [1, max] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let ids: Vec<String> = (0..=max).map(|i| format!("claim-{i}")).collect();
+        let identities: Vec<_> = ids.iter().map(|id| [("object_id", id.as_str())]).collect();
+        let requests: Vec<_> = identities
+            .iter()
+            .map(|identity| {
+                request(
+                    Occurrence {
+                        class: "canonical_claims",
+                        identity,
+                        revision: "1",
+                        representation: "decision_summary",
+                        span: None,
+                    },
+                    &evidence,
+                    text,
+                )
+            })
+            .collect();
+        assert_eq!(
+            fixture.publish_batch("oversized", &requests).err(),
+            Some(SourceDescriptorError::BatchTooLarge)
+        );
+        let tip = fixture.store.tip().unwrap();
+        let receipt = fixture
+            .store
+            .commit(intent("cumulative-bound"), |envelope| {
+                for batch in requests[..max].chunks(chunk_size) {
+                    envelope.publish_source_descriptors(batch).unwrap();
+                }
+                assert_eq!(
+                    envelope.publish_source_descriptor(&requests[max]).err(),
+                    Some(SourceDescriptorError::BatchTooLarge)
+                );
+                Ok(String::new())
+            });
+        assert!(receipt.is_err());
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+        assert_eq!(
+            fixture
+                .publish_batch("at-bound", &requests[..max])
+                .unwrap()
+                .len(),
+            max
+        );
+        fixture.publish("fresh-envelope", &requests[max]).unwrap();
+        assert_eq!(fixture.descriptor_object_ids_at_tip().len(), max + 1);
+    }
+}
+
+#[test]
+fn an_occurrence_id_never_aliases_unequal_tuple_bytes() {
+    for retired in [false, true] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let (first, _, _) = fixture
+            .publish("first", &request(message(MSG_A, "1"), &evidence, text))
+            .unwrap();
+        if retired {
+            fixture
+                .store
+                .commit(intent("retire"), |envelope| {
+                    envelope.retire_observation(&first.object_id)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+        let a = encode(&message(MSG_A, "1"), text).unwrap();
+        let b = encode(&message(MSG_B, "1"), text).unwrap();
+        assert_ne!(a.tuple, b.tuple);
+        assert_ne!(a.lineage_id, b.lineage_id);
+        let connection = rusqlite::Connection::open_with_flags(
+            fixture.root.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        let (observation_id, payload): (String, Vec<u8>) = connection
+            .query_row(
+                "SELECT observation_id,observation_payload FROM observations WHERE object_id=?1",
+                [&first.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(observation_id, format!("srcocc:{}", first.occurrence_id));
+        let mut stored: Value = serde_json::from_slice(&payload).unwrap();
+        let mut detail: Value = serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+        detail["occurrence_id"] = serde_json::json!(b.occurrence_id);
+        detail["occurrence_tuple"] = serde_json::json!(a.tuple);
+        stored["detail"] = Value::String(serde_json::to_string(&detail).unwrap());
+        connection.execute(
+            "UPDATE observations SET observation_id=?1,observation_payload=?2 WHERE object_id=?3",
+            rusqlite::params![format!("srcocc:{}", b.occurrence_id), serde_json::to_vec(&stored).unwrap(), first.object_id],
+        ).unwrap();
+        let tip = fixture.store.tip().unwrap();
+        let result = fixture.publish("colliding", &request(message(MSG_B, "1"), &evidence, text));
+        assert_eq!(
+            result.err().map(|error| error.to_string()),
+            Some("descriptor occurrence id names a different stored tuple".to_string())
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&first.object_id), Some(!retired));
+        assert_eq!(
+            fixture.live(&descriptor_object_id(&b.lineage_id, "1")),
+            None
+        );
+    }
+}
+
+#[test]
+fn public_encoder_canonicalizes_whole_buffer_selection() {
+    for buffer in ["aé", ""] {
+        let whole = message(MSG_A, "1");
+        let explicit = Occurrence {
+            span: Some(Span {
+                start: 0,
+                end: buffer.len() as u64,
+            }),
+            ..whole.clone()
+        };
+        validate_span(explicit.span, buffer).unwrap();
+        assert_eq!(
+            encode(&explicit, buffer).unwrap(),
+            encode(&whole, buffer).unwrap()
+        );
+    }
+    let buffer = "aéb";
+    let whole = message(MSG_A, "1");
+    let part = Occurrence {
+        span: Some(Span { start: 0, end: 3 }),
+        ..whole.clone()
+    };
+    assert_ne!(
+        encode(&part, buffer).unwrap().occurrence_id,
+        encode(&whole, buffer).unwrap().occurrence_id
+    );
+    for (span, expected) in [
+        (Span { start: 3, end: 1 }, OccurrenceRefusal::SpanReversed),
+        (Span { start: 0, end: 5 }, OccurrenceRefusal::SpanOutOfRange),
+        (
+            Span { start: 0, end: 2 },
+            OccurrenceRefusal::SpanNotUtf8Aligned,
+        ),
+    ] {
+        let invalid = Occurrence {
+            span: Some(span),
+            ..whole.clone()
+        };
+        assert_eq!(encode(&invalid, buffer).err(), Some(expected));
+        let invalid_class = Occurrence {
+            class: "unknown",
+            ..invalid
+        };
+        assert_eq!(
+            encode(&invalid_class, buffer).err(),
+            Some(OccurrenceRefusal::UnknownClass)
+        );
+    }
+}
+
+#[test]
+fn generic_observation_writes_cannot_mint_or_replace_descriptors() {
+    let fixture = Fixture::open();
+    let text = "some text";
+    let evidence = fixture.retain("text", text);
+    let (descriptor, _, _) = fixture
+        .publish("typed", &request(message(MSG_A, "1"), &evidence, text))
+        .unwrap();
+    let generic = kernel::ObservationSpec {
+        observation_id: "generic".to_string(),
+        object_id: "generic".to_string(),
+        domain_id: DOMAIN.to_string(),
+        proposition_id: None,
+        scope_id: None,
+        anchor_id: None,
+        evidence_id: None,
+        observation_kind: "probe".to_string(),
+        payload: kernel::ObservationPayload {
+            summary: "probe".to_string(),
+            classification: "probe".to_string(),
+            detail: None,
+        },
+        observed_at: 1,
+        dependencies: Vec::new(),
+        source_kind: "messages".to_string(),
+        source_id: descriptor.lineage_id.clone(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    };
+    fixture
+        .store
+        .commit(intent("generic"), |envelope| {
+            envelope.insert_observation(generic.clone())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+    for (i, (predecessor, kind, reserved_observation_id, reserved_object_id)) in [
+        (None, SOURCE_DESCRIPTOR_KIND, false, false),
+        (Some("generic"), SOURCE_DESCRIPTOR_KIND, false, false),
+        (Some(descriptor.object_id.as_str()), "probe", false, false),
+        (None, "probe", true, false),
+        (Some("generic"), "probe", true, false),
+        (None, "probe", false, true),
+        (Some("generic"), "probe", false, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let forged = kernel::ObservationSpec {
+            observation_id: if reserved_observation_id {
+                format!("srcocc:{i}")
+            } else {
+                format!("forged-{i}")
+            },
+            object_id: if reserved_object_id {
+                format!("srcdesc:{i}")
+            } else {
+                format!("forged-{i}")
+            },
+            observation_kind: kind.to_string(),
+            source_revision: 2,
+            ..generic.clone()
+        };
+        let forged_id = forged.object_id.clone();
+        let receipt = fixture
+            .store
+            .commit(intent(&format!("forge-{i}")), |envelope| {
+                let result = match predecessor {
+                    None => envelope.insert_observation(forged),
+                    Some(id) => envelope.correct_observation(id, forged),
+                };
+                assert_eq!(result.err(), Some(KernelError::InvalidInput));
+                Ok(String::new())
+            });
+        assert_eq!(receipt.err(), Some(KernelError::InvalidInput));
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&descriptor.object_id), Some(true));
+        assert_eq!(fixture.live("generic"), Some(true));
+        assert_eq!(fixture.live(&forged_id), None);
+    }
+}
+
+#[test]
+fn lineage_collision_checks_include_other_source_classes() {
+    for retired in [false, true] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let (original, _, _) = fixture
+            .publish("first", &request(message(MSG_A, "1"), &evidence, text))
+            .unwrap();
+        if retired {
+            fixture
+                .store
+                .commit(intent("retire"), |envelope| {
+                    envelope.retire_observation(&original.object_id)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+        let incoming = Occurrence {
+            class: "canonical_claims",
+            identity: &[("object_id", "claim-7")],
+            revision: "2",
+            representation: "decision_summary",
+            span: None,
+        };
+        let encoded = encode(&incoming, text).unwrap();
+        let alias_id = descriptor_object_id(&encoded.lineage_id, "1");
+        let mut connection = rusqlite::Connection::open_with_flags(
+            fixture.root.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO object_registry SELECT ?1,object_kind,domain_id,source_kind,?2,
+             source_revision,created_commit_seq,invalidated_commit_seq,superseded_by,sensitivity_class
+             FROM object_registry WHERE object_id=?3",
+            rusqlite::params![alias_id, encoded.lineage_id, original.object_id],
+        ).unwrap();
+        tx.execute(
+            "INSERT INTO observations SELECT ?1,?1,proposition_id,scope_id,anchor_id,evidence_id,
+             observation_kind,observation_payload,observed_at,created_commit_seq,
+             invalidated_commit_seq,superseded_by,sensitivity_class
+             FROM observations WHERE object_id=?2",
+            rusqlite::params![alias_id, original.object_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let tip = fixture.store.tip().unwrap();
+        let result = fixture.publish("collision", &request(incoming, &evidence, text));
+        assert_eq!(result.err(), Some(SourceDescriptorError::LineageCollision));
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&alias_id), Some(!retired));
+        assert_eq!(
+            fixture.live(&descriptor_object_id(&encoded.lineage_id, "2")),
+            None
+        );
+    }
+}
+
+#[test]
+fn git_descriptors_require_source_policy_provenance() {
+    let fixture = Fixture::open();
+    let text = "commit message";
+    let evidence = fixture.retain("git", text);
+    let occurrence = Occurrence {
+        class: "git_commits",
+        identity: &[
+            ("repository_id", "repo-1"),
+            ("object_format", "sha1"),
+            ("oid", "0123456789abcdef0123456789abcdef01234567"),
+        ],
+        revision: "1",
+        representation: "commit_message",
+        span: None,
+    };
+    let encoded = encode(&occurrence, text).unwrap();
+    let base = request(occurrence, &evidence, text);
+    let tip = fixture.store.tip().unwrap();
+    let result = fixture.publish("missing-policy", &base);
+    assert_eq!(
+        result.err().map(|error| error.to_string()),
+        Some("descriptor source policy is missing or invalid".to_string())
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+    for version in [
+        String::new(),
+        "control\ncharacter".to_string(),
+        "x".repeat(kernel::source_identity::MAX_IDENTITY_VALUE_BYTES + 1),
+        "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678".to_string(),
+    ] {
+        let invalid = SourceDescriptorRequest {
+            source_policy: kernel::SourceDescriptorPolicy::Git { version },
+            ..base.clone()
+        };
+        assert_eq!(
+            fixture.publish("invalid-policy", &invalid).err(),
+            Some(SourceDescriptorError::SourcePolicyRefused)
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+    }
+    let policy = kernel::SourceDescriptorPolicy::Git {
+        version: "test-git-policy-v1".to_string(),
+    };
+    let valid = SourceDescriptorRequest {
+        source_policy: policy.clone(),
+        ..base
+    };
+    let (outcome, _, _) = fixture.publish("valid-policy", &valid).unwrap();
+    assert_eq!(outcome.occurrence_id, encoded.occurrence_id);
+    assert_eq!(outcome.lineage_id, encoded.lineage_id);
+    let detail = fixture.detail(&outcome.object_id).unwrap();
+    assert_eq!(detail.source_policy, policy);
+    assert_eq!(detail.occurrence_tuple, encoded.tuple);
+    let wrong_class = SourceDescriptorRequest {
+        source_policy: policy,
+        ..request(message(MSG_A, "1"), &evidence, text)
+    };
+    assert_eq!(
+        fixture.publish("non-git-policy", &wrong_class).err(),
+        Some(SourceDescriptorError::SourcePolicyRefused)
+    );
+}
+
+#[test]
+fn every_object_writer_preserves_descriptor_registry_ownership() {
+    let mut failures = Vec::new();
+    for kind in ["domain", "scope", "decision", "co-published-decision"] {
+        let fixture = Fixture::open();
+        let text = "some text";
+        let evidence = fixture.retain("text", text);
+        let encoded = encode(&message(MSG_A, "1"), text).unwrap();
+        let reserved_id = descriptor_object_id(&encoded.lineage_id, "1");
+        let tip = fixture.store.tip().unwrap();
+        let receipt = fixture.store.commit(intent(kind), |envelope| {
+            if kind == "co-published-decision" {
+                envelope
+                    .publish_source_descriptor(&request(message(MSG_A, "2"), &evidence, text))
+                    .unwrap();
+            }
+            match kind {
+                "domain" => envelope.insert_domain(DomainSpec {
+                    domain_id: "foreign-domain".to_string(),
+                    object_id: reserved_id.clone(),
+                    name: "foreign".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: encoded.lineage_id.clone(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?,
+                "scope" => {
+                    envelope.insert_scope(kernel::ScopeSpec {
+                        scope_id: "foreign-scope".to_string(),
+                        object_id: reserved_id.clone(),
+                        domain_id: DOMAIN.to_string(),
+                        source_kind: "fixture".to_string(),
+                        source_id: encoded.lineage_id.clone(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                        terms: vec![kernel::ScopeTermSpec {
+                            dimension: kernel::Dimension::Project.as_str().to_string(),
+                            operator: "exact".to_string(),
+                            exact_value: Some("b".repeat(64)),
+                            ..kernel::ScopeTermSpec::default()
+                        }],
+                    })?;
+                }
+                _ => {
+                    envelope.insert_decision(kernel::DecisionSpec {
+                        decision_id: "foreign-decision".to_string(),
+                        object_id: reserved_id.clone(),
+                        domain_id: DOMAIN.to_string(),
+                        proposition_id: None,
+                        scope_id: None,
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "probe".to_string(),
+                        payload: kernel::DecisionPayload {
+                            summary: "probe".to_string(),
+                            rationale: "probe".to_string(),
+                        },
+                        source_kind: "messages".to_string(),
+                        source_id: encoded.lineage_id.clone(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                    })?;
+                }
+            }
+            Ok(String::new())
+        });
+        let error = receipt.err();
+        if error != Some(KernelError::InvalidInput) {
+            failures.push((kind, error));
+            continue;
+        }
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.live(&reserved_id), None);
+        assert!(fixture.descriptor_object_ids_at_tip().is_empty());
+        let (published, _, _) = fixture
+            .publish("valid", &request(message(MSG_A, "1"), &evidence, text))
+            .unwrap();
+        assert_eq!(published.object_id, reserved_id);
+        assert_eq!(fixture.live(&reserved_id), Some(true));
+    }
+    assert!(
+        failures.is_empty(),
+        "reserved descriptor IDs must be refused: {failures:?}"
+    );
+}
+
+#[test]
 fn name_only_remediation_changes_no_descriptor_input() {
     let fixture = Fixture::open();
     let evidence = fixture.retain("text", "some text");
@@ -1190,7 +1883,7 @@ fn name_only_remediation_changes_no_descriptor_input() {
     assert_eq!(fixture.live(&before.object_id), Some(true));
     // Re-deriving the identity from the same inputs yields the same ids: the
     // domain name is not an input.
-    let again = encode(&message(MSG_A, "1")).unwrap();
+    let again = encode(&message(MSG_A, "1"), "some text").unwrap();
     assert_eq!(again.occurrence_id, before.occurrence_id);
     assert_eq!(again.lineage_id, before.lineage_id);
 }

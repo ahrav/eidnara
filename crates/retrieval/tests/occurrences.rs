@@ -193,7 +193,7 @@ fn row_counts(store: &SqliteStore) -> (i64, i64) {
 /// The identifier the canonical digests give `record`.
 fn occurrence_id_of(record: &Owned) -> String {
     let identity = borrowed(&record.identity);
-    kernel::source_identity::encode(&record.record(&identity).occurrence)
+    kernel::source_identity::encode(&record.record(&identity).occurrence, &record.payload)
         .unwrap()
         .occurrence_id
 }

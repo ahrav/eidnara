@@ -8,6 +8,7 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
 use super::redaction::{RedactedField, identity, redact};
 use super::retention::begin_fenced_write;
+use super::source_hold::release_consumer_holds_in_tx;
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
 /// Result of pruning rows through the minimum consumer checkpoint.
@@ -112,6 +113,8 @@ impl Envelope<'_> {
         Ok(checkpoint)
     }
 
+    /// Releases every source hold the consumer still owns at `recorded_at`.
+    ///
     /// # Errors
     ///
     /// - Returns [`KernelError::InvalidInput`] when `recorded_at` is negative or `consumer_id` is empty.
@@ -136,6 +139,9 @@ impl Envelope<'_> {
         }
         // A missing `outbox_consumers` row counts as checkpoint -1.
         complete_satisfied_barriers(self.tx, recorded_at)?;
+        // A consumer that leaves takes its pins with it; otherwise its bytes stay
+        // pinned until expiry with no registered owner left to release them.
+        release_consumer_holds_in_tx(self.tx, &consumer_id, None, recorded_at)?;
         self.tx
             .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",
@@ -255,6 +261,7 @@ impl Envelope<'_> {
                 )
                 .map_err(map_sqlite)?;
         }
+        release_consumer_holds_in_tx(self.tx, &consumer_id, None, abandonment.abandoned_at)?;
         self.tx
             .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",

@@ -431,6 +431,7 @@ fn a_name_only_remediation_changes_no_persisted_input() {
                             representation: "text",
                             span,
                         },
+                        source_policy: kernel::SourceDescriptorPolicy::Native,
                         domain_id: "domain",
                         scope_id: None,
                         evidence_id: &handle.evidence_id,

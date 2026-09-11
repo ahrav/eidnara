@@ -17,8 +17,7 @@ use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
 use kernel::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, covers_whole, encode, payload_id, select,
-    validate_span,
+    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, payload_id, select,
 };
 use rusqlite::{CachedStatement, OptionalExtension, params};
 use storage::GuardedConn;
@@ -512,14 +511,7 @@ fn persist_with_digests<'c>(
         if record.created_commit_seq <= 0 {
             return Err(ProjectionError::NonPositiveSequence { index });
         }
-        let mut encoded = encode(&record.occurrence)?;
-        validate_span(record.occurrence.span, record.buffer)?;
-        if covers_whole(encoded.span, record.buffer) {
-            encoded = encode(&Occurrence {
-                span: None,
-                ..record.occurrence
-            })?;
-        }
+        let encoded = encode(&record.occurrence, record.buffer)?;
         if encoded.tuple.len() > bounds.max_tuple_bytes.get() {
             return Err(ProjectionError::OverBound {
                 index,
@@ -527,7 +519,7 @@ fn persist_with_digests<'c>(
                 size: encoded.tuple.len(),
             });
         }
-        let selected = select(record.occurrence.span, record.buffer);
+        let selected = select(encoded.span, record.buffer);
         if selected.len() > bounds.max_payload_bytes.get() {
             return Err(ProjectionError::OverBound {
                 index,
