@@ -156,14 +156,14 @@ and the production differential-panic policy remain outside this change.
 [assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
 [prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2910-L2912
 [sel-item]: ../../../../../crates/daemon/src/transform.rs#L6352
-[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16629
+[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16630
 [ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13027-L13071
 [chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13058
 [gate-native]: ../../../../../crates/daemon/src/lib.rs#L13073-L13080
 [native-diff]: ../../../../../crates/daemon/src/lib.rs#L13316-L13333
 [segments-take]: ../../../../../crates/daemon/src/lib.rs#L14428-L14443
 [segments]: ../../../../../crates/daemon/src/lib.rs#L14448-L14454
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20954
+[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20956
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L302
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L278-L300
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73

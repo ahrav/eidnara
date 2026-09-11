@@ -314,7 +314,9 @@ value-only construction. Projection: `project_messages(&msgs)` is equal under
 [`FlatProjection`][flatproj]'s derived `PartialEq` whether the slice is the
 fresh request, the normalized clone, a reattached prefix plus suffix, or a
 shared view; per block `content_hash == sha256(bytes)` and `bytes ==
-to_string(wire)`, and the block retains the tool input once, inside `wire`;
+to_string(wire)`, and `FlatBlock` holds no tool input outside `wire` (the
+wire block itself may keep the input in both `kind()` and its retained
+`original`, and the retained charge counts both);
 and `project_messages_incremental(msgs, cached, k) == project_messages(msgs)`
 with equal [`differential_bytes`][diff-bytes]. Native attachment: under
 `serve_native`, `to_vec(incremental native_messages) ==
@@ -341,10 +343,10 @@ Fault/timing angle: None in time. A projector that reuses an ingress
 `Arc<WireBlock>` and computes `bytes` from another serialization; a consumer
 reading a projected input copy that is not the `wire.kind()` value
 ([`sel_item_from_flat`][sel-item] and
-[`sel_kind_for_flat`][sel-kind] both borrow the wire input, and `FlatBlock`
-holds no other copy); chunk reuse decided by
+[`sel_kind_for_flat`][sel-kind] both borrow the typed wire input, and
+`FlatBlock` holds no copy outside `wire`); chunk reuse decided by
 pointer identity; an incremental sidecar merge that changes first-seen order
-on a repeated mid ([`:277-291`][sidecar-merge]); a direct `to_vec(&message)`
+on a repeated mid ([`:277-300`][sidecar-merge]); a direct `to_vec(&message)`
 on a typed shell (rebuilt prefix, reduced, overlaid, or synthetic) that emits
 struct field order instead of sorted keys, which
 [`Serialize for ServedMessage`][ser-served] already does and the handler
@@ -2432,8 +2434,8 @@ evaluation of this area and its disposition are recorded in
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13315-L13332
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14427-L14442
 [segments]: ../../../../crates/daemon/src/lib.rs#L14448-L14454
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16629
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16568
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16630
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2028-L2050
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
@@ -2448,11 +2450,11 @@ evaluation of this area and its disposition are recorded in
 [taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
 [active-match]: ../../../../crates/daemon/src/transform.rs#L7389
 [make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27904
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27655
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28980
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L112-L125
 [reattach]: ../../../../crates/daemon/src/wire.rs#L143-L184
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L322-L330
@@ -2659,7 +2661,7 @@ evaluation of this area and its disposition are recorded in
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
 [fx-1400]: ../../../../crates/daemon/src/transform.rs#L12417-L12422
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28025-L28030
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28029-L28034
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8463-L8488
 [respond]: ../../../../crates/daemon/src/lib.rs#L14404
@@ -2684,13 +2686,13 @@ evaluation of this area and its disposition are recorded in
 [ao-sig]: ../../../../crates/daemon/src/transform.rs#L2865
 [soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6315
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24264
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24517
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24516
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2071
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L24293
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24318
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24453
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21408
-[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28240
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28244
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128

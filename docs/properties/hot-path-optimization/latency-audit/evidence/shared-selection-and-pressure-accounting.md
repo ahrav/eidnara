@@ -29,10 +29,17 @@ candidate input representation.
 
 The borrow lifetime propagates through selection items and boundary messages,
 but not through persisted wire types. No new process-local cache or retained
-input allocation is added. The projection retains the tool input once, inside
-the wire block; `FlatBlock` carries no separate input copy, so the borrowed
-selection value is the only projected input. Token-cache generations, capacity,
-key domains, and `RETAINED_BYTES_BOUND` are unchanged.
+input allocation is added. `FlatBlock` carries no input copy of its own; the
+borrowed selection value is the typed `input` inside the projected wire block.
+That block can still hold the input twice: [`WireBlock::deserialize`][wire-deser]
+keeps the parsed `original` JSON beside the typed `BlockKind`, and
+[`flatten_block`][flatten] clones the whole block into `wire`. The retained
+charge counts both trees ([`wire_block_retained_bytes`][wire-bytes]), and the
+[projection retained-bytes check][retained-check] reparses its fixture so the
+expected total includes the original tree. The sharing check compares the
+typed tree only; `wire` is `skip_serializing`, so it does not establish that
+the original tree is absent. Token-cache generations, capacity, key domains,
+and `RETAINED_BYTES_BOUND` are unchanged.
 
 [`soft_pressure_refold`][pressure] owns the frozen-unit lookup, placeholder
 gate, and both comparisons. Its estimator argument is the pass's injected
@@ -208,7 +215,11 @@ workspace/Bun gates and index resolution remain controller work. The worktree
 contains no conflict markers; the unmerged index is deliberately untouched.
 
 [selection]: ../../../../../crates/daemon/src/transform.rs#L6352
-[historian]: ../../../../../crates/daemon/src/lib.rs#L16629
+[historian]: ../../../../../crates/daemon/src/lib.rs#L16630
 [pressure]: ../../../../../crates/daemon/src/transform.rs#L6315
 [sidecar]: ../../../../../crates/daemon/src/codec/opencode.rs#L2071
 [thresholds]: ../../../../../crates/daemon/src/transform.rs#L24318
+[wire-deser]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L732
+[wire-bytes]: ../../../../../crates/daemon/src/retained_size.rs#L193-L198
+[retained-check]: ../../../../../crates/daemon/src/wire.rs#L886

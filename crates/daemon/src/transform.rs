@@ -24538,11 +24538,11 @@ pub(crate) mod tests {
                 panic!("tool call")
             };
             assert_eq!(original, &call["input"]);
-            // The projection retains one copy of the input, inside `wire`.
+            // `FlatBlock` holds no input outside `wire`; `wire` itself may retain it twice.
             let flat_fields = serde_json::to_value(flat).unwrap();
             assert!(
                 flat_fields.get("tool_input").is_none(),
-                "projection must not retain a second tool input copy: {flat_fields}"
+                "projection must not retain a tool input copy outside `wire`: {flat_fields}"
             );
             let item = sel_item_from_flat(flat, &HashMap::new());
             let cloned = item.clone();
