@@ -889,6 +889,37 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it("continues after a full candidate page ending with a non-text message ID", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        for (let index = 0; index < 63; index++) {
+            const messageId = `user-${index.toString().padStart(2, "0")}`;
+            insertUser(db, "session-1", messageId, {}, 200 + index);
+            insertPart(db, "session-1", messageId, `part-${index}`, {
+                type: "text",
+                ignored: true,
+            });
+        }
+        const blobId = Buffer.from("blob-user");
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(blobId, "session-1", 263, '{"role":"user"}');
+        db.prepare("INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)").run(
+            "part-blob",
+            blobId,
+            "session-1",
+            '{"type":"text","ignored":true}',
+        );
+        insertUser(db, "session-1", "user-real", {}, 264);
+        insertPart(db, "session-1", "user-real", "part-real", {
+            type: "text",
+            text: "next task",
+        });
+
+        expect(frozenIsMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expect(candidateIsMidTurn(db, "session-1")).toBe(true);
+    });
+
     it("stays mid-turn when a compaction summary assistant follows the tool-calls assistant", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);

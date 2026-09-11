@@ -2518,10 +2518,10 @@ evaluation of this area and its disposition are recorded in
 [ts-stage-fn]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
-[ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L218-L226
+[ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L223-L231
 [dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L215
-[midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L282
-[newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L295-L333
+[midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L233-L287
+[newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L300-L357
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L9-L10

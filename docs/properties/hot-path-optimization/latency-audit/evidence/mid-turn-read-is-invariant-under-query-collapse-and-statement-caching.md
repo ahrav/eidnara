@@ -198,8 +198,9 @@ the file at the same path.
   `bun run --cwd packages/opencode-plugin test src/hooks/context/read-session-db-cache.test.ts`
   failed its real 800-ID interleaving case on both adapters: Bun recompiled
   chunk statements and Node recompiled predicate statements, each observing
-  seven native prepares instead of five. With the selected budgets, both
-  execute repeated time/part chunks between mid-turn reads with exactly five
+  seven native prepares instead of the five then expected. With the selected
+  budgets and the bounded candidate reader, both execute repeated time/part
+  chunks between mid-turn reads with exactly six
   prepares total, one native connection and zero native closes. Updated
   retirement tests cross the actual 64-statement and 128-KiB limits.
 - Growing-remainder red/green: The variable-width implementation still
@@ -208,29 +209,30 @@ the file at the same path.
   recompiled after eviction. The cache-contract command failed on both
   adapters before padding. The fixed-width implementation returns every
   expected timestamp and ordered message/part payload for all 70 remainders,
-  accepts frozen input lists, and observes five prepares, one connection and
+  accepts frozen input lists, and observes six prepares, one connection and
   zero closes. Mid-turn reads run between every list size. The prior 1,623-text
   inventory and accepted remainder churn are superseded by this fixed shape.
 - Integration corrections: The [graph guard][graph-guard] names only the
   child-process helper in `AWAITING_CONSUMER` and updates the exact readonly
   constructor line. It still requires one readonly opening and the same sole
   writer. No directory-wide exemption or graph weakening is added.
-- Current execution: `bun run check:repo` passes typechecks, lints, tests,
-  builds, the comment gate and compiled-TUI cleanliness. Test counts are
+- Recorded repository execution: The retained `bun run check:repo` logs pass
+  typechecks, lints, tests, builds, the comment gate and compiled-TUI
+  cleanliness. That run predates bounded candidate pagination. Its counts are
   5,126 pass, 5 skip, 0 fail, with 19,743 Bun assertions: shm-native 21;
   retina-local-fs 56; opencode 3,785; Pi 379; CLI 596 plus 3 skips; e2e 265
   plus 2 skips; root scripts 24. Lints report 73 warnings and one info, no
   errors. `bun run --cwd packages/opencode-plugin smoke` passes all nine
   checks (five WASM, four TUI). Logs are
   `/tmp/opencode/session-db-verified-repo.log` and
-  `/tmp/opencode/session-db-verified-smoke.log`. The focused reader/cache
-  command (`bun run --cwd packages/opencode-plugin test src/hooks/context/read-session-db-cache.test.ts src/hooks/context/read-session-db.test.ts src/hooks/context/read-session-raw.test.ts`)
-  passes 124 tests, 2,258 assertions; its native launcher executes 28
+  `/tmp/opencode/session-db-verified-smoke.log`.
+- Current focused execution: The reader/cache command
+  (`bun run --cwd packages/opencode-plugin test src/hooks/context/read-session-db-cache.test.ts src/hooks/context/read-session-db.test.ts src/hooks/context/read-session-raw.test.ts`)
+  passes 129 tests, 2,278 assertions; its native launcher executes 28
   subprocess cases on Bun 1.3.14 and Node 24.18.0 without adapter skips.
   Earlier focused/wider runs passed 188/465 tests but did not establish the
   full integration gate or normal-chunk budget fit. Counts overlap and are
-  not additive. Production changes total 377 added/deleted lines against the
-  base; shared writer adapters have only type declarations added.
+  not additive.
 - Caller/API audit: The [raw readers][raw-reader], [work metrics][work-metrics],
   [availability resolver][availability-reader] and [marker lookup][marker-reader]
   use only `prepare().get/all`; no production caller retains native statements
@@ -254,17 +256,21 @@ the file at the same path.
   finalizers and calls native close in `finally`. Tests retain original native
   getters while applying 128-query pressure, require at most 64 live natives
   between calls, and require every getter to fail after teardown, without GC.
-- Query semantics: One user-candidate statement replaces the
-  candidate-count-dependent read sequence. The 20-user witness counts three
-  executions (assistant row, candidates, completed assistant's parts) versus
-  23 frozen-reference executions. The assistant statement selects the same
-  ordered row without its parts; the parts statement runs only after the
-  `time.completed` and `tool-calls` exits, in the reference's order. A
+- Query semantics: The user-candidate scan uses bounded tuple-key pages and a
+  reusable per-message parts statement. The 20-user witness counts 23 reads in
+  both implementations. The candidate uses four direct `prepare` calls, and
+  the two identical part-query texts share one native statement under the
+  read-only cache. The benefit is bounded result materialization and statement
+  reuse, not fewer query executions. The assistant statement selects the same
+  ordered row without its parts; the completed-assistant parts read still runs
+  only after the `time.completed` and `tool-calls` exits, in the reference's
+  order. A
   materialization witness inserts 40 tool parts under a streaming and under a
   `tool-calls` assistant and requires at most one materialized row across all
   reads; before that ordering, a `LEFT JOIN` on the assistant statement
-  returned 40 rows per call. The user statement joins same-session parts
-  and scopes the compaction subquery by session. JavaScript still decides
+  returned 40 rows per call. The candidate page scopes the compaction subquery
+  by session, and each candidate's part query scopes by session and message.
+  JavaScript still decides
   part-object validity, exact provider booleans, machine flags, and cleaned
   user text. SQL NULL part data
   does not mean a partless message. The absent-assistant sentinel remains
@@ -302,9 +308,8 @@ the file at the same path.
   before reuse and around open. Ordinary same-inode commits do not replace the
   cache. Replacement after the last stat is detected at the next lookup; an
   adversarial open-time ABA sequence is not proven. Equivalence is limited to
-  static snapshots: the three reads keep the reference's order, but the user
-  candidate class is one joined statement and none of the reads are jointly
-  atomic under
+  static snapshots: candidate pages and per-message part reads keep the
+  reference's order, but none of the reads are jointly atomic under
   concurrent writers. No transaction is added to equate arbitrary schedules.
   Replacement fixtures use closed
   rollback-journal files, not concurrent WAL-family publication.
@@ -315,12 +320,12 @@ the file at the same path.
   inconsistent cross-session associations is not claimed.
 
 [reference]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
-[differential]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L892
-[current-cache]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L226
-[current-predicate]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L358
+[differential]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L1056
+[current-cache]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L220
+[current-predicate]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L223-L382
 [native-contract]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/session-db-cache-contract.ts#L1-L392
 [runtime-launcher]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db-cache.test.ts#L6-L53
-[time-chunks]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L373-L411
+[time-chunks]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L405-L435
 [part-chunks]: ../../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.ts#L131-L164
 [message-ids]: ../../../../../packages/opencode-plugin/src/features/context/compaction-marker.ts#L34-L72
 [graph-guard]: ../../../../../packages/opencode-plugin/src/testing/module-graph.test.ts#L46-L171

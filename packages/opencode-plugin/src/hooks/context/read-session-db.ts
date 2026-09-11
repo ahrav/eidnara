@@ -313,6 +313,7 @@ function hasNewerRealUserMessage(
          WHERE m.session_id = ?
            AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
            AND ${jsonField("m.data", "$.role")} = 'user'
+           AND typeof(m.id) = 'text'
            AND NOT EXISTS (
              SELECT 1 FROM part c
              WHERE c.session_id = m.session_id AND c.message_id = m.id
