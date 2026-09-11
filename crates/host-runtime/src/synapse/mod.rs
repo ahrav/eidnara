@@ -212,9 +212,15 @@ pub enum SynapseStatus {
 
 enum LaneState {
     Starting,
-    Disabled { reason: String },
+    Disabled {
+        reason: String,
+    },
     Ready(Arc<ReadyLane>),
-    Failing { reason: String },
+    Failing {
+        reason: String,
+    },
+    /// Late count failures may escalate runtime disablement, but cannot replace completed shutdown.
+    ShutDown,
 }
 
 struct SynapseInner {
@@ -341,6 +347,9 @@ impl SynapseComponent {
             LaneState::Failing { reason } => SynapseStatus::Failing {
                 reason: reason.clone(),
             },
+            LaneState::ShutDown => SynapseStatus::Disabled {
+                reason: SHUT_DOWN_REASON.to_owned(),
+            },
         }
     }
 
@@ -358,29 +367,31 @@ impl SynapseComponent {
     ///
     /// Returns [`DenseUnavailable`] naming the first check that failed; the text is never part of the reason.
     /// A count failure settles the lane by the same classes as inference: `Artifact` disables it and `Invariant` marks it failing, with fixed reasons because a count error message can echo the text.
-    /// Counting is joined by neither the tracker nor the `cpu` permit shutdown drains, so the settlement replaces only a `Ready` lane; an already-settled state, including terminal shutdown, keeps its reason.
+    /// Counter panics are quarantined as invariant failures. Invariants escalate runtime disablement, but completed shutdown remains disabled.
     pub fn preflight_embedding<'t>(
         &self,
         limits: EmbeddingInputLimits,
         text: &'t str,
     ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
         let lane = self.ready_or_unavailable()?;
-        let admitted = preflight::admit(&lane.lane, &*lane.backend, limits, text);
+        let admitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            preflight::admit(&lane.lane, &*lane.backend, limits, text)
+        }))
+        .map_err(|payload| {
+            crate::composite::discard_payload(payload);
+            mark_failing(&self.inner, "token counting panicked".to_owned());
+            DenseUnavailable::CountUnavailable(InferenceFailureKind::Invariant)
+        })?;
         if let Err(DenseUnavailable::CountUnavailable(kind)) = &admitted {
-            let next = match kind {
-                InferenceFailureKind::Artifact => Some(LaneState::Disabled {
-                    reason: "token counting declared the artifact unusable".to_owned(),
-                }),
-                InferenceFailureKind::Invariant => Some(LaneState::Failing {
-                    reason: "token counting failed an invariant".to_owned(),
-                }),
-                InferenceFailureKind::Input | InferenceFailureKind::Execution => None,
-            };
-            if let Some(next) = next {
-                let mut state = self.inner.lock_state();
-                if matches!(&*state, LaneState::Ready(_)) {
-                    *state = next;
+            match kind {
+                InferenceFailureKind::Artifact => mark_disabled(
+                    &self.inner,
+                    "token counting declared the artifact unusable".to_owned(),
+                ),
+                InferenceFailureKind::Invariant => {
+                    mark_failing(&self.inner, "token counting failed an invariant".to_owned())
                 }
+                InferenceFailureKind::Input | InferenceFailureKind::Execution => {}
             }
         }
         admitted
@@ -427,7 +438,7 @@ impl SynapseComponent {
             LaneState::Disabled { reason } if is_unsupported_reason(reason) => {
                 LaneUnavailableState::Unsupported
             }
-            LaneState::Disabled { .. } => LaneUnavailableState::Disabled,
+            LaneState::Disabled { .. } | LaneState::ShutDown => LaneUnavailableState::Disabled,
             LaneState::Failing { .. } => LaneUnavailableState::Failing,
         };
         Err(DenseUnavailable::LaneUnavailable { state })
@@ -473,6 +484,9 @@ impl SynapseComponent {
                 }
                 LaneState::Disabled { reason } | LaneState::Failing { reason } => {
                     return Err(InferenceError::Artifact(reason.clone()));
+                }
+                LaneState::ShutDown => {
+                    return Err(InferenceError::Artifact(SHUT_DOWN_REASON.to_owned()));
                 }
             }
         };
@@ -545,6 +559,7 @@ fn lane_failure_reason(inner: &SynapseInner) -> Option<String> {
         LaneState::Ready(_) => None,
         LaneState::Starting => Some(STARTING_REASON.to_owned()),
         LaneState::Disabled { reason } | LaneState::Failing { reason } => Some(reason.clone()),
+        LaneState::ShutDown => Some(SHUT_DOWN_REASON.to_owned()),
     }
 }
 
@@ -1270,8 +1285,9 @@ impl CompositeComponent for SynapseComponent {
         }
     }
 
-    /// Shutdown closes admission and cancels queued wrappers before joining every started native call through its incarnation.
+    /// Shutdown closes admission and cancels queued wrappers before joining every started native inference call through its incarnation.
     /// Shutdown never aborts a started native call.
+    /// Token counting is not joined: each in-flight count retains its lane through an `Arc`, and its settlement cannot replace completed shutdown.
     /// The lane ends `Disabled` so a late `bind`, `health`, or `embed_blocking` observes the shutdown instead of a ready lane whose admission is closed.
     /// `embed_blocking` calls are not tracked, so shutdown joins them through the CPU permit: an in-flight blocking call holds that permit until it returns, and the terminal state is written while shutdown holds it, so a call that read `Ready` earlier observes `Disabled` when it rechecks after acquiring the permit, and a joined call that failed cannot overwrite the shutdown state.
     async fn shutdown(&self) -> Result<(), crate::composite::ShutdownError> {
@@ -1284,9 +1300,7 @@ impl CompositeComponent for SynapseComponent {
         self.inner.jobs.clear();
         // Taking the permit joins an in-flight `embed_blocking` call; its own failure transition settles before the shutdown state is written.
         let permit = self.inner.cpu.acquire().await;
-        *self.inner.lock_state() = LaneState::Disabled {
-            reason: SHUT_DOWN_REASON.to_owned(),
-        };
+        *self.inner.lock_state() = LaneState::ShutDown;
         drop(permit);
         Ok(())
     }
@@ -1527,30 +1541,36 @@ mod tests {
         ));
     }
 
-    /// `GatedCountEngine` blocks `untruncated_token_len` until the test releases an `Invariant` failure.
     struct GatedCountEngine {
         entered: std::sync::mpsc::Sender<()>,
-        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<InferenceError>>,
     }
 
     impl EmbeddingEngine for GatedCountEngine {
-        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-            Ok(texts.iter().map(|_| vec![1.0]).collect())
+        fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+            Err(InferenceError::Artifact("artifact fault".to_owned()))
         }
 
-        fn untruncated_token_len(&self, _text: &str) -> Result<EmbedTokens, InferenceError> {
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            if text == "artifact" {
+                return Err(InferenceError::Artifact("count artifact fault".to_owned()));
+            }
             self.entered.send(()).expect("test observes entry");
-            self.release
+            let error = self
+                .release
                 .lock()
                 .expect("release receiver")
                 .recv()
-                .expect("test releases the count");
-            Err(InferenceError::Invariant("count overflowed".to_owned()))
+                .expect("injected counter panic: release channel closed");
+            Err(error)
         }
     }
 
-    #[tokio::test]
-    async fn a_count_failure_that_settles_after_shutdown_preserves_the_terminal_state() {
+    fn gated_count_component() -> (
+        Arc<SynapseComponent>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<InferenceError>,
+    ) {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let component = Arc::new(
@@ -1567,26 +1587,40 @@ mod tests {
             )
             .expect("limits validate"),
         );
+        (component, entered_rx, release_tx)
+    }
+
+    #[tokio::test]
+    async fn a_count_failure_that_settles_after_shutdown_preserves_the_terminal_state() {
+        let (component, entered_rx, release_tx) = gated_count_component();
+        let budget = std::time::Duration::from_secs(5);
         let limits = EmbeddingInputLimits::of_lane(&lane());
         let counting = {
             let component = Arc::clone(&component);
-            std::thread::spawn(move || component.preflight_embedding(limits, "alpha beta"))
+            tokio::task::spawn_blocking(move || component.preflight_embedding(limits, "alpha beta"))
         };
         entered_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(budget)
             .expect("the count is entered");
 
-        component.shutdown().await.expect("shutdown drains cleanly");
-        match component.status() {
+        let shutdown = tokio::time::timeout(budget, component.shutdown()).await;
+        let stopped = component.status();
+
+        release_tx
+            .send(InferenceError::Invariant("count overflowed".to_owned()))
+            .expect("the count is released");
+        let refusal = tokio::time::timeout(budget, counting)
+            .await
+            .expect("the released count completes within the budget")
+            .expect("the counting thread joins")
+            .expect_err("an invariant count fails the preflight");
+        shutdown
+            .expect("shutdown must not wait for the blocked count")
+            .expect("shutdown drains cleanly");
+        match stopped {
             SynapseStatus::Disabled { reason } => assert_eq!(reason, SHUT_DOWN_REASON),
             other => panic!("a drained lane must be disabled, got {other:?}"),
         }
-
-        release_tx.send(()).expect("the count is released");
-        let refusal = counting
-            .join()
-            .expect("the counting thread joins")
-            .expect_err("an invariant count fails the preflight");
         assert_eq!(
             refusal,
             DenseUnavailable::CountUnavailable(InferenceFailureKind::Invariant)
@@ -1598,5 +1632,93 @@ mod tests {
             ),
             other => panic!("the terminal shutdown state must survive, got {other:?}"),
         }
+        assert_eq!(component.health().await.status, HealthStatus::Degraded);
+    }
+
+    #[tokio::test]
+    async fn a_count_invariant_escalates_runtime_disablement() {
+        for artifact_source in ["inference", "count"] {
+            let (component, entered_rx, release_tx) = gated_count_component();
+            let budget = std::time::Duration::from_secs(5);
+            let limits = EmbeddingInputLimits::of_lane(&lane());
+            let counting = {
+                let component = Arc::clone(&component);
+                tokio::task::spawn_blocking(move || {
+                    component.preflight_embedding(limits, "alpha beta")
+                })
+            };
+            entered_rx
+                .recv_timeout(budget)
+                .expect("the count is entered");
+            if artifact_source == "inference" {
+                assert!(matches!(
+                    component.embed_blocking(&["alpha"]),
+                    Err(InferenceError::Artifact(_))
+                ));
+            } else {
+                assert_eq!(
+                    component.preflight_embedding(limits, "artifact"),
+                    Err(DenseUnavailable::CountUnavailable(
+                        InferenceFailureKind::Artifact
+                    ))
+                );
+            }
+            assert!(matches!(component.status(), SynapseStatus::Disabled { .. }));
+            release_tx
+                .send(InferenceError::Invariant("count overflowed".to_owned()))
+                .expect("the count is released");
+            let result = tokio::time::timeout(budget, counting)
+                .await
+                .expect("the count completes")
+                .expect("the count does not panic");
+            assert_eq!(
+                result,
+                Err(DenseUnavailable::CountUnavailable(
+                    InferenceFailureKind::Invariant
+                ))
+            );
+            assert!(
+                matches!(component.status(), SynapseStatus::Failing { .. }),
+                "an invariant must escalate {artifact_source} disablement: {:?}",
+                component.status()
+            );
+            assert_eq!(component.health().await.status, HealthStatus::Failing);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_counter_panic_is_quarantined_as_a_content_free_invariant() {
+        let (component, entered_rx, release_tx) = gated_count_component();
+        let budget = std::time::Duration::from_secs(5);
+        let limits = EmbeddingInputLimits::of_lane(&lane());
+        let counting = {
+            let component = Arc::clone(&component);
+            tokio::task::spawn_blocking(move || component.preflight_embedding(limits, "alpha beta"))
+        };
+        entered_rx
+            .recv_timeout(budget)
+            .expect("the count is entered");
+        drop(release_tx);
+        let result = tokio::time::timeout(budget, counting)
+            .await
+            .expect("the count completes")
+            .expect("preflight must contain a backend panic");
+        assert_eq!(
+            result,
+            Err(DenseUnavailable::CountUnavailable(
+                InferenceFailureKind::Invariant
+            ))
+        );
+        let SynapseStatus::Failing { reason } = component.status() else {
+            panic!("a counter panic quarantines the lane");
+        };
+        assert_eq!(reason, "token counting panicked");
+        assert_eq!(component.health().await.status, HealthStatus::Failing);
+        assert_eq!(
+            component.preflight_embedding(limits, "alpha beta"),
+            Err(DenseUnavailable::LaneUnavailable {
+                state: LaneUnavailableState::Failing
+            })
+        );
     }
 }
