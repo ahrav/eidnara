@@ -64,7 +64,9 @@ not the handler.
 | [`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline`][t-parked] | Reused `content_hash` fingerprints and `canonical_bytes` equal a full rehash. | unaudited |
 | [`served_fingerprint_block_ids_pin_flat_mid_index_format`][t-fpids] | Fingerprint block ids are `mid#index` and synthetic ids. | unaudited |
 | [`transform_segments_preserve_existing_golden_bytes`][t-segments] | `Exact` segments concatenate into the golden body. | unaudited |
-| [`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`][t-native-inc] | The native prefix is replayed, the tail encoded, and the differential is live. | unaudited |
+| [`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`][t-native-inc] | Real tail expansion shares native values and sidecar metadata. Fresh, reattached, and shared replay produce equal native bytes and projected identity data. At most two served tail messages are encoded; prefix chunks retain pointer identity. The warm request charge equals a fresh walk using the same size estimator, independently of cached charges. The compiled test setting enables the native differential; the negative controls below verify detection. | unaudited |
+| [`native_delta_ingress_core_is_independent_of_changed_output_messages`][t-native-ingress] | Equal but separately allocated ingress/output values share output chunks. Changed output cannot replace raw ingress. Snapshot fallback retains request pointers after native-cache eviction. Cached request charges match capacity-based walks including Arc headers. | unaudited |
+| [`native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate`][t-native-charge-floor] | A scalar-dense raw allocation exceeds its sidecar serialized-size estimate, so the shared raw pointer retains its ingress allocation charge. Full and degraded sidecars preserve ingress/output pointer deduplication, while equal values in distinct allocations retain distinct charges. Request charges remain independent. | unaudited |
 | [`differential_assert_rejects_frontier_inside_mutated_native_region`][t-native-reject] | The differential panics on a corrupt native frontier. | unaudited |
 | [`frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits`][t-vacuity] | Same-length edits and repeats are not vacuously reused. | unaudited |
 | [`duplicate_tool_use_assert_covers_incremental_native_suffix`][t-dup] | Tool-use ids are unique across the cached prefix and encoded suffix. | unaudited |
@@ -382,7 +384,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1411
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1596
 [t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22226
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L20954
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L21221
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19168
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
@@ -393,11 +395,13 @@ not a claim that no related check exists anywhere in the repository.
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13746
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13616
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20650
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L21754
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21684
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L22271
-[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2071
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20653
+[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L20872
+[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L20983
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L22029
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21958
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L22546
+[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22512
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22581
 [t-interleave]: ../../../../crates/daemon/src/transform.rs#L22614

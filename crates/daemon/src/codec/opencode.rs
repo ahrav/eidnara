@@ -49,6 +49,15 @@ pub fn decode_opencode_with_sidecar_and_base(
     prior: Option<&DecodeSidecar>,
     provisional_base: u64,
 ) -> DecodedHarnessMessages {
+    let shared = messages.iter().cloned().map(Arc::new).collect::<Vec<_>>();
+    decode_opencode_shared(&shared, prior, provisional_base)
+}
+
+pub(crate) fn decode_opencode_shared(
+    messages: &[Arc<Value>],
+    prior: Option<&DecodeSidecar>,
+    provisional_base: u64,
+) -> DecodedHarnessMessages {
     let mut sidecar = DecodeSidecar::new(HARNESS);
     if let Some(prior) = prior {
         sidecar.mid_pins = prior.mid_pins.clone();
@@ -58,7 +67,7 @@ pub fn decode_opencode_with_sidecar_and_base(
     let mut boundary = None;
 
     for (message_index, raw_message) in messages.iter().enumerate() {
-        let info = raw_message.get("info").unwrap_or(raw_message);
+        let info = raw_message.get("info").unwrap_or(raw_message.as_ref());
         let explicit_ordinal = raw_message
             .get("absolute_ordinal")
             .and_then(Value::as_u64)
@@ -83,7 +92,7 @@ pub fn decode_opencode_with_sidecar_and_base(
         let parts = raw_message
             .get("parts")
             .and_then(Value::as_array)
-            .cloned()
+            .map(Vec::as_slice)
             .unwrap_or_default();
 
         let mut content = Vec::new();
@@ -217,7 +226,7 @@ pub fn decode_opencode_with_sidecar_and_base(
             }
         }
 
-        let synthetic = is_synthetic_message(&parts);
+        let synthetic = is_synthetic_message(parts);
         let ck = WireMessage::from_parts(
             role.clone(),
             content,
@@ -241,7 +250,7 @@ pub fn decode_opencode_with_sidecar_and_base(
                 mid,
                 ordinal,
                 role,
-                raw: raw_message.clone(),
+                raw: Arc::clone(raw_message),
                 stable_key: Some(stable_key),
                 blocks: block_metas,
             },
@@ -256,7 +265,7 @@ pub fn decode_opencode_with_sidecar_and_base(
 }
 
 pub(crate) fn decode_opencode_sidecar_incremental(
-    messages: &[MessageV2Json],
+    messages: &[Arc<Value>],
     prior: &DecodeSidecar,
     replace_from: usize,
 ) -> DecodeSidecar {
@@ -266,12 +275,8 @@ pub(crate) fn decode_opencode_sidecar_incremental(
         return prior.clone();
     }
 
-    let suffix = decode_opencode_with_sidecar_and_base(
-        &messages[replace_from..],
-        Some(prior),
-        replace_from as u64,
-    )
-    .sidecar;
+    let suffix =
+        decode_opencode_shared(&messages[replace_from..], Some(prior), replace_from as u64).sidecar;
     let mut sidecar = DecodeSidecar::new(HARNESS);
     sidecar.mid_pins = suffix.mid_pins;
     let mut order_is_indexed = true;
@@ -448,7 +453,9 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
         // A positional synthetic fallback may attach a native envelope to a fresh module-authored m0/m1 message.
         let meta = meta_for_ck(sidecar, msg, absolute_index);
         let value = match meta {
-            Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => meta.raw.clone(),
+            Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
+                meta.raw.as_ref().clone()
+            }
             Some(meta) => encode_with_meta(msg, meta, preserve_compaction),
             None => encode_new_message(msg, session_id),
         };
@@ -716,11 +723,11 @@ fn encode_with_meta(
     meta: &HarnessMessageMeta,
     preserve_compaction: bool,
 ) -> Value {
-    let mut raw = meta.raw.clone();
+    let mut raw = meta.raw.as_ref().clone();
     let mut parts = raw
-        .get("parts")
-        .and_then(Value::as_array)
-        .cloned()
+        .get_mut("parts")
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
         .unwrap_or_default();
     let matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
 
@@ -806,8 +813,8 @@ fn encode_with_meta(
             "parts": parts,
         });
     }
-    if raw == meta.raw {
-        meta.raw.clone()
+    if raw == *meta.raw {
+        meta.raw.as_ref().clone()
     } else {
         raw
     }
@@ -2083,7 +2090,12 @@ mod tests {
             "info": { "id": "other-key", "role": "assistant" },
             "parts": [{ "type": "text", "text": "second" }]
         }));
-        let second = decode_opencode_sidecar_incremental(&generation_2, &first.sidecar, 1);
+        let shared_2 = generation_2
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let second = decode_opencode_sidecar_incremental(&shared_2, &first.sidecar, 1);
         assert_eq!(
             second.inherit_pin("stable-key").as_deref(),
             Some("pinned-mid")
@@ -2094,7 +2106,12 @@ mod tests {
             "info": { "id": "stable-key", "role": "user", "generation": 3 },
             "parts": [{ "type": "text", "text": "third" }]
         }));
-        let incremental = decode_opencode_sidecar_incremental(&generation_3, &second, 2);
+        let shared_3 = generation_3
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let incremental = decode_opencode_sidecar_incremental(&shared_3, &second, 2);
         let full = decode_opencode_with_sidecar(&generation_3, Some(&seed)).sidecar;
         assert!(
             incremental
@@ -2111,14 +2128,14 @@ mod tests {
 
         let mut broken_prior = second;
         broken_prior.mid_pins.clear();
-        let broken = decode_opencode_sidecar_incremental(&generation_3, &broken_prior, 2);
+        let broken = decode_opencode_sidecar_incremental(&shared_3, &broken_prior, 2);
         assert_ne!(broken, full);
         assert!(broken.message_by_mid("stable-key").is_some());
 
         for missing in ["pinned-mid", "other-key"] {
             let mut sparse = decode_opencode_with_sidecar(&generation_2, Some(&seed)).sidecar;
             sparse.messages.remove(missing);
-            let recovered = decode_opencode_sidecar_incremental(&generation_3, &sparse, 2);
+            let recovered = decode_opencode_sidecar_incremental(&shared_3, &sparse, 2);
             assert_eq!(
                 recovered.order, full.order,
                 "missing prefix metadata for {missing}"
