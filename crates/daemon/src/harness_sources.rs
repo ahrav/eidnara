@@ -14,7 +14,7 @@ const _: () = assert!(
 );
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactErrorKind, ArtifactIngestRequest, CommitIntent,
-    EventKind, KernelError, KernelStore, ProviderEgress, Sensitivity, SourceClass,
+    EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, Sensitivity, SourceClass,
     SourceDescriptorError, SourceDescriptorPolicy, SourceDescriptorRequest, TaintClass,
 };
 use serde_json::Value;
@@ -188,7 +188,7 @@ struct ToolBlock<'a> {
 ///
 /// # Errors
 ///
-/// Refuses a non-OpenCode binding, non-object `info`, missing identities, a different session, missing or invalid timestamps, non-array `parts`, non-string selected text, tool parts without `state`, and settled tools without `callID`, `state.time.end`, or string output.
+/// The OpenCode adapter refuses a non-OpenCode binding, non-object `info`, missing identities, roles other than `user` or `assistant`, a different session, missing or invalid timestamps, non-array `parts`, non-string selected text, tool parts without `state`, and settled tools without `callID`, `state.time.end`, or string output.
 pub fn opencode_units(
     session: &SessionIdentity,
     message: &Value,
@@ -205,6 +205,9 @@ pub fn opencode_units(
         return Err(AdapterRefusal::SessionMismatch);
     }
     let role = field(info, "role")?;
+    if !matches!(role, "user" | "assistant") {
+        return Err(AdapterRefusal::UnsupportedShape("info.role"));
+    }
     let time = info
         .get("time")
         .ok_or(AdapterRefusal::MissingIdentity("time"))?;
@@ -264,7 +267,7 @@ pub fn opencode_units(
 ///
 /// # Errors
 ///
-/// Refuses a non-Pi binding, non-object entries or messages, missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call or parent or with non-text content.
+/// The Pi adapter refuses a non-Pi binding, non-object entries or messages, missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call, parent, or boolean `isError`, or with non-text content.
 pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
@@ -297,7 +300,7 @@ pub fn pi_units(
             is_error: message
                 .get("isError")
                 .and_then(Value::as_bool)
-                .unwrap_or(false),
+                .ok_or(AdapterRefusal::UnsupportedShape("message.isError"))?,
         };
         for (index, item) in content_items(message)?.iter().enumerate() {
             let text = item
@@ -392,7 +395,7 @@ pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
 /// How long `publish` waits for a kernel reader to consult the stored receipt before offering bytes to the store.
 const RECEIPT_WAIT: Duration = Duration::from_secs(30);
 
-/// Publishes units into one kernel under one domain and scope. `egress` is the caller's provider policy for the retained evidence.
+/// Publishes units into one kernel under one domain and scope, checking existing scopes with [`ProjectScope::names_project`] before receipt replay. `egress` controls the provider policy for retained evidence.
 pub struct SourcePublisher<'a> {
     pub kernel: &'a KernelStore,
     pub domain_id: &'a str,
@@ -407,6 +410,7 @@ impl SourcePublisher<'_> {
     /// # Errors
     ///
     /// Returns identity, revision, or artifact errors before retention, descriptor errors for permanent refusals, and kernel errors including unmet preconditions such as a missing scope. Failures after retention carry the evidence object. Permanent refusals attempt retirement; kernel failures preserve evidence without implying retryability.
+    /// A known scope mismatch returns `NotFound` before retention; a scope mismatch detected in the descriptor transaction preserves the retained evidence without publishing it.
     pub fn publish(&self, unit: &SourceUnit, observed_at: i64) -> Result<Published, PublishError> {
         let identity: Vec<(&str, &str)> = unit
             .identity
@@ -445,6 +449,19 @@ impl SourcePublisher<'_> {
         let harness = unit.value("harness").to_owned();
         let evidence_object_id = format!("srcev-object:{key}");
         let provenance = provenance(unit);
+        let project =
+            ProjectScope::new(unit.value("project_id")).map_err(|error| PublishError::Kernel {
+                error,
+                evidence: None,
+            })?;
+        let check_scope = |envelope: &kernel::Envelope<'_>| {
+            if let Some(terms) = envelope.scope_terms(self.scope_id)?
+                && !project.names_project(Some(&terms))
+            {
+                return Err(KernelError::NotFound);
+            }
+            Ok(())
+        };
         // A unit published before answers from its descriptor receipt without offering its bytes to the store again; a receipt under another request is the conflict the digest exists to catch.
         let descriptor_intent = self.intent(
             &format!("source-descriptor:{key}"),
@@ -454,6 +471,7 @@ impl SourcePublisher<'_> {
         let (_, stored) = self
             .kernel
             .preview(Instant::now() + RECEIPT_WAIT, |preview| {
+                check_scope(preview)?;
                 preview.stored_receipt(descriptor_intent.clone())
             })
             .map_err(|error| match error {
@@ -509,6 +527,7 @@ impl SourcePublisher<'_> {
         };
         let mut outcome = None;
         let receipt = self.kernel.commit(descriptor_intent, |envelope| {
+            check_scope(envelope)?;
             let published = envelope
                 .publish_source_descriptor(&SourceDescriptorRequest {
                     occurrence: occurrence.clone(),

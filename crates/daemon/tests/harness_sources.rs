@@ -740,6 +740,77 @@ fn pi_refuses_unsupported_message_roles() {
 }
 
 #[test]
+fn opencode_refuses_unsupported_roles_before_projecting_any_parts() {
+    for role in ["system", "developer", "tool", "toolResult", "future-role"] {
+        for kind in ["text", "tool", "no-parts"] {
+            let mut record = opencode_assistant("msg_a", 5000);
+            record["info"]["role"] = json!(role);
+            record["parts"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|part| part["type"] == kind);
+            assert_eq!(
+                opencode_units(&opencode_session(), &record),
+                Err(AdapterRefusal::UnsupportedShape("info.role")),
+                "role={role}, parts={kind}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pi_tool_results_require_boolean_error_status() {
+    for (is_error, representation) in [
+        (false, Representation::ToolOutput),
+        (true, Representation::ToolError),
+    ] {
+        let units = pi_units(
+            &pi_session(),
+            &pi_tool_result("pi-t1", "pi-a1", is_error, 7777),
+        )
+        .unwrap();
+        assert_eq!(units.len(), 2);
+        for unit in &units {
+            assert_eq!(unit.representation, representation);
+            assert_eq!(unit.class, OccurrenceClass::RawToolSpans);
+        }
+        assert_eq!(units[0].text, TOOL_BYTES);
+        assert_eq!(units[1].text, "");
+    }
+    for status in [
+        None,
+        Some(Value::Null),
+        Some(json!("true")),
+        Some(json!("false")),
+        Some(json!(0)),
+        Some(json!(1)),
+        Some(json!([])),
+        Some(json!({})),
+    ] {
+        for mut entry in [
+            pi_user("pi-u1", "user text", 100),
+            pi_assistant("pi-a1", 200),
+        ] {
+            let expected = pi_units(&pi_session(), &entry).unwrap();
+            if let Some(status) = status.clone() {
+                entry["message"]["isError"] = status;
+            }
+            assert_eq!(pi_units(&pi_session(), &entry).unwrap(), expected);
+        }
+        let mut entry = pi_tool_result("pi-t1", "pi-a1", false, 7777);
+        entry["message"].as_object_mut().unwrap().remove("isError");
+        if let Some(status) = status {
+            entry["message"]["isError"] = status;
+        }
+        assert_eq!(
+            pi_units(&pi_session(), &entry),
+            Err(AdapterRefusal::UnsupportedShape("message.isError")),
+            "{entry:?}"
+        );
+    }
+}
+
+#[test]
 fn opencode_refuses_pi_namespace() {
     let session = SessionIdentity {
         harness: Harness::Pi,
@@ -946,6 +1017,81 @@ fn publication_store_failure_preserves_evidence_for_retry() {
         assert!(corpus.publisher().publish(&unit, NOW).unwrap().replayed);
         assert_eq!(inventory(&corpus).len(), 1);
     }
+}
+
+#[test]
+fn publication_refuses_another_projects_scope_before_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let session = SessionIdentity {
+        project_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        ..pi_session()
+    };
+    let mut units = pi_units(&session, &pi_user("pi-u1", "wrong project", 100)).unwrap();
+    units.extend(pi_units(&session, &pi_tool_result("pi-t1", "pi-a1", false, 200)).unwrap());
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    for unit in units {
+        let result = corpus.publisher().publish(&unit, NOW);
+        assert!(
+            matches!(
+                result,
+                Err(PublishError::Kernel {
+                    error: kernel::KernelError::NotFound,
+                    evidence: None,
+                })
+            ),
+            "wrong-project publication must fail before retention: {result:?}"
+        );
+        assert_eq!(
+            corpus.tip(),
+            tip,
+            "no artifact or descriptor receipt commits"
+        );
+        assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+        assert!(inventory(&corpus).is_empty());
+    }
+}
+
+#[test]
+fn publication_rechecks_project_scope_after_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let unit = pi_units(&pi_session(), &pi_user("pi-u1", "scope changes", 100))
+        .unwrap()
+        .remove(0);
+    let connection = Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER change_scope AFTER INSERT ON evidence_meta
+         BEGIN UPDATE scope_term
+           SET exact_value='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+           WHERE scope_id='project:a' AND dimension='project'; END;",
+        )
+        .unwrap();
+    let result = corpus.publisher().publish(&unit, NOW);
+    let Err(PublishError::Kernel {
+        error: kernel::KernelError::NotFound,
+        evidence: Some(evidence),
+    }) = result
+    else {
+        panic!("scope must be rechecked in the descriptor commit: {result:?}");
+    };
+    assert_eq!(evidence.retired, None);
+    let (_, states) = corpus
+        .kernel
+        .object_states(std::slice::from_ref(&evidence.object_id))
+        .unwrap();
+    assert_eq!(
+        states[0].as_ref().unwrap().object.invalidated_commit_seq,
+        None
+    );
+    assert!(inventory(&corpus).is_empty());
+    connection
+        .execute_batch("DROP TRIGGER change_scope")
+        .unwrap();
 }
 
 #[test]
