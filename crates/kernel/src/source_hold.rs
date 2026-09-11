@@ -190,14 +190,15 @@ pub(crate) enum Descriptors {
 impl Descriptors {
     /// `end` and `start` are inserted verbatim into the SQL predicate.
     pub(crate) fn predicate(self, end: &str, start: &str) -> String {
+        // Registry timestamps keep corrupt observation timestamps from hiding source rows.
         let descriptor_liveness = match self {
             Self::LiveAtEnd => {
-                format!("AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>{end})")
+                format!("AND (o.invalidated_commit_seq IS NULL OR o.invalidated_commit_seq>{end})")
             }
             Self::CreatedInWindow => String::new(),
         };
         format!(
-            "b.created_commit_seq>{start} AND b.created_commit_seq<={end}
+            "o.created_commit_seq>{start} AND o.created_commit_seq<={end}
              {descriptor_liveness}
              AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>{end})"
         )
@@ -267,7 +268,7 @@ impl Window {
     fn held_descriptors_sql(self) -> String {
         Keyset::sql(
             "o.source_kind,o.object_id,o.source_revision,e.evidence_id,
-             e.artifact_digest,e.byte_length,b.invalidated_commit_seq",
+             e.artifact_digest,e.byte_length,o.invalidated_commit_seq",
             &self.descriptors.cited_evidence_sql(),
         )
     }
@@ -670,6 +671,17 @@ impl KernelStore {
                 }
             })?;
         }
+        self.recheck_source_hold_after_read(binding, hold_id, now, started)?;
+        Ok(hold)
+    }
+
+    pub(crate) fn recheck_source_hold_after_read(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        started: Instant,
+    ) -> Result<(), SourceHoldError> {
         // A purge can commit degradation while its object is still readable.
         let mut reader = self.lock_reader()?;
         let tx = reader
@@ -677,7 +689,7 @@ impl KernelStore {
             .map_err(sqlite)?;
         let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         self.load_valid_pin(&tx, binding, hold_id, now.saturating_add(elapsed_ms))?;
-        Ok(hold)
+        Ok(())
     }
 
     /// One page of the descriptors the hold captured, in `(class, object_id,

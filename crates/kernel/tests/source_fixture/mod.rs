@@ -548,7 +548,7 @@ impl Fixture {
         );
     }
 
-    fn tamper(&self, sql: &str, params: impl rusqlite::Params) {
+    pub fn tamper(&self, sql: &str, params: impl rusqlite::Params) {
         let connection = Connection::open(self.root.path().join("kernel.sqlite")).unwrap();
         connection
             .busy_timeout(std::time::Duration::from_secs(5))

@@ -393,6 +393,270 @@ fn catch_up_pages_bound_invalidation_metadata_by_through() {
     );
 }
 
+#[test]
+fn export_rejects_lifecycle_drift_even_when_observation_filters_would_hide_it() {
+    let mut accepted = Vec::new();
+    for mode in ["snapshot", "created", "invalidation"] {
+        let mut fixture = Fixture::open();
+        if mode != "created" {
+            fixture.publish("messages", "lifecycle", 1, "lifecycle bytes");
+        }
+        fixture
+            .store
+            .commit(intent("before-lifecycle-hold"), |_| Ok(String::new()))
+            .unwrap();
+        let hold = fixture
+            .store
+            .capture_source_hold(&fixture.binding(), wide())
+            .unwrap();
+        if mode == "created" {
+            fixture.publish("messages", "lifecycle", 1, "lifecycle bytes");
+        }
+        let object_id = fixture
+            .live_entry("messages", "lifecycle")
+            .object_id
+            .clone();
+        if mode == "invalidation" {
+            fixture.retire(&object_id);
+        }
+        fixture
+            .store
+            .commit(intent("lifecycle-window-end"), |_| Ok(String::new()))
+            .unwrap();
+        let through = fixture.store.tip().unwrap();
+        let window = if mode == "snapshot" {
+            ExportWindow::Snapshot
+        } else {
+            fixture
+                .store
+                .extend_source_hold(&hold.binding, &hold.hold_id, through, wide_admission())
+                .unwrap();
+            ExportWindow::CatchUp { through }
+        };
+        let future = fixture
+            .store
+            .commit(intent("advance-lifecycle-tip"), |envelope| {
+                envelope.register_outbox_consumer("other", 1)?;
+                Ok(String::new())
+            })
+            .unwrap()
+            .commit_seq;
+        assert!(future > through);
+        let original = fixture.ledger[&object_id].clone();
+        let baseline = fixture
+            .store
+            .export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                window,
+                None,
+                roomy(),
+            )
+            .unwrap();
+        assert_eq!(baseline.rows.len(), 1);
+        assert_eq!(baseline.rows[0].text.is_none(), mode == "invalidation");
+        for field in ["creation", "invalidation", "future invalidation"] {
+            let (created, invalidated) = match field {
+                "creation" => (
+                    if mode == "snapshot" {
+                        future
+                    } else {
+                        hold.snapshot
+                    },
+                    original.invalidated,
+                ),
+                "invalidation" => (
+                    original.created,
+                    if mode == "invalidation" {
+                        None
+                    } else if mode == "snapshot" {
+                        Some(hold.snapshot)
+                    } else {
+                        Some(through)
+                    },
+                ),
+                "future invalidation" => (original.created, Some(future)),
+                _ => unreachable!(),
+            };
+            fixture.tamper(
+                "UPDATE observations SET created_commit_seq=?1,invalidated_commit_seq=?2 WHERE object_id=?3",
+                rusqlite::params![created, invalidated, object_id],
+            );
+            let result = fixture.store.export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                window,
+                None,
+                roomy(),
+            );
+            if result
+                != Err(SourceExportError::MalformedRow {
+                    object_id: object_id.clone(),
+                })
+            {
+                accepted.push((
+                    mode,
+                    field,
+                    result.as_ref().map(|page| page.rows.len()).ok(),
+                ));
+            }
+            fixture.tamper(
+                "UPDATE observations SET created_commit_seq=?1,invalidated_commit_seq=?2 WHERE object_id=?3",
+                rusqlite::params![original.created, original.invalidated, object_id],
+            );
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted lifecycle drift (mode, field, returned rows): {accepted:?}"
+    );
+}
+
+#[test]
+fn cached_artifact_length_is_checked_for_each_evidence_row() {
+    let mut fixture = Fixture::open();
+    let first = fixture.retain("length-first", "four");
+    let second = fixture.retain("length-second", "four");
+    assert_ne!(first.0, second.0);
+    assert_eq!(first.1, second.1);
+    fixture.publish_span("canonical_claims", "short", 1, "four", Some((0, 1)), first);
+    let evidence_id = second.0.clone();
+    let object_id = fixture.publish_over("messages", "whole", 1, "four", second);
+    let hold = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), wide())
+        .unwrap();
+    fixture.tamper(
+        "UPDATE evidence_meta SET byte_length=2 WHERE evidence_id=?1",
+        [&evidence_id],
+    );
+    let tight = SourcePageBounds {
+        max_row_bytes: NonZeroU64::new(2).unwrap(),
+        max_encoded_bytes: NonZeroU64::new(4).unwrap(),
+        ..page_bounds(2, 3)
+    };
+    assert_eq!(
+        fixture.store.export_source_page(
+            &hold.binding,
+            &hold.hold_id,
+            hold.captured_at,
+            ExportWindow::Snapshot,
+            None,
+            tight,
+        ),
+        Err(SourceExportError::BytesUnavailable {
+            object_id,
+            kind: ArtifactErrorKind::CorruptObject,
+        }),
+        "the cached second row must not export four bytes after admitting only two"
+    );
+}
+
+#[test]
+fn terminal_page_rechecks_hold_after_the_read_transaction() {
+    let mut accepted = Vec::new();
+    for invalidity in [
+        SourceHoldInvalidity::Released,
+        SourceHoldInvalidity::Expired,
+        SourceHoldInvalidity::PurgeDegraded,
+    ] {
+        let mut fixture = Fixture::open();
+        let object_id = fixture.publish("messages", "terminal", 1, "readable bytes");
+        let hold = fixture
+            .store
+            .capture_source_hold(&fixture.binding(), wide())
+            .unwrap();
+        let baseline = fixture
+            .store
+            .export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                ExportWindow::Snapshot,
+                None,
+                roomy(),
+            )
+            .unwrap();
+        assert_eq!(baseline.rows.len(), 1);
+        assert!(baseline.next.is_none());
+        let now = if invalidity == SourceHoldInvalidity::Expired {
+            hold.expires_at - 1
+        } else {
+            hold.captured_at
+        };
+        let store = std::sync::Arc::clone(&fixture.store);
+        let hook_store = std::sync::Arc::clone(&fixture.store);
+        let digest = fixture.ledger[&object_id].digest.clone();
+        let object_path = fixture.object_path(&digest);
+        let held = hold.clone();
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+        let result = kernel::KernelStore::with_source_export_after_snapshot_hook_for_test(
+            move || {
+                match invalidity {
+                    SourceHoldInvalidity::Released => hook_store
+                        .release_source_hold(&held.binding, &held.hold_id, held.captured_at)
+                        .unwrap(),
+                    SourceHoldInvalidity::Expired => {
+                        let remaining = u64::try_from(held.expires_at - now).unwrap();
+                        let started = std::time::Instant::now();
+                        std::thread::sleep(std::time::Duration::from_millis(remaining + 1));
+                        assert!(started.elapsed().as_millis() >= u128::from(remaining));
+                    }
+                    SourceHoldInvalidity::PurgeDegraded => {
+                        let error = hook_store
+                            .delete_artifact_with_fault_for_test(
+                                kernel::ArtifactDeletionRequest {
+                                    intent: intent("purge-during-export"),
+                                    identity: kernel::ArtifactDeletionIdentity::Digest(
+                                        digest.clone(),
+                                    ),
+                                    kind: ArtifactDeletionKind::Purge,
+                                    operator_id: Some("operator".to_string()),
+                                    target_locator: Some("incident://export".to_string()),
+                                    reason: Some("retired".to_string()),
+                                    deleted_at: held.captured_at,
+                                },
+                                kernel::ArtifactDeletionFault::AfterCommit,
+                            )
+                            .unwrap_err();
+                        assert_eq!(error.kind(), ArtifactErrorKind::PurgeUnlinkPending);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(fs::read(&object_path).unwrap(), b"readable bytes");
+                ran_tx.send(()).unwrap();
+            },
+            || {
+                store.export_source_page(
+                    &hold.binding,
+                    &hold.hold_id,
+                    now,
+                    ExportWindow::Snapshot,
+                    None,
+                    roomy(),
+                )
+            },
+        );
+        ran_rx.try_recv().unwrap();
+        if result
+            != Err(SourceExportError::Hold(SourceHoldError::Invalid(
+                invalidity,
+            )))
+        {
+            accepted.push((
+                invalidity,
+                result.as_ref().map(|page| page.next.is_none()).ok(),
+            ));
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted invalid holds (invalidity, terminal page): {accepted:?}"
+    );
+}
+
 fn page_bounds(max_rows: usize, max_decoded_bytes: u64) -> SourcePageBounds {
     SourcePageBounds {
         max_rows: NonZeroUsize::new(max_rows).unwrap(),
@@ -991,7 +1255,7 @@ fn dead_holds_and_lost_history_prevent_completion_and_a_reopen_needs_a_new_s() {
         .store
         .capture_source_hold(&binding, bounds(HOUR_MS))
         .unwrap();
-    assert!(export(&fixture, &expiring, expiring.expires_at - 1).is_ok());
+    assert!(export(&fixture, &expiring, expiring.captured_at).is_ok());
     assert_eq!(
         export(&fixture, &expiring, expiring.expires_at),
         invalid(SourceHoldInvalidity::Expired)
