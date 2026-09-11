@@ -15,7 +15,7 @@ use host_runtime::synapse::{
     InferenceFailureKind, LaneInfo, LaneUnavailableState, SynapseComponent, SynapseLimits,
     SynapseStatus,
 };
-use support::synapse::{DeterministicEngine, ready_component, test_lane};
+use support::synapse::{BUDGET, DeterministicEngine, ready_component, test_lane};
 use tokenizers::{AddedToken, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 fn fixture_dir(name: &str) -> PathBuf {
@@ -595,15 +595,38 @@ fn a_held_inference_permit_is_reported_as_busy_not_as_an_artifact_fault() {
             component.embed_admitted(&admitted)
         })
     };
+    // Bounded: a holder that fails before inference surfaces its error instead of spinning this loop forever.
+    let deadline = std::time::Instant::now() + BUDGET;
     while engine.calls.load(Ordering::SeqCst) == 0 {
+        if holder.is_finished() {
+            panic!("the holder failed before inference: {:?}", holder.join());
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the holder did not enter inference within {BUDGET:?}"
+        );
         std::thread::yield_now();
     }
     // Counting does not need the permit, so admission still succeeds while inference is busy.
     let admitted = component
         .preflight_embedding(limits, "gamma delta")
         .expect("counting runs outside the permit");
+    // The probe runs off-thread: synchronous execution would deadlock against the gate this
+    // thread releases, and a regression to waiting on the permit must fail within `BUDGET`.
+    let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+    {
+        let component = Arc::clone(&component);
+        let probe_input = admitted.clone();
+        std::thread::spawn(move || {
+            let _ = probe_tx.send(component.embed_admitted(&probe_input));
+        });
+    }
+    let busy = probe_rx.recv_timeout(BUDGET).unwrap_or_else(|_| {
+        DeterministicEngine::release_calls(&gate);
+        panic!("embed_admitted waited on the held permit instead of reporting busy");
+    });
     assert_eq!(
-        component.embed_admitted(&admitted),
+        busy,
         Err(DenseUnavailable::LaneBusy {
             retry_after_ms: SynapseLimits::default().query_retry_after_ms,
         })
@@ -670,9 +693,10 @@ fn an_admitted_input_embeds_only_under_the_lane_that_admitted_it() {
     let mut other_epoch = test_lane();
     other_epoch.table_epoch += 1;
     for other_lane in [other_fingerprint, other_epoch] {
+        let other_engine = DeterministicEngine::new();
         let other = SynapseComponent::ready_with_engine(
             other_lane,
-            DeterministicEngine::new(),
+            Arc::clone(&other_engine) as Arc<dyn EmbeddingEngine>,
             SynapseLimits::default(),
         )
         .expect("lane");
@@ -680,8 +704,52 @@ fn an_admitted_input_embeds_only_under_the_lane_that_admitted_it() {
             other.embed_admitted(&admitted),
             Err(DenseUnavailable::IdentityChanged)
         );
+        assert_eq!(
+            other_engine.calls.load(Ordering::SeqCst),
+            0,
+            "a mismatched identity never reaches the rejecting lane's inference"
+        );
     }
     assert_eq!(engine.calls.load(Ordering::SeqCst), 0);
     component.embed_admitted(&admitted).unwrap();
     assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+}
+
+/// Two components can serve the same verified bundle identity under different host byte caps,
+/// so the receiving lane must re-judge the admitted bytes against its own cap.
+#[test]
+fn an_admission_reused_across_same_identity_lanes_respects_the_receiving_byte_cap() {
+    let wide_engine = DeterministicEngine::new();
+    let wide = ready_component(Arc::clone(&wide_engine), SynapseLimits::default());
+    let SynapseStatus::Ready(wide_lane) = wide.status() else {
+        panic!("ready lane");
+    };
+    let admitted = wide
+        .preflight_embedding(limits_of(&wide_lane), "alpha")
+        .expect("five bytes fit the wide cap");
+
+    let narrow_engine = DeterministicEngine::new();
+    let narrow = ready_component(
+        Arc::clone(&narrow_engine),
+        SynapseLimits {
+            max_text_bytes: 4,
+            ..SynapseLimits::default()
+        },
+    );
+    assert_eq!(
+        narrow.embed_admitted(&admitted),
+        Err(DenseUnavailable::ByteOverflow {
+            bytes: 5,
+            max_bytes: 4,
+        })
+    );
+    assert_eq!(
+        narrow_engine.calls.load(Ordering::SeqCst),
+        0,
+        "an admission over the receiving lane's byte cap never reaches its inference"
+    );
+
+    // The refusal is the receiving lane's own; the admitting lane still serves the input.
+    wide.embed_admitted(&admitted)
+        .expect("the admitting lane still embeds its own admission");
 }

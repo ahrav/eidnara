@@ -370,7 +370,7 @@ impl SynapseComponent {
     ///
     /// # Errors
     ///
-    /// Returns [`DenseUnavailable::IdentityChanged`] when the serving lane is no longer the admitting one, [`DenseUnavailable::LaneUnavailable`] when no lane serves, [`DenseUnavailable::LaneBusy`] when another call holds the lane's permit, and [`DenseUnavailable::Inference`] when inference refuses or fails.
+    /// Returns [`DenseUnavailable::IdentityChanged`] when the serving lane is no longer the admitting one, [`DenseUnavailable::ByteOverflow`] when the admitted bytes exceed the serving lane's own cap, [`DenseUnavailable::LaneUnavailable`] when no lane serves, [`DenseUnavailable::LaneBusy`] when another call holds the lane's permit, and [`DenseUnavailable::Inference`] when inference refuses or fails.
     pub fn embed_admitted(
         &self,
         admitted: &AdmittedInput<'_>,
@@ -378,6 +378,14 @@ impl SynapseComponent {
         let lane = self.ready_or_unavailable()?;
         if !admitted.identity().matches(&lane.lane) {
             return Err(DenseUnavailable::IdentityChanged);
+        }
+        // The byte cap is host configuration, not part of the identity, so a lane serving the
+        // same bundle under a narrower cap must re-judge the admitted bytes as its own.
+        if admitted.bytes() > lane.lane.max_text_bytes {
+            return Err(DenseUnavailable::ByteOverflow {
+                bytes: admitted.bytes(),
+                max_bytes: lane.lane.max_text_bytes,
+            });
         }
         let mut vectors = self
             .run_inference(&lane, &[admitted.text()])
