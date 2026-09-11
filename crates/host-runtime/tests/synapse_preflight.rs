@@ -684,6 +684,77 @@ fn admission_keeps_exact_bytes_and_repeats_identically() {
     assert_eq!(engine.count_calls.load(Ordering::SeqCst), 13);
 }
 
+#[tokio::test]
+async fn a_count_failure_quarantines_an_in_flight_inference_result() {
+    for (error, output_dims, expected_failure) in [
+        (
+            InferenceError::Artifact("tokenizer artifact failed".to_owned()),
+            8,
+            InferenceFailureKind::Artifact,
+        ),
+        (
+            InferenceError::Invariant("tokenizer invariant failed".to_owned()),
+            8,
+            InferenceFailureKind::Artifact,
+        ),
+        (
+            InferenceError::Artifact("tokenizer artifact failed".to_owned()),
+            1,
+            InferenceFailureKind::Invariant,
+        ),
+    ] {
+        let mut engine = DeterministicEngine::new();
+        Arc::get_mut(&mut engine).unwrap().dims = output_dims;
+        let component = Arc::new(ready_component(
+            Arc::clone(&engine),
+            SynapseLimits::default(),
+        ));
+        let gate = engine.block_calls();
+        let running = {
+            let component = Arc::clone(&component);
+            tokio::task::spawn_blocking(move || {
+                let admitted = component
+                    .preflight_embedding(limits_of(&test_lane()), "alpha beta")
+                    .unwrap();
+                component.embed_admitted(&admitted)
+            })
+        };
+        let entered = tokio::time::timeout(BUDGET, async {
+            while engine.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let kind = InferenceFailureKind::from(&error);
+        *engine.fail_next_count.lock().unwrap() = Some(error);
+        let refused = component.preflight_embedding(limits_of(&test_lane()), "gamma delta");
+        let quarantined = component.status();
+        DeterministicEngine::release_calls(&gate);
+        let completed = tokio::time::timeout(BUDGET, running)
+            .await
+            .expect("inference completes after gate release")
+            .expect("inference does not panic");
+        entered.expect("inference enters before the count failure");
+        assert_eq!(refused, Err(DenseUnavailable::CountUnavailable(kind)));
+        assert!(matches!(
+            quarantined,
+            SynapseStatus::Disabled { .. } | SynapseStatus::Failing { .. }
+        ));
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            completed,
+            Err(DenseUnavailable::Inference(expected_failure)),
+            "a quarantined lane must not return its in-flight vector"
+        );
+        if expected_failure == InferenceFailureKind::Invariant {
+            assert!(
+                matches!(component.status(), SynapseStatus::Failing { .. }),
+                "invalid vectors still escalate artifact disablement"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_admitted_input_embeds_only_under_the_lane_that_admitted_it() {
     let engine = DeterministicEngine::new();

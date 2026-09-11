@@ -265,6 +265,18 @@ pub fn load_bundle(
     let corpus_bytes = read_verified(&manifest.corpus, MAX_SIDE_FILE_BYTES)?;
 
     validate_tokenizer_config(&tokenizer_config_file, manifest.max_tokens)?;
+    // BPE dropout prevents admission from proving inference input fits the model window.
+    if matches!(
+        tokenizers::Tokenizer::from_bytes(&tokenizer_file)
+            .map_err(|_| err("tokenizer.json is invalid"))?
+            .get_model(),
+        tokenizers::models::ModelWrapper::BPE(model)
+            if model.dropout.is_some_and(|probability| probability > 0.0)
+    ) {
+        return Err(err(
+            "tokenizer BPE dropout must be disabled for exact token counts",
+        ));
+    }
     let corpus = parse_corpus(&corpus_bytes, manifest.dims as usize)?;
 
     // The fingerprint must be derived from embedding-space fields, not manifest hashes.

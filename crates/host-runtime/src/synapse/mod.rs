@@ -516,10 +516,8 @@ impl SynapseComponent {
         let joined =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lane.backend.embed(texts)))
                 .map_err(|_| PanickedBackend);
-        let vectors = settle_inference(&self.inner, joined)?;
-        check_engine_vectors(&self.inner, lane.lane.dims, texts.len(), &vectors)
-            .map_err(InferenceError::Invariant)?;
-        Ok(vectors)
+        settle_inference(&self.inner, lane.lane.dims, texts.len(), joined)
+            .map_err(EmbedRefusal::Inference)
     }
 }
 
@@ -615,10 +613,20 @@ impl From<tokio::task::JoinError> for PanickedBackend {
 /// `Invariant` failures and panicked backends mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
 fn settle_inference(
     inner: &SynapseInner,
+    dims: usize,
+    expected_rows: usize,
     joined: Result<Result<Vec<Vec<f32>>, InferenceError>, impl Into<PanickedBackend>>,
 ) -> Result<Vec<Vec<f32>>, InferenceError> {
     match joined {
-        Ok(Ok(vectors)) => Ok(vectors),
+        Ok(Ok(vectors)) => {
+            check_engine_vectors(inner, dims, expected_rows, &vectors)
+                .map_err(InferenceError::Invariant)?;
+            // The state lock orders validated completion against concurrent count failures.
+            match lane_failure_reason(inner) {
+                Some(reason) => Err(InferenceError::Artifact(reason)),
+                None => Ok(vectors),
+            }
+        }
         // Reasons are bounded once here so the retained state and the propagated error carry the same capped text; an oversized error would otherwise be downgraded to `internal_error` at the terminal.
         Ok(Err(InferenceError::Invariant(mut reason))) => {
             protocol::bound_diagnostic(&mut reason);
@@ -855,12 +863,7 @@ impl SynapseComponent {
                 tokio::task::spawn_blocking(move || lane_blocking.backend.embed(&[text.as_str()]))
                     .await;
             // The vector contract is checked here, while the permit is still held, so a malformed engine result quarantines the lane even when the handler has already expired or been cancelled and no later worker can slip past `lane_failure_reason` first.
-            let result = settle_inference(&inner, joined)
-                .and_then(|vectors| {
-                    check_engine_vectors(&inner, lane_task.lane.dims, 1, &vectors)
-                        .map(|()| vectors)
-                        .map_err(InferenceError::Invariant)
-                })
+            let result = settle_inference(&inner, lane_task.lane.dims, 1, joined)
                 .map_err(QueryFault::Engine);
             let _ = tx.send(result);
         });
@@ -1014,17 +1017,8 @@ impl SynapseComponent {
                 lane_blocking.backend.embed(&texts)
             })
             .await;
-            match settle_inference(&inner, joined) {
-                Ok(vectors) => {
-                    match check_engine_vectors(&inner, lane.lane.dims, item_count, &vectors) {
-                        Ok(()) => inner.jobs.publish_ready(seq, vectors),
-                        Err(reason) => {
-                            inner
-                                .jobs
-                                .publish_failed(seq, "artifact_invalid".to_owned(), reason);
-                        }
-                    }
-                }
+            match settle_inference(&inner, lane.lane.dims, item_count, joined) {
+                Ok(vectors) => inner.jobs.publish_ready(seq, vectors),
                 Err(InferenceError::Input(reason)) => {
                     inner
                         .jobs
