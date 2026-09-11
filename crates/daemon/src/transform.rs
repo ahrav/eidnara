@@ -29177,6 +29177,7 @@ pub(crate) mod tests {
     fn tag_mint_tokenized_bytes_counts_only_cache_misses_and_bypasses() {
         // Two new blocks with identical cacheable content: the second lookup is a
         // cache hit and tokenizes nothing.
+        let _guard = crate::token_cache::test_cache_guard();
         let source = format!("tag mint duplicate source {}", "payload ".repeat(16));
         assert!(source.len() >= 64);
         let messages = vec![item("dup-a", 1, &source), item("dup-b", 2, &source)];
