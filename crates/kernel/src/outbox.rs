@@ -531,34 +531,7 @@ impl KernelStore {
         let consumer_id = consumer_identity(consumer_id)?;
         let mut writer = self.lock_writer()?;
         let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
-        let current = tx
-            .query_row_cached(
-                "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
-                [consumer_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(map_sqlite)?
-            .ok_or(KernelError::NotFound)?;
-        let is_existing_commit = checkpoint_commit_seq == current
-            || tx
-                .query_row_cached(
-                    "SELECT EXISTS(SELECT 1 FROM commit_log WHERE commit_seq=?1)",
-                    [checkpoint_commit_seq],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(map_sqlite)?;
-        if checkpoint_commit_seq < current || !is_existing_commit {
-            return Err(KernelError::InvalidCheckpoint);
-        }
-        tx.execute_cached(
-            "UPDATE outbox_consumers
-             SET checkpoint_commit_seq=?1,updated_at=MAX(updated_at,?2)
-             WHERE consumer_id=?3",
-            params![checkpoint_commit_seq, updated_at, consumer_id],
-        )
-        .map_err(map_sqlite)?;
-        complete_satisfied_barriers(&tx, updated_at)?;
+        acknowledge_outbox_in_tx(&tx, &consumer_id, checkpoint_commit_seq, updated_at)?;
         tx.commit().map_err(map_sqlite)
     }
 
@@ -612,6 +585,45 @@ pub(super) fn outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEn
         created_at: row.get(10)?,
         commit_boundary: row.get(11)?,
     })
+}
+
+/// Moves `consumer_id`'s checkpoint to `checkpoint_commit_seq` inside the
+/// caller's fenced write and completes any deletion barrier that satisfies.
+/// The checkpoint must name an existing commit at or after the current one.
+pub(crate) fn acknowledge_outbox_in_tx(
+    tx: &Transaction<'_>,
+    consumer_id: &str,
+    checkpoint_commit_seq: i64,
+    updated_at: i64,
+) -> Result<(), KernelError> {
+    let current = tx
+        .query_row_cached(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
+            [consumer_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(map_sqlite)?
+        .ok_or(KernelError::NotFound)?;
+    let is_existing_commit = checkpoint_commit_seq == current
+        || tx
+            .query_row_cached(
+                "SELECT EXISTS(SELECT 1 FROM commit_log WHERE commit_seq=?1)",
+                [checkpoint_commit_seq],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(map_sqlite)?;
+    if checkpoint_commit_seq < current || !is_existing_commit {
+        return Err(KernelError::InvalidCheckpoint);
+    }
+    tx.execute_cached(
+        "UPDATE outbox_consumers
+         SET checkpoint_commit_seq=?1,updated_at=MAX(updated_at,?2)
+         WHERE consumer_id=?3",
+        params![checkpoint_commit_seq, updated_at, consumer_id],
+    )
+    .map_err(map_sqlite)?;
+    complete_satisfied_barriers(tx, updated_at)
 }
 
 fn consumer_identity(consumer_id: &str) -> Result<String, KernelError> {

@@ -13,12 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kernel::source_identity::Occurrence;
 use kernel::{
-    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest,
-    CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelError, KernelStore,
-    MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER, MAX_SOURCE_HOLD_LIFETIME_MS, ProviderEgress,
-    RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorPolicy,
-    SourceDescriptorRequest, SourceHold, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
-    SourceHoldInvalidity,
+    ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
+    ArtifactGcFault, ArtifactIngestRequest, CommitIntent, DomainSpec, HeldCursor, HeldDescriptor,
+    KernelError, KernelStore, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER, MAX_SOURCE_HOLD_LIFETIME_MS,
+    ProviderEgress, RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorPolicy,
+    SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourceHoldError, SourceHoldInvalidity,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -61,11 +61,21 @@ fn audit(kind: ArtifactDeletionKind, value: &str) -> Option<String> {
     (kind == ArtifactDeletionKind::Purge).then(|| value.to_string())
 }
 
+fn admission(max_references: usize, max_encoded_bytes: u64) -> SourceHoldAdmission {
+    SourceHoldAdmission {
+        max_references: NonZeroUsize::new(max_references).unwrap(),
+        max_encoded_bytes: NonZeroU64::new(max_encoded_bytes).unwrap(),
+    }
+}
+
+fn wide_admission() -> SourceHoldAdmission {
+    admission(1024, 1 << 20)
+}
+
 fn bounds(expiry_ms: u64) -> SourceHoldBounds {
     SourceHoldBounds {
+        admission: wide_admission(),
         max_descriptor_rows: NonZeroUsize::new(1024).unwrap(),
-        max_references: NonZeroUsize::new(1024).unwrap(),
-        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
         expiry_ms: NonZeroU64::new(expiry_ms).unwrap(),
     }
 }
@@ -287,8 +297,21 @@ impl Fixture {
             )
             .unwrap();
         let outcome = outcome.unwrap();
-        if let Some(replaced) = &outcome.replaced_object_id {
-            self.ledger.get_mut(replaced).unwrap().invalidated = Some(receipt.commit_seq);
+        // Supersession is the ledger's own fact: the one live entry for this
+        // (class, key) closes, and the kernel must have reported exactly it.
+        let superseded: Vec<String> = self
+            .ledger
+            .values()
+            .filter(|entry| entry.class == class && entry.key == key && entry.invalidated.is_none())
+            .map(|entry| entry.object_id.clone())
+            .collect();
+        assert!(
+            superseded.len() <= 1,
+            "{class}/{key} had two live revisions"
+        );
+        assert_eq!(outcome.replaced_object_id, superseded.first().cloned());
+        for object_id in superseded {
+            self.ledger.get_mut(&object_id).unwrap().invalidated = Some(receipt.commit_seq);
         }
         let evidence_invalidated = self
             .ledger
@@ -357,10 +380,15 @@ impl Fixture {
     }
 
     fn live_entry(&self, class: &str, key: &str) -> &LedgerEntry {
-        self.ledger
-            .values()
-            .find(|entry| entry.class == class && entry.key == key && entry.invalidated.is_none())
-            .unwrap()
+        let mut live = self.ledger.values().filter(|entry| {
+            entry.class == class && entry.key == key && entry.invalidated.is_none()
+        });
+        let entry = live.next().unwrap();
+        assert!(
+            live.next().is_none(),
+            "{class}/{key} has two live revisions"
+        );
+        entry
     }
 
     /// The ledger's prediction of what a hold captured at `snapshot` holds:
@@ -397,6 +425,41 @@ impl Fixture {
             })
             .collect();
         (descriptors, evidence.len(), evidence.values().sum())
+    }
+
+    /// The ledger's prediction of what a hold captured at `snapshot` and
+    /// extended through `through` references: the evidence live at S plus the
+    /// evidence of every descriptor created in `(S, through]` whose evidence
+    /// was not invalidated at or before `through`.
+    fn expected_refs_through(&self, snapshot: i64, through: i64) -> (Vec<String>, u64) {
+        let (at_s, _, _) = self.expected_at(snapshot);
+        let mut refs: BTreeMap<String, u64> = at_s
+            .into_iter()
+            .map(|d| (d.evidence_id, d.byte_length))
+            .collect();
+        for entry in self.ledger.values() {
+            if entry.created > snapshot
+                && entry.created <= through
+                && entry.evidence_invalidated.is_none_or(|at| at > through)
+            {
+                refs.insert(entry.evidence_id.clone(), entry.text.len() as u64);
+            }
+        }
+        let bytes = refs.values().sum();
+        (refs.into_keys().collect(), bytes)
+    }
+
+    /// Marks every outbox row published and prunes what every consumer has
+    /// acknowledged, the publication path a hold must not depend on.
+    fn publish_and_prune(&self) {
+        let pending = self.store.pending_outbox(usize::MAX).unwrap();
+        let last = pending.last().expect("unpublished rows to publish");
+        self.store
+            .mark_outbox_published_through(last.outbox_position, 1)
+            .unwrap();
+        assert!(self.store.pending_outbox(usize::MAX).unwrap().is_empty());
+        let pruned = self.store.prune_outbox().unwrap();
+        assert!(pruned.deleted > 0, "pruning removed acknowledged rows");
     }
 
     /// Every held descriptor across every page of `page_size`.
@@ -461,6 +524,16 @@ impl Fixture {
             .unwrap()
     }
 
+    fn pin_released(&self, hold_id: &str) -> bool {
+        self.inspect()
+            .query_row(
+                "SELECT released_at IS NOT NULL FROM capture_pins WHERE capture_pin_id=?1",
+                [hold_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
     fn checkpoint(&self) -> i64 {
         self.inspect()
             .query_row(
@@ -517,6 +590,34 @@ fn assert_hold_matches_ledger(fixture: &Fixture, hold: &SourceHold, page_size: u
         fixture.pin_refs(&hold.hold_id),
         expected_refs,
         "pinned evidence"
+    );
+}
+
+/// What the concurrent capture run produced, joined after the writer stops.
+struct ConcurrentRun {
+    captured: Vec<SourceHold>,
+    sweeps: usize,
+    extended: Vec<(SourceHold, i64)>,
+    held_after_delete: Vec<String>,
+}
+
+fn assert_hold_matches_ledger_inventory(fixture: &Fixture, hold: &SourceHold) {
+    let (expected, _, _) = fixture.expected_at(hold.snapshot);
+    assert_eq!(fixture.held_all(hold, 4), expected, "held inventory at S");
+}
+
+fn assert_extended_hold_matches_ledger(fixture: &Fixture, hold: &SourceHold, through: i64) {
+    let (refs, bytes) = fixture.expected_refs_through(hold.snapshot, through);
+    assert_eq!(
+        hold.references,
+        refs.len(),
+        "reference count through {through}"
+    );
+    assert_eq!(hold.encoded_bytes, bytes, "encoded bytes through {through}");
+    assert_eq!(
+        fixture.pin_refs(&hold.hold_id),
+        refs,
+        "pinned evidence through {through}"
     );
 }
 
@@ -747,7 +848,7 @@ fn writer_serialized_capture_leaves_no_gap_between_s_and_protection_under_concur
     let stop = Arc::new(AtomicBool::new(false));
     let store = Arc::clone(&fixture.store);
     let binding = fixture.binding();
-    let (captured, sweeps): (Vec<SourceHold>, usize) = std::thread::scope(|scope| {
+    let run: ConcurrentRun = std::thread::scope(|scope| {
         let stop_reader = Arc::clone(&stop);
         let reader_store = Arc::clone(&store);
         let reader = scope.spawn(move || {
@@ -771,6 +872,8 @@ fn writer_serialized_capture_leaves_no_gap_between_s_and_protection_under_concur
         // at least one S is known to sit inside the run whatever the
         // background threads' timing.
         let mut inline = Vec::new();
+        let mut extended = Vec::new();
+        let mut held_after_delete = Vec::new();
         for round in 0..12 {
             let key = format!("flip{round}");
             fixture.publish("messages", &key, 1, &format!("flip {round}"));
@@ -783,13 +886,76 @@ fn writer_serialized_capture_leaves_no_gap_between_s_and_protection_under_concur
                 let current = fixture.live_entry("messages", &key).object_id.clone();
                 fixture.retire(&current);
             }
+            // Every third round the writer also extends an earlier hold to
+            // the tip and acknowledges through it, under the same sweeps.
+            if round % 3 == 2
+                && let Some(hold) = inline.get(extended.len())
+            {
+                let binding = fixture.binding();
+                let through = fixture.store.tip().unwrap();
+                let grown = fixture
+                    .store
+                    .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+                    .unwrap();
+                fixture
+                    .store
+                    .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1)
+                    .unwrap();
+                // Acknowledged and then deleted while the sweeps run: only the
+                // extension's reference keeps these bytes.
+                let victim = fixture
+                    .live_entry("messages", &format!("flip{}", round - 1))
+                    .evidence_id
+                    .clone();
+                assert!(fixture.pin_refs(&hold.hold_id).contains(&victim));
+                fixture.delete_evidence(&victim, ArtifactDeletionKind::Delete, deleted_at);
+                held_after_delete.push(victim);
+                extended.push((grown, through));
+            }
         }
         stop.store(true, Ordering::Relaxed);
         let mut captured = reader.join().unwrap();
         captured.extend(inline);
         captured.sort_by_key(|hold| hold.snapshot);
-        (captured, gc.join().unwrap())
+        ConcurrentRun {
+            captured,
+            sweeps: gc.join().unwrap(),
+            extended,
+            held_after_delete,
+        }
     });
+    let ConcurrentRun {
+        captured,
+        sweeps,
+        extended,
+        held_after_delete,
+    } = run;
+    assert!(!held_after_delete.is_empty());
+    for evidence_id in &held_after_delete {
+        let digest = fixture.entry_by_evidence(evidence_id).digest.clone();
+        assert!(
+            fixture.object_present(&digest),
+            "{evidence_id} was acknowledged, deleted, and swept, and only the extension held it"
+        );
+    }
+    assert!(extended.len() >= 2, "extensions ran under the sweeps");
+    let extended_ids: BTreeSet<&str> = extended.iter().map(|(h, _)| h.hold_id.as_str()).collect();
+    for (hold, through) in &extended {
+        assert_extended_hold_matches_ledger(&fixture, hold, *through);
+        assert_eq!(
+            fixture
+                .store
+                .source_hold_status(&hold.binding, &hold.hold_id, sweep_now)
+                .unwrap(),
+            *hold,
+            "every byte an extension added under a live sweep is still on disk"
+        );
+    }
+    assert_eq!(
+        fixture.checkpoint(),
+        extended.last().unwrap().1,
+        "acknowledgement moved exactly to the last extended commit"
+    );
     let last_publish = fixture.store.tip().unwrap();
     assert!(sweeps > 0);
     assert!(captured.len() > 3);
@@ -815,6 +981,9 @@ fn writer_serialized_capture_leaves_no_gap_between_s_and_protection_under_concur
             .all(|pair| pair[0].snapshot <= pair[1].snapshot)
     );
     for hold in &captured {
+        if extended_ids.contains(hold.hold_id.as_str()) {
+            continue;
+        }
         assert_hold_matches_ledger(&fixture, hold, 7);
         assert_eq!(
             fixture
@@ -844,9 +1013,14 @@ fn writer_serialized_capture_leaves_no_gap_between_s_and_protection_under_concur
     }
     assert_hold_matches_ledger(&fixture, &pinned_before_delete, 5);
 
-    // Releasing the pin is what frees the bytes: past the grace period after
-    // release the deleted evidence is reclaimed and everything else stays.
+    // Once the consumer has acknowledged every descriptor creation, releasing
+    // the pin is what frees the bytes: past the grace period after release the
+    // deleted evidence is reclaimed and everything else stays.
     let released_at = sweep_now;
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, fixture.store.tip().unwrap(), 1)
+        .unwrap();
     fixture
         .store
         .release_source_hold(
@@ -892,9 +1066,8 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
     let (expected, references, bytes) = fixture.expected_at(fixture.store.tip().unwrap());
     assert_eq!(expected.len(), 10);
     let exact = SourceHoldBounds {
+        admission: admission(references, bytes),
         max_descriptor_rows: NonZeroUsize::new(expected.len()).unwrap(),
-        max_references: NonZeroUsize::new(references).unwrap(),
-        max_encoded_bytes: NonZeroU64::new(bytes).unwrap(),
         expiry_ms: NonZeroU64::new(HOUR_MS).unwrap(),
     };
     let refs_before = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
@@ -918,11 +1091,11 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
     let refs_before = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
     for tight in [
         SourceHoldBounds {
-            max_references: NonZeroUsize::new(references - 1).unwrap(),
+            admission: admission(references - 1, bytes),
             ..exact
         },
         SourceHoldBounds {
-            max_encoded_bytes: NonZeroU64::new(bytes - 1).unwrap(),
+            admission: admission(references, bytes - 1),
             ..exact
         },
     ] {
@@ -955,6 +1128,33 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn capture_expiring_during_admission_rolls_back_pin_and_references() {
+    let mut fixture = Fixture::open();
+    fixture.publish("messages", "slow-capture", 1, "capture evidence");
+    let lifetime_ms = 20;
+    let mut seen_at_admission = false;
+    let result = fixture.store.capture_source_hold_with_hook_for_test(
+        &fixture.binding(),
+        bounds(lifetime_ms),
+        |refs| {
+            seen_at_admission = true;
+            assert_eq!(refs, 0);
+            let expired_by = wall_ms() + i64::try_from(lifetime_ms).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(lifetime_ms + 1));
+            assert!(wall_ms() >= expired_by, "the admission hook crosses expiry");
+        },
+    );
+    assert!(seen_at_admission);
+    assert_eq!(
+        result,
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
+    );
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pins"), 0);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert_eq!(fixture.checkpoint(), 0);
+}
+
+#[test]
 fn maintenance_releases_expired_obligations_before_capture_admission_recovers() {
     let mut fixture = Fixture::open();
     fixture.publish("messages", "expired-cap", 1, "held until released");
@@ -963,12 +1163,15 @@ fn maintenance_releases_expired_obligations_before_capture_admission_recovers() 
         .map(|_| {
             fixture
                 .store
-                .capture_source_hold(&binding, bounds(1))
+                .capture_source_hold(&binding, bounds(1_000))
                 .unwrap()
         })
         .collect();
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    let deadline = holds.iter().map(|hold| hold.expires_at).max().unwrap();
+    let remaining = u64::try_from((deadline - wall_ms()).max(0)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(remaining + 1));
     let now = wall_ms();
+    assert!(now >= deadline);
     for hold in &holds {
         assert_eq!(
             fixture
@@ -996,14 +1199,51 @@ fn maintenance_releases_expired_obligations_before_capture_admission_recovers() 
 }
 
 #[test]
+fn extension_expiring_during_admission_preserves_hold_and_checkpoint() {
+    let mut fixture = Fixture::open();
+    let binding = fixture.binding();
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(1_000))
+        .unwrap();
+    fixture.publish("messages", "slow-extension", 1, "extension evidence");
+    let through = fixture.store.tip().unwrap();
+    let mut seen_at_admission = false;
+    let result = fixture.store.extend_source_hold_with_hook_for_test(
+        &binding,
+        &hold.hold_id,
+        through,
+        wide_admission(),
+        |refs| {
+            seen_at_admission = true;
+            assert_eq!(refs, 0);
+            let remaining = u64::try_from((hold.expires_at - wall_ms()).max(0)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(remaining + 1));
+            assert!(wall_ms() >= hold.expires_at);
+        },
+    );
+    assert!(seen_at_admission);
+    assert_eq!(
+        result,
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
+    );
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pins"), 1);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert_eq!(fixture.checkpoint(), 0);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Ok(hold)
+    );
+}
+
+#[test]
 fn delayed_maintenance_reclaims_from_the_stored_hold_deadline() {
     let mut fixture = Fixture::open();
     fixture.seed_five_classes();
     let binding = fixture.binding();
-    let hold = fixture
-        .store
-        .capture_source_hold(&binding, bounds(1))
-        .unwrap();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
     let victim = fixture.held_all(&hold, 64)[0].clone();
     fixture.delete_evidence(
         &victim.evidence_id,
@@ -1134,8 +1374,7 @@ fn capture_work_is_bounded_independently_of_shared_evidence() {
     let binding = fixture.binding();
     let admitted = SourceHoldBounds {
         max_descriptor_rows: NonZeroUsize::new(8).unwrap(),
-        max_references: NonZeroUsize::new(1).unwrap(),
-        max_encoded_bytes: NonZeroU64::new(text.len() as u64).unwrap(),
+        admission: admission(1, text.len() as u64),
         ..wide()
     };
     for retire_history in [false, true] {
@@ -1228,6 +1467,138 @@ fn hold_status_expires_while_verifying_objects() {
         ),
         Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
     );
+}
+
+#[test]
+fn hold_status_requires_revalidation_after_extension() {
+    for with_existing in [false, true] {
+        for object_state in ["missing", "corrupt", "healthy"] {
+            let mut fixture = Fixture::open();
+            if with_existing {
+                fixture.publish("messages", "existing", 1, "existing evidence");
+            }
+            let binding = fixture.binding();
+            let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+            assert_hold_matches_ledger(&fixture, &hold, 4);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+                Ok(hold.clone())
+            );
+            let added = fixture.publish("messages", "added", 1, "added evidence");
+            let through = fixture.store.tip().unwrap();
+            assert!(through > hold.snapshot);
+            let path = fixture.object_path(&fixture.ledger[&added].digest);
+            let mut extended = hold.clone();
+            let result = fixture.store.source_hold_status_with_hook_for_test(
+                &binding,
+                &hold.hold_id,
+                hold.captured_at,
+                |phase| {
+                    if phase != kernel::SourceHoldCheckPhase::AfterSnapshot {
+                        return;
+                    }
+                    match object_state {
+                        "missing" => fs::remove_file(&path).unwrap(),
+                        "corrupt" => fs::write(&path, b"wrong evidence").unwrap(),
+                        "healthy" => {}
+                        _ => unreachable!(),
+                    }
+                    extended = fixture
+                        .store
+                        .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+                        .unwrap();
+                },
+            );
+            assert_eq!(extended.references, hold.references + 1);
+            assert_extended_hold_matches_ledger(&fixture, &extended, through);
+            assert!(
+                result.is_err(),
+                "extension requires revalidation: with_existing={with_existing}, \
+                 object_state={object_state}, result={result:?}, extended={extended:?}"
+            );
+            assert_eq!(result, Err(SourceHoldError::VerificationChanged));
+            let stable =
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, hold.captured_at);
+            if object_state == "healthy" {
+                assert_eq!(stable, Ok(extended));
+            } else {
+                assert_eq!(
+                    stable,
+                    Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hold_status_requires_revalidation_after_restore_replaces_equal_count_refs() {
+    let mut fixture = Fixture::open();
+    let store = Arc::clone(&fixture.store);
+    let binding = fixture.binding();
+    let empty = store.capture_source_hold(&binding, wide()).unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    fs::set_permissions(destination.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = store
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    fixture.publish("messages", "before-restore", 1, "before restore");
+    let hold = store
+        .extend_source_hold(
+            &binding,
+            &empty.hold_id,
+            store.tip().unwrap(),
+            wide_admission(),
+        )
+        .unwrap();
+    let original_refs = fixture.pin_refs(&hold.hold_id);
+    assert_eq!(hold.references, 1);
+    let result = store.source_hold_status_with_hook_for_test(
+        &binding,
+        &hold.hold_id,
+        hold.captured_at,
+        |phase| {
+            if phase != kernel::SourceHoldCheckPhase::AfterSnapshot {
+                return;
+            }
+            store.restore(&backup.destination_path).unwrap();
+            assert_eq!(fixture.binding(), binding);
+            assert_eq!(
+                store.source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+                Ok(empty.clone()),
+                "restore removes references without invalidating the hold"
+            );
+            fixture.ledger.clear();
+            let added = fixture.publish("messages", "after-restore", 1, "after restore!");
+            let through = store.tip().unwrap();
+            let extended = store
+                .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+                .unwrap();
+            assert_eq!(extended, hold, "metadata and totals can remain identical");
+            assert_extended_hold_matches_ledger(&fixture, &extended, through);
+            let current_refs = fixture.pin_refs(&hold.hold_id);
+            assert_eq!(current_refs.len(), original_refs.len());
+            assert_ne!(current_refs, original_refs);
+            fs::remove_file(fixture.object_path(&fixture.ledger[&added].digest)).unwrap();
+        },
+    );
+    assert_eq!(
+        store.source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+    );
+    assert!(
+        result.is_err(),
+        "different references at equal counts require revalidation: {result:?}"
+    );
+    assert_eq!(result, Err(SourceHoldError::VerificationChanged));
 }
 
 #[test]
@@ -1454,7 +1825,7 @@ fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the
     // releases the expired pin durably. A dead hold serves no page.
     let expiring = fixture
         .store
-        .capture_source_hold(&binding, bounds(1))
+        .capture_source_hold(&binding, bounds(HOUR_MS / 2))
         .unwrap();
     let fresh = fixture.store.capture_source_hold(&binding, wide()).unwrap();
     assert!(
@@ -1641,9 +2012,48 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
     let deleted_at = wall_ms();
     fixture.delete_evidence(&doomed, ArtifactDeletionKind::Delete, deleted_at);
 
+    // One catch-up window is acknowledged through the hold, then the process
+    // is cut after the next extension and before its acknowledgement.
+    fixture.publish("messages", "landed", 1, "acknowledged before the cut");
+    let landed_through = fixture.store.tip().unwrap();
+    fixture
+        .store
+        .extend_source_hold(&old_binding, &old.hold_id, landed_through, wide_admission())
+        .unwrap();
+    fixture
+        .store
+        .acknowledge_through_source_hold(&old_binding, &old.hold_id, landed_through, 1)
+        .unwrap();
+    fixture.publish("messages", "cut", 1, "cut before acknowledgement");
+    let cut_through = fixture.store.tip().unwrap();
+    let extended_before_cut = fixture
+        .store
+        .extend_source_hold(&old_binding, &old.hold_id, cut_through, wide_admission())
+        .unwrap();
+    let checkpoint_before_cut = fixture.checkpoint();
+    assert_eq!(
+        checkpoint_before_cut, landed_through,
+        "no progress is lost either"
+    );
+
     let mut fixture = fixture.reopen();
     let new_binding = fixture.binding();
     assert_ne!(new_binding.lease_epoch, old_binding.lease_epoch);
+    // No progress is invented for the cut extension: the old hold cannot
+    // acknowledge under the new incarnation, and the checkpoint stands.
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&new_binding, &old.hold_id, cut_through, 1)
+            .unwrap_err(),
+        SourceHoldError::BindingMismatch
+    );
+    assert_eq!(fixture.checkpoint(), checkpoint_before_cut);
+    assert_eq!(
+        fixture.pin_refs(&old.hold_id).len(),
+        extended_before_cut.references,
+        "the cut extension's references survive until reconciliation"
+    );
 
     assert_eq!(
         fixture
@@ -1679,6 +2089,11 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
     let mut expected = vec![old.hold_id.clone(), older.hold_id.clone()];
     expected.sort();
     assert_eq!(released, expected);
+    assert_eq!(
+        fixture.checkpoint(),
+        checkpoint_before_cut,
+        "reconciliation closes holds; it never completes their acknowledgement"
+    );
     assert!(
         fixture
             .store
@@ -1686,6 +2101,8 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
             .unwrap()
             .is_empty()
     );
+    // The old binding itself is refused in the new incarnation; the pins are
+    // observed released through the tables.
     for hold in [&old, &older] {
         assert_eq!(
             fixture
@@ -1693,6 +2110,7 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
                 .source_hold_status(&old_binding, &hold.hold_id, 0),
             Err(SourceHoldError::IncarnationMismatch)
         );
+        assert!(fixture.pin_released(&hold.hold_id));
         assert!(
             fixture.pin_refs(&hold.hold_id).is_empty(),
             "references released with the pin"
@@ -1703,6 +2121,7 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
         2
     );
     // The other consumer's old hold is untouched and still pins the deleted evidence.
+    assert!(!fixture.pin_released(&other.hold_id));
     assert_eq!(
         fixture
             .store
@@ -1730,12 +2149,20 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
         );
     }
     // Reconciliation freed protection: once the other consumer's pin is also
-    // released and the grace period passes, the deleted evidence is reclaimed
-    // while everything the fresh hold cites stays.
+    // released, both consumers have acknowledged the descriptor creations, and
+    // the grace period passes, the deleted evidence is reclaimed while
+    // everything the fresh hold cites stays.
     fixture
         .store
         .reconcile_source_holds("other", released_at)
         .unwrap();
+    let acknowledged = fixture.store.tip().unwrap();
+    for consumer in [CONSUMER, "other"] {
+        fixture
+            .store
+            .acknowledge_outbox(consumer, acknowledged, 1)
+            .unwrap();
+    }
     let doomed_digest = fixture.entry_by_evidence(&doomed).digest.clone();
     fixture
         .store
@@ -1777,6 +2204,975 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
             .source_hold_status(&new_binding, &fresh.hold_id, fresh.captured_at),
         Ok(fresh.clone())
     );
+}
+
+#[test]
+fn replay_evidence_created_after_s_survives_publication_pruning_and_gc_until_acknowledged() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    // A second, slower consumer: the replay horizon is the least advanced
+    // checkpoint, never the most advanced one.
+    fixture
+        .store
+        .commit(intent("lagging-consumer"), |envelope| {
+            envelope.register_outbox_consumer("lagging", 1)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let acknowledged = fixture.store.tip().unwrap();
+    for consumer in [CONSUMER, "lagging"] {
+        fixture
+            .store
+            .acknowledge_outbox(consumer, acknowledged, 1)
+            .unwrap();
+    }
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+        .unwrap();
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+
+    // An independent after-S ledger: creations, a revision, a retirement, and
+    // logical deletions of the evidence behind two of them.
+    fixture.publish("messages", "late", 1, "late message");
+    fixture.publish("messages", "late", 2, "late message v2");
+    fixture.publish("canonical_claims", "late", 1, "late claim");
+    fixture.publish("raw_tool_spans", "late", 1, "late tool span");
+    let retired = fixture
+        .live_entry("canonical_claims", "late")
+        .object_id
+        .clone();
+    fixture.retire(&retired);
+    let after_s: Vec<LedgerEntry> = fixture
+        .ledger
+        .values()
+        .filter(|entry| entry.created > hold.snapshot)
+        .cloned()
+        .collect();
+    assert_eq!(after_s.len(), 4);
+    let deleted: Vec<String> = [
+        "evidence-messages-late-1",
+        "evidence-canonical_claims-late-1",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    for evidence_id in &deleted {
+        fixture.delete_evidence(evidence_id, ArtifactDeletionKind::Delete, wall_ms());
+    }
+    assert_hold_matches_ledger(&fixture, &hold, 4);
+
+    // Publication and pruning do not release anything; only checkpoints do.
+    fixture.publish_and_prune();
+    fixture.store.run_staging_maintenance(far).unwrap();
+    for entry in &after_s {
+        assert_eq!(
+            fs::read(fixture.object_path(&entry.digest)).unwrap(),
+            entry.text.as_bytes(),
+            "{} replay bytes intact before acknowledgement",
+            entry.evidence_id
+        );
+    }
+    assert_eq!(fixture.checkpoint(), acknowledged);
+
+    // Negative control: acknowledging without extending the hold lets the
+    // deleted after-S evidence go once the grace period passes, but only once
+    // the slowest consumer has acknowledged past each creation.
+    let tip = fixture.store.tip().unwrap();
+    fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 2,
+        "both deleted after-S artifacts are reported as withheld by the lagging consumer"
+    );
+    for entry in &after_s {
+        assert!(
+            fixture.object_present(&entry.digest),
+            "{} is kept while the lagging consumer has not acknowledged it",
+            entry.evidence_id
+        );
+    }
+    // The horizon is inclusive: a creation acknowledged exactly is released,
+    // a later one is not.
+    let first_deleted = fixture.entry_by_evidence(&deleted[0]).clone();
+    let second_deleted = fixture.entry_by_evidence(&deleted[1]).clone();
+    assert!(first_deleted.created < second_deleted.created);
+    fixture
+        .store
+        .acknowledge_outbox("lagging", first_deleted.created, 1)
+        .unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
+    assert!(!fixture.object_present(&first_deleted.digest));
+    assert!(fixture.object_present(&second_deleted.digest));
+    fixture.store.acknowledge_outbox("lagging", tip, 1).unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 0);
+    for entry in &after_s {
+        assert_eq!(
+            fixture.object_present(&entry.digest),
+            !deleted.contains(&entry.evidence_id),
+            "{}",
+            entry.evidence_id
+        );
+    }
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Ok(hold.clone()),
+        "the hold at S is untouched by after-S collection"
+    );
+
+    // Extension before acknowledgement keeps the catch-up bytes through
+    // acknowledgement and publication, until the hold is released.
+    fixture.publish("promoted_memory", "catchup", 1, "catch-up memory");
+    fixture.publish("git_commits", "catchup", 1, "catch-up commit");
+    let catchup: Vec<LedgerEntry> = fixture
+        .ledger
+        .values()
+        .filter(|entry| entry.created > tip)
+        .cloned()
+        .collect();
+    assert_eq!(catchup.len(), 2);
+    let through = fixture.store.tip().unwrap();
+    let extended = fixture
+        .store
+        .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+        .unwrap();
+    assert_eq!(
+        extended.expires_at, hold.expires_at,
+        "extension never renews expiry"
+    );
+    assert_eq!(extended.snapshot, hold.snapshot);
+    assert_extended_hold_matches_ledger(&fixture, &extended, through);
+    fixture
+        .store
+        .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1)
+        .unwrap();
+    assert_eq!(fixture.checkpoint(), through);
+    // The acknowledged evidence is deleted afterwards: without the hold the
+    // consumer's checkpoint no longer protects it, so only the pin does.
+    fixture.delete_evidence(
+        &catchup[0].evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    for consumer in [CONSUMER, "lagging"] {
+        fixture
+            .store
+            .acknowledge_outbox(consumer, fixture.store.tip().unwrap(), 1)
+            .unwrap();
+    }
+    fixture.publish_and_prune();
+    fixture.store.run_staging_maintenance(far).unwrap();
+    for entry in &catchup {
+        assert_eq!(
+            fs::read(fixture.object_path(&entry.digest)).unwrap(),
+            entry.text.as_bytes(),
+            "{} survives acknowledgement while held",
+            entry.evidence_id
+        );
+    }
+    let released_at = far;
+    fixture
+        .store
+        .release_source_hold(&binding, &hold.hold_id, released_at)
+        .unwrap();
+    fixture
+        .store
+        .run_staging_maintenance(released_at + i64::try_from(15 * DAY_MS).unwrap())
+        .unwrap();
+    assert!(
+        !fixture.object_present(&catchup[0].digest),
+        "released and acknowledged: collected"
+    );
+    assert!(
+        fixture.object_present(&catchup[1].digest),
+        "live evidence stays"
+    );
+}
+
+#[test]
+fn natural_reclaim_recovery_keeps_unacknowledged_descriptor_evidence() {
+    let mut fixture = Fixture::open();
+    fixture.publish("messages", "reclaiming", 1, "replay after reopen");
+    let evidence = fixture.live_entry("messages", "reclaiming").clone();
+    fixture.delete_evidence(
+        &evidence.evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    let checkpoint = fixture.checkpoint();
+    assert!(checkpoint < evidence.created);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+        0
+    );
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+        0
+    );
+
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    let connection = Connection::open(fixture.root.path().join("kernel.sqlite")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "INSERT INTO artifact_ingestion_reservations(
+                     reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
+                     created_at,heartbeat_at,lease_expires_at,reclaim_started_at
+                 ) SELECT 'gc-'||e.artifact_digest,e.artifact_digest,e.artifact_reference,
+                          'Reclaiming',?1,?2,?2,?2,?2
+                   FROM evidence_meta e JOIN commit_log c ON c.commit_seq=e.invalidated_commit_seq
+                   WHERE e.evidence_id=?3 AND e.retain_until IS NULL AND c.recorded_at+?4<=?2",
+                rusqlite::params![
+                    i64::try_from(fixture.store.lease_epoch()).unwrap(),
+                    far,
+                    evidence.evidence_id,
+                    i64::try_from(14 * DAY_MS).unwrap(),
+                ],
+            )
+            .unwrap(),
+        1,
+        "the stored reclaim decision has passed the reference grace"
+    );
+    drop(connection);
+    assert_eq!(
+        fs::read(fixture.object_path(&evidence.digest)).unwrap(),
+        evidence.text.as_bytes()
+    );
+
+    let fixture = fixture.reopen();
+    assert_eq!(fixture.checkpoint(), checkpoint);
+    assert_eq!(
+        fs::read(fixture.object_path(&evidence.digest))
+            .ok()
+            .as_deref(),
+        Some(evidence.text.as_bytes()),
+        "startup recovery must retain unacknowledged descriptor evidence"
+    );
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE state='Reclaiming'"),
+        0
+    );
+
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, evidence.created, 1)
+        .unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 0);
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 1);
+    assert!(!fixture.object_present(&evidence.digest));
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+        0
+    );
+}
+
+#[test]
+fn natural_reclaim_rechecks_historical_hold_extensions_and_purge_overrides_them() {
+    let mut fixture = Fixture::open();
+    let binding = fixture.binding();
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+        .unwrap();
+    fixture.publish("messages", "held-reclaim", 1, "held historical evidence");
+    let evidence = fixture.live_entry("messages", "held-reclaim").clone();
+    fixture.delete_evidence(
+        &evidence.evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, evidence.created, 1)
+        .unwrap();
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .run_staging_maintenance_with_fault_for_test(far, ArtifactGcFault::AfterReclaiming),
+        Err(KernelError::Fault)
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE state='Reclaiming'"),
+        1
+    );
+    let extended = fixture
+        .store
+        .extend_source_hold(&binding, &hold.hold_id, evidence.created, wide_admission())
+        .unwrap();
+    assert_eq!(
+        fixture.pin_refs(&hold.hold_id),
+        std::slice::from_ref(&evidence.evidence_id)
+    );
+    fixture
+        .store
+        .commit(intent("new-lagging-consumer"), |envelope| {
+            envelope.register_outbox_consumer("lagging", 1)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.count(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='lagging'"
+        ),
+        0
+    );
+
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(
+        swept.artifact_gc.reclaimed_objects, 0,
+        "a historical hold extension protects an already-reclaiming artifact"
+    );
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 0);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+        Ok(extended)
+    );
+    let (_, readmitted_digest) = fixture.retain("readmitted-reclaim", &evidence.text);
+    assert_eq!(readmitted_digest, evidence.digest);
+    assert_eq!(
+        fs::read(fixture.object_path(&readmitted_digest)).unwrap(),
+        evidence.text.as_bytes()
+    );
+
+    fixture
+        .store
+        .delete_artifact_with_fault_for_test(
+            ArtifactDeletionRequest {
+                intent: intent("purge-held-reclaim"),
+                identity: ArtifactDeletionIdentity::Digest(evidence.digest.clone()),
+                kind: ArtifactDeletionKind::Purge,
+                operator_id: Some("operator-1".to_string()),
+                target_locator: Some("incident://1".to_string()),
+                reason: Some("secret".to_string()),
+                deleted_at: wall_ms(),
+            },
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert!(fixture.object_present(&evidence.digest));
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+        1
+    );
+    let fixture = fixture.reopen();
+    assert!(!fixture.object_present(&evidence.digest));
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+        0
+    );
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+        0
+    );
+    assert_eq!(fixture.checkpoint(), evidence.created);
+    assert_eq!(
+        fixture.count(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='lagging'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn reclaim_cleanup_retires_absent_objects_despite_replay_protection() {
+    for active_pin in [false, true] {
+        let mut fixture = Fixture::open();
+        let binding = fixture.binding();
+        let hold = fixture
+            .store
+            .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+            .unwrap();
+        fixture.publish("messages", "unlinked", 1, "unlinked evidence");
+        let evidence = fixture.live_entry("messages", "unlinked").clone();
+        fixture.delete_evidence(
+            &evidence.evidence_id,
+            ArtifactDeletionKind::Delete,
+            wall_ms(),
+        );
+        fixture
+            .store
+            .acknowledge_outbox(CONSUMER, evidence.created, 1)
+            .unwrap();
+        let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .run_staging_maintenance_with_fault_for_test(far, ArtifactGcFault::AfterUnlink),
+            Err(KernelError::Fault)
+        );
+        assert!(!fixture.object_present(&evidence.digest));
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE state='Reclaiming'"
+            ),
+            1
+        );
+        if active_pin {
+            fixture
+                .store
+                .extend_source_hold(&binding, &hold.hold_id, evidence.created, wide_admission())
+                .unwrap();
+            assert_eq!(
+                fixture.pin_refs(&hold.hold_id),
+                std::slice::from_ref(&evidence.evidence_id)
+            );
+        } else {
+            fixture
+                .store
+                .commit(intent("lagging-after-unlink"), |envelope| {
+                    envelope.register_outbox_consumer("lagging", 1)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+            assert_eq!(
+                fixture.count(
+                    "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='lagging'"
+                ),
+                0
+            );
+        }
+
+        let swept = fixture.store.run_staging_maintenance(far).unwrap();
+        assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+        assert_eq!(swept.artifact_gc.reclaimed_bytes, 0);
+        assert_eq!(swept.artifact_gc.failed_candidates, 0);
+        assert_eq!(
+            swept.artifact_gc.withheld_for_replay, 0,
+            "absent bytes cannot be withheld for replay"
+        );
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+            0,
+            "completed unlinks retire their reclaim notes despite active pins"
+        );
+        let fixture = fixture.reopen();
+        assert!(!fixture.object_present(&evidence.digest));
+        assert_eq!(fixture.checkpoint(), evidence.created);
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+            0
+        );
+    }
+}
+
+#[test]
+fn reclaim_cleanup_does_not_treat_an_unreadable_object_as_absent() {
+    let mut fixture = Fixture::open();
+    fixture.publish(
+        "messages",
+        "unreadable-reclaim",
+        1,
+        "protected unreadable bytes",
+    );
+    let evidence = fixture.live_entry("messages", "unreadable-reclaim").clone();
+    fixture.delete_evidence(
+        &evidence.evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, evidence.created, 1)
+        .unwrap();
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .run_staging_maintenance_with_fault_for_test(far, ArtifactGcFault::AfterReclaiming),
+        Err(KernelError::Fault)
+    );
+    fixture
+        .store
+        .commit(intent("lagging-with-unreadable-object"), |envelope| {
+            envelope.register_outbox_consumer("lagging", 1)?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let object = fixture.object_path(&evidence.digest);
+    let shard = object.parent().unwrap();
+    fs::set_permissions(shard, fs::Permissions::from_mode(0o000)).unwrap();
+    let probe_error = fs::metadata(&object).err();
+    let swept = fixture.store.run_staging_maintenance(far);
+    fs::set_permissions(shard, fs::Permissions::from_mode(0o700)).unwrap();
+    if let Some(error) = probe_error {
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        eprintln!("permission-denied object probe exercised");
+    } else {
+        eprintln!("privileged process bypassed mode bits; unreadable probe not exercised");
+    }
+    let swept = swept.unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
+    assert_eq!(swept.artifact_gc.failed_candidates, 0);
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(fs::read(object).unwrap(), evidence.text.as_bytes());
+}
+
+#[test]
+fn extension_is_bounded_idempotent_and_gates_acknowledgement() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let checkpoint = fixture.store.tip().unwrap();
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, checkpoint, 1)
+        .unwrap();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    // A descriptor created and superseded inside the window is still replay
+    // evidence; the batch also cites one artifact from two descriptors.
+    fixture.publish("messages", "w", 1, "window message");
+    fixture.publish("messages", "w", 2, "window message v2");
+    let shared = fixture.retain("window-shared", "window shared bytes");
+    fixture.publish_over(
+        "promoted_memory",
+        "w",
+        1,
+        "window shared bytes",
+        shared.clone(),
+    );
+    fixture.publish_over("git_commits", "w", 1, "window shared bytes", shared);
+    let through = fixture.store.tip().unwrap();
+    let (expected_refs, expected_bytes) = fixture.expected_refs_through(hold.snapshot, through);
+    let added = expected_refs.len() - hold.references;
+    assert_eq!(added, 3, "two window messages and one shared artifact");
+
+    // Acknowledgement is refused until the hold covers the window.
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1),
+        Err(SourceHoldError::ExtensionIncomplete { uncovered: added })
+    );
+    assert_eq!(fixture.checkpoint(), checkpoint);
+
+    // Admission is judged on the whole hold before any reference is written.
+    let refs_before = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
+    let mut seen = Vec::new();
+    let error = fixture
+        .store
+        .extend_source_hold_with_hook_for_test(
+            &binding,
+            &hold.hold_id,
+            through,
+            admission(expected_refs.len() - 1, expected_bytes),
+            |refs| seen.push(refs),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        SourceHoldError::Unadmitted {
+            references: expected_refs.len(),
+            encoded_bytes: expected_bytes,
+        }
+    );
+    assert_eq!(seen, vec![refs_before]);
+    assert_eq!(
+        fixture
+            .store
+            .extend_source_hold(
+                &binding,
+                &hold.hold_id,
+                through,
+                admission(expected_refs.len(), expected_bytes - 1)
+            )
+            .unwrap_err(),
+        SourceHoldError::Unadmitted {
+            references: expected_refs.len(),
+            encoded_bytes: expected_bytes,
+        }
+    );
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM capture_pin_refs"),
+        refs_before
+    );
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1),
+        Err(SourceHoldError::ExtensionIncomplete { uncovered: added }),
+        "a failed extension authorizes nothing"
+    );
+    assert_eq!(fixture.checkpoint(), checkpoint);
+
+    // The window must lie within [S, tip]; the binding must match.
+    for bad in [hold.snapshot - 1, through + 1] {
+        assert_eq!(
+            fixture
+                .store
+                .extend_source_hold(&binding, &hold.hold_id, bad, wide_admission())
+                .unwrap_err(),
+            SourceHoldError::InvalidRequest,
+            "{bad}"
+        );
+    }
+    let mut other = binding.clone();
+    other.source_policy_version = "source-policy.v2".to_string();
+    assert_eq!(
+        fixture
+            .store
+            .extend_source_hold(&other, &hold.hold_id, through, wide_admission())
+            .unwrap_err(),
+        SourceHoldError::BindingMismatch
+    );
+
+    // The admitted extension equals the ledger; replaying it changes nothing.
+    let extended = fixture
+        .store
+        .extend_source_hold(
+            &binding,
+            &hold.hold_id,
+            through,
+            admission(expected_refs.len(), expected_bytes),
+        )
+        .unwrap();
+    assert_extended_hold_matches_ledger(&fixture, &extended, through);
+    assert_eq!(extended.expires_at, hold.expires_at);
+    for replay_extension in [false, true] {
+        let mut snapshot_hooks = 0;
+        let status = fixture.store.source_hold_status_with_hook_for_test(
+            &binding,
+            &hold.hold_id,
+            hold.captured_at,
+            |phase| {
+                if phase != kernel::SourceHoldCheckPhase::AfterSnapshot {
+                    return;
+                }
+                snapshot_hooks += 1;
+                if replay_extension {
+                    let replayed = fixture
+                        .store
+                        .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+                        .unwrap();
+                    assert_eq!(
+                        replayed, extended,
+                        "replay duplicates neither references nor charges"
+                    );
+                } else {
+                    let receipt = fixture
+                        .store
+                        .commit(intent("unrelated-during-verification"), |_| {
+                            Ok(String::new())
+                        })
+                        .unwrap();
+                    assert!(!receipt.replayed);
+                    assert!(receipt.commit_seq > through);
+                }
+            },
+        );
+        assert_eq!(snapshot_hooks, 1);
+        assert_eq!(
+            status,
+            Ok(extended.clone()),
+            "unchanged references need no retry: replay_extension={replay_extension}"
+        );
+    }
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM capture_pin_refs"),
+        refs_before + i64::try_from(added).unwrap()
+    );
+    // Extending to S itself is an admitted no-op.
+    assert_eq!(
+        fixture
+            .store
+            .extend_source_hold(&binding, &hold.hold_id, hold.snapshot, wide_admission())
+            .unwrap(),
+        extended
+    );
+    // Paging still reads S; the window's descriptors are protected, not listed.
+    assert_hold_matches_ledger_inventory(&fixture, &extended);
+
+    // Acknowledgement now moves exactly to `through`, and replaying it is a
+    // no-op after an uncertain response.
+    fixture
+        .store
+        .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 2)
+        .unwrap();
+    assert_eq!(fixture.checkpoint(), through);
+    fixture
+        .store
+        .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 3)
+        .unwrap();
+    assert_eq!(fixture.checkpoint(), through);
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&binding, &hold.hold_id, hold.snapshot, 3),
+        Err(SourceHoldError::Kernel(
+            kernel::KernelError::InvalidCheckpoint
+        )),
+        "a checkpoint never moves backward"
+    );
+    assert_eq!(fixture.checkpoint(), through);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Ok(extended.clone())
+    );
+
+    // A dead hold can neither extend nor acknowledge: expired, purge-degraded,
+    // or released.
+    fixture.publish("messages", "afterwards", 1, "afterwards");
+    let later = fixture.store.tip().unwrap();
+    let expiring = fixture
+        .store
+        .capture_source_hold(&binding, bounds(1_000))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1_001));
+    assert!(wall_ms() >= expiring.expires_at);
+    let expired = SourceHoldError::Invalid(SourceHoldInvalidity::Expired);
+    assert_eq!(
+        fixture
+            .store
+            .extend_source_hold(&binding, &expiring.hold_id, later, wide_admission())
+            .unwrap_err(),
+        expired
+    );
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&binding, &expiring.hold_id, later, 9)
+            .unwrap_err(),
+        expired
+    );
+    let degraded_hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let purged = fixture.held_all(&degraded_hold, 64)[0].evidence_id.clone();
+    fixture.delete_evidence(&purged, ArtifactDeletionKind::Purge, 42);
+    let degraded = SourceHoldError::Invalid(SourceHoldInvalidity::PurgeDegraded);
+    let after_purge = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .extend_source_hold(
+                &binding,
+                &degraded_hold.hold_id,
+                after_purge,
+                wide_admission()
+            )
+            .unwrap_err(),
+        degraded
+    );
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&binding, &degraded_hold.hold_id, after_purge, 9)
+            .unwrap_err(),
+        degraded
+    );
+    fixture
+        .store
+        .release_source_hold(&binding, &hold.hold_id, 9)
+        .unwrap();
+    let released = SourceHoldError::Invalid(SourceHoldInvalidity::Released);
+    assert_eq!(
+        fixture
+            .store
+            .extend_source_hold(&binding, &hold.hold_id, later, wide_admission())
+            .unwrap_err(),
+        released
+    );
+    assert_eq!(
+        fixture
+            .store
+            .acknowledge_through_source_hold(&binding, &hold.hold_id, later, 9)
+            .unwrap_err(),
+        released
+    );
+    assert_eq!(
+        fixture.checkpoint(),
+        through,
+        "no failure advances acknowledgement"
+    );
+}
+
+#[test]
+fn extension_after_window_deletion_distinguishes_purge_from_logical_delete() {
+    for kind in [ArtifactDeletionKind::Delete, ArtifactDeletionKind::Purge] {
+        let mut fixture = Fixture::open();
+        let binding = fixture.binding();
+        let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+        assert_eq!((hold.references, hold.encoded_bytes), (0, 0));
+
+        fixture.publish("messages", "late", 1, "late evidence");
+        let evidence = fixture.live_entry("messages", "late").clone();
+        let through = fixture.store.tip().unwrap();
+        assert!(through > hold.snapshot);
+        let deleted = fixture.delete_evidence(&evidence.evidence_id, kind, wall_ms());
+        assert!(deleted > through);
+        assert_eq!(
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1),
+            Err(SourceHoldError::ExtensionIncomplete { uncovered: 1 })
+        );
+        assert_eq!(fixture.checkpoint(), 0);
+        assert_eq!(
+            fixture
+                .store
+                .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+            Ok(hold.clone())
+        );
+
+        let extended =
+            fixture
+                .store
+                .extend_source_hold(&binding, &hold.hold_id, through, wide_admission());
+        if kind == ArtifactDeletionKind::Purge {
+            assert!(!fixture.object_present(&evidence.digest));
+            assert_eq!(
+                fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+                0
+            );
+            assert_eq!(
+                fixture.count("SELECT COUNT(*) FROM artifact_purge_tombstones"),
+                1
+            );
+            assert!(
+                extended.is_err(),
+                "purged evidence must be refused before reference insertion: {extended:?}"
+            );
+            assert_eq!(extended, Err(SourceHoldError::PurgedEvidence));
+            assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+            assert_eq!(
+                fixture
+                    .store
+                    .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1),
+                Err(SourceHoldError::ExtensionIncomplete { uncovered: 1 })
+            );
+            assert_eq!(fixture.checkpoint(), 0);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+                Ok(hold.clone())
+            );
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, hold.snapshot, 1)
+                .unwrap();
+            assert_eq!(fixture.checkpoint(), hold.snapshot);
+            assert_eq!(
+                fixture.store.extend_source_hold(
+                    &binding,
+                    &hold.hold_id,
+                    deleted,
+                    wide_admission()
+                ),
+                Ok(hold.clone())
+            );
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, deleted, 1)
+                .unwrap();
+            assert_eq!(fixture.checkpoint(), deleted);
+        } else {
+            let extended = extended.unwrap();
+            assert_extended_hold_matches_ledger(&fixture, &extended, through);
+            assert_eq!(extended.references, 1);
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1)
+                .unwrap();
+            assert_eq!(fixture.checkpoint(), through);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+                Ok(extended)
+            );
+            assert_eq!(
+                fs::read(fixture.object_path(&evidence.digest)).unwrap(),
+                evidence.text.as_bytes()
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_consumer_set_names_no_safe_horizon_so_replay_evidence_is_kept() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    fixture.publish("messages", "orphaned", 1, "kept for whoever registers next");
+    let doomed = fixture
+        .live_entry("messages", "orphaned")
+        .evidence_id
+        .clone();
+    fixture.delete_evidence(&doomed, ArtifactDeletionKind::Delete, wall_ms());
+    // The only consumer catches up and leaves; nothing bounds replay anymore.
+    let tip = fixture.store.tip().unwrap();
+    fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
+    fixture
+        .store
+        .commit(intent("leave"), |envelope| {
+            envelope.deregister_outbox_consumer(CONSUMER, 2)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM outbox_consumers"), 0);
+    let digest = fixture.entry_by_evidence(&doomed).digest.clone();
+    // Inside the invalidation grace period the horizon is not the only keeper,
+    // so the sweep reports nothing withheld for replay.
+    let swept = fixture.store.run_staging_maintenance(wall_ms()).unwrap();
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 0,
+        "a candidate the grace period still keeps is not counted against the horizon"
+    );
+    assert!(fixture.object_present(&digest));
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    // The sweep reports what the horizon kept: the one deleted artifact. The
+    // ten live ones are kept by their live reference, not by the horizon.
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 1,
+        "the no-consumer horizon reports the artifact it withholds"
+    );
+    assert!(
+        fixture.object_present(&digest),
+        "deleted descriptor evidence is kept while no consumer names a horizon"
+    );
+    // A consumer that registers starts below the oldest outbox row, so it
+    // names a horizon behind the creation and still protects the bytes; once
+    // it acknowledges past the creation the sweep proceeds.
+    fixture
+        .store
+        .commit(intent("rejoin"), |envelope| {
+            envelope.register_outbox_consumer(CONSUMER, 3)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert!(fixture.checkpoint() < fixture.entry_by_evidence(&doomed).created);
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
+    assert!(fixture.object_present(&digest));
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, fixture.store.tip().unwrap(), 3)
+        .unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(
+        swept.artifact_gc.withheld_for_replay, 0,
+        "an acknowledged creation is no longer withheld"
+    );
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 1);
+    assert!(!fixture.object_present(&digest));
 }
 
 #[test]

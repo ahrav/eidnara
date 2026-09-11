@@ -2,11 +2,15 @@
 //! cites at one canonical sequence S, for one registered consumer, in one
 //! store incarnation, under one source policy, until a finite expiry. The
 //! capture runs under the kernel writer, so S and the protection of its bytes
-//! are one step and nothing can be reclaimed between them. Admission runs from
-//! counts before a reference is written, and an over-bound corpus is refused
-//! whole rather than narrowed.
+//! are one step and nothing can be reclaimed between them. The same hold is
+//! later extended over catch-up windows `(S, through]`, and the consumer's
+//! checkpoint moves to `through` only through a hold that already covers the
+//! window. Every admission runs from counts over the whole hold before a
+//! reference is written, and an over-bound hold is refused whole rather than
+//! narrowed. Every use of a hold in another store incarnation is refused.
 
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -14,6 +18,7 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::backup::release_capture_pin_in_tx;
 use super::cas::{ArtifactErrorKind, ObjectPresence, is_artifact_digest};
 use super::envelope::check_fence;
+use super::outbox::acknowledge_outbox_in_tx;
 use super::source_descriptor::SOURCE_DESCRIPTOR_KIND;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
@@ -54,15 +59,23 @@ pub struct SourceHoldBinding {
     pub source_policy_version: String,
 }
 
-/// Admission bounds for one capture, checked from `COUNT` and `SUM` before
-/// any reference row exists.
+/// What one hold may reference in total, checked from `COUNT` and `SUM`
+/// before any reference row exists. A capture and every later extension of
+/// the same hold are each admitted against the whole hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceHoldAdmission {
+    pub max_references: NonZeroUsize,
+    pub max_encoded_bytes: NonZeroU64,
+}
+
+/// Admission plus the finite lifetime a capture gives the hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceHoldBounds {
     /// Maximum descriptor registry rows in the capture scan, including invalidated revisions.
     pub max_descriptor_rows: NonZeroUsize,
-    pub max_references: NonZeroUsize,
-    pub max_encoded_bytes: NonZeroU64,
-    /// Finite lifetime of the hold from capture, in the store's millisecond clock.
+    pub admission: SourceHoldAdmission,
+    /// Finite lifetime of the hold from capture, in the store's millisecond
+    /// clock. An extension never renews it.
     pub expiry_ms: NonZeroU64,
 }
 
@@ -139,7 +152,7 @@ pub enum SourceHoldError {
     #[error("source hold was captured in another store incarnation")]
     IncarnationMismatch,
     #[error(
-        "source hold at S would reference {references} evidence rows totalling {encoded_bytes} bytes, over the admitted bound"
+        "source hold would reference {references} evidence rows totalling {encoded_bytes} bytes in all, over the admitted bound"
     )]
     Unadmitted {
         references: usize,
@@ -149,10 +162,19 @@ pub enum SourceHoldError {
         "source hold consumer already has {MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER} unreleased holds"
     )]
     HoldLimitReached,
+    #[error(
+        "source hold does not reference {uncovered} evidence rows cited by descriptors through the commit being acknowledged"
+    )]
+    ExtensionIncomplete { uncovered: usize },
+    #[error("source hold would reference purged evidence")]
+    PurgedEvidence,
     #[error("source hold descriptor scan exceeds {max_descriptor_rows} rows")]
     CaptureWorkLimitReached { max_descriptor_rows: usize },
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
+    /// The hold may still be valid; retry the status check.
+    #[error("source hold verification changed; retry the status check")]
+    VerificationChanged,
     #[error("source hold is not valid: {0:?}")]
     Invalid(SourceHoldInvalidity),
     #[error(transparent)]
@@ -181,24 +203,97 @@ fn verification_time_upper_bound(now: i64, elapsed: Duration) -> i64 {
     }
 }
 
-/// Evidence cited by descriptors live at `?1`: the descriptor was created at
-/// or before it, and neither the descriptor nor the evidence it cites was
-/// invalidated at or before it. A logical delete or a purge invalidates the
-/// evidence row, so a descriptor over deleted bytes is not a candidate rather
-/// than a held reference that can never be read. Shared by the count, the
-/// insert, and the page so they cannot disagree.
-fn live_descriptors_sql() -> String {
-    // The descriptor-only index and join order let keyset pages stop at LIMIT without sorting.
-    format!(
-        "FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
-         CROSS JOIN observations b ON b.object_id=o.object_id
-         CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-         WHERE o.object_id GLOB 'srcdesc:*'
-           AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
-           AND b.created_commit_seq<=?1
-           AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)
-           AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?1)"
-    )
+/// Which descriptors in a commit window cite evidence a hold protects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Descriptors {
+    /// Descriptors live at the window's end: a capture over `(0, S]` drops
+    /// descriptors invalidated at or before S, because the projection at S
+    /// never sees them.
+    LiveAtEnd,
+    /// Every descriptor created in the window, including one invalidated
+    /// inside it, because a consumer replaying the window still meets its
+    /// creation.
+    CreatedInWindow,
+}
+
+/// One commit window `(after, through]` of descriptor creations.
+#[derive(Clone, Copy)]
+struct Window {
+    after: i64,
+    through: i64,
+    descriptors: Descriptors,
+}
+
+impl Window {
+    fn at_snapshot(snapshot: i64) -> Self {
+        Self {
+            after: 0,
+            through: snapshot,
+            descriptors: Descriptors::LiveAtEnd,
+        }
+    }
+
+    fn catch_up(snapshot: i64, through: i64) -> Self {
+        Self {
+            after: snapshot,
+            through,
+            descriptors: Descriptors::CreatedInWindow,
+        }
+    }
+
+    /// Evidence cited by the window's descriptors whose evidence row is not
+    /// invalidated at or before `?1`, the window's end; `?2` is its start. A
+    /// logical delete or a purge invalidates the evidence row, so a descriptor
+    /// over deleted bytes is not a candidate rather than a held reference that
+    /// can never be read. Shared by every count, insert, and page so they
+    /// cannot disagree.
+    fn cited_evidence_sql(self) -> String {
+        let (descriptor_scan, descriptor_liveness) = match self.descriptors {
+            // Identity order lets keyset pages stop at LIMIT without sorting.
+            Descriptors::LiveAtEnd => (
+                "FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
+                 CROSS JOIN observations b ON b.object_id=o.object_id",
+                "AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)",
+            ),
+            // Creation order skips observations outside the catch-up window.
+            Descriptors::CreatedInWindow => (
+                "FROM observations b INDEXED BY idx_observations_known_as_of
+                 CROSS JOIN object_registry o ON o.object_id=b.object_id",
+                "",
+            ),
+        };
+        format!(
+            "{descriptor_scan}
+             CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+             WHERE o.object_id GLOB 'srcdesc:*'
+               AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
+               AND b.created_commit_seq>?2 AND b.created_commit_seq<=?1
+               {descriptor_liveness}
+               AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?1)"
+        )
+    }
+
+    fn unreferenced_evidence_sql(self) -> String {
+        format!(
+            "SELECT e.evidence_id,e.byte_length,e.artifact_digest {}
+               AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
+                              WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
+             GROUP BY e.evidence_id",
+            self.cited_evidence_sql()
+        )
+    }
+
+    fn held_descriptors_sql(self) -> String {
+        format!(
+            "SELECT o.source_kind,o.object_id,o.source_revision,e.evidence_id,
+                    e.artifact_digest,e.byte_length,b.invalidated_commit_seq
+             {}
+               AND (o.source_kind,o.object_id,o.source_revision)>(?3,?4,?5)
+             ORDER BY o.source_kind,o.object_id,o.source_revision
+             LIMIT ?6",
+            self.cited_evidence_sql()
+        )
+    }
 }
 
 fn is_token(value: &str) -> bool {
@@ -207,18 +302,6 @@ fn is_token(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-}
-
-fn held_descriptors_sql() -> String {
-    format!(
-        "SELECT o.source_kind,o.object_id,o.source_revision,e.evidence_id,
-                e.artifact_digest,e.byte_length,b.invalidated_commit_seq
-         {}
-           AND (o.source_kind,o.object_id,o.source_revision)>(?2,?3,?4)
-         ORDER BY o.source_kind,o.object_id,o.source_revision
-         LIMIT ?5",
-        live_descriptors_sql()
-    )
 }
 
 impl KernelStore {
@@ -309,46 +392,26 @@ impl KernelStore {
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
-        let (references, encoded_bytes): (i64, Option<i64>) = tx
-            .query_row_cached(
-                &format!(
-                    "SELECT COUNT(*),SUM(byte_length) FROM (
-                         SELECT e.evidence_id,e.byte_length {}
-                         GROUP BY e.evidence_id
-                     )",
-                    live_descriptors_sql()
-                ),
-                [snapshot],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let hold_id: String = tx
+            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
             .map_err(sqlite)?;
-        let references = usize::try_from(references).map_err(corrupt)?;
-        let encoded_bytes = u64::try_from(encoded_bytes.unwrap_or(0)).map_err(corrupt)?;
-        if let Some(hook) = at_admission {
-            let refs_in_tx: i64 = tx
-                .query_row("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
-                    row.get(0)
-                })
-                .map_err(sqlite)?;
-            hook(refs_in_tx);
-        }
-        if references > bounds.max_references.get()
-            || encoded_bytes > bounds.max_encoded_bytes.get()
-        {
-            return Err(SourceHoldError::Unadmitted {
-                references,
-                encoded_bytes,
-            });
-        }
         let captured_at = current_time_ms();
         let expires_at = captured_at
             .checked_add(expiry)
             .ok_or(SourceHoldError::InvalidRequest)?;
-        let hold_id: String = tx
-            .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
-            .map_err(sqlite)?;
         let epoch = i64::try_from(self.lease_epoch()).map_err(|_| KernelError::InvalidInput)?;
-        tx.execute(
+        let admitted = admit_references(
+            &tx,
+            HoldRow {
+                hold_id: &hold_id,
+                expires_at,
+            },
+            Window::at_snapshot(snapshot),
+            (0, 0),
+            bounds.admission,
+            at_admission,
+        )?;
+        tx.execute_cached(
             "INSERT INTO capture_pins(
                  capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
                  created_at,expires_at
@@ -364,27 +427,8 @@ impl KernelStore {
             ],
         )
         .map_err(sqlite)?;
-        let inserted = tx
-            .execute_cached(
-                &format!(
-                    "INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
-                     SELECT ?2,evidence_id,?3 FROM (
-                         SELECT e.evidence_id {}
-                         GROUP BY e.evidence_id
-                     ) LIMIT ?4",
-                    live_descriptors_sql()
-                ),
-                params![
-                    snapshot,
-                    hold_id,
-                    expires_at,
-                    i64::try_from(bounds.max_references.get()).unwrap_or(i64::MAX),
-                ],
-            )
-            .map_err(sqlite)?;
-        if inserted != references {
-            return Err(KernelError::CorruptCanonicalRow.into());
-        }
+        admitted.materialize(&tx)?;
+        let (references, encoded_bytes) = (admitted.references, admitted.encoded_bytes);
         tx.commit().map_err(sqlite)?;
         Ok(SourceHold {
             hold_id,
@@ -397,6 +441,127 @@ impl KernelStore {
         })
     }
 
+    /// Extends the hold to the evidence cited by descriptors created in
+    /// `(S, through]`, so a consumer can finish the catch-up batch that ends
+    /// at `through` with every byte protected. Runs under the writer against
+    /// the whole hold's admission; an over-bound extension is refused whole
+    /// and writes nothing. Replaying an extension adds no reference twice,
+    /// charges nothing twice, and never renews the expiry.
+    pub fn extend_source_hold(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.extend_source_hold_inner(binding, hold_id, through, admission, None)
+    }
+
+    /// [`Self::extend_source_hold`] with `at_admission` run inside the writer
+    /// transaction after the admission decision and before any reference is
+    /// written, receiving the number of `capture_pin_refs` rows visible there.
+    #[cfg(feature = "test-support")]
+    pub fn extend_source_hold_with_hook_for_test(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+        mut at_admission: impl FnMut(i64),
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.extend_source_hold_inner(
+            binding,
+            hold_id,
+            through,
+            admission,
+            Some(&mut at_admission),
+        )
+    }
+
+    fn extend_source_hold_inner(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+        at_admission: Option<&mut dyn FnMut(i64)>,
+    ) -> Result<SourceHold, SourceHoldError> {
+        let mut writer = self.lock_writer()?;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite)?;
+        check_fence(&tx, self.lease_epoch())?;
+        let pin = self.load_valid_pin(&tx, binding, hold_id, current_time_ms())?;
+        let hold = self.hold_from_pin(&tx, binding, hold_id, &pin)?;
+        check_window(&tx, hold.snapshot, through)?;
+        let admitted = admit_references(
+            &tx,
+            HoldRow {
+                hold_id,
+                expires_at: hold.expires_at,
+            },
+            Window::catch_up(hold.snapshot, through),
+            (hold.references, hold.encoded_bytes),
+            admission,
+            at_admission,
+        )?;
+        admitted.materialize(&tx)?;
+        tx.commit().map_err(sqlite)?;
+        Ok(SourceHold {
+            references: admitted.references,
+            encoded_bytes: admitted.encoded_bytes,
+            ..hold
+        })
+    }
+
+    /// Moves the consumer's checkpoint to `through` in the same writer transaction that checks the hold.
+    /// The hold is unreleased, unexpired, not purge-degraded, and references every byte required to replay `(S, through]`.
+    /// `Self::source_hold_status` checks object presence before publication; this method does not.
+    /// A failed or skipped extension cannot authorize acknowledgement.
+    /// The hold keeps the bytes protected after the checkpoint moves until it is released.
+    /// Acknowledging through a hold asserts that the consumer's state
+    /// reflects the corpus at S plus the window, so a checkpoint below S
+    /// moves over `(checkpoint, S]` on the strength of the S baseline.
+    pub fn acknowledge_through_source_hold(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        updated_at: i64,
+    ) -> Result<(), SourceHoldError> {
+        if updated_at < 0 {
+            return Err(SourceHoldError::InvalidRequest);
+        }
+        let mut writer = self.lock_writer()?;
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite)?;
+        check_fence(&tx, self.lease_epoch())?;
+        let pin = self.load_valid_pin(&tx, binding, hold_id, current_time_ms())?;
+        check_window(&tx, pin.snapshot, through)?;
+        let uncovered: i64 = tx
+            .query_row_cached(
+                &format!(
+                    "SELECT COUNT(*) FROM ({})",
+                    Window::catch_up(pin.snapshot, through).unreferenced_evidence_sql()
+                ),
+                params![through, pin.snapshot, hold_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if uncovered != 0 {
+            return Err(SourceHoldError::ExtensionIncomplete {
+                uncovered: usize::try_from(uncovered).map_err(corrupt)?,
+            });
+        }
+        if current_time_ms() >= pin.expires_at {
+            return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
+        }
+        acknowledge_outbox_in_tx(&tx, &binding.consumer_id, through, updated_at)?;
+        tx.commit().map_err(sqlite)?;
+        Ok(())
+    }
+
     /// Rounding elapsed monotonic time up prevents partial milliseconds from hiding expiry.
     /// Checked before a candidate built from the hold is published, and never
     /// answered from a cached earlier check. A hold that no longer protects
@@ -404,6 +569,7 @@ impl KernelStore {
     /// Each distinct object is read and hashed, with one object buffer bounded
     /// by [`crate::MAX_PAYLOAD_BYTES`]. Storage failures return [`KernelError::Io`].
     /// The pin is rechecked after hashing; this check does not synchronize a later publication.
+    /// [`SourceHoldError::VerificationChanged`] requires a fresh status check.
     pub fn source_hold_status(
         &self,
         binding: &SourceHoldBinding,
@@ -437,6 +603,7 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
+        let restore_generation = self.restore_generation.load(Ordering::SeqCst);
         let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
         let hold = self.hold_from_pin(&tx, binding, hold_id, &pin)?;
         // Every referenced evidence row must still exist with its object on disk.
@@ -492,6 +659,20 @@ impl KernelStore {
             hold_id,
             verification_time_upper_bound(now, started.elapsed()),
         )?;
+        if self.restore_generation.load(Ordering::SeqCst) != restore_generation {
+            return Err(SourceHoldError::VerificationChanged);
+        }
+        // With restores excluded, valid holds only gain references; release is required for reclamation.
+        let references: i64 = tx
+            .query_row_cached(
+                "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1",
+                [hold_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if usize::try_from(references).map_err(corrupt)? != hold.references {
+            return Err(SourceHoldError::VerificationChanged);
+        }
         Ok(hold)
     }
 
@@ -522,10 +703,20 @@ impl KernelStore {
             None => ("", "", -1),
         };
         let fetch = i64::try_from(limit.get().saturating_add(1)).unwrap_or(i64::MAX);
-        let mut statement = tx.prepare_cached(&held_descriptors_sql()).map_err(sqlite)?;
+        let window = Window::at_snapshot(pin.snapshot);
+        let mut statement = tx
+            .prepare_cached(&window.held_descriptors_sql())
+            .map_err(sqlite)?;
         let mut rows = statement
             .query_map(
-                params![pin.snapshot, class, object_id, revision, fetch],
+                params![
+                    window.through,
+                    window.after,
+                    class,
+                    object_id,
+                    revision,
+                    fetch
+                ],
                 |row| {
                     Ok((
                         HeldDescriptor {
@@ -714,6 +905,62 @@ impl KernelStore {
     }
 }
 
+/// The pin an admitted set is written to, fixed at admission time so the set
+/// cannot be counted against one pin and written to another.
+#[derive(Clone, Copy)]
+struct HoldRow<'a> {
+    hold_id: &'a str,
+    expires_at: i64,
+}
+
+/// An admitted set of additions, counted but not yet written.
+struct Admitted<'a> {
+    row: HoldRow<'a>,
+    window: Window,
+    /// Distinct evidence rows the window adds to the hold.
+    added: usize,
+    /// Whole-hold totals after the additions.
+    references: usize,
+    encoded_bytes: u64,
+}
+
+impl Admitted<'_> {
+    /// Writes the admitted references with one `INSERT ... SELECT` bounded
+    /// by the admitted count. `OR IGNORE` makes a replayed extension a no-op
+    /// per reference, and the whole-hold count is checked afterwards.
+    fn materialize(&self, tx: &Transaction<'_>) -> Result<(), SourceHoldError> {
+        tx.execute_cached(
+            &format!(
+                "INSERT OR IGNORE INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
+                 SELECT ?3,evidence_id,?4 FROM ({}) LIMIT ?5",
+                self.window.unreferenced_evidence_sql()
+            ),
+            params![
+                self.window.through,
+                self.window.after,
+                self.row.hold_id,
+                self.row.expires_at,
+                i64::try_from(self.added).map_err(corrupt)?,
+            ],
+        )
+        .map_err(sqlite)?;
+        let total: i64 = tx
+            .query_row_cached(
+                "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1",
+                [self.row.hold_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if usize::try_from(total).map_err(corrupt)? != self.references {
+            return Err(KernelError::CorruptCanonicalRow.into());
+        }
+        if current_time_ms() >= self.row.expires_at {
+            return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
+        }
+        Ok(())
+    }
+}
+
 /// `keep_epoch` excludes holds whose `lease_epoch` matches it; `None` releases
 /// every unreleased hold of the consumer. Returns the released hold ids in
 /// `capture_pin_id` order.
@@ -743,6 +990,76 @@ pub(crate) fn release_consumer_holds_in_tx(
     Ok(held)
 }
 
+fn admit_references<'a>(
+    tx: &Transaction<'_>,
+    row: HoldRow<'a>,
+    window: Window,
+    current: (usize, u64),
+    admission: SourceHoldAdmission,
+    at_admission: Option<&mut dyn FnMut(i64)>,
+) -> Result<Admitted<'a>, SourceHoldError> {
+    let (added, added_bytes, purged): (i64, Option<i64>, bool) = tx
+        .query_row_cached(
+            &format!(
+                "SELECT COUNT(*),SUM(e.byte_length),COUNT(t.artifact_digest)>0
+                 FROM ({}) e
+                 LEFT JOIN artifact_purge_tombstones t ON t.artifact_digest=e.artifact_digest",
+                window.unreferenced_evidence_sql()
+            ),
+            params![window.through, window.after, row.hold_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(sqlite)?;
+    if purged {
+        return Err(SourceHoldError::PurgedEvidence);
+    }
+    let added = usize::try_from(added).map_err(corrupt)?;
+    let references = current.0.checked_add(added).ok_or_else(|| corrupt(()))?;
+    let encoded_bytes = current
+        .1
+        .checked_add(u64::try_from(added_bytes.unwrap_or(0)).map_err(corrupt)?)
+        .ok_or_else(|| corrupt(()))?;
+    if let Some(hook) = at_admission {
+        let refs_in_tx: i64 = tx
+            .query_row_cached("SELECT COUNT(*) FROM capture_pin_refs", [], |row| {
+                row.get(0)
+            })
+            .map_err(sqlite)?;
+        hook(refs_in_tx);
+    }
+    if references > admission.max_references.get()
+        || encoded_bytes > admission.max_encoded_bytes.get()
+    {
+        return Err(SourceHoldError::Unadmitted {
+            references,
+            encoded_bytes,
+        });
+    }
+    Ok(Admitted {
+        row,
+        window,
+        added,
+        references,
+        encoded_bytes,
+    })
+}
+
+/// `through` must lie in `[S, tip]`: an extension or acknowledgement can
+/// neither move before S nor name a commit that does not exist yet.
+fn check_window(tx: &Transaction<'_>, snapshot: i64, through: i64) -> Result<(), SourceHoldError> {
+    let tip: i64 = tx
+        .query_row_cached(
+            "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sqlite)?;
+    if through < snapshot || through > tip {
+        return Err(SourceHoldError::InvalidRequest);
+    }
+    Ok(())
+}
+
 struct PinRow {
     kind: String,
     owner: String,
@@ -764,14 +1081,118 @@ struct StoredPin {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{Connection, StatementStatus, params};
+    use std::num::{NonZeroU64, NonZeroUsize};
+    use std::sync::mpsc;
     use std::time::Duration;
+
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use rusqlite::{Connection, StatementStatus, params};
 
     use super::{
         ACTIVE_SOURCE_HOLDS_SQL, CAPTURE_DESCRIPTOR_WORK_SQL, RELEASABLE_SOURCE_HOLDS_SQL,
-        SOURCE_HOLD_KIND, SourceHoldBinding, held_descriptors_sql, owner_id,
+        SOURCE_HOLD_KIND, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+        SourceHoldError, SourceHoldInvalidity, Window, owner_id,
     };
     use crate::schema::apply_kernel_schema;
+    use crate::{CommitIntent, KernelStore, current_time_ms};
+
+    #[test]
+    fn acknowledgement_expiring_during_coverage_preserves_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        store
+            .commit(
+                CommitIntent {
+                    producer: "source-hold-test".to_string(),
+                    operation_key: "register".to_string(),
+                    request_digest: "a".repeat(64),
+                    actor: "test".to_string(),
+                    cause: "test".to_string(),
+                },
+                |envelope| {
+                    envelope.register_outbox_consumer("search", 1)?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let checkpoint_sql = "SELECT checkpoint_commit_seq,updated_at FROM outbox_consumers WHERE consumer_id='search'";
+        let before: (i64, i64) = store
+            .lock_writer()
+            .unwrap()
+            .query_row(checkpoint_sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(before, (0, 1));
+        let binding = SourceHoldBinding {
+            consumer_id: "search".to_string(),
+            lease_epoch: store.lease_epoch(),
+            source_policy_version: "source-policy.v1".to_string(),
+        };
+        let hold = store
+            .capture_source_hold(
+                &binding,
+                SourceHoldBounds {
+                    max_descriptor_rows: NonZeroUsize::new(1).unwrap(),
+                    admission: SourceHoldAdmission {
+                        max_references: NonZeroUsize::new(1).unwrap(),
+                        max_encoded_bytes: NonZeroU64::new(1).unwrap(),
+                    },
+                    expiry_ms: NonZeroU64::new(1_000).unwrap(),
+                },
+            )
+            .unwrap();
+        assert!(hold.snapshot > before.0);
+        let (coverage_tx, coverage_rx) = mpsc::channel();
+        let mut pin_read = false;
+        let mut delayed = false;
+        store
+            .lock_writer()
+            .unwrap()
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                match context.action {
+                    AuthAction::Read {
+                        table_name: "capture_pins",
+                        ..
+                    } => pin_read = true,
+                    AuthAction::Read {
+                        table_name: "capture_pin_refs",
+                        ..
+                    } if !delayed => {
+                        delayed = true;
+                        let started = current_time_ms();
+                        let remaining = u64::try_from((hold.expires_at - started).max(0)).unwrap();
+                        std::thread::sleep(Duration::from_millis(remaining + 1));
+                        coverage_tx
+                            .send((pin_read, started, current_time_ms()))
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        let result =
+            store.acknowledge_through_source_hold(&binding, &hold.hold_id, hold.snapshot, 2);
+        let writer = store.lock_writer().unwrap();
+        writer
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        let after: (i64, i64) = writer
+            .query_row(checkpoint_sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        let (pin_read, started, finished) = coverage_rx.try_recv().unwrap();
+        assert!(pin_read, "the same call reads the pin before coverage");
+        assert!(started < hold.expires_at, "coverage starts before expiry");
+        assert!(
+            finished >= hold.expires_at,
+            "the coverage hook crosses expiry"
+        );
+        assert_eq!(
+            result,
+            Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired)),
+            "checkpoint before={before:?}, after={after:?}"
+        );
+        assert_eq!(after, before, "a refused acknowledgement writes nothing");
+    }
 
     #[test]
     fn partial_milliseconds_cannot_hide_hold_expiry() {
@@ -903,6 +1324,7 @@ mod tests {
     fn held_pages_seek_without_sorting_the_inventory() {
         let mut baseline_steps = None;
         let mut baseline_work_steps = None;
+        let mut baseline_catch_up_steps = None;
         for count in [32, 512] {
             let mut conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -944,6 +1366,7 @@ mod tests {
                 }
             }
             tx.commit().unwrap();
+            let window = Window::at_snapshot(1);
             let mut work = conn.prepare(CAPTURE_DESCRIPTOR_WORK_SQL).unwrap();
             let inspected: i64 = work.query_row([9], |row| row.get(0)).unwrap();
             assert_eq!(inspected, 9);
@@ -951,10 +1374,17 @@ mod tests {
             eprintln!("capture work: count={count}, inspected={inspected}, steps={work_steps}");
             assert_eq!(work_steps, *baseline_work_steps.get_or_insert(work_steps));
             for after in [0, count / 2, count - 10] {
-                let mut statement = conn.prepare(&held_descriptors_sql()).unwrap();
+                let mut statement = conn.prepare(&window.held_descriptors_sql()).unwrap();
                 let rows = statement
                     .query_map(
-                        params![1, "messages", format!("srcdesc:{after:06}:1"), 1, 9],
+                        params![
+                            window.through,
+                            window.after,
+                            "messages",
+                            format!("srcdesc:{after:06}:1"),
+                            1,
+                            9
+                        ],
                         |row| row.get::<_, String>(1),
                     )
                     .unwrap()
@@ -977,6 +1407,55 @@ mod tests {
                     "page work grew from {baseline} to {steps} steps"
                 );
             }
+            conn.execute_batch(
+                "INSERT INTO commit_log VALUES (2,'query-plan-catch-up',1,'test','catch-up','digest',0,'test','test');
+                 INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('catch-up-evidence','evidence','domain','artifact','catch-up-evidence',1,2,'normal'),
+                        ('srcdesc:catch-up:1','observation','domain','messages','catch-up',1,2,'normal');
+                 INSERT INTO evidence_meta(evidence_id,object_id,artifact_reference,artifact_digest,
+                     byte_length,media_type,retention_class,provider_egress_class,redaction_metadata,
+                     created_commit_seq,sensitivity_class)
+                 VALUES ('catch-up-evidence','catch-up-evidence','object','catch-up-digest',7,
+                         'text/plain','canonical','local_only',x'5b5d',2,'normal');
+                 INSERT INTO observations(observation_id,object_id,evidence_id,
+                     observation_kind,observation_payload,observed_at,created_commit_seq,
+                     sensitivity_class)
+                 VALUES ('srcdesc:catch-up:1','srcdesc:catch-up:1','catch-up-evidence',
+                         'source_descriptor',x'7b7d',0,2,'normal');",
+            )
+            .unwrap();
+            let window = Window::catch_up(1, 2);
+            let mut statement = conn.prepare(&window.unreferenced_evidence_sql()).unwrap();
+            let rows = statement
+                .query_map(params![window.through, window.after, "pin"], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![(
+                    "catch-up-evidence".to_string(),
+                    7,
+                    "catch-up-digest".to_string()
+                )]
+            );
+            let steps = statement.get_status(StatementStatus::VmStep);
+            eprintln!(
+                "SQLite {} catch-up: history={count}, steps={steps}",
+                rusqlite::version()
+            );
+            let baseline = *baseline_catch_up_steps.get_or_insert(steps);
+            assert!(
+                steps <= baseline * 2,
+                "catch-up work grew from {baseline} to {steps} steps with unrelated history"
+            );
         }
     }
 }
