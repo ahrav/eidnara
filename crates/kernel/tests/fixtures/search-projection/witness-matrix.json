@@ -5,7 +5,7 @@
   "expected_marker_counts": {
     "export-recovery": 23,
     "projection-coverage": 24,
-    "embedding": 16
+    "embedding": 18
   },
   "result_marker": "search_projection_acceptance_situations_witnessed",
   "acceptance_criteria": [
@@ -1533,6 +1533,57 @@
       "constructing_tickets": [
         371,
         377
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_wrong_scope_prefix_crosses_page_budget",
+      "part": "embedding",
+      "property": "embedding-dispatch-scan-makes-bounded-progress",
+      "acceptance_criteria": [
+        "AC5",
+        "AC7"
+      ],
+      "seams": [
+        "T8",
+        "T9"
+      ],
+      "scenario_ids": [
+        "two_wrong_scope_pages_then_eligible",
+        "terminal_deadline_then_retry"
+      ],
+      "independent_oracle": "Ordered durable job ledger and one dispatcher reused across passes.",
+      "negative_control": "Restarting each pass at the first page or committing the cursor before disposition must fail.",
+      "integration_observation": "U3d bounded project scan and retry after a refused terminal write.",
+      "constructing_tickets": [
+        368,
+        369
+      ],
+      "cell_kind": "required"
+    },
+    {
+      "marker": "search_projection_embedding_terminal_actions_hit_pass_bound",
+      "part": "embedding",
+      "property": "embedding-dispatch-actions-respect-pass-budget",
+      "acceptance_criteria": [
+        "AC5",
+        "AC8"
+      ],
+      "seams": [
+        "T6",
+        "T8"
+      ],
+      "scenario_ids": [
+        "terminal_only",
+        "malformed_then_valid",
+        "wrong_scope_then_valid"
+      ],
+      "independent_oracle": "Durable per-job state and emitted stop-event ledger under `max_jobs=1`.",
+      "negative_control": "More than one selected or terminal action, or a no-op stop event, must fail.",
+      "integration_observation": "U3d one bounded dispatch pass over mixed verdicts.",
+      "constructing_tickets": [
+        368,
+        371
       ],
       "cell_kind": "required"
     },

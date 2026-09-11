@@ -32,7 +32,7 @@ use storage::GuardedConn;
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.

@@ -11,14 +11,17 @@ use host_runtime::synapse::{
     DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState, PollOutcome,
     SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
 };
-use kernel::{CurrentInputExpectation, EligibilityBinding, KernelError, KernelStore};
+use kernel::{
+    CurrentInputExpectation, EligibilityBinding, EligibilityCandidate, EligibilityVerdict,
+    KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+};
 use retrieval::ProjectionError;
 use retrieval::dispatch::{
-    Admission, BindingOutcome, DispatchJob, Disposition, EXHAUSTED, EpisodeGrant, LaneBinding,
-    bind_lane, charge_admission, eligible_jobs, job_ledger, rebind_host_job, record_retry,
-    stop_job,
+    Admission, BindingOutcome, DispatchCandidate, DispatchCursor, DispatchJob, Disposition,
+    EXHAUSTED, EpisodeGrant, JobLedger, LaneBinding, bind_lane, charge_admission, dispatch_jobs,
+    eligible_job_candidates, job_ledger, rebind_host_job, record_retry, stop_job,
 };
-use retrieval::vectors::obsolete_embedding;
+use retrieval::vectors::{Obsoletion, completion_status, obsolete_embedding};
 
 use crate::embedding_publication::{
     EmbeddingPublisher, Publication, PublicationError, VectorPublication,
@@ -31,13 +34,18 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchBounds {
     pub max_jobs: NonZeroUsize,
+    /// `deadline` uses the caller-defined logical units supplied as `run_pass(now)`.
     pub grant: EpisodeGrant,
+    /// Added to the pass's frozen logical `now`; it is not a wall-clock duration.
     pub retry_after: i64,
+    /// Monotonic wait bound independent of the logical episode clock.
     pub result_wait: Duration,
+    /// Monotonic guard-acquisition bound independent of the logical episode clock.
     pub guard_deadline: Duration,
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+const MAX_ELIGIBILITY_PAGES_PER_PASS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DispatchEvent {
@@ -87,6 +95,8 @@ pub enum DispatchError {
     /// The store refused the lane binding or eligible-row read before any disposition, so the pass can run again.
     #[error(transparent)]
     Retryable(SearchProjectionError),
+    #[error("kernel eligibility read is retryable: {0}")]
+    RetryableKernel(KernelError),
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -99,6 +109,56 @@ pub enum DispatchFault {
     RefuseChargeStatement,
     /// The admission charge commits, then its reply arrives as a store failure.
     LoseChargeReply,
+    /// Injects a store failure after a successful obsoletion write.
+    LoseObsoletionReply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LostChargeResolution {
+    AlreadyCharged,
+    Retry,
+    Defer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EligibilityCursorBinding {
+    project: kernel::ProjectScope,
+    destination: kernel::ArtifactDestination,
+}
+
+fn lost_charge_resolution(
+    original_attempts: u32,
+    host_job_id: &str,
+    ledger: &JobLedger,
+) -> Option<LostChargeResolution> {
+    if ledger.state == "admitted" && ledger.host_job_id.as_deref() == Some(host_job_id) {
+        Some(LostChargeResolution::AlreadyCharged)
+    } else if ledger.state == "pending" && ledger.attempts == original_attempts {
+        Some(LostChargeResolution::Retry)
+    } else if ledger.state == "pending" && ledger.attempts > original_attempts {
+        Some(LostChargeResolution::Defer)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingObsoletion {
+    job_id: String,
+    occurrence_id: String,
+    generation_id: String,
+    reason: &'static str,
+}
+
+impl PendingObsoletion {
+    fn candidate(candidate: &DispatchCandidate, reason: &'static str) -> Self {
+        Self {
+            job_id: candidate.job_id.clone(),
+            occurrence_id: candidate.occurrence_id.clone(),
+            generation_id: candidate.generation_id.clone(),
+            reason,
+        }
+    }
 }
 
 /// `run_pass` blocks and requires a multi-threaded Tokio runtime; `block_in_place` yields the worker while the pass waits.
@@ -108,6 +168,8 @@ pub struct EmbeddingDispatcher<'a> {
     synapse: &'a SynapseComponent,
     quarantine: Option<Quarantine>,
     fault: Option<DispatchFault>,
+    cursor: Option<DispatchCursor>,
+    cursor_binding: Option<EligibilityCursorBinding>,
 }
 
 impl<'a> EmbeddingDispatcher<'a> {
@@ -122,6 +184,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             synapse,
             quarantine: None,
             fault: None,
+            cursor: None,
+            cursor_binding: None,
         }
     }
 
@@ -129,6 +193,12 @@ impl<'a> EmbeddingDispatcher<'a> {
     #[cfg(feature = "test-support")]
     pub fn inject_fault_for_test(&mut self, fault: DispatchFault) {
         self.fault = Some(fault);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn eligibility_cursor_for_test(&self) -> Option<DispatchCursor> {
+        self.cursor.clone()
     }
 
     fn take_fault(&mut self, fault: DispatchFault) -> bool {
@@ -141,12 +211,14 @@ impl<'a> EmbeddingDispatcher<'a> {
     }
 
     /// Runs one pass and reports what stopped it early, if anything; every job's disposition reaches `observer`.
+    /// `now` is one caller-defined logical-time snapshot for the entire pass;
+    /// episode deadlines do not expire by wall clock while the pass runs.
     ///
     /// The pass sleeps while it polls, so it must not keep a runtime worker: on a worker it hands the worker's tasks off first, on a blocking thread it runs directly, and on a `current_thread` runtime it panics rather than starve the inference it waits for.
     ///
     /// # Errors
     ///
-    /// Returns [`DispatchError::Retryable`] when the store refuses the lane binding or the eligible-row read, [`DispatchError::Quarantined`] once any disposition write fails or is refused and on every later call of this dispatcher, and [`DispatchError::Kernel`] when the kernel guard fails for a reason other than its deadline.
+    /// Returns [`DispatchError::Retryable`] when the store refuses the lane binding or an eligible-row read, [`DispatchError::RetryableKernel`] when an eligibility read is busy or reaches its deadline, [`DispatchError::Quarantined`] once any disposition write fails or is refused and on every later call of this dispatcher, and [`DispatchError::Kernel`] for other kernel failures.
     pub fn run_pass(
         &mut self,
         eligibility: EligibilityBinding<'_>,
@@ -167,6 +239,14 @@ impl<'a> EmbeddingDispatcher<'a> {
         if let Some(quarantine) = &self.quarantine {
             return Err(DispatchError::Quarantined(quarantine.clone()));
         }
+        let cursor_binding = EligibilityCursorBinding {
+            project: eligibility.project.clone(),
+            destination: eligibility.destination,
+        };
+        if self.cursor_binding.as_ref() != Some(&cursor_binding) {
+            self.cursor = None;
+            self.cursor_binding = Some(cursor_binding);
+        }
         let lane = match serving(self.synapse.status()) {
             Ok(lane) => lane,
             Err(state) => return Ok(Some(Blocked::LaneUnavailable(state))),
@@ -184,10 +264,138 @@ impl<'a> EmbeddingDispatcher<'a> {
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
             outcome => observer(DispatchEvent::Bound(outcome)),
         }
+        let page_limit = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES)
+            .expect("the kernel eligibility limit is nonzero");
+        let mut scan_cursor = self.cursor.clone();
+        let mut wrong_scope_cursor = self.cursor.clone();
+        let mut action_found = false;
+        let mut actions = 0;
+        let mut selected = Vec::with_capacity(bounds.max_jobs.get());
+        let mut terminal = Vec::with_capacity(bounds.max_jobs.get());
+        for page_index in 0..MAX_ELIGIBILITY_PAGES_PER_PASS {
+            let page = self
+                .projection
+                .read(|conn| eligible_job_candidates(conn, scan_cursor.as_ref(), page_limit, now));
+            let page = self.before_dispositions(page)?;
+            if page.is_empty() {
+                let restart_at_beginning = page_index == 0 && scan_cursor.is_some();
+                scan_cursor = None;
+                if !action_found {
+                    wrong_scope_cursor = None;
+                }
+                if restart_at_beginning {
+                    continue;
+                }
+                break;
+            }
+            let short_page = page.len() < MAX_ELIGIBILITY_CANDIDATES;
+            let mut valid = Vec::with_capacity(page.len());
+            let mut kernel_candidates = Vec::with_capacity(page.len());
+            for candidate in &page {
+                let kernel_candidate = EligibilityCandidate {
+                    object_id: candidate.source_object_id.clone(),
+                    source_revision: candidate.source_revision,
+                    artifact_digest: Some(candidate.source_artifact_digest.clone()),
+                };
+                match kernel_candidate.validate() {
+                    Ok(()) => {
+                        valid.push(true);
+                        kernel_candidates.push(kernel_candidate);
+                    }
+                    Err(KernelError::InvalidInput) => valid.push(false),
+                    Err(error) => return Err(DispatchError::Kernel(error)),
+                }
+            }
+            let verdicts = if kernel_candidates.is_empty() {
+                Vec::new()
+            } else {
+                self.kernel
+                    .judge_eligibility(
+                        eligibility.project,
+                        eligibility.destination,
+                        &kernel_candidates,
+                    )
+                    .map_err(eligibility_error)?
+                    .verdicts
+            };
+            let mut verdicts = exact_verdicts(verdicts, kernel_candidates.len())?.into_iter();
+            let mut processed = 0;
+            for (candidate, valid) in page.iter().zip(valid) {
+                if actions == bounds.max_jobs.get() {
+                    break;
+                }
+                processed += 1;
+                scan_cursor = Some(candidate.cursor());
+                if !valid {
+                    action_found = true;
+                    terminal.push(PendingObsoletion::candidate(candidate, "invalid_identity"));
+                    actions += 1;
+                    continue;
+                }
+                let verdict = verdicts
+                    .next()
+                    .expect("verdict cardinality was checked before processing");
+                match verdict {
+                    EligibilityVerdict::Ok => {
+                        action_found = true;
+                        selected.push(candidate.job_id.clone());
+                        actions += 1;
+                    }
+                    EligibilityVerdict::WrongScope => {
+                        if !action_found {
+                            wrong_scope_cursor = Some(candidate.cursor());
+                        }
+                    }
+                    EligibilityVerdict::Retracted => {
+                        action_found = true;
+                        terminal.push(PendingObsoletion::candidate(candidate, "retracted"));
+                        actions += 1;
+                    }
+                    EligibilityVerdict::Superseded => {
+                        action_found = true;
+                        terminal.push(PendingObsoletion::candidate(candidate, "superseded"));
+                        actions += 1;
+                    }
+                    EligibilityVerdict::Stale => {
+                        action_found = true;
+                        terminal.push(PendingObsoletion::candidate(candidate, "stale"));
+                        actions += 1;
+                    }
+                    EligibilityVerdict::Hidden => {
+                        action_found = true;
+                        terminal.push(PendingObsoletion::candidate(candidate, "hidden"));
+                        actions += 1;
+                    }
+                    EligibilityVerdict::ProviderSensitive => {
+                        action_found = true;
+                        terminal.push(PendingObsoletion::candidate(
+                            candidate,
+                            "provider_sensitive",
+                        ));
+                        actions += 1;
+                    }
+                }
+            }
+            if short_page && processed == page.len() {
+                if !action_found {
+                    wrong_scope_cursor = None;
+                }
+                break;
+            }
+            if actions == bounds.max_jobs.get() {
+                break;
+            }
+        }
         let jobs = self
             .projection
-            .read(|conn| eligible_jobs(conn, bounds.max_jobs, now));
+            .read(|conn| dispatch_jobs(conn, &selected, now));
         let jobs = self.before_dispositions(jobs)?;
+        let terminal_deadline = Instant::now() + bounds.guard_deadline;
+        if let Some(blocked) =
+            self.obsolete_candidates(&terminal, terminal_deadline, now, observer)?
+        {
+            return Ok(Some(blocked));
+        }
         let pass = Pass {
             lane: &lane,
             binding: &binding,
@@ -200,14 +408,15 @@ impl<'a> EmbeddingDispatcher<'a> {
                 return Ok(Some(blocked));
             }
         }
+        self.cursor = wrong_scope_cursor;
         Ok(None)
     }
 
-    /// Store failures before any disposition are retryable because nothing about the ledger is uncertain yet.
     fn before_dispositions<T>(
         &mut self,
         result: Result<T, SearchProjectionError>,
     ) -> Result<T, DispatchError> {
+        // Storage failures before terminal writes are retryable because no disposition is uncertain.
         result.map_err(|error| match &error {
             SearchProjectionError::Projection(refusal)
                 if !matches!(classify(refusal), Refusal::Storage) =>
@@ -227,19 +436,13 @@ impl<'a> EmbeddingDispatcher<'a> {
     ) -> Result<Option<Blocked>, DispatchError> {
         // A generation the lane does not serve is a model mismatch: the work is obsolete, not failed.
         if !pass.binding.serves(&job.generation) {
-            self.write(|conn| {
-                obsolete_embedding(
-                    conn,
-                    &job.occurrence_id,
-                    &job.generation.generation_id,
-                    pass.now,
-                )
-            })?;
-            observer(DispatchEvent::Stopped {
-                job_id: job.job_id.clone(),
-                reason: "generation_mismatch".to_owned(),
-            });
-            return Ok(None);
+            return self.obsolete_identity(
+                job,
+                "generation_mismatch",
+                Instant::now() + pass.bounds.guard_deadline,
+                pass.now,
+                observer,
+            );
         }
         let mut host_job_id = match &job.host_job_id {
             Some(host_job_id) if job.state == "admitted" => {
@@ -285,7 +488,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                     {
                         Ok(admitted) => admitted,
                         Err(refusal) => {
-                            return self.dense_unavailable(job, refusal, pass, observer);
+                            return self.completion_preflight_refusal(job, refusal, pass, observer);
                         }
                     };
                     // `page` stays alive through publication so its lease keeps the result bytes counted while the vector is in use.
@@ -332,38 +535,15 @@ impl<'a> EmbeddingDispatcher<'a> {
     }
 
     fn submit(
-        &mut self,
+        &self,
         job: &DispatchJob,
         pass: &Pass<'_>,
-        observer: &mut dyn FnMut(DispatchEvent),
-    ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
-        let admitted = match self
+    ) -> Result<SubmitOutcome, DenseUnavailable> {
+        let admitted = self
             .synapse
-            .preflight_embedding_for_lane(pass.lane, &job.text)
-        {
-            Ok(admitted) => admitted,
-            Err(refusal) => {
-                return self
-                    .dense_unavailable(job, refusal, pass, observer)
-                    .map(Err);
-            }
-        };
+            .preflight_embedding_for_lane(pass.lane, &job.text)?;
         // The host item is the episode, so a new episode never reuses a job the table retains from a stopped one.
-        Ok(
-            match self.synapse.submit_admitted(&admitted, &job.item_id()) {
-                Ok(SubmitOutcome::Queued { job_id }) => Ok(job_id),
-                Ok(SubmitOutcome::Full) => {
-                    self.retry(job, "admission_full", pass, observer).map(Err)?
-                }
-                Ok(SubmitOutcome::Refused(reason)) => {
-                    self.stop(job, reason, pass.now, observer).map(Err)?
-                }
-                Ok(SubmitOutcome::Closing) => Err(Some(Blocked::HostClosing)),
-                Err(refusal) => self
-                    .dense_unavailable(job, refusal, pass, observer)
-                    .map(Err)?,
-            },
-        )
+        self.synapse.submit_admitted(&admitted, &job.item_id())
     }
 
     fn admit(
@@ -372,25 +552,37 @@ impl<'a> EmbeddingDispatcher<'a> {
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
-        let host_job_id = match self.submit(job, pass, observer)? {
-            Ok(host_job_id) => host_job_id,
-            Err(blocked) => return Ok(Err(blocked)),
+        let host_job_id = match self.submit(job, pass) {
+            Ok(SubmitOutcome::Queued { job_id }) => job_id,
+            Ok(SubmitOutcome::Full) => {
+                return self.retry(job, "admission_full", pass, observer).map(Err);
+            }
+            Ok(SubmitOutcome::Refused(reason)) => {
+                return self.stop(job, reason, pass.now, observer).map(Err);
+            }
+            Ok(SubmitOutcome::Closing) => return Ok(Err(Some(Blocked::HostClosing))),
+            Err(refusal) => {
+                return self
+                    .dense_unavailable(job, refusal, pass, observer)
+                    .map(Err);
+            }
+        };
+        let charge = |conn: &storage::GuardedConn<'_>| {
+            charge_admission(
+                conn,
+                &job.job_id,
+                pass.binding,
+                &host_job_id,
+                pass.bounds.grant,
+                pass.now,
+            )
         };
         let charged = if self.take_fault(DispatchFault::RefuseChargeStatement) {
             Err(SearchProjectionError::Projection(ProjectionError::Sqlite(
                 "database is locked".to_owned(),
             )))
         } else {
-            let charged = self.projection.write(|conn| {
-                charge_admission(
-                    conn,
-                    &job.job_id,
-                    pass.binding,
-                    &host_job_id,
-                    pass.bounds.grant,
-                    pass.now,
-                )
-            });
+            let charged = self.projection.write(charge);
             if self.take_fault(DispatchFault::LoseChargeReply) && charged.is_ok() {
                 Err(SearchProjectionError::Store(storage::StoreError::Backend(
                     "database is locked".to_owned(),
@@ -406,15 +598,15 @@ impl<'a> EmbeddingDispatcher<'a> {
             {
                 return Err(self.enter_quarantine(QuarantineKind::Integrity, &error));
             }
-            // The charge's statement failed or its reply was lost: the row, not the error, says whether it committed. A row still pending was not charged and is re-admitted by the next pass; anything else is unknown and stops dispatch.
             Err(lost) => match self.projection.read(|conn| job_ledger(conn, &job.job_id)) {
-                Ok(Some(ledger))
-                    if ledger.state == "admitted"
-                        && ledger.host_job_id.as_deref() == Some(host_job_id.as_str()) =>
-                {
-                    Admission::AlreadyCharged
+                Ok(Some(ledger)) => {
+                    match lost_charge_resolution(job.attempts, &host_job_id, &ledger) {
+                        Some(LostChargeResolution::AlreadyCharged) => Admission::AlreadyCharged,
+                        Some(LostChargeResolution::Retry) => self.write(charge)?,
+                        Some(LostChargeResolution::Defer) => return Ok(Err(None)),
+                        None => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
+                    }
                 }
-                Ok(Some(ledger)) if ledger.state == "pending" => return Ok(Err(None)),
                 _ => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
             },
         };
@@ -445,9 +637,21 @@ impl<'a> EmbeddingDispatcher<'a> {
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
-        let host_job_id = match self.submit(job, pass, observer)? {
-            Ok(host_job_id) => host_job_id,
-            Err(blocked) => return Ok(Err(blocked)),
+        let host_job_id = match self.submit(job, pass) {
+            Ok(SubmitOutcome::Queued { job_id }) => job_id,
+            Ok(SubmitOutcome::Full)
+            | Err(DenseUnavailable::CountUnavailable(InferenceFailureKind::Execution)) => {
+                return Ok(Err(None));
+            }
+            Ok(SubmitOutcome::Refused(reason)) => {
+                return self.stop(job, reason, pass.now, observer).map(Err);
+            }
+            Ok(SubmitOutcome::Closing) => return Ok(Err(Some(Blocked::HostClosing))),
+            Err(refusal) => {
+                return self
+                    .dense_unavailable(job, refusal, pass, observer)
+                    .map(Err);
+            }
         };
         let rebound =
             self.write(|conn| rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now))?;
@@ -541,6 +745,25 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
     }
 
+    fn completion_preflight_refusal(
+        &mut self,
+        job: &DispatchJob,
+        refusal: DenseUnavailable,
+        pass: &Pass<'_>,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Option<Blocked>, DispatchError> {
+        match refusal {
+            DenseUnavailable::CountUnavailable(InferenceFailureKind::Execution) => Ok(None),
+            DenseUnavailable::CountUnavailable(
+                InferenceFailureKind::Artifact | InferenceFailureKind::Invariant,
+            ) => match serving(self.synapse.status()) {
+                Err(state) => Ok(Some(Blocked::LaneUnavailable(state))),
+                Ok(_) => Ok(None),
+            },
+            refusal => self.dense_unavailable(job, refusal, pass, observer),
+        }
+    }
+
     fn retry(
         &mut self,
         job: &DispatchJob,
@@ -575,6 +798,118 @@ impl<'a> EmbeddingDispatcher<'a> {
             });
         }
         Ok(None)
+    }
+
+    fn obsolete_candidates(
+        &mut self,
+        candidates: &[PendingObsoletion],
+        deadline: Instant,
+        now: i64,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Option<Blocked>, DispatchError> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let outcomes = self.projection.write_within(deadline, |conn| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    obsolete_embedding(
+                        conn,
+                        &candidate.occurrence_id,
+                        &candidate.generation_id,
+                        now,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let outcomes = if self.take_fault(DispatchFault::LoseObsoletionReply) && outcomes.is_ok() {
+            Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                "database is locked".to_owned(),
+            )))
+        } else {
+            outcomes
+        };
+        match outcomes {
+            Ok(outcomes) => {
+                for (candidate, outcome) in candidates.iter().zip(outcomes) {
+                    if outcome == Obsoletion::Marked {
+                        observer(DispatchEvent::Stopped {
+                            job_id: candidate.job_id.clone(),
+                            reason: candidate.reason.to_owned(),
+                        });
+                    }
+                }
+                Ok(None)
+            }
+            Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
+                Refusal::Integrity => self.enter_quarantine(QuarantineKind::Integrity, &error),
+                Refusal::Storage => self.enter_quarantine(QuarantineKind::Storage, &error),
+                Refusal::Admission | Refusal::Identity | Refusal::OperatorRepair => {
+                    DispatchError::Retryable(SearchProjectionError::Projection(error))
+                }
+            }),
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Ok(Some(Blocked::SearchDeadline))
+            }
+            Err(_) => self.reconcile_obsoletions(candidates, observer),
+        }
+    }
+
+    fn obsolete_identity(
+        &mut self,
+        job: &DispatchJob,
+        reason: &'static str,
+        deadline: Instant,
+        now: i64,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Option<Blocked>, DispatchError> {
+        self.obsolete_candidates(
+            &[PendingObsoletion {
+                job_id: job.job_id.clone(),
+                occurrence_id: job.occurrence_id.clone(),
+                generation_id: job.generation.generation_id.clone(),
+                reason,
+            }],
+            deadline,
+            now,
+            observer,
+        )
+    }
+
+    fn reconcile_obsoletions(
+        &mut self,
+        candidates: &[PendingObsoletion],
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Option<Blocked>, DispatchError> {
+        let statuses = self.projection.read(|conn| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    completion_status(conn, &candidate.occurrence_id, &candidate.generation_id)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        });
+        match statuses {
+            Ok(statuses) => {
+                for (candidate, status) in candidates.iter().zip(&statuses) {
+                    if status.job_state.as_deref() == Some("obsolete") {
+                        observer(DispatchEvent::Stopped {
+                            job_id: candidate.job_id.clone(),
+                            reason: candidate.reason.to_owned(),
+                        });
+                    }
+                }
+                if statuses.iter().all(|status| {
+                    !matches!(status.job_state.as_deref(), Some("pending" | "admitted"))
+                }) {
+                    Ok(None)
+                } else {
+                    Ok(Some(Blocked::LocalCommitUnresolved))
+                }
+            }
+            Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
+        }
     }
 
     /// Every disposition write that fails quarantines: a refusal means the row's state no longer describes the work, and a store failure leaves it unknown whether the disposition committed.
@@ -621,6 +956,23 @@ fn serving(status: SynapseStatus) -> Result<LaneInfo, LaneUnavailableState> {
     }
 }
 
+fn eligibility_error(error: KernelError) -> DispatchError {
+    match error {
+        KernelError::Busy | KernelError::Deadline => DispatchError::RetryableKernel(error),
+        _ => DispatchError::Kernel(error),
+    }
+}
+
+fn exact_verdicts(
+    verdicts: Vec<EligibilityVerdict>,
+    expected: usize,
+) -> Result<Vec<EligibilityVerdict>, DispatchError> {
+    if verdicts.len() != expected {
+        return Err(DispatchError::Kernel(KernelError::AdmissionPolicy));
+    }
+    Ok(verdicts)
+}
+
 /// The binding a lane implies: the lane fingerprint is the verified bundle fingerprint the projection identity records as its tokenizer fingerprint.
 pub fn lane_binding(lane: &LaneInfo, host_incarnation: &str) -> LaneBinding {
     LaneBinding {
@@ -629,5 +981,65 @@ pub fn lane_binding(lane: &LaneInfo, host_incarnation: &str) -> LaneBinding {
         vector_dimension: u32::try_from(lane.dims).unwrap_or(u32::MAX),
         table_epoch: lane.table_epoch,
         host_incarnation: host_incarnation.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DispatchError, LostChargeResolution, eligibility_error, exact_verdicts,
+        lost_charge_resolution,
+    };
+    use kernel::{EligibilityVerdict, KernelError};
+    use retrieval::dispatch::JobLedger;
+
+    fn pending_ledger(attempts: u32) -> JobLedger {
+        JobLedger {
+            state: "pending".to_owned(),
+            attempts,
+            episode_id: None,
+            episode_allowance: 0,
+            episode_deadline: None,
+            host_job_id: None,
+            host_incarnation: None,
+            last_failure_kind: None,
+            stop_reason: None,
+            authorization_ref: None,
+        }
+    }
+
+    #[test]
+    fn only_busy_and_deadline_eligibility_errors_are_retryable() {
+        for error in [KernelError::Busy, KernelError::Deadline] {
+            assert!(matches!(
+                eligibility_error(error),
+                DispatchError::RetryableKernel(actual) if actual == error
+            ));
+        }
+        assert!(matches!(
+            eligibility_error(KernelError::Held),
+            DispatchError::Kernel(KernelError::Held)
+        ));
+    }
+
+    #[test]
+    fn eligibility_cardinality_mismatch_is_a_release_error() {
+        assert!(matches!(
+            exact_verdicts(vec![EligibilityVerdict::Ok], 2),
+            Err(DispatchError::Kernel(KernelError::AdmissionPolicy))
+        ));
+    }
+
+    #[test]
+    fn lost_charge_reply_retries_only_the_same_attempt() {
+        assert_eq!(
+            lost_charge_resolution(2, "host", &pending_ledger(2)),
+            Some(LostChargeResolution::Retry)
+        );
+        assert_eq!(
+            lost_charge_resolution(2, "host", &pending_ledger(3)),
+            Some(LostChargeResolution::Defer)
+        );
+        assert_eq!(lost_charge_resolution(2, "host", &pending_ledger(1)), None);
     }
 }

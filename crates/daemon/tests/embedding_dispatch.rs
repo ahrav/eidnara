@@ -14,20 +14,20 @@ use daemon::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
     lane_binding,
 };
-use daemon::embedding_publication::{ObsoleteCause, Publication};
+use daemon::embedding_publication::Publication;
 use daemon::search_projection::SearchProjection;
 use host_runtime::synapse::inference::InferenceError;
 use host_runtime::synapse::{
-    EmbedTokens, EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SynapseComponent,
-    SynapseLimits,
+    EmbedTokens, EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SubmitOutcome,
+    SynapseComponent, SynapseLimits,
 };
 use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow, KernelStore, ProjectScope,
-    ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass,
-    SourceDescriptorRequest, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourcePageBounds, SourceRow, StaleInput, TaintClass,
+    Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow, KernelStore,
+    MAX_ELIGIBILITY_CANDIDATES, ProjectScope, ProviderEgress, RepositoryProvenance, ScopeSpec,
+    ScopeTermSpec, Sensitivity, SourceClass, SourceDescriptorRequest, SourceHoldAdmission,
+    SourceHoldBinding, SourceHoldBounds, SourcePageBounds, SourceRow, TaintClass,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
@@ -46,7 +46,9 @@ const CONSUMER: &str = "search";
 const KERNEL_INCARNATION: &str = "kernel-1";
 const POLICY: &str = "source-policy.v1";
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PROJECT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SCOPE: &str = "project:a";
+const SCOPE_B: &str = "project:b";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const MODEL: &str = "tiny-test-model";
 const FINGERPRINT: &str = "a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234";
@@ -59,10 +61,19 @@ const CHILD_BARRIER: &str = "EIDNARA_EMBEDDING_DISPATCH_BARRIER";
 
 type Gate = Arc<(Mutex<bool>, Condvar)>;
 
+struct GateGuard(Gate);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        TestEngine::release(&self.0);
+    }
+}
+
 /// A deterministic engine: one whitespace word is one token, the vector is derived from the text, and the next inference can be made to fail, block, or return a malformed vector.
 struct TestEngine {
     calls: AtomicUsize,
     count_calls: AtomicUsize,
+    count_failure: Mutex<Option<InferenceError>>,
     fail_next: Mutex<Option<InferenceError>>,
     malformed: Mutex<bool>,
     gate: Mutex<Option<Gate>>,
@@ -73,6 +84,7 @@ impl TestEngine {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             count_calls: AtomicUsize::new(0),
+            count_failure: Mutex::new(None),
             fail_next: Mutex::new(None),
             malformed: Mutex::new(false),
             gate: Mutex::new(None),
@@ -91,14 +103,14 @@ impl TestEngine {
         *self.fail_next.lock().unwrap() = Some(error);
     }
 
-    fn block_calls(&self) -> Gate {
+    fn block_calls(&self) -> GateGuard {
         let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
         *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
-        gate
+        GateGuard(gate)
     }
 
     fn release(gate: &Gate) {
-        *gate.0.lock().unwrap() = true;
+        *gate.0.lock().unwrap_or_else(|error| error.into_inner()) = true;
         gate.1.notify_all();
     }
 
@@ -120,6 +132,9 @@ impl TestEngine {
 impl EmbeddingEngine for TestEngine {
     fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
         self.count_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.count_failure.lock().unwrap().take() {
+            return Err(error);
+        }
         Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
     }
 
@@ -139,6 +154,37 @@ impl EmbeddingEngine for TestEngine {
         }
         Ok(texts.iter().map(|text| Self::vector_for(text)).collect())
     }
+}
+
+#[test]
+fn a_gate_owner_unwinding_releases_the_inference_worker() {
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let emergency = engine.gate.lock().unwrap().as_ref().unwrap().clone();
+    let worker_engine = Arc::clone(&engine);
+    let (done, completion) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let result = worker_engine.embed(&["blocked input"]);
+        done.send(result).unwrap();
+    });
+    let unwound = std::panic::catch_unwind(move || {
+        let _owner = gate;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while engine.calls() == 0 {
+            assert!(std::time::Instant::now() < deadline, "worker never entered");
+            std::thread::yield_now();
+        }
+        panic!("force unwind after worker entry");
+    });
+    let completed = completion.recv_timeout(Duration::from_secs(1));
+    TestEngine::release(&emergency);
+    worker.join().unwrap();
+    assert_eq!(
+        unwound.unwrap_err().downcast_ref::<&str>(),
+        Some(&"force unwind after worker entry")
+    );
+    assert!(completed.is_ok(), "unwinding left inference parked");
+    assert!(completed.unwrap().is_ok());
 }
 
 fn lane(fingerprint: &str) -> LaneInfo {
@@ -163,6 +209,26 @@ fn component(engine: &Arc<TestEngine>, limits: SynapseLimits) -> SynapseComponen
         limits,
     )
     .unwrap()
+}
+
+fn wait_for_host_result(
+    synapse: &SynapseComponent,
+    host_job: &str,
+    item: &str,
+    text: &str,
+) -> PollOutcome {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = synapse.poll_admitted(&lane(FINGERPRINT), host_job, item, text);
+        if !matches!(result, PollOutcome::Pending { .. }) {
+            return result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "host job stayed pending"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn generation() -> VectorGeneration {
@@ -277,6 +343,21 @@ impl Corpus {
                         ..ScopeTermSpec::default()
                     }],
                 })?;
+                envelope.insert_scope(ScopeSpec {
+                    scope_id: SCOPE_B.to_string(),
+                    object_id: SCOPE_B.to_string(),
+                    source_id: SCOPE_B.to_string(),
+                    domain_id: "domain".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                    terms: vec![ScopeTermSpec {
+                        dimension: Dimension::Project.as_str().to_string(),
+                        operator: "exact".to_string(),
+                        exact_value: Some(PROJECT_B.to_string()),
+                        ..ScopeTermSpec::default()
+                    }],
+                })?;
                 envelope.register_outbox_consumer(CONSUMER, 1)?;
                 Ok(String::new())
             })
@@ -289,11 +370,35 @@ impl Corpus {
 
     /// Publishes one scoped, admitted message descriptor and returns its object id.
     fn publish(&self, key: &str, text: &str) -> String {
-        self.publish_class(key, text, "messages")
+        self.publish_scoped(key, text, SCOPE)
+    }
+
+    fn publish_scoped(&self, key: &str, text: &str, scope: &str) -> String {
+        self.publish_class_scoped_with(key, text, "messages", scope, Sensitivity::Normal, true)
     }
 
     /// Publishes one scoped, admitted descriptor of `class` and returns its object id.
     fn publish_class(&self, key: &str, text: &str, class: &str) -> String {
+        self.publish_class_scoped_with(key, text, class, SCOPE, Sensitivity::Normal, true)
+    }
+
+    fn publish_hidden(&self, key: &str, text: &str) -> String {
+        self.publish_class_scoped_with(key, text, "messages", SCOPE, Sensitivity::Normal, false)
+    }
+
+    fn publish_sensitive(&self, key: &str, text: &str) -> String {
+        self.publish_class_scoped_with(key, text, "messages", SCOPE, Sensitivity::Sensitive, true)
+    }
+
+    fn publish_class_scoped_with(
+        &self,
+        key: &str,
+        text: &str,
+        class: &str,
+        scope: &str,
+        sensitivity: Sensitivity,
+        admitted: bool,
+    ) -> String {
         let handle = self
             .kernel
             .ingest_exact_artifact(ArtifactIngestRequest {
@@ -309,7 +414,7 @@ impl Corpus {
                 media_type: "text/plain".to_string(),
                 retention_class: "canonical".to_string(),
                 retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
+                asserted_sensitivity: sensitivity,
                 provider_egress: ProviderEgress::RemoteAllowed,
                 provenance: Some(RepositoryProvenance {
                     repository_id: "repo".to_string(),
@@ -355,27 +460,29 @@ impl Corpus {
                             span: None,
                         },
                         domain_id: "domain",
-                        scope_id: Some(SCOPE),
+                        scope_id: Some(scope),
                         evidence_id: &handle.evidence_id,
                         artifact_digest: &handle.digest,
                         buffer: text,
-                        sensitivity: Sensitivity::Normal,
+                        sensitivity,
                         observed_at: 1,
                     })
                     .unwrap();
-                envelope.record_admission(AdmissionRequest {
-                    candidate_id: None,
-                    subject_object_id: Some(outcome.object_id.clone()),
-                    source_class: Some(SourceClass::ExplicitUser),
-                    taint_class: Some(TaintClass::UserExplicit),
-                    event: AdmissionEvent {
-                        kind: EventKind::Other,
-                        trigger_object_id: None,
-                        approval_object_id: None,
-                        evidence_id: None,
-                        reason: "test".to_string(),
-                    },
-                })?;
+                if admitted {
+                    envelope.record_admission(AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some(outcome.object_id.clone()),
+                        source_class: Some(SourceClass::ExplicitUser),
+                        taint_class: Some(TaintClass::UserExplicit),
+                        event: AdmissionEvent {
+                            kind: EventKind::Other,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "test".to_string(),
+                        },
+                    })?;
+                }
                 object = outcome.object_id;
                 Ok(String::new())
             })
@@ -557,6 +664,30 @@ fn ledger(data_home: &Path, occurrence_id: &str) -> Ledger {
     .unwrap()
 }
 
+fn insert_wrong_scope_jobs(data_home: &Path, occurrence_id: &str, count: usize) {
+    let conn = Connection::open(search_path(data_home)).unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=0 WHERE occurrence_id=?1",
+        [occurrence_id],
+    )
+    .unwrap();
+    conn.execute(
+        "WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<?1)
+         INSERT INTO vector_generations(generation_id,embedding_model,tokenizer_fingerprint,
+             vector_dimension,generation_epoch,state,created_at,updated_at)
+         SELECT printf('wrong-scope-generation-%04d',n),?2,?3,?4,1,'building',0,0 FROM ids",
+        rusqlite::params![count as i64, MODEL, FINGERPRINT, DIMS as i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO embedding_jobs(job_id,occurrence_id,generation_id,state,created_at,updated_at)
+         SELECT 'wrong-scope-job-'||generation_id,?1,generation_id,'pending',1,0
+         FROM vector_generations WHERE generation_id GLOB 'wrong-scope-generation-*'",
+        [occurrence_id],
+    )
+    .unwrap();
+}
+
 /// One real dispatch pass on a blocking thread of the test runtime, so the component's inference workers run while the pass polls.
 fn pass(
     corpus: &Corpus,
@@ -653,83 +784,104 @@ fn reopen(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publication_scope_and_search_deadline_preserve_admission_without_recharging() {
-    for blocked in [Blocked::WrongScope, Blocked::SearchDeadline] {
-        let dir = tempfile::tempdir().unwrap();
-        let corpus = Corpus::open(dir.path());
-        corpus.seed();
-        let object = corpus.publish("publication-blocked", "admitted input");
-        let (projection, rows) = corpus.bootstrap(dir.path());
-        let occurrence = occurrence_of(&rows, &object);
-        let engine = TestEngine::new();
-        let synapse = component(&engine, SynapseLimits::default());
-        let project = ProjectScope::new(if blocked == Blocked::WrongScope {
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-        } else {
-            PROJECT
+async fn payload_corruption_quarantines_before_tokenization_or_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("integrity", "hello");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let before = ledger(dir.path(), occurrence);
+    Connection::open(search_path(dir.path()))
+        .unwrap()
+        .execute("UPDATE payloads SET bytes=?1", [b"jello".as_slice()])
+        .unwrap();
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    for _ in 0..2 {
+        let result = dispatcher.run_pass(
+            eligibility(&project),
+            &bounds(Duration::from_secs(5)),
+            NOW,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(result, Err(DispatchError::Quarantined(ref quarantine))
+            if quarantine.kind == daemon::search_writer::QuarantineKind::Integrity),
+            "{result:?}"
+        );
+        assert_eq!(ledger(dir.path(), occurrence), before);
+        assert_eq!(engine.count_calls(), 0);
+        assert_eq!(engine.calls(), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_search_deadline_preserves_admission_without_recharging() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("publication-blocked", "admitted input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut bounds = bounds(Duration::from_secs(5));
+    bounds.guard_deadline = Duration::from_millis(300);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut events = Vec::new();
+    let mut at_admission = None;
+    let mut write_lock = None;
+    let end = dispatcher
+        .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+            if matches!(event, DispatchEvent::Admitted { .. }) {
+                at_admission = Some(ledger(dir.path(), occurrence));
+                let conn = Connection::open(search_path(dir.path())).unwrap();
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                write_lock = Some(conn);
+            }
+            events.push(event);
         })
         .unwrap();
-        let mut bounds = bounds(Duration::from_secs(5));
-        bounds.guard_deadline = Duration::from_millis(300);
-        let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
-        let mut events = Vec::new();
-        let mut at_admission = None;
-        let mut write_lock = None;
-        let end = dispatcher
-            .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-                if matches!(event, DispatchEvent::Admitted { .. }) {
-                    at_admission = Some(ledger(dir.path(), occurrence));
-                    if blocked == Blocked::SearchDeadline {
-                        let conn = Connection::open(search_path(dir.path())).unwrap();
-                        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-                        write_lock = Some(conn);
-                    }
-                }
-                events.push(event);
-            })
-            .unwrap();
-        assert_eq!(end, Some(blocked));
-        let admitted_row = at_admission.expect("publication follows admission");
-        assert_eq!(admitted_row.state, "admitted");
-        assert_eq!(admitted_row.attempts, 1);
-        assert_eq!(ledger(dir.path(), occurrence), admitted_row);
-        assert!(stopped(&events).is_empty());
-        assert!(retried(&events).is_empty());
-        assert!(published(&events).is_empty());
-        assert_eq!(engine.calls(), 1);
-        assert!(projection.quarantine().is_none());
+    assert_eq!(end, Some(Blocked::SearchDeadline));
+    let admitted_row = at_admission.expect("publication follows admission");
+    assert_eq!(admitted_row.state, "admitted");
+    assert_eq!(admitted_row.attempts, 1);
+    assert_eq!(ledger(dir.path(), occurrence), admitted_row);
+    assert!(stopped(&events).is_empty());
+    assert!(retried(&events).is_empty());
+    assert!(published(&events).is_empty());
+    assert_eq!(engine.calls(), 1);
+    assert!(projection.quarantine().is_none());
 
-        drop(write_lock);
-        let project = ProjectScope::new(PROJECT).unwrap();
-        events.clear();
-        assert_eq!(
-            dispatcher
-                .run_pass(eligibility(&project), &bounds, NOW + 1, &mut |event| {
-                    events.push(event)
-                })
-                .unwrap(),
-            None
-        );
-        let completed = ledger(dir.path(), occurrence);
-        assert_eq!(completed.state, "embedded");
-        assert_eq!(completed.attempts, admitted_row.attempts);
-        assert_eq!(completed.host_job_id, admitted_row.host_job_id);
-        assert_eq!(completed.episode, admitted_row.episode);
-        assert_eq!(
-            completed.vector,
-            Some(encode(&TestEngine::vector_for("admitted input")))
-        );
-        assert!(admitted(&events).is_empty());
-        assert_eq!(
-            published(&events),
-            vec![(completed.job_id, Publication::Embedded)]
-        );
-        assert_eq!(
-            engine.calls(),
-            1,
-            "publication must reuse the retained result"
-        );
-    }
+    drop(write_lock);
+    events.clear();
+    assert_eq!(
+        dispatcher
+            .run_pass(eligibility(&project), &bounds, NOW + 1, &mut |event| {
+                events.push(event)
+            })
+            .unwrap(),
+        None
+    );
+    let completed = ledger(dir.path(), occurrence);
+    assert_eq!(completed.state, "embedded");
+    assert_eq!(completed.attempts, admitted_row.attempts);
+    assert_eq!(completed.host_job_id, admitted_row.host_job_id);
+    assert_eq!(completed.episode, admitted_row.episode);
+    assert_eq!(
+        completed.vector,
+        Some(encode(&TestEngine::vector_for("admitted input")))
+    );
+    assert!(admitted(&events).is_empty());
+    assert_eq!(
+        published(&events),
+        vec![(completed.job_id, Publication::Embedded)]
+    );
+    assert_eq!(engine.calls(), 1, "publication reuses the retained result");
 }
 
 fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) {
@@ -768,7 +920,7 @@ fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) 
                             Arc::clone(&engine_b) as Arc<dyn EmbeddingEngine>,
                         )
                         .unwrap();
-                    TestEngine::release(&gate);
+                    TestEngine::release(&gate.0);
                 }
                 events.push(event);
             },
@@ -965,7 +1117,7 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     }
     assert_eq!(engine.calls(), 1);
 
-    TestEngine::release(&gate);
+    TestEngine::release(&gate.0);
     let (_, events) = pass(
         &corpus,
         &projection,
@@ -1009,7 +1161,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let held = ledger(dir.path(), occurrence);
     assert_eq!(held.state, "admitted");
     let first_host = first.host_incarnation().to_owned();
-    TestEngine::release(&gate);
+    TestEngine::release(&gate.0);
     drop(first);
 
     // A lane differing in any one identity field is refused before any row is touched.
@@ -1414,11 +1566,8 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     );
     let job = ledger(dir.path(), &occurrence);
     assert_eq!(
-        published(&events),
-        vec![(
-            job.job_id.clone(),
-            Publication::Obsolete(ObsoleteCause::Canonical(StaleInput::Retracted))
-        )]
+        stopped(&events),
+        vec![(job.job_id.clone(), "retracted".to_string())]
     );
     assert_eq!(
         (job.state.as_str(), job.vector.is_none()),
@@ -1427,7 +1576,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
     let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
-    assert_eq!(engine.calls(), 1);
+    assert_eq!(engine.calls(), 0);
     drop((synapse, projection, corpus, dir));
 
     // An expired episode deadline stops before any charge.
@@ -1641,7 +1790,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
         .unwrap();
     assert_eq!(ledgered.attempts, 1);
 
-    TestEngine::release(&gate);
+    TestEngine::release(&gate.0);
     let (_, events) = pass(
         &corpus,
         &projection,
@@ -1703,7 +1852,348 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     assert_eq!(end, None);
 }
 
-/// A charge-statement store error rolls back the charge; the next pass reuses and admits the retained host job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let text = "failed first attempt";
+    let object = corpus.publish("rollback", text);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    engine.fail_next(InferenceError::Execution("controlled failure".to_owned()));
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
+    let mut tight = DispatchBounds {
+        grant: grant(1, NOW + DAY_MS),
+        ..bounds(Duration::ZERO)
+    };
+    let mut events = Vec::new();
+    dispatcher
+        .run_pass(eligibility(&project), &tight, NOW, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    let charged = ledger(dir.path(), occurrence);
+    let item = retrieval::dispatch::first_episode_id(&charged.job_id);
+    // The worker is parked, so identical submission can only return its existing identity.
+    let input = synapse
+        .preflight_embedding_for_lane(&lane(FINGERPRINT), text)
+        .unwrap();
+    let SubmitOutcome::Queued { job_id: h1 } = synapse.submit_admitted(&input, &item).unwrap()
+    else {
+        panic!("the parked host job must be retained");
+    };
+    drop(gate);
+    assert!(matches!(
+        wait_for_host_result(&synapse, &h1, &item, text),
+        PollOutcome::Failed { .. }
+    ));
+    tight.result_wait = Duration::from_secs(5);
+    dispatcher
+        .run_pass(eligibility(&project), &tight, NOW + 10, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    let stopped_row = ledger(dir.path(), occurrence);
+    assert_eq!(
+        engine.calls(),
+        1,
+        "rollback must not permit a replacement H2"
+    );
+    assert_eq!((charged.state.as_str(), charged.attempts), ("admitted", 1));
+    assert_eq!(charged.host_job_id.as_deref(), Some(h1.as_str()));
+    assert_eq!(
+        (stopped_row.state.as_str(), stopped_row.attempts),
+        ("failed", 1)
+    );
+    assert_eq!(stopped_row.stop_reason.as_deref(), Some("exhausted"));
+    assert_eq!(stopped_row.episode, charged.episode);
+    assert!(stopped_row.vector.is_none());
+    assert_eq!(admitted(&events), vec![(charged.job_id, 1)]);
+    assert!(published(&events).is_empty());
+    dispatcher
+        .run_pass(eligibility(&project), &tight, NOW + 20, &mut |_| {})
+        .unwrap();
+    assert_eq!(ledger(dir.path(), occurrence), stopped_row);
+    assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("terminal-blocked", "obsolete input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    corpus.retire(&object);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut limits = bounds(Duration::from_secs(5));
+    limits.guard_deadline = Duration::from_millis(300);
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut write_lock = None;
+    let mut events = Vec::new();
+
+    let end = dispatcher
+        .run_pass(eligibility(&project), &limits, NOW, &mut |event| {
+            if matches!(event, DispatchEvent::Bound(_)) {
+                let conn = Connection::open(search_path(dir.path())).unwrap();
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                write_lock = Some(conn);
+            }
+            events.push(event);
+        })
+        .unwrap();
+    assert_eq!(end, Some(Blocked::SearchDeadline));
+    assert_eq!(ledger(dir.path(), occurrence).state, "pending");
+    assert!(stopped(&events).is_empty());
+    assert!(projection.quarantine().is_none());
+
+    drop(write_lock);
+    events.clear();
+    assert_eq!(
+        dispatcher
+            .run_pass(eligibility(&project), &limits, NOW + 1, &mut |event| {
+                events.push(event)
+            })
+            .unwrap(),
+        None
+    );
+    assert_eq!(ledger(dir.path(), occurrence).state, "obsolete");
+    let stopped = stopped(&events);
+    assert_eq!(stopped.len(), 1);
+    assert_eq!(stopped[0].1, "retracted");
+    assert_eq!(engine.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciled_terminal_commit_emits_stopped_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("terminal-lost-reply", "obsolete input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    corpus.retire(&object);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    dispatcher.inject_fault_for_test(DispatchFault::LoseObsoletionReply);
+    let mut events = Vec::new();
+
+    assert_eq!(
+        dispatcher
+            .run_pass(
+                eligibility(&project),
+                &bounds(Duration::from_secs(5)),
+                NOW,
+                &mut |event| events.push(event),
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(ledger(dir.path(), occurrence).state, "obsolete");
+    assert_eq!(
+        stopped(&events),
+        vec![(
+            ledger(dir.path(), occurrence).job_id,
+            "retracted".to_owned()
+        )]
+    );
+    assert_eq!(engine.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actionable_rows_are_repolled_before_later_pending_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    for index in 0..3 {
+        corpus.publish(&format!("actionable-{index}"), &format!("input {index}"));
+    }
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let ordered_occurrences: Vec<String> = {
+        let conn = inspect(dir.path());
+        let mut statement = conn
+            .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY created_at,job_id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut limits = bounds(Duration::ZERO);
+    limits.max_jobs = NonZeroUsize::new(2).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut events = Vec::new();
+
+    dispatcher
+        .run_pass(eligibility(&project), &limits, NOW, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert_eq!(admitted(&events).len(), 2);
+    assert_eq!(
+        ledger(dir.path(), &ordered_occurrences[0]).state,
+        "admitted"
+    );
+    assert_eq!(
+        ledger(dir.path(), &ordered_occurrences[1]).state,
+        "admitted"
+    );
+    assert_eq!(ledger(dir.path(), &ordered_occurrences[2]).state, "pending");
+
+    drop(gate);
+    events.clear();
+    limits.result_wait = Duration::from_secs(5);
+    dispatcher
+        .run_pass(eligibility(&project), &limits, NOW + 1, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert_eq!(
+        ledger(dir.path(), &ordered_occurrences[0]).state,
+        "embedded"
+    );
+    assert_eq!(
+        ledger(dir.path(), &ordered_occurrences[1]).state,
+        "embedded"
+    );
+    assert_eq!(ledger(dir.path(), &ordered_occurrences[2]).state, "pending");
+    assert_eq!(engine.calls(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eligibility_cursor_resets_when_project_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object_b = corpus.publish_scoped("binding-b", "project b input", SCOPE_B);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence_b = occurrence_of(&rows, &object_b);
+    insert_wrong_scope_jobs(dir.path(), occurrence_b, 2 * MAX_ELIGIBILITY_CANDIDATES);
+    let target = ledger(dir.path(), occurrence_b);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project_a = ProjectScope::new(PROJECT).unwrap();
+    let project_b = ProjectScope::new(PROJECT_B).unwrap();
+    let mut limits = bounds(Duration::from_secs(5));
+    limits.max_jobs = NonZeroUsize::new(1).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+
+    assert_eq!(
+        dispatcher
+            .run_pass(eligibility(&project_a), &limits, NOW, &mut |_| {})
+            .unwrap(),
+        None
+    );
+    assert_eq!(ledger(dir.path(), occurrence_b).state, "pending");
+    let cursor = dispatcher
+        .eligibility_cursor_for_test()
+        .expect("two full WrongScope pages carry a cursor");
+    let conn = inspect(dir.path());
+    let target_created_at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM embedding_jobs WHERE job_id=?1",
+            [&target.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        (target_created_at, target.job_id.as_str()) < (cursor.created_at, cursor.job_id.as_str()),
+        "project B's oldest target must precede project A's carried cursor"
+    );
+    let rows_through_cursor: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs
+             WHERE created_at<?1 OR (created_at=?1 AND job_id<=?2)",
+            rusqlite::params![cursor.created_at, cursor.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rows_after_cursor: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs
+             WHERE created_at>?1 OR (created_at=?1 AND job_id>?2)",
+            rusqlite::params![cursor.created_at, cursor.job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rows_through_cursor,
+        i64::try_from(2 * MAX_ELIGIBILITY_CANDIDATES).unwrap()
+    );
+    assert_eq!(rows_after_cursor, 1, "fixture exceeds the two-page cap");
+    drop(conn);
+    let mut events = Vec::new();
+    dispatcher
+        .run_pass(eligibility(&project_b), &limits, NOW + 1, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert_eq!(ledger(dir.path(), occurrence_b).state, "embedded");
+    assert_eq!(admitted(&events), vec![(target.job_id.clone(), 1)]);
+    assert_eq!(
+        published(&events),
+        vec![(target.job_id, Publication::Embedded)]
+    );
+    assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unresolved_charge_retry_quarantines_without_resubmission() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("charge-quarantine", "charge refused twice");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let before = ledger(dir.path(), occurrence);
+    Connection::open(search_path(dir.path()))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_charge BEFORE UPDATE OF attempts ON embedding_jobs
+         BEGIN SELECT RAISE(ABORT,'database is locked'); END;",
+        )
+        .unwrap();
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
+    for _ in 0..2 {
+        let result = dispatcher.run_pass(
+            eligibility(&project),
+            &bounds(Duration::ZERO),
+            NOW,
+            &mut |_| {},
+        );
+        assert!(
+            matches!(result, Err(DispatchError::Quarantined(_))),
+            "{result:?}"
+        );
+        assert_eq!(ledger(dir.path(), occurrence), before);
+        assert_eq!(
+            engine.count_calls(),
+            1,
+            "quarantine prevents another submission"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_charge_statement_is_retried_not_quarantined() {
     let dir = tempfile::tempdir().unwrap();
@@ -1726,15 +2216,13 @@ async fn a_refused_charge_statement_is_retried_not_quarantined() {
     })
     .unwrap();
     assert_eq!(end, None);
-    assert!(admitted(&events).is_empty(), "{events:?}");
-    let uncharged = ledger(dir.path(), occurrence);
+    let charged = ledger(dir.path(), occurrence);
+    assert_eq!((charged.state.as_str(), charged.attempts), ("embedded", 1));
+    assert_eq!(admitted(&events), vec![(charged.job_id.clone(), 1)]);
+    assert_eq!(admitted_host(&events, &charged.job_id), charged.host_job_id);
     assert_eq!(
-        (
-            uncharged.state.as_str(),
-            uncharged.attempts,
-            uncharged.host_job_id
-        ),
-        ("pending", 0, None)
+        published(&events),
+        vec![(charged.job_id.clone(), Publication::Embedded)]
     );
 
     let mut events = Vec::new();
@@ -1745,12 +2233,9 @@ async fn a_refused_charge_statement_is_retried_not_quarantined() {
     })
     .unwrap();
     assert_eq!(end, None);
-    assert_eq!(admitted(&events), vec![(uncharged.job_id.clone(), 1)]);
-    assert_eq!(
-        published(&events),
-        vec![(uncharged.job_id.clone(), Publication::Embedded)]
-    );
-    assert_eq!(ledger(dir.path(), occurrence).attempts, 1);
+    assert!(admitted(&events).is_empty());
+    assert!(published(&events).is_empty());
+    assert_eq!(ledger(dir.path(), occurrence), charged);
     assert_eq!(
         engine.calls(),
         1,
@@ -1977,7 +2462,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     // The result is still outstanding: the row is polled, not judged exhausted.
     let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
     let still = ledger(dir.path(), occurrence);
-    TestEngine::release(&gate);
+    TestEngine::release(&gate.0);
     assert_eq!(end, None);
     assert!(stopped(&events).is_empty(), "{events:?}");
     assert!(admitted(&events).is_empty(), "{events:?}");
@@ -1985,6 +2470,24 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
         (still.state.as_str(), still.attempts, still.stop_reason),
         ("admitted", 1, None)
     );
+
+    assert!(matches!(
+        wait_for_host_result(
+            &synapse,
+            held.host_job_id.as_deref().unwrap(),
+            held.episode.as_deref().unwrap(),
+            "last attempt",
+        ),
+        PollOutcome::Page(_)
+    ));
+    *engine.count_failure.lock().unwrap() = Some(InferenceError::Execution(
+        "completion count failed".to_owned(),
+    ));
+    let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    assert_eq!(end, None);
+    assert_eq!(ledger(dir.path(), occurrence), held);
+    assert!(stopped(&events).is_empty());
+    assert!(retried(&events).is_empty());
 
     let (_, events) = pass(
         &corpus,
@@ -2009,89 +2512,442 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_count_lane_failures_preserve_the_final_attempt() {
+    for failure in [
+        InferenceError::Artifact("completion artifact failure".to_owned()),
+        InferenceError::Invariant("completion invariant failure".to_owned()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let text = "retained final result";
+        let object = corpus.publish("completion-lane-failure", text);
+        let (projection, rows) = corpus.bootstrap(dir.path());
+        let occurrence = occurrence_of(&rows, &object);
+        let engine = TestEngine::new();
+        let gate = engine.block_calls();
+        let synapse = component(&engine, SynapseLimits::default());
+        let tight = DispatchBounds {
+            grant: grant(1, NOW + DAY_MS),
+            ..bounds(Duration::from_millis(50))
+        };
+        pass(&corpus, &projection, &synapse, &tight, NOW);
+        let held = ledger(dir.path(), occurrence);
+        drop(gate);
+        assert!(matches!(
+            wait_for_host_result(
+                &synapse,
+                held.host_job_id.as_deref().unwrap(),
+                held.episode.as_deref().unwrap(),
+                text,
+            ),
+            PollOutcome::Page(_)
+        ));
+        *engine.count_failure.lock().unwrap() = Some(failure.clone());
+
+        let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+
+        assert!(matches!(
+            end,
+            Some(Blocked::LaneUnavailable(
+                LaneUnavailableState::Disabled | LaneUnavailableState::Failing
+            ))
+        ));
+        assert_eq!(ledger(dir.path(), occurrence), held);
+        assert!(stopped(&events).is_empty());
+        assert!(retried(&events).is_empty());
+        assert!(published(&events).is_empty());
+        assert_eq!(engine.calls(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
+    let mut failures = Vec::new();
+    for allowance in [1, 2] {
+        for count_failure in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let corpus = Corpus::open(dir.path());
+            corpus.seed();
+            let text = "evicted before polled";
+            let object = corpus.publish("m0", text);
+            let (projection, rows) = corpus.bootstrap(dir.path());
+            let occurrence = occurrence_of(&rows, &object);
+            let engine = TestEngine::new();
+            let gate = engine.block_calls();
+            let synapse = component(
+                &engine,
+                SynapseLimits {
+                    max_retained_jobs: 1,
+                    max_queued_jobs: 1,
+                    ..SynapseLimits::default()
+                },
+            );
+            let tight = DispatchBounds {
+                grant: grant(allowance, NOW + DAY_MS),
+                ..bounds(Duration::from_millis(50))
+            };
+            let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+            let held = ledger(dir.path(), occurrence);
+            assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
+            assert_eq!(held.state, "admitted");
+            let evicted_host_job = held.host_job_id.clone().unwrap();
+            let item = held.episode.clone().unwrap();
+
+            drop(gate);
+            assert!(matches!(
+                wait_for_host_result(&synapse, &evicted_host_job, &item, text),
+                PollOutcome::Page(_)
+            ));
+            assert_eq!(engine.calls(), 1);
+
+            let sentinel = synapse
+                .preflight_embedding_for_lane(&lane(FINGERPRINT), "eviction sentinel")
+                .unwrap();
+            let SubmitOutcome::Queued {
+                job_id: sentinel_host,
+            } = synapse.submit_admitted(&sentinel, "sentinel").unwrap()
+            else {
+                panic!("sentinel must be admitted");
+            };
+            assert!(matches!(
+                wait_for_host_result(&synapse, &sentinel_host, "sentinel", "eviction sentinel"),
+                PollOutcome::Page(_)
+            ));
+            assert_eq!(engine.calls(), 2, "one original and one sentinel inference");
+            assert!(matches!(
+                synapse.poll_admitted(&lane(FINGERPRINT), &evicted_host_job, &item, text),
+                PollOutcome::Restarted
+            ));
+
+            let blocker = if count_failure {
+                *engine.count_failure.lock().unwrap() =
+                    Some(InferenceError::Execution("count failed".to_owned()));
+                None
+            } else {
+                let gate = engine.block_calls();
+                let input = synapse
+                    .preflight_embedding_for_lane(&lane(FINGERPRINT), "queue holder")
+                    .unwrap();
+                let SubmitOutcome::Queued { job_id } =
+                    synapse.submit_admitted(&input, "queue-holder").unwrap()
+                else {
+                    panic!("queue holder must be admitted");
+                };
+                assert!(matches!(
+                    synapse.poll_admitted(
+                        &lane(FINGERPRINT),
+                        &job_id,
+                        "queue-holder",
+                        "queue holder"
+                    ),
+                    PollOutcome::Pending { .. }
+                ));
+                Some((gate, job_id))
+            };
+            let (end, deferred_events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+            let deferred = ledger(dir.path(), occurrence);
+            if let Some((gate, host)) = blocker {
+                drop(gate);
+                assert!(matches!(
+                    wait_for_host_result(&synapse, &host, "queue-holder", "queue holder"),
+                    PollOutcome::Page(_)
+                ));
+            }
+            assert_eq!(end, None);
+            if deferred != held
+                || !retried(&deferred_events).is_empty()
+                || !stopped(&deferred_events).is_empty()
+            {
+                failures.push((
+                    allowance,
+                    count_failure,
+                    deferred.state,
+                    deferred.attempts,
+                    deferred.stop_reason,
+                ));
+                continue;
+            }
+
+            let (end, events) = pass(
+                &corpus,
+                &projection,
+                &synapse,
+                &DispatchBounds {
+                    grant: grant(allowance, NOW + DAY_MS),
+                    ..bounds(Duration::from_secs(5))
+                },
+                NOW,
+            );
+            assert_eq!(end, None);
+            assert!(stopped(&events).is_empty(), "{events:?}");
+            assert!(retried(&events).is_empty(), "{events:?}");
+            assert_eq!(
+                admitted(&events),
+                vec![(held.job_id.clone(), 1)],
+                "the re-admission reports the attempt already charged"
+            );
+            assert_eq!(
+                published(&events),
+                vec![(held.job_id.clone(), Publication::Embedded)]
+            );
+            let done = ledger(dir.path(), occurrence);
+            assert_eq!(
+                (done.state.as_str(), done.attempts, done.episode),
+                ("embedded", 1, held.episode)
+            );
+            assert_ne!(done.host_job_id.as_deref(), Some(evicted_host_job.as_str()));
+            assert_eq!(done.vector, Some(encode(&TestEngine::vector_for(text))));
+            assert_eq!(
+                engine.calls(),
+                3 + usize::from(!count_failure),
+                "two runs of the charged attempt plus the sentinel and any queue holder"
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "temporary readmission refusal changed the charged ledger: {failures:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_selection_skips_wrong_scope_without_starving_eligible_work() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
-    let object = corpus.publish("m0", "evicted before polled");
+    let object_b = corpus.publish_scoped("project-b", "project B input", SCOPE_B);
+    let object_a = corpus.publish_scoped("project-a", "project A input", SCOPE);
     let (projection, rows) = corpus.bootstrap(dir.path());
-    let occurrence = occurrence_of(&rows, &object);
+    let occurrence_a = occurrence_of(&rows, &object_a);
+    let occurrence_b = occurrence_of(&rows, &object_b);
+    let job_b = ledger(dir.path(), occurrence_b).job_id;
+    let before_b = projection
+        .read(|conn| job_ledger(conn, &job_b))
+        .unwrap()
+        .unwrap();
+    insert_wrong_scope_jobs(dir.path(), occurrence_b, 1_024);
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
-    let synapse = component(
-        &engine,
-        SynapseLimits {
-            retention: Duration::from_millis(100),
-            ..SynapseLimits::default()
-        },
-    );
-    let tight = DispatchBounds {
-        grant: grant(1, NOW + DAY_MS),
-        ..bounds(Duration::from_millis(50))
+    let synapse = component(&engine, SynapseLimits::default());
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds(Duration::from_secs(5))
     };
-    let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
-    let held = ledger(dir.path(), occurrence);
-    assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
-    assert_eq!(held.state, "admitted");
-    let evicted_host_job = held.host_job_id.clone().unwrap();
-    let item = held.episode.clone().unwrap();
 
-    // The worker finishes and its result ages past retention before any pass polls it.
-    TestEngine::release(&gate);
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if matches!(
-            synapse.poll_admitted(
-                &lane(FINGERPRINT),
-                &evicted_host_job,
-                &item,
-                "evicted before polled"
-            ),
-            PollOutcome::Restarted
-        ) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the completed job was never evicted"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let project_a = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut events = Vec::new();
+    let end = dispatcher
+        .run_pass(eligibility(&project_a), &one, NOW, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert_eq!(end, None);
+    assert_eq!(
+        projection
+            .read(|conn| job_ledger(conn, &job_b))
+            .unwrap()
+            .unwrap(),
+        before_b
+    );
+    assert_eq!(ledger(dir.path(), occurrence_a).state, "embedded");
+    assert_eq!(published(&events).len(), 1, "{events:?}");
+    assert_eq!(
+        engine.calls(),
+        1,
+        "wrong-scope input never reaches inference"
+    );
+
+    let project_b = ProjectScope::new(PROJECT_B).unwrap();
+    events.clear();
+    let end = dispatcher
+        .run_pass(eligibility(&project_b), &one, NOW, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert_eq!(end, None);
+    assert_eq!(
+        projection
+            .read(|conn| job_ledger(conn, &job_b))
+            .unwrap()
+            .unwrap()
+            .state,
+        "embedded"
+    );
+    assert_eq!(published(&events).len(), 1, "{events:?}");
+    assert_eq!(engine.calls(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object_b = corpus.publish_scoped("project-b-many", "project B input", SCOPE_B);
+    let object_a = corpus.publish_scoped("project-a-after-many", "project A input", SCOPE);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence_a = occurrence_of(&rows, &object_a);
+    let occurrence_b = occurrence_of(&rows, &object_b);
+    insert_wrong_scope_jobs(dir.path(), occurrence_b, 2_048);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds(Duration::from_secs(5))
+    };
+    let project_a = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+
+    let first = dispatcher
+        .run_pass(eligibility(&project_a), &one, NOW, &mut |_| {})
+        .unwrap();
+    assert_eq!(first, None);
+    assert_eq!(ledger(dir.path(), occurrence_a).state, "pending");
+    assert_eq!(engine.calls(), 0);
+
+    let second = dispatcher
+        .run_pass(eligibility(&project_a), &one, NOW, &mut |_| {})
+        .unwrap();
+    assert_eq!(second, None);
+    assert_eq!(ledger(dir.path(), occurrence_a).state, "embedded");
     assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_jobs_bounds_terminal_dispositions() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let objects: Vec<_> = (0..3)
+        .map(|index| corpus.publish(&format!("terminal-{index}"), "obsolete input"))
+        .collect();
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    for object in &objects {
+        corpus.retire(object);
+    }
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds(Duration::from_secs(5))
+    };
+
+    let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW);
+
+    assert_eq!(end, None);
+    let conn = inspect(dir.path());
+    let obsolete: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM embedding_jobs WHERE state='obsolete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(obsolete, 1);
+    assert_eq!(stopped(&events).len(), 1);
+    assert_eq!(engine.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let malformed = corpus.publish("malformed-candidate", "malformed input");
+    let valid = corpus.publish("valid-after-malformed", "valid input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let malformed_occurrence = occurrence_of(&rows, &malformed);
+    let valid_occurrence = occurrence_of(&rows, &valid);
+    Connection::open(search_path(dir.path()))
+        .unwrap()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            [malformed_occurrence],
+        )
+        .unwrap();
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let two = DispatchBounds {
+        max_jobs: NonZeroUsize::new(2).unwrap(),
+        ..bounds(Duration::from_secs(5))
+    };
+
+    let (end, events) = pass(&corpus, &projection, &synapse, &two, NOW);
+
+    assert_eq!(end, None);
+    assert_eq!(ledger(dir.path(), malformed_occurrence).state, "obsolete");
+    assert_eq!(ledger(dir.path(), valid_occurrence).state, "embedded");
+    assert!(
+        stopped(&events)
+            .iter()
+            .any(|(_, reason)| reason == "invalid_identity"),
+        "{events:?}"
+    );
+    assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_and_sensitive_inputs_are_obsoleted_without_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let hidden = corpus.publish_hidden("hidden-before-dispatch", "hidden input");
+    let sensitive = corpus.publish_sensitive("sensitive-before-dispatch", "sensitive input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let hidden_occurrence = occurrence_of(&rows, &hidden);
+    let sensitive_occurrence = occurrence_of(&rows, &sensitive);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
 
     let (end, events) = pass(
         &corpus,
         &projection,
         &synapse,
-        &DispatchBounds {
-            grant: grant(1, NOW + DAY_MS),
-            ..bounds(Duration::from_secs(5))
-        },
+        &bounds(Duration::from_secs(5)),
         NOW,
     );
+
     assert_eq!(end, None);
-    assert!(stopped(&events).is_empty(), "{events:?}");
-    assert!(retried(&events).is_empty(), "{events:?}");
-    assert_eq!(
-        admitted(&events),
-        vec![(held.job_id.clone(), 1)],
-        "the re-admission reports the attempt already charged"
+    assert_eq!(ledger(dir.path(), hidden_occurrence).state, "obsolete");
+    assert_eq!(ledger(dir.path(), sensitive_occurrence).state, "obsolete");
+    assert_eq!(engine.count_calls(), 0, "terminal inputs skip tokenization");
+    assert_eq!(engine.calls(), 0, "terminal inputs skip inference");
+    let reasons: Vec<_> = stopped(&events)
+        .into_iter()
+        .map(|(_, reason)| reason)
+        .collect();
+    assert!(reasons.contains(&"hidden".to_owned()), "{events:?}");
+    assert!(
+        reasons.contains(&"provider_sensitive".to_owned()),
+        "{events:?}"
     );
-    assert_eq!(
-        published(&events),
-        vec![(held.job_id.clone(), Publication::Embedded)]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_selection_still_obsoletes_retracted_input_without_inference() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("retracted-before-dispatch", "obsolete input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    corpus.retire(&object);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+
+    let (end, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &bounds(Duration::from_secs(5)),
+        NOW,
     );
-    let done = ledger(dir.path(), occurrence);
-    assert_eq!(
-        (done.state.as_str(), done.attempts, done.episode),
-        ("embedded", 1, held.episode)
-    );
-    assert_ne!(done.host_job_id.as_deref(), Some(evicted_host_job.as_str()));
-    assert_eq!(
-        done.vector,
-        Some(encode(&TestEngine::vector_for("evicted before polled")))
-    );
-    assert_eq!(engine.calls(), 2, "the charged attempt ran again");
+
+    assert_eq!(end, None);
+    assert_eq!(ledger(dir.path(), occurrence).state, "obsolete");
+    assert_eq!(engine.count_calls(), 0, "obsolete input skips tokenization");
+    assert_eq!(engine.calls(), 0, "obsolete input skips inference");
+    assert!(published(&events).is_empty());
 }
 
 /// With room for one job, the pass takes the row created earliest even when its identifier sorts last.

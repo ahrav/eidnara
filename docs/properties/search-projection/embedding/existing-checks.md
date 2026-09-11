@@ -6,10 +6,18 @@ External scope and why-consulted sources: [source register](catalog.md#source-re
 All checks in this inventory are **unaudited** for this handoff. Source inspection
 does not establish test adequacy, coverage, or a successful execution.
 
-The inventory covers checks bearing on the nine embedding deltas and the
+The inventory covers checks bearing on the original nine embedding deltas and the
 existing mechanisms they reuse. The full Claude tokenizer and host protocol
 inventories remain in their owning catalogs. Their historical run claims are
 not refreshed by this document.
+
+The bounded-dispatch update adds two catalog records after this pinned inventory.
+Its checks are `project_scan_cursor_advances_across_more_than_two_wrong_scope_pages`,
+`max_jobs_bounds_terminal_dispositions`,
+`malformed_candidate_is_obsoleted_without_poisoning_valid_work`, and
+`terminal_search_deadline_preserves_the_candidate_for_retry` in
+`crates/daemon/tests/embedding_dispatch.rs`, plus
+`eligibility_cardinality_mismatch_is_a_release_error` in the dispatcher module.
 
 ## Reused canonical inventories
 
@@ -163,7 +171,8 @@ They concern review-user-memories scheduling, not embedding backfill.
 
 ## Explicit none found
 
-No existing product check is found for any of these proposed seams:
+At the pinned revision, no product check was found for these proposed seams.
+This historical list does not override the bounded-dispatch additions above:
 
 1. Untruncated EmbedTokens count from the certified tokenizer bytes.
 2. Compile-time or runtime separation of EmbedTokens and ClaudeTokens.

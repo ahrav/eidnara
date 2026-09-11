@@ -332,6 +332,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
         [
             "index:idx_embedding_jobs_dispatch",
             "index:idx_embedding_jobs_generation",
+            "index:idx_embedding_jobs_open_order",
             "index:idx_occurrence_vectors_generation",
             "index:idx_occurrences_lineage",
             "index:idx_occurrences_payload",
@@ -1398,7 +1399,8 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
     use retrieval::batch::{batch_from_rows, row_identities};
     use retrieval::dispatch::{
         Admission, Disposition, EpisodeGrant, LaneBinding, Recovery, authorize_recovery,
-        charge_admission, eligible_jobs, job_ledger, record_retry, stop_job,
+        charge_admission, dispatch_jobs, eligible_job_candidates, job_ledger, record_retry,
+        stop_job,
     };
     use std::num::NonZeroU32;
 
@@ -1423,7 +1425,13 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
     let jobs = store
         .with_conn_fenced(|conn| {
             apply_batch(conn, &batch, bounds(), 3).unwrap();
-            let jobs = eligible_jobs(conn, NonZeroUsize::new(2).unwrap(), 3).unwrap();
+            let candidates =
+                eligible_job_candidates(conn, None, NonZeroUsize::new(2).unwrap(), 3).unwrap();
+            let job_ids: Vec<_> = candidates
+                .iter()
+                .map(|candidate| candidate.job_id.clone())
+                .collect();
+            let jobs = dispatch_jobs(conn, &job_ids, 3).unwrap();
             assert_eq!(jobs.len(), 2);
             assert_eq!(
                 authorize_recovery(conn, "unknown", "A", grant, 4).unwrap(),
@@ -1499,7 +1507,7 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
             );
             assert_eq!(job_ledger(conn, job_id).unwrap().unwrap(), stopped);
             assert!(
-                eligible_jobs(conn, NonZeroUsize::new(2).unwrap(), 8)
+                eligible_job_candidates(conn, None, NonZeroUsize::new(2).unwrap(), 8)
                     .unwrap()
                     .is_empty()
             );
@@ -1524,6 +1532,118 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn dispatch_jobs_reject_same_length_utf8_payload_corruption() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{dispatch_jobs, eligible_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "integrity",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let candidates =
+                eligible_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+            let job_ids = [candidates[0].job_id.clone()];
+            let jobs = dispatch_jobs(conn, &job_ids, 3).unwrap();
+            assert_eq!(jobs[0].text, "hello");
+            conn.execute("UPDATE payloads SET bytes=?1", [b"jello".as_slice()])?;
+            assert!(matches!(
+                dispatch_jobs(conn, &job_ids, 3),
+                Err(ProjectionError::CorruptRow)
+            ));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn selected_job_that_closes_before_hydration_is_skipped() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{dispatch_jobs, eligible_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "hydrate-race",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let candidates =
+                eligible_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+            let job_ids = [candidates[0].job_id.clone()];
+            conn.execute(
+                "UPDATE embedding_jobs SET state='obsolete' WHERE job_id=?1",
+                [&job_ids[0]],
+            )?;
+            assert!(dispatch_jobs(conn, &job_ids, 3).unwrap().is_empty());
+            conn.execute("DELETE FROM embedding_jobs WHERE job_id=?1", [&job_ids[0]])?;
+            assert!(dispatch_jobs(conn, &job_ids, 3).unwrap().is_empty());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn selected_job_with_a_corrupt_generation_relationship_is_rejected() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{dispatch_jobs, eligible_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "hydrate-corrupt",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    let rolled_back: Result<(), _> = store.with_conn_fenced(|conn| {
+        apply_batch(conn, &batch, bounds(), 3).unwrap();
+        let candidates =
+            eligible_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+        let job_ids = [candidates[0].job_id.clone()];
+        conn.execute("PRAGMA defer_foreign_keys=ON", [])?;
+        conn.execute(
+            "UPDATE embedding_jobs SET generation_id='missing' WHERE job_id=?1",
+            [&job_ids[0]],
+        )?;
+        assert!(matches!(
+            dispatch_jobs(conn, &job_ids, 3),
+            Err(ProjectionError::CorruptRow)
+        ));
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    });
+    assert!(rolled_back.is_err());
 }
 
 #[test]

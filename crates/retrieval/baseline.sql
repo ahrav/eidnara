@@ -138,6 +138,7 @@ CREATE TABLE embedding_jobs(
 ) STRICT;
 CREATE INDEX idx_embedding_jobs_dispatch ON embedding_jobs(state,next_attempt_at,job_id);
 CREATE INDEX idx_embedding_jobs_generation ON embedding_jobs(generation_id,job_id);
+CREATE INDEX idx_embedding_jobs_open_order ON embedding_jobs(created_at,job_id) WHERE state IN ('pending','admitted') AND stop_reason IS NULL;
 
 -- Consumed references prevent earlier authorizations from reopening a job after later episodes.
 CREATE TABLE embedding_recovery_authorizations(
