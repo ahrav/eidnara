@@ -178,28 +178,18 @@ afterEach(() => {
 });
 
 describe("createEventHandler — session.created", () => {
-    it("adds an eidnara- titled child to internalChildSessions and subagentSessions", async () => {
+    it("tracks an eidnara- titled child in both sets, a plain child as a subagent only, and a root session in neither", async () => {
         const { deps, handle } = buildHarness();
         await handle("session.created", sessionCreated("child-1", "parent-1", "eidnara-sidekick"));
+        await handle("session.created", sessionCreated("child-2", "parent-1", "Research task"));
+        await handle("session.created", sessionCreated("root-1", "", "eidnara-root"));
 
         expect(deps.internalChildSessions?.has("child-1")).toBe(true);
         expect(deps.subagentSessions?.has("child-1")).toBe(true);
-    });
-
-    it("adds a plainly titled child to subagentSessions only", async () => {
-        const { deps, handle } = buildHarness();
-        await handle("session.created", sessionCreated("child-2", "parent-1", "Research task"));
-
         expect(deps.subagentSessions?.has("child-2")).toBe(true);
         expect(deps.internalChildSessions?.has("child-2")).toBe(false);
-    });
-
-    it("tracks nothing for a root session, even with an eidnara- title", async () => {
-        const { deps, handle } = buildHarness();
-        await handle("session.created", sessionCreated("root-1", "", "eidnara-root"));
-
-        expect(deps.subagentSessions?.size).toBe(0);
-        expect(deps.internalChildSessions?.size).toBe(0);
+        expect(deps.subagentSessions?.size).toBe(2);
+        expect(deps.internalChildSessions?.size).toBe(1);
     });
 
     it("keeps only the newest 1000 children in each set", async () => {

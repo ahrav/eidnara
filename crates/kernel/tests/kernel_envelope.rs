@@ -538,34 +538,6 @@ fn projection_replace_repeats_when_a_field_carries_a_detected_secret() {
 }
 
 #[test]
-fn projection_replace_rejects_an_empty_batch_instead_of_truncating() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_projection_inputs(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-    store
-        .replace_alignment_projection(&[AlignmentProjectionSpec {
-            decision_id: "decision".to_string(),
-            observation_id: "observation".to_string(),
-            alignment_kind: "intended".to_string(),
-            alignment_payload: None,
-            built_through_commit_seq: 1,
-        }])
-        .unwrap();
-
-    assert_eq!(
-        store.replace_alignment_projection(&[]).unwrap_err(),
-        KernelError::InvalidInput
-    );
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM alignment_projection"
-        ),
-        1
-    );
-}
-
-#[test]
 fn retire_and_correct_refuse_a_non_domain_object() {
     let directory = tempfile::tempdir().unwrap();
     seed_projection_inputs(directory.path());
@@ -839,10 +811,18 @@ fn an_empty_rebuild_is_publishable_through_the_clear_path() {
         1
     );
 
-    // An accidental empty vector is still refused.
+    // An empty vector is rejected rather than truncating the projection; the
+    // published rows remain.
     assert_eq!(
         store.replace_alignment_projection(&[]).unwrap_err(),
         KernelError::InvalidInput
+    );
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM alignment_projection"
+        ),
+        1
     );
 
     assert_eq!(store.clear_alignment_projection(1).unwrap(), 1);

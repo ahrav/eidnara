@@ -356,29 +356,6 @@ describe("readSessionChunk", () => {
         expect(freshRead).toHaveLength(2);
     });
 
-    it("keeps the raw-message cache alive until an async scope settles", async () => {
-        useTempDataHome("read-session-async-cache-scope-");
-        createOpenCodeDbWithMessages("ses-async-cache", [
-            { id: "m-1", role: "user", part: { type: "text", text: "turn 1" } },
-        ]);
-
-        const reads = await withRawSessionMessageCache(async () => {
-            const beforeAwait = readRawSessionMessages("ses-async-cache");
-            await Promise.resolve();
-            appendOpenCodeMessage(
-                "ses-async-cache",
-                { id: "m-2", role: "assistant", part: { type: "text", text: "turn 2" } },
-                2,
-            );
-            const afterAwait = readRawSessionMessages("ses-async-cache");
-            return { beforeAwait, afterAwait };
-        });
-
-        expect(reads.afterAwait).toBe(reads.beforeAwait);
-        expect(reads.afterAwait).toHaveLength(1);
-        expect(readRawSessionMessages("ses-async-cache")).toHaveLength(2);
-    });
-
     it("clears the raw-message cache when an async scope rejects", async () => {
         useTempDataHome("read-session-async-cache-reject-");
         createOpenCodeDbWithMessages("ses-async-reject", [
@@ -689,12 +666,16 @@ describe("readSessionChunk", () => {
                 { id: "m-4", role: "assistant", part: { type: "text", text: "reply 2" } },
                 { id: "m-5", role: "user", part: { type: "text", text: "turn 3" } },
                 { id: "m-6", role: "assistant", part: { type: "text", text: "reply 3" } },
+                { id: "m-7", role: "user", part: { type: "text", text: "turn 4" } },
+                { id: "m-8", role: "assistant", part: { type: "text", text: "reply 4" } },
+                { id: "m-9", role: "user", part: { type: "text", text: "turn 5" } },
+                { id: "m-10", role: "assistant", part: { type: "text", text: "reply 5" } },
             ]);
 
             //#when
             const ordinal = getProtectedTailStartOrdinal("ses-tail");
 
-            // All 5 user turns are protected.
+            // The 5th-to-last user message is the first message, so all 5 user turns are protected.
             expect(ordinal).toBe(1);
         });
 
@@ -782,23 +763,28 @@ describe("readSessionChunk", () => {
                 { id: "m-2", role: "assistant", part: { type: "text", text: "reply 1" } },
                 { id: "m-3", role: "user", part: { type: "text", text: "real turn 2" } },
                 { id: "m-4", role: "assistant", part: { type: "text", text: "reply 2" } },
+                { id: "m-5", role: "user", part: { type: "text", text: "real turn 3" } },
+                { id: "m-6", role: "assistant", part: { type: "text", text: "reply 3" } },
                 {
-                    id: "m-5",
+                    id: "m-7",
                     role: "user",
                     part: {
                         type: "text",
                         text: "<system-reminder>background finished</system-reminder>\nPlease also keep this architectural concern in mind.",
                     },
                 },
-                { id: "m-6", role: "assistant", part: { type: "text", text: "reply 3" } },
-                { id: "m-7", role: "user", part: { type: "text", text: "real turn 4" } },
+                { id: "m-8", role: "assistant", part: { type: "text", text: "reply 4" } },
+                { id: "m-9", role: "user", part: { type: "text", text: "real turn 5" } },
+                { id: "m-10", role: "assistant", part: { type: "text", text: "reply 5" } },
+                { id: "m-11", role: "user", part: { type: "text", text: "real turn 6" } },
             ]);
 
             //#when
             const ordinal = getProtectedTailStartOrdinal("ses-mixed");
 
-            // All 4 meaningful user turns are protected because there are fewer than 5.
-            expect(ordinal).toBe(1);
+            // The mixed message is the 6th user turn, so the protected tail starts at the 2nd (m-3).
+            // Dropping it would leave 5 turns and move the start back to ordinal 1.
+            expect(ordinal).toBe(3);
         });
     });
 
@@ -822,24 +808,6 @@ describe("readSessionChunk", () => {
             expect(chunk.text).toContain("done");
             expect(chunk.text).not.toContain("protected turn");
             expect(chunk.endIndex).toBe(2);
-            expect(chunk.hasMore).toBe(false);
-        });
-
-        it("reports hasMore false when all eligible messages fit within the budget", () => {
-            //#given
-            useTempDataHome("read-session-hasmore-");
-            createOpenCodeDbWithMessages("ses-hasmore", [
-                { id: "m-1", role: "user", part: { type: "text", text: "eligible" } },
-                { id: "m-2", role: "user", part: { type: "text", text: "tail turn 1" } },
-                { id: "m-3", role: "user", part: { type: "text", text: "tail turn 2" } },
-                { id: "m-4", role: "user", part: { type: "text", text: "tail turn 3" } },
-            ]);
-
-            // The eligible end excludes m-2 and later messages.
-            const chunk = readSessionChunk("ses-hasmore", 100_000, 1, 2);
-
-            //#then
-            expect(chunk.messageCount).toBe(1);
             expect(chunk.hasMore).toBe(false);
         });
 

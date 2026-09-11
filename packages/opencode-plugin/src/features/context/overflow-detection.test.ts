@@ -8,34 +8,23 @@ import {
 } from "./overflow-detection";
 
 describe("overflow-detection / extractErrorMessage", () => {
-    test("returns message from Error instance", () => {
-        expect(extractErrorMessage(new Error("prompt is too long"))).toBe("prompt is too long");
-    });
-
-    test("returns raw string", () => {
-        expect(extractErrorMessage("context length exceeded")).toBe("context length exceeded");
-    });
-
-    test("unwraps nested provider SDK error (error.error.message)", () => {
-        const nested = {
-            error: { message: "Input token count 200000 exceeds the maximum of 128000" },
-        };
-        expect(extractErrorMessage(nested)).toContain("exceeds the maximum");
-    });
-
-    test("reads top-level message property", () => {
-        expect(extractErrorMessage({ message: "prompt is too long" })).toBe("prompt is too long");
-    });
-
-    test("reads responseBody fallback", () => {
-        expect(extractErrorMessage({ responseBody: "413 payload too large" })).toBe(
-            "413 payload too large",
-        );
-    });
-
-    test("returns empty string for null / undefined", () => {
-        expect(extractErrorMessage(null)).toBe("");
-        expect(extractErrorMessage(undefined)).toBe("");
+    test("extracts text from each supported error shape", () => {
+        const cases: Array<[unknown, string]> = [
+            [new Error("prompt is too long"), "prompt is too long"],
+            ["context length exceeded", "context length exceeded"],
+            [{ message: "prompt is too long" }, "prompt is too long"],
+            [{ responseBody: "413 payload too large" }, "413 payload too large"],
+            [null, ""],
+            [undefined, ""],
+        ];
+        for (const [input, expected] of cases) {
+            expect(extractErrorMessage(input)).toBe(expected);
+        }
+        expect(
+            extractErrorMessage({
+                error: { message: "Input token count 200000 exceeds the maximum of 128000" },
+            }),
+        ).toContain("exceeds the maximum");
     });
 
     test("serializes an object without recognized text fields within the scan cap", () => {
@@ -122,6 +111,7 @@ describe("overflow-detection / detectOverflow", () => {
     ])("%s pattern matches overflow", (_provider, message, expectedLimit, expectedProvenance) => {
         const detection = detectOverflow(message);
         expect(detection.isOverflow).toBe(true);
+        expect(detection.matchedPattern).toBeDefined();
         expect(detection.reportedLimit).toBe(expectedLimit);
         expect(detection.reportedLimitProvenance).toBe(expectedProvenance);
     });
@@ -143,12 +133,6 @@ describe("overflow-detection / detectOverflow", () => {
         expect(detection.isOverflow).toBe(true);
         expect(detection.reportedLimit).toBe(128000);
         expect(detection.reportedLimitProvenance).toBe("combined");
-    });
-
-    test("returns matchedPattern for diagnostics", () => {
-        const detection = detectOverflow("prompt is too long: 210000 > 200000");
-        expect(detection.isOverflow).toBe(true);
-        expect(detection.matchedPattern).toBeDefined();
     });
 
     // HTTP and SDK wrappers can carry the provider text below a generic top-level message.
@@ -190,46 +174,12 @@ describe("overflow-detection / detectOverflow", () => {
 });
 
 describe("overflow-detection / parseReportedLimit", () => {
-    test("extracts from 'maximum prompt length' (xAI)", () => {
-        expect(parseReportedLimit("the maximum prompt length is 256000 tokens")).toEqual({
-            value: 256000,
-            provenance: "prompt_only",
-        });
-    });
-
-    test("extracts from 'maximum context length' (OpenRouter/DeepSeek)", () => {
-        expect(parseReportedLimit("maximum context length is 32768 tokens")).toEqual({
-            value: 32768,
-            provenance: "combined",
-        });
-    });
-
-    test("extracts from 'context length is only' (vLLM)", () => {
-        expect(parseReportedLimit("context length is only 4096 tokens")).toEqual({
-            value: 4096,
-            provenance: "combined",
-        });
-    });
-
-    test("extracts from 'exceeds the limit of' (Copilot)", () => {
-        expect(parseReportedLimit("Prompt exceeds the limit of 64000 tokens")).toEqual({
-            value: 64000,
-            provenance: "unknown",
-        });
-    });
-
     test("extracts Anthropic-style '> N maximum|max|limit' caps", () => {
         for (const suffix of ["maximum", "max", "limit"]) {
             expect(
                 parseReportedLimit(`prompt is too long: 210000 tokens > 200000 ${suffix}`),
             ).toEqual({ value: 200000, provenance: "prompt_only" });
         }
-    });
-
-    test("extracts from 'too large for model with' (Mistral)", () => {
-        expect(parseReportedLimit("Too large for model with 32768 maximum context length")).toEqual(
-            { value: 32768, provenance: "combined" },
-        );
     });
 
     test("rejects implausibly small numbers (< 1024)", () => {

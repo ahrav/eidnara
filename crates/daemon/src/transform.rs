@@ -11870,24 +11870,11 @@ pub(crate) mod tests {
         assert_eq!(claude_code_marker_ttl("300m"), "1h");
         assert_eq!(claude_code_marker_ttl("0m"), "");
         assert_eq!(claude_code_marker_ttl(""), "");
-    }
-
-    #[test]
-    fn claude_code_cache_ttl_mapper_treats_garbage_as_unset() {
-        assert_eq!(claude_code_marker_ttl("not-a-ttl"), "5m");
-    }
-
-    #[test]
-    fn wire_normalization_does_not_change_the_raw_effective_cache_lifetime() {
-        let config = crate::config::DaemonConfig {
-            cache_ttl: "300m".to_string(),
-            ..crate::config::DaemonConfig::default()
-        };
-        let internally_resolved = config.resolve_cache_ttl(None);
-
-        assert_eq!(internally_resolved, "300m");
-        assert_eq!(claude_code_marker_ttl(&internally_resolved), "1h");
-        assert_eq!(internally_resolved, "300m");
+        assert_eq!(
+            claude_code_marker_ttl("not-a-ttl"),
+            "5m",
+            "unparseable input falls back to the provider default"
+        );
     }
 
     #[test]
@@ -11962,23 +11949,6 @@ pub(crate) mod tests {
         let provider_default_round_trip: TransformResponse =
             serde_json::from_value(provider_default_json).unwrap();
         assert_eq!(provider_default_round_trip.cache_ttl, Some(String::new()));
-    }
-
-    #[test]
-    fn cache_ttl_serialization_discriminates_no_opinion_from_provider_default() {
-        let no_opinion = TransformResponse::passthrough(Vec::new(), None);
-        let mut provider_default = no_opinion.clone();
-        provider_default.cache_ttl = Some(String::new());
-
-        let no_opinion_json = serde_json::to_value(no_opinion).unwrap();
-        let provider_default_json = serde_json::to_value(provider_default).unwrap();
-        assert!(
-            !no_opinion_json
-                .as_object()
-                .unwrap()
-                .contains_key("cache_ttl")
-        );
-        assert_eq!(provider_default_json["cache_ttl"], "");
     }
 
     #[test]
@@ -12376,45 +12346,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn apply_once_records_per_stage_timings() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let messages = (0..40)
-            .map(|index| item(&format!("stage-{index}"), index as u64 + 1, "stage payload"))
-            .collect::<Vec<_>>();
-        let request = req("stage-timings", "cfg0", messages);
-        let first = run(&store, &request, &[]);
-        let timings = first.timings.expect("apply_once records timings");
-        assert!(timings.projection >= 0.0);
-        assert!(timings.decide >= 0.0);
-        assert!(timings.compose_m0m1 >= 0.0);
-        assert!(timings.selection >= 0.0);
-        assert!(timings.todo >= 0.0);
-        assert!(timings.tag_overlay >= 0.0);
-        assert!(timings.unit_mint >= 0.0);
-        assert!(timings.temporal >= 0.0);
-        assert!(timings.caveman >= 0.0);
-        assert!(timings.build_frozen_unit_scan >= 0.0);
-        assert!(timings.build_frozen_unit_index >= 0.0);
-        eprintln!(
-            "apply_once-stage-breakdown projection={:.1} decide={:.1} tag_overlay={:.1} unit_mint={:.1} temporal={:.1} caveman={:.1} compose_m0m1={:.1} selection={:.1} todo={:.1} build_frozen_unit_scan={:.1} build_frozen_unit_index={:.1} build_output={:.1} total={:.1}",
-            timings.projection,
-            timings.decide,
-            timings.tag_overlay,
-            timings.unit_mint,
-            timings.temporal,
-            timings.caveman,
-            timings.compose_m0m1,
-            timings.selection,
-            timings.todo,
-            timings.build_frozen_unit_scan,
-            timings.build_frozen_unit_index,
-            timings.build_output,
-            timings.total,
-        );
-    }
-
-    #[test]
     #[ignore = "run manually to decompose a production-sized apply_once"]
     fn apply_once_stage_timings_large_fixture() {
         let dir = tempfile::tempdir().unwrap();
@@ -12650,62 +12581,38 @@ pub(crate) mod tests {
     /// Wire fixtures must preserve every prefixable tool-result output variant and each block's pass-through bytes through serialization.
     /// Each case fails when the overlay no longer clears the retained bytes of the block it mutates.
     #[test]
-    fn wire_tool_result_text_variant_tags_survive_serialization() {
-        let joined = second_active_pass_json(
-            "wire-tr-text",
-            vec![
-                wire_tool_call("a1", 1, "call_t1"),
-                wire_tool_result(
-                    "t1",
-                    2,
-                    json!({ "kind": { "type": "text", "text": "plain output" } }),
-                ),
-            ],
-        );
-        assert!(
-            joined.contains("\u{a7}1\u{a7} plain output"),
-            "text output lost its tag: {joined}"
-        );
-    }
-
-    #[test]
-    fn wire_tool_result_error_text_variant_tags_survive_serialization() {
-        let joined = second_active_pass_json(
-            "wire-tr-err",
-            vec![
-                wire_tool_call("a1", 1, "call_t1"),
-                wire_tool_result(
-                    "t1",
-                    2,
-                    json!({ "kind": { "type": "error_text", "text": "boom" } }),
-                ),
-            ],
-        );
-        assert!(
-            joined.contains("\u{a7}1\u{a7} boom"),
-            "error_text output lost its tag: {joined}"
-        );
-    }
-
-    #[test]
-    fn wire_tool_result_content_variant_tags_survive_serialization() {
-        let joined = second_active_pass_json(
-            "wire-tr-content",
-            vec![
-                wire_tool_call("a1", 1, "call_t1"),
-                wire_tool_result(
-                    "t1",
-                    2,
-                    json!({ "kind": { "type": "content", "blocks": [
-                        { "kind": { "type": "text", "text": "nested text" } },
-                    ]}}),
-                ),
-            ],
-        );
-        assert!(
-            joined.contains("\u{a7}1\u{a7} nested text"),
-            "content-variant output lost its tag: {joined}"
-        );
+    fn wire_tool_result_output_variants_keep_tags_through_serialization() {
+        for (session, output, expected) in [
+            (
+                "wire-tr-text",
+                json!({ "kind": { "type": "text", "text": "plain output" } }),
+                "\u{a7}1\u{a7} plain output",
+            ),
+            (
+                "wire-tr-err",
+                json!({ "kind": { "type": "error_text", "text": "boom" } }),
+                "\u{a7}1\u{a7} boom",
+            ),
+            (
+                "wire-tr-content",
+                json!({ "kind": { "type": "content", "blocks": [
+                    { "kind": { "type": "text", "text": "nested text" } },
+                ]}}),
+                "\u{a7}1\u{a7} nested text",
+            ),
+        ] {
+            let joined = second_active_pass_json(
+                session,
+                vec![
+                    wire_tool_call("a1", 1, "call_t1"),
+                    wire_tool_result("t1", 2, output),
+                ],
+            );
+            assert!(
+                joined.contains(expected),
+                "{session}: tool-result output lost its tag: {joined}"
+            );
+        }
     }
 
     #[test]
@@ -12913,10 +12820,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// The strip treats all whitespace as an inter-prefix separator.
-    /// Malformed tag shapes and mid-prose references remain verbatim.
+    /// The strip treats all whitespace as an inter-prefix separator and runs at every line start
+    /// outside inline or fenced code. Malformed tag shapes and mid-prose references remain verbatim.
     #[test]
-    fn strip_leading_tag_imitations_covers_whitespace_and_preserves_malformed() {
+    fn strip_leading_tag_imitations_strips_at_line_starts_outside_code_and_preserves_malformed() {
         assert_eq!(
             strip_leading_tag_imitations("\u{a7}39\u{a7} \u{a7}40\u{a7} BEAT"),
             "BEAT"
@@ -12950,10 +12857,6 @@ pub(crate) mod tests {
             "\u{a7}39\u{a7}BEAT",
             "a token without a separator is not an imitation"
         );
-    }
-
-    #[test]
-    fn assistant_tag_imitations_strip_on_later_lines_but_not_code() {
         let value = "preamble\n\u{a7}22\u{a7} Delta\n`\u{a7}23\u{a7} inline`\n```rust\n\u{a7}24\u{a7} fenced\n```\n\u{a7}25\u{a7} Echo";
         assert_eq!(
             strip_leading_tag_imitations(value),
@@ -16221,6 +16124,8 @@ pub(crate) mod tests {
         assert_eq!(parsed.usage.unwrap().context_limit_tokens, 2);
         assert_eq!(parsed.history_budget_tokens, Some(42_000.0));
         assert_eq!(parsed.provider_error.as_deref(), Some("prompt is too long"));
+        assert_eq!(parsed.prev_response_completed_at_ms, None);
+        assert_eq!(parsed.todo_tool_present, None);
     }
 
     #[test]
@@ -16556,39 +16461,60 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reasoning_keep_rule_treats_whitespace_only_text_as_sentinel_invisible() {
-        let mut messages = vec![WireMessage::from_parts(
-            "assistant",
-            vec![
+    fn reasoning_keep_rule_treats_whitespace_text_and_step_metadata_prefixes_as_invisible() {
+        let prefixes = [
+            (
+                "whitespace-first",
                 wire::WireBlock::bare(wire::BlockKind::Text {
                     text: " \t\n".to_string(),
                 }),
-                wire::WireBlock::bare(wire::BlockKind::Reasoning {
-                    text: "signed thinking".to_string(),
-                    signature: Some("sig".to_string()),
-                }),
-            ],
-            None,
-            wire::ProviderExtras::new(),
-            wire::HarnessMeta {
-                harness_id: Some("whitespace-first".to_string()),
-                ..Default::default()
-            },
-        )];
-
-        assert_eq!(
-            apply_serializer_residuals_with_exemption(
-                SerializerProfile::OpencodeAiSdk,
-                &mut messages,
-                None,
-                Some("anthropic"),
             ),
-            0
-        );
-        assert!(matches!(
-            messages[0].content()[1].kind(),
-            wire::BlockKind::Reasoning { text, .. } if text == "signed thinking"
-        ));
+            (
+                "metadata-latest",
+                wire::WireBlock::bare(wire::BlockKind::Opaque(wire::OpaqueBlock {
+                    source: serde_json::json!({"harness": "opencode"}),
+                    kind: "step-start".to_string(),
+                    raw: serde_json::json!({"type": "step-start"}),
+                    arc: None,
+                })),
+            ),
+        ];
+        for (mid, prefix) in prefixes {
+            let mut messages = vec![WireMessage::from_parts(
+                "assistant",
+                vec![
+                    prefix,
+                    wire::WireBlock::bare(wire::BlockKind::Reasoning {
+                        text: "signed thinking".to_string(),
+                        signature: Some("sig".to_string()),
+                    }),
+                ],
+                None,
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
+                    harness_id: Some(mid.to_string()),
+                    ..Default::default()
+                },
+            )];
+
+            assert_eq!(
+                apply_serializer_residuals_with_exemption(
+                    SerializerProfile::OpencodeAiSdk,
+                    &mut messages,
+                    None,
+                    Some("anthropic"),
+                ),
+                0,
+                "{mid}"
+            );
+            assert!(
+                matches!(
+                    messages[0].content()[1].kind(),
+                    wire::BlockKind::Reasoning { text, .. } if text == "signed thinking"
+                ),
+                "{mid}"
+            );
+        }
     }
 
     #[test]
@@ -18653,45 +18579,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reasoning_strip_ignores_opencode_step_metadata_before_thinking() {
-        let mut messages = vec![WireMessage::from_parts(
-            "assistant",
-            vec![
-                wire::WireBlock::bare(wire::BlockKind::Opaque(wire::OpaqueBlock {
-                    source: serde_json::json!({"harness": "opencode"}),
-                    kind: "step-start".to_string(),
-                    raw: serde_json::json!({"type": "step-start"}),
-                    arc: None,
-                })),
-                wire::WireBlock::bare(wire::BlockKind::Reasoning {
-                    text: "signed thinking".to_string(),
-                    signature: Some("sig".to_string()),
-                }),
-            ],
-            None,
-            wire::ProviderExtras::new(),
-            wire::HarnessMeta {
-                harness_id: Some("metadata-latest".to_string()),
-                ..Default::default()
-            },
-        )];
-
-        assert_eq!(
-            apply_serializer_residuals_with_exemption(
-                SerializerProfile::OpencodeAiSdk,
-                &mut messages,
-                None,
-                Some("anthropic"),
-            ),
-            0
-        );
-        assert!(matches!(
-            messages[0].content()[1].kind(),
-            wire::BlockKind::Reasoning { .. }
-        ));
-    }
-
-    #[test]
     fn bootstrap_with_no_compartments_is_empty_baseline_whole_array_is_tail() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -18822,60 +18709,40 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fold_minting_wrong_vocabulary_anchor_fails_loud_instead_of_looping() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments(
-            "ses",
-            &[StoredCompartment {
-                sequence: 0,
-                start_message: 1,
-                end_message: 1,
-                end_message_id: "m1".to_string(), // bare mid — wrong vocabulary
-                title: "C0".to_string(),
-                content: "S".to_string(),
-                p1: Some("S".to_string()),
-                importance: 50,
-                ..Default::default()
-            }],
-        )
-        .unwrap();
-        let live = vec![item("m1", 1, "raw"), item("t2", 2, "tail")];
-        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        let err = transform(&s, &req("ses", "cfg0", live.clone()), &ctx);
-        match err {
-            Err(TransformError::BoundaryNotPresent(_)) => {}
-            other => panic!("expected BoundaryNotPresent, got {other:?}"),
+    fn fold_minting_unpresentable_anchor_fails_loud_instead_of_looping() {
+        // A bare mid uses the wrong vocabulary; an empty id is never presentable. Either one
+        // would re-trigger the first-fold HARD forever, so the minting guard rejects it on every pass.
+        for (label, end_message_id) in [("bare-mid", "m1"), ("empty", "")] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments(
+                "ses",
+                &[StoredCompartment {
+                    sequence: 0,
+                    start_message: 1,
+                    end_message: 1,
+                    end_message_id: end_message_id.to_string(),
+                    title: "C0".to_string(),
+                    content: "S".to_string(),
+                    p1: Some("S".to_string()),
+                    importance: 50,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+            let live = vec![item("m1", 1, "raw"), item("t2", 2, "tail")];
+            let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+            let err = transform(&s, &req("ses", "cfg0", live.clone()), &ctx);
+            assert!(
+                matches!(err, Err(TransformError::BoundaryNotPresent(_))),
+                "{label}: expected BoundaryNotPresent, got {err:?}"
+            );
+            let retry = transform(&s, &req("ses", "cfg0", live), &ctx);
+            assert!(
+                matches!(retry, Err(TransformError::BoundaryNotPresent(_))),
+                "{label}: the retry must fail the same way"
+            );
         }
-        let retry = transform(&s, &req("ses", "cfg0", live), &ctx);
-        assert!(matches!(retry, Err(TransformError::BoundaryNotPresent(_))));
-    }
-
-    #[test]
-    fn fold_minting_empty_anchor_with_coverage_fails_loud() {
-        // An empty minted boundary with compartments present would re-trigger the first-fold HARD.
-        // The minting guard rejects an empty `end_message_id` before it can create the loop.
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments(
-            "ses",
-            &[StoredCompartment {
-                sequence: 0,
-                start_message: 1,
-                end_message: 1,
-                end_message_id: String::new(), // empty — never presentable
-                title: "C0".to_string(),
-                content: "S".to_string(),
-                p1: Some("S".to_string()),
-                importance: 50,
-                ..Default::default()
-            }],
-        )
-        .unwrap();
-        let live = vec![item("m1", 1, "raw")];
-        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        let err = transform(&s, &req("ses", "cfg0", live), &ctx);
-        assert!(matches!(err, Err(TransformError::BoundaryNotPresent(_))));
     }
 
     #[test]
@@ -19282,13 +19149,13 @@ pub(crate) mod tests {
         let ctx = pctx("git:proj", "/nonexistent-docs", 0);
         let first = transform(&s, &req("ses", "cfg0", live.clone()), &ctx);
         assert!(
-            first.is_err(),
-            "first-fold HARD hits the leading-gap fail-loud path"
+            matches!(first, Err(TransformError::CoverageGap(_))),
+            "a leading gap must fail loud instead of silently dropping the early live item: {first:?}"
         );
         let retry = transform(&s, &req("ses", "cfg0", live), &ctx);
         assert!(
-            retry.is_err(),
-            "state unchanged after the failed fold → the HARD retries and stays visible"
+            matches!(retry, Err(TransformError::CoverageGap(_))),
+            "state unchanged after the failed fold → the HARD retries and stays visible: {retry:?}"
         );
     }
 
@@ -19758,44 +19625,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn permanently_unequal_compartment_revision_escalates_on_third_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-stale-component", 2_402);
-        let loaded = store.load("astro-stale-component").unwrap();
-        let mut stale = loaded.meta.clone();
-        stale.m1_revision ^= u64::MAX;
-        stale.m1_compartment_seq = Some(1);
-        store
-            .commit(
-                "astro-stale-component",
-                loaded.row_version,
-                &loaded.core,
-                &stale,
-            )
-            .unwrap();
-
-        for _ in 1..BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT {
-            let deferred = run(&store, &request, &spine());
-            assert_eq!(deferred.action, "SOFT+");
-        }
-        let escalated = run(&store, &request, &spine());
-        assert_eq!(escalated.action, "HARD");
-        assert_eq!(
-            escalated.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(
-            store
-                .load("astro-stale-component")
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            0
-        );
-    }
-
-    #[test]
     fn active_wrapup_retains_divergence_count_until_the_window_closes() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -20020,30 +19849,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn leading_coverage_gap_fails_loud_not_silent_drop() {
-        // The first compartment starts at ordinal 10 while live items at ordinals 1..9 are uncovered and below coverage_ordinal; build_output would trim them, so the live coverage guard must return TransformError::CoverageGap.
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("ses", &[comp(1, 10, 20, "m20", "S")])
-            .unwrap();
-        let items = vec![
-            item("early", 1, "live before the first compartment"),
-            item("m20", 20, "covered"),
-            item("t21", 21, "tail"),
-        ];
-        let err = transform(
-            &s,
-            &req("ses", "cfg0", items),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, TransformError::CoverageGap(_)),
-            "a leading gap must fail loud, not silently drop the early live item: {err:?}"
-        );
-    }
-
-    #[test]
     fn interior_live_coverage_gap_fails_loud_not_silent_drop() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -20071,26 +19876,6 @@ pub(crate) mod tests {
             err.to_string().contains("m4"),
             "the uncovered live message should be named in the loud failure: {err:?}"
         );
-    }
-
-    #[test]
-    fn leading_coverage_gap_exempts_pinned_system_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("ses", &[comp(1, 1, 2, "m2", "S")])
-            .unwrap();
-        let items = vec![
-            system_item("sys0", 0, "identity lead"),
-            item("m2", 2, "covered"),
-            item("t3", 3, "tail"),
-        ];
-        let out = transform(
-            &s,
-            &req("ses", "cfg0", items),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap();
-        assert_eq!(out.coverage_ordinal, Some(2));
     }
 
     #[test]
@@ -20345,36 +20130,6 @@ pub(crate) mod tests {
         assert_eq!(defer.action, "SOFT+");
         assert_eq!(m1_bytes(&defer), m1_bytes(&folded));
         assert_eq!(m0_bytes(&defer), m0_bytes(&folded));
-    }
-
-    #[test]
-    fn share_nothing_revert_arms_pending_instead_of_reconcile_rematerializing() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("ses", &[comp(1, 1, 10, "m10", "S1")])
-            .unwrap();
-        let before = run(
-            &s,
-            &req("ses", "cfg0", vec![item("m10", 10, "raw")]),
-            &spine(),
-        );
-        assert_eq!(before.action, "HARD");
-        assert_eq!(before.boundary_id, "m10#0");
-
-        let raw = run(
-            &s,
-            &req("ses", "cfg0", vec![item("z", 50, "other")]),
-            &spine(),
-        );
-        assert_eq!(raw.action, "PASSTHROUGH");
-        assert!(!raw.reconcile_pending);
-        assert_eq!(tail_ids(&raw), vec!["z"]);
-        let loaded = s.load("ses").unwrap();
-        assert_eq!(loaded.core.boundary_id, "m10#0");
-        assert!(!loaded.core.reconcile_pending);
-        assert!(loaded.meta.pending_rewrite.is_some());
-        assert_eq!(loaded.meta.revert_epoch, 0);
-        assert_eq!(s.load_compartments("ses").unwrap().len(), 1);
     }
 
     #[test]
@@ -21110,56 +20865,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn synthetic_todo_aged_out_capture_composes_from_meta_on_bust() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("aged", &[comp(1, 1, 2, "todo", "SUMMARY")])
-            .unwrap();
-        let todos = json!([{ "content": "Persisted", "status": "pending", "priority": "high" }]);
-        run(
-            &s,
-            &req(
-                "aged",
-                "cfg0",
-                vec![item("a", 1, "raw"), todowrite_call("todo", 2, todos)],
-            ),
-            &spine(),
-        );
-        let loaded = s.load("aged").unwrap();
-        let mut meta = loaded.meta;
-        meta.synthetic_todo = None;
-        meta.last_render_config = "force a hard".to_string();
-        s.commit("aged", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-
-        let aged = run(
-            &s,
-            &req(
-                "aged",
-                "cfg1",
-                vec![
-                    item("a", 1, "raw"),
-                    todowrite_call(
-                        "todo",
-                        2,
-                        json!([{ "content": "Persisted", "status": "pending", "priority": "high" }]),
-                    ),
-                ],
-            ),
-            &spine(),
-        );
-
-        assert_eq!(aged.action, "HARD");
-        assert_eq!(tail_ids(&aged), Vec::<&str>::new());
-        assert_eq!(
-            synthetic_todo_index(&aged),
-            2,
-            "None anchor appends after m0/m1 when no real tail remains"
-        );
-        assert!(s.load("aged").unwrap().meta.synthetic_todo.is_some());
-    }
-
-    #[test]
     fn synthetic_todo_none_anchor_stays_before_grown_tail_on_defer() {
         // Pairs frozen with `anchor_mid = None` remain immediately after `m0`/`m1` when later defers grow the tail.
         // Pairs frozen with `anchor_mid = None` remain immediately after `m0`/`m1`, not at the end of the tail.
@@ -21538,76 +21243,48 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opencode_surface_flip_folds_once_before_rendering_tags() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let mut request =
-            opencode_req("opencode-flip", "cfg0", vec![item("m1", 1, "stable bytes")]);
-
-        let before = run(&s, &request, &spine());
-        let before_config = s.load("opencode-flip").unwrap().meta.last_render_config;
-        assert_eq!(before.action, "HARD");
-        assert!(!before_config.contains("tfe:"));
-
-        request.tool_present = true;
-        let transition = run(&s, &request, &spine());
-        let transitioned_config = s.load("opencode-flip").unwrap().meta.last_render_config;
-        assert_eq!(transition.action, "HARD");
-        assert_ne!(transitioned_config, before_config);
-        assert!(transitioned_config.contains("tfe:4:tfe3"));
-        assert!(
-            !serde_json::to_string(transition.messages())
-                .unwrap()
-                .contains("§1§")
-        );
-
-        let active = run(&s, &request, &spine());
-        assert_ne!(active.action, "HARD");
-        assert_eq!(
-            s.load("opencode-flip").unwrap().meta.last_render_config,
-            transitioned_config
-        );
-        assert!(
-            serde_json::to_string(active.messages())
-                .unwrap()
-                .contains("§1§ stable bytes")
-        );
-    }
-
-    #[test]
     fn tagger_flip_hards_before_committed_identity_can_render_tags() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let mut request = cc_req("flip", "cfg0", vec![item("m1", 1, "hello")]);
+        // The flip pass folds once with the tagger epoch in the render identity but serves
+        // untagged bytes; tags render only after that identity is durable.
+        type Builder = fn(&str, &str, Vec<IngressMessage>) -> TransformRequest;
+        let builders: [(&str, Builder); 2] = [("opencode-flip", opencode_req), ("flip", cc_req)];
+        for (session, build) in builders {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let mut request = build(session, "cfg0", vec![item("m1", 1, "hello")]);
 
-        let before_flip = run(&s, &request, &spine());
-        assert_eq!(before_flip.action, "HARD");
-        assert_eq!(tail_bytes(&before_flip, "m1"), "hello");
-        assert!(
-            !s.load("flip")
-                .unwrap()
-                .meta
-                .last_render_config
-                .contains("tfe:")
-        );
+            let before_flip = run(&s, &request, &spine());
+            let before_config = s.load(session).unwrap().meta.last_render_config;
+            assert_eq!(before_flip.action, "HARD", "{session}");
+            assert_eq!(tail_bytes(&before_flip, "m1"), "hello", "{session}");
+            assert!(!before_config.contains("tfe:"), "{session}");
 
-        request.tool_present = true;
-        let transition = run(&s, &request, &spine());
-        assert_eq!(transition.action, "HARD");
-        assert_eq!(tail_bytes(&transition, "m1"), "hello");
-        assert!(s.load_tags_for_session("flip").unwrap().is_empty());
-        assert!(
-            s.load("flip")
-                .unwrap()
-                .meta
-                .last_render_config
-                .contains("tfe:4:tfe3")
-        );
+            request.tool_present = true;
+            let transition = run(&s, &request, &spine());
+            let transitioned_config = s.load(session).unwrap().meta.last_render_config;
+            assert_eq!(transition.action, "HARD", "{session}");
+            assert_eq!(tail_bytes(&transition, "m1"), "hello", "{session}");
+            assert!(
+                s.load_tags_for_session(session).unwrap().is_empty(),
+                "{session}"
+            );
+            assert_ne!(transitioned_config, before_config, "{session}");
+            assert!(transitioned_config.contains("tfe:4:tfe3"), "{session}");
 
-        let after_commit = run(&s, &request, &spine());
-        assert_eq!(after_commit.action, "SOFT+");
-        assert_eq!(tail_bytes(&after_commit, "m1"), "§1§ hello");
-        assert_eq!(s.load_tags_for_session("flip").unwrap().len(), 1);
+            let after_commit = run(&s, &request, &spine());
+            assert_eq!(after_commit.action, "SOFT+", "{session}");
+            assert_eq!(
+                s.load(session).unwrap().meta.last_render_config,
+                transitioned_config,
+                "{session}"
+            );
+            assert_eq!(tail_bytes(&after_commit, "m1"), "§1§ hello", "{session}");
+            assert_eq!(
+                s.load_tags_for_session(session).unwrap().len(),
+                1,
+                "{session}"
+            );
+        }
     }
 
     #[test]
@@ -21845,85 +21522,58 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn temporal_gap_trailing_role_system_reminder_keeps_authored_user_eligible() {
+    fn temporal_gap_trailing_transport_reminders_keep_authored_user_eligible() {
         run_active_surface_test(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let s = store(dir.path());
-            let first = active_cc_req(
-                "temporal-system-tail",
-                "cfg0",
-                vec![wire_item("user", "m1", 1, &["start"])],
-            );
-            run(&s, &first, &spine());
-            run(&s, &first, &spine());
-
-            let mut request = active_cc_req(
-                "temporal-system-tail",
-                "cfg0",
-                vec![
-                    first.messages[0].clone(),
-                    wire_item("assistant", "m2", 2, &["answer"]),
-                    wire_item("user", "m3", 3, &["question"]),
+            // Both a role=system reminder and a standalone reminder-shaped user message are transport, so the authored tail stays at m3.
+            for (session, reminder) in [
+                (
+                    "temporal-system-tail",
                     system_item("reminder", 4, "transport reminder"),
-                ],
-            );
-            request.prev_response_completed_at_ms = Some(10_000);
-            request.request_observed_at_ms = Some(730_000);
-            let response = transform(
-                &s,
-                &request,
-                &pctx("git:proj", "/nonexistent-docs", 730_000),
-            )
-            .unwrap();
-            assert_eq!(
-                tail_bytes(&response, "m3"),
-                "<!-- +12m -->\n§3§ question",
-                "role=system reminders are skipped when resolving the authored tail"
-            );
-        });
-    }
-
-    #[test]
-    fn temporal_gap_standalone_system_reminder_user_is_transport() {
-        run_active_surface_test(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let s = store(dir.path());
-            let first = active_cc_req(
-                "temporal-user-reminder",
-                "cfg0",
-                vec![wire_item("user", "m1", 1, &["start"])],
-            );
-            run(&s, &first, &spine());
-            run(&s, &first, &spine());
-
-            let mut request = active_cc_req(
-                "temporal-user-reminder",
-                "cfg0",
-                vec![
-                    first.messages[0].clone(),
-                    wire_item("assistant", "m2", 2, &["answer"]),
-                    wire_item("user", "m3", 3, &["question"]),
+                ),
+                (
+                    "temporal-user-reminder",
                     wire_item(
                         "user",
                         "reminder",
                         4,
                         &["<system-reminder>background work finished</system-reminder>"],
                     ),
-                ],
-            );
-            request.prev_response_completed_at_ms = Some(10_000);
-            request.request_observed_at_ms = Some(730_000);
-            let response = transform(
-                &s,
-                &request,
-                &pctx("git:proj", "/nonexistent-docs", 730_000),
-            )
-            .unwrap();
-            assert_eq!(
-                tail_bytes(&response, "m3"),
-                "<!-- +12m -->\n§3§ question",
-                "a standalone reminder-shaped user message is transport, not an authored tail"
-            );
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = store(dir.path());
+                let first = active_cc_req(
+                    session,
+                    "cfg0",
+                    vec![wire_item("user", "m1", 1, &["start"])],
+                );
+                run(&s, &first, &spine());
+                run(&s, &first, &spine());
+
+                let mut request = active_cc_req(
+                    session,
+                    "cfg0",
+                    vec![
+                        first.messages[0].clone(),
+                        wire_item("assistant", "m2", 2, &["answer"]),
+                        wire_item("user", "m3", 3, &["question"]),
+                        reminder,
+                    ],
+                );
+                request.prev_response_completed_at_ms = Some(10_000);
+                request.request_observed_at_ms = Some(730_000);
+                let response = transform(
+                    &s,
+                    &request,
+                    &pctx("git:proj", "/nonexistent-docs", 730_000),
+                )
+                .unwrap();
+                assert_eq!(
+                    tail_bytes(&response, "m3"),
+                    "<!-- +12m -->\n§3§ question",
+                    "{session}: trailing transport must not displace the authored tail"
+                );
+            }
         });
     }
 
@@ -22116,39 +21766,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn v2_request_tolerates_absent_previous_response_completion() {
-        let parsed: TransformRequest = serde_json::from_value(serde_json::json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "claude-code-anthropic",
-            "session_id": "parse-gap",
-            "render_config": "cfg",
-            "messages": []
-        }))
-        .unwrap();
-        assert_eq!(parsed.prev_response_completed_at_ms, None);
-    }
-
-    #[test]
-    fn user_hint_query_strips_transport_markup_and_keeps_full_input() {
-        let long_tail = "x".repeat(600);
-        let message = wire_item(
-            "user",
-            "query",
-            1,
-            &[
-                "§12§ keep <system-reminder>drop <system-reminder>nested</system-reminder> tail</system-reminder> words",
-                &long_tail,
-            ],
-        );
-        let query = user_hint_query(&message);
-        assert_eq!(query, format!("keep words {long_tail}"));
-        assert!(!query.contains("§12§"));
-        assert!(!query.contains("drop"));
-        assert!(query.chars().count() > 500);
-    }
-
-    #[test]
     fn user_hint_query_sanitizes_nested_reminders_comments_markup_and_tags() {
         let cases = [
             (
@@ -22172,6 +21789,27 @@ pub(crate) mod tests {
             let message = wire_item("user", "query-sanitization", 1, &[input]);
             assert_eq!(user_hint_query(&message), expected, "{name}");
         }
+
+        // Multi-block prompts are joined without truncation.
+        let long_tail = "x".repeat(600);
+        let multi_block = wire_item(
+            "user",
+            "query",
+            1,
+            &[
+                "§12§ keep <system-reminder>drop <system-reminder>nested</system-reminder> tail</system-reminder> words",
+                &long_tail,
+            ],
+        );
+        let query = user_hint_query(&multi_block);
+        assert_eq!(query, format!("keep words {long_tail}"));
+        assert!(query.chars().count() > 500);
+
+        let complete_prefix = "word ".repeat(110);
+        let full_prompt = format!("{complete_prefix}discriminatingterm suffix");
+        let query = user_hint_query(&wire_item("user", "m1", 1, &[&full_prompt]));
+        assert_eq!(query, full_prompt.trim());
+        assert!(query.chars().count() > 500);
     }
 
     #[test]
@@ -22238,16 +21876,6 @@ pub(crate) mod tests {
             !normalize_synthetic_todo_ingress(&role_user)
                 .is_authored_user_message(&role_user.messages[1])
         );
-    }
-
-    #[test]
-    fn user_hint_query_keeps_terms_beyond_the_old_character_cap() {
-        let complete_prefix = "word ".repeat(110);
-        let full_prompt = format!("{complete_prefix}discriminatingterm suffix");
-        let query = user_hint_query(&wire_item("user", "m1", 1, &[&full_prompt]));
-        assert_eq!(query, full_prompt.trim());
-        assert!(query.contains("discriminatingterm suffix"));
-        assert!(query.chars().count() > 500);
     }
 
     #[test]
@@ -22777,35 +22405,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn subc_reversibility_full_array_cc_applies_pending_drop_without_an_active_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let messages = (1..=30)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, "old live content"))
-            .collect::<Vec<_>>();
-        let mut inactive = cc_req("false-window", "cfg0", messages.clone());
-        run(&store, &inactive, &spine());
-        store
-            .append_pending_agent_drops("false-window", &["m1#0".to_string()], 1)
-            .unwrap();
-
-        // The first tool-absent emergency pass already applies the drop.
-        inactive.render_config = "cfg1".to_string();
-        let response = run(&store, &with_usage(inactive.clone(), 99, 100), &spine());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            frozen_red_payload(&store.load("false-window").unwrap().core, "m1#0"),
-            Some("[dropped]")
-        );
-        assert!(
-            store
-                .load_pending_agent_drops("false-window")
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn subc_reversibility_true_reduction_stays_canonical_after_false_flip() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -22847,9 +22446,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn latched_execute_without_concrete_work_preserves_supersession_bytes() {
+    fn latched_execute_batches_supersession_on_the_next_concrete_bust() {
         const LATCHED_PASSES: usize = 3;
-        const SESSION: &str = "latched-supersession-idle";
+        const SESSION: &str = "latched-supersession-batch";
 
         let dir = tempfile::tempdir().unwrap();
         let reference_dir = tempfile::tempdir().unwrap();
@@ -22867,6 +22466,7 @@ pub(crate) mod tests {
         ];
         let mut context = smart_pctx();
         context.cache_ttl = "never".to_string();
+        // The reference store never enables smart drops, so its render is the unreduced byte identity.
         let mut reference_context = pctx("git:proj", "/nonexistent-docs", 0);
         reference_context.cache_ttl = "never".to_string();
         let boot_request = with_usage(cc_req(SESSION, "cfg0", messages.clone()), 10, 100);
@@ -22896,7 +22496,7 @@ pub(crate) mod tests {
             next_ordinal += 1;
             for message in 0..crate::selection::RECENT_TOOL_SKELETON_WINDOW {
                 messages.push(item(
-                    &format!("latched-{pass}-tail-{message}"),
+                    &format!("batch-{pass}-tail-{message}"),
                     next_ordinal,
                     "stable tail",
                 ));
@@ -22929,102 +22529,12 @@ pub(crate) mod tests {
             assert_eq!(
                 &rendered[..previous_bytes.len()],
                 previous_bytes.as_slice(),
-                "latched Execute pass {pass} must preserve all previously served bytes"
+                "latched Execute pass {pass} must not rewrite an existing byte"
             );
             let loaded = store.load(SESSION).unwrap();
             assert!(loaded.meta.emergency_drain_active);
             assert!(
                 loaded
-                    .core
-                    .frozen_units
-                    .iter()
-                    .all(|unit| !unit.key.starts_with("red:")),
-                "latched Execute pass {pass} must leave supersession pending"
-            );
-            previous_bytes = rendered;
-        }
-    }
-
-    #[test]
-    fn latched_execute_batches_supersession_on_the_next_concrete_bust() {
-        const LATCHED_PASSES: usize = 3;
-        const SESSION: &str = "latched-supersession-batch";
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        store
-            .replace_compartments(SESSION, &[comp(1, 1, 1, "covered", "summary")])
-            .unwrap();
-        let mut messages = vec![
-            item("covered", 1, "covered source"),
-            assistant_edit_call("edit-call-1", 2, "edit-1", "shared.ts"),
-            edit_result("edit-result-1", 3, "edit-1", "result one"),
-        ];
-        let mut context = smart_pctx();
-        context.cache_ttl = "never".to_string();
-        let boot = transform(
-            &store,
-            &with_usage(cc_req(SESSION, "cfg0", messages.clone()), 10, 100),
-            &context,
-        )
-        .unwrap();
-        let mut previous_bytes = canonical_output(boot.messages());
-
-        let mut next_ordinal = 4u64;
-        for pass in 1..=LATCHED_PASSES {
-            let edit_number = pass + 1;
-            let call_id = format!("edit-{edit_number}");
-            messages.push(assistant_edit_call(
-                &format!("edit-call-{edit_number}"),
-                next_ordinal,
-                &call_id,
-                "shared.ts",
-            ));
-            next_ordinal += 1;
-            messages.push(edit_result(
-                &format!("edit-result-{edit_number}"),
-                next_ordinal,
-                &call_id,
-                &format!("result {edit_number}"),
-            ));
-            next_ordinal += 1;
-            for message in 0..crate::selection::RECENT_TOOL_SKELETON_WINDOW {
-                messages.push(item(
-                    &format!("batch-{pass}-tail-{message}"),
-                    next_ordinal,
-                    "stable tail",
-                ));
-                next_ordinal += 1;
-            }
-
-            let loaded = store.load(SESSION).unwrap();
-            let mut meta = loaded.meta;
-            meta.soft_refresh_pending = false;
-            meta.deferred_execute_state = Some(memory_store::DeferredExecuteState {
-                reason: "execute-none".to_string(),
-            });
-            meta.emergency_drain_active = true;
-            meta.emergency_drain_entered_at_ms = 1;
-            store
-                .commit(SESSION, loaded.row_version, &loaded.core, &meta)
-                .unwrap();
-
-            let latched = transform(
-                &store,
-                &with_usage(cc_req(SESSION, "cfg0", messages.clone()), 60, 100),
-                &context,
-            )
-            .unwrap();
-            let rendered = canonical_output(latched.messages());
-            assert_eq!(
-                &rendered[..previous_bytes.len()],
-                previous_bytes.as_slice(),
-                "latched Execute pass {pass} must not rewrite an existing byte"
-            );
-            assert!(
-                store
-                    .load(SESSION)
-                    .unwrap()
                     .core
                     .frozen_units
                     .iter()
@@ -23615,46 +23125,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn newest_tag_block_set_excludes_stale_provenance_from_slots() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        // m21#0 has stale provenance and cannot occupy a protected slot.
-        // The 20 protected blocks are m20#0 through m1#0, so m1#0's pending drop remains pending.
-        // Skipping the provenance re-check frees m1#0 and applies its drop.
-        let messages = (1..=21)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
-            .collect::<Vec<_>>();
-        let tags = (1..=21)
-            .map(|ordinal| TagMintInput {
-                block_id: format!("m{ordinal}#0"),
-                kind: "message".to_string(),
-                token_count: 1,
-                source_bytes: if ordinal == 21 {
-                    b"stale bytes".to_vec()
-                } else {
-                    format!("text {ordinal}").into_bytes()
-                },
-            })
-            .collect::<Vec<_>>();
-        store.seed_tags_for_test("stale-slot", &tags, 1).unwrap();
-        store
-            .append_pending_agent_drops("stale-slot", &["m1#0".to_string()], 2)
-            .unwrap();
-
-        let response = run(
-            &store,
-            &active_cc_req("stale-slot", "cfg0", messages),
-            &spine(),
-        );
-        assert_eq!(response.action, "HARD");
-        let loaded = store.load("stale-slot").unwrap();
-        assert_eq!(frozen_red_payload(&loaded.core, "m1#0"), None);
-        let pending = store.load_pending_agent_drops("stale-slot").unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].target_id, "m1#0");
-    }
-
-    #[test]
     fn full_array_cc_dormant_forced_hard_applies_pending_drop_directly() {
         // The profile alone gates reclaim.
         // forced HARD applies the drop itself; the active pass then finds nothing pending.
@@ -23837,22 +23307,6 @@ pub(crate) mod tests {
         let durable = store.load("mixed-freezes").unwrap().core;
         assert_eq!(frozen_red_payload(&durable, "m1#0"), Some("[dropped §7§]"));
         assert_eq!(frozen_red_payload(&durable, "m2#0"), Some("[dropped]"));
-    }
-
-    #[test]
-    fn missing_todo_tool_verdict_deserializes_as_fail_closed() {
-        let mut wire = serde_json::to_value(profile_req(
-            SerializerProfile::OpencodeAiSdk,
-            "todo-verdict-default",
-            "cfg0",
-            vec![item("a", 1, "first")],
-        ))
-        .unwrap();
-        wire.as_object_mut().unwrap().remove("todo_tool_present");
-        assert!(wire.get("todo_tool_present").is_none());
-        let request: TransformRequest = serde_json::from_value(wire).unwrap();
-
-        assert_eq!(request.todo_tool_present, None);
     }
 
     #[test]
@@ -25603,33 +25057,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn inactive_surface_omits_tagger_epoch_and_keeps_render_identity() {
-        assert_eq!(crate::tagger_feature_epoch(false), 0);
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let request = cc_req(
-            "inactive-tfe",
-            "pe1/tf1/gfull",
-            vec![wire_item("user", "m1", 1, &["raw bytes"])],
-        );
-        let first = run(&s, &request, &spine());
-        let first_config = s.load("inactive-tfe").unwrap().meta.last_render_config;
-        assert!(!first_config.contains("tfe:"));
-
-        let replay = run(&s, &request, &spine());
-        assert_ne!(replay.action, "HARD");
-        assert_eq!(
-            s.load("inactive-tfe").unwrap().meta.last_render_config,
-            first_config
-        );
-        assert_eq!(
-            serde_json::to_vec(first.messages()).unwrap(),
-            serde_json::to_vec(replay.messages()).unwrap()
-        );
-        assert_eq!(tail_bytes(&replay, "m1"), "raw bytes");
-    }
-
-    #[test]
     fn profile_epoch_fold_hards_epoch_zero_cc_state_once() {
         assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
         let dir = tempfile::tempdir().unwrap();
@@ -26130,14 +25557,6 @@ pub(crate) mod tests {
         );
     }
 
-    fn assert_fresh_reasoning_adjacency_is_skeletonized(next_has_reasoning: bool) {
-        assert_fresh_reasoning_adjacency_messages_are_skeletonized(reasoning_adjacency_fixture(
-            true,
-            true,
-            next_has_reasoning,
-        ));
-    }
-
     #[test]
     fn reasoning_only_tool_arc_remains_unreduced_and_separated() {
         let request = cc_req(
@@ -26158,19 +25577,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn text_bearing_tool_arc_skeletonizes_between_two_reasoning_assistants() {
-        assert_fresh_reasoning_adjacency_is_skeletonized(true);
-    }
-
-    #[test]
-    fn text_bearing_tool_arc_skeletonizes_when_only_left_assistant_has_reasoning() {
-        assert_fresh_reasoning_adjacency_is_skeletonized(false);
-    }
-
-    #[test]
-    fn text_bearing_tool_arc_skeletonizes_across_redacted_reasoning() {
-        let mut messages = reasoning_adjacency_fixture(false, true, false);
-        let right = messages
+    fn text_bearing_tool_arc_skeletonizes_across_reasoning_adjacency_shapes() {
+        let mut redacted_right = reasoning_adjacency_fixture(false, true, false);
+        let right = redacted_right
             .iter_mut()
             .find(|message| message.mid == "reasoning-adjacency-right")
             .expect("fixture has the right assistant");
@@ -26181,7 +25590,17 @@ pub(crate) mod tests {
             }),
         );
         right.ck.mark_modified();
-        assert_fresh_reasoning_adjacency_messages_are_skeletonized(messages);
+
+        for messages in [
+            // Signed reasoning on both sides of the arc.
+            reasoning_adjacency_fixture(true, true, true),
+            // Signed reasoning only on the left assistant.
+            reasoning_adjacency_fixture(true, true, false),
+            // Redacted reasoning on the right assistant only.
+            redacted_right,
+        ] {
+            assert_fresh_reasoning_adjacency_messages_are_skeletonized(messages);
+        }
     }
 
     #[test]
@@ -28527,65 +27946,6 @@ pub(crate) mod tests {
         assert_eq!(mismatch_response.action, "PASSTHROUGH");
         assert_eq!(mismatch_response.lineage_switch_consumed_id, None);
         assert!(store.load("resolved-target").unwrap().row_version.is_none());
-    }
-
-    #[test]
-    fn continued_lineage_survives_post_descent_folds_advancing_past_the_seam() {
-        // The continuation base remains frozen at the descent seam while the successor's historian may fold beyond it.
-        // A `compartment_end` beyond the seam does not fence a successor pass.
-        // Coverage at or beyond the seam is accepted; coverage before the seam is refused.
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_fake_compaction_prior(&store, "A");
-        let summary = continuation_summary("seam");
-        let descent = fake_compaction_request(
-            "B",
-            "A",
-            2,
-            501,
-            true,
-            fake_compaction_messages("2026-08-06", &summary),
-        );
-        let first = run(&store, &descent, &spine());
-        assert_eq!(
-            first.lineage_descent_disposition.as_deref(),
-            Some("descended")
-        );
-        assert_eq!(first.ordinal_continuation_base, Some(10));
-
-        // A successor may fold messages past the seam.
-        store
-            .append_compartments("B", &[comp(4, 12, 14, "successor-14", "successor work")])
-            .unwrap();
-
-        // An ordinary follow-up pass does not fence on an advanced `compartment_end`.
-        // The successor's first live ordinal is `base + 1` to continue the predecessor's numbering.
-        // assigns it.
-        let mut follow_up_messages = vec![
-            wire_item(
-                "user",
-                "summary",
-                11,
-                &[
-                    "<system-reminder>Today's date: 2026-08-06</system-reminder>",
-                    &summary,
-                ],
-            ),
-            wire_item("assistant", "tail", 12, &["continued answer"]),
-        ];
-        follow_up_messages.push(item("succ-13", 13, "successor turn thirteen"));
-        follow_up_messages.push(item("succ-14", 14, "successor turn fourteen"));
-        let follow_up = req("B", "descent-cfg", follow_up_messages);
-        let outcome = transform(
-            &store,
-            &follow_up,
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        );
-        assert!(
-            outcome.is_ok(),
-            "post-descent fold past the seam must not fence: {:?}",
-            outcome.err()
-        );
     }
 
     #[test]

@@ -80,29 +80,27 @@ describe("resolvePiUsableContextLimit", () => {
         expect(geometry?.usableSoft).toBe(100_000);
     });
 
-    test("a persisted estimate above the detected cap leaves the capped geometry intact", () => {
-        const geometry = resolvePiWindowGeometry({
-            rawContextWindow: 272_000,
-            detectedContextLimit: 120_000,
+    test("a persisted estimate above the hard wall leaves the geometry intact for a detected cap and for a runtime window", () => {
+        // The wall is 120_000 either way: once from a detected cap under a larger runtime
+        // window, once from the runtime window itself. A persisted sample inferring 204_000
+        // cannot move the soft threshold past that wall in either derivation.
+        const persisted = {
             model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
             persistedInputTokens: 139_400,
             persistedPercentage: (139_400 / 204_000) * 100,
-        });
-        expect(geometry?.derivation.window).toBe(120_000);
-        expect(geometry?.usableSoft).toBe(100_000);
-        expect(geometry?.usableHard).toBe(120_000 - 4_096);
-    });
-
-    test("a persisted estimate above the runtime window leaves the derived geometry intact", () => {
-        const geometry = resolvePiWindowGeometry({
-            rawContextWindow: 120_000,
-            model: { provider: "anthropic", id: "claude", maxTokens: 20_000 },
-            persistedInputTokens: 139_400,
-            persistedPercentage: (139_400 / 204_000) * 100,
-        });
-        expect(geometry?.derivation.window).toBe(120_000);
-        expect(geometry?.usableSoft).toBe(100_000);
-        expect(geometry?.usableHard).toBe(120_000 - 4_096);
+        };
+        for (const geometry of [
+            resolvePiWindowGeometry({
+                ...persisted,
+                rawContextWindow: 272_000,
+                detectedContextLimit: 120_000,
+            }),
+            resolvePiWindowGeometry({ ...persisted, rawContextWindow: 120_000 }),
+        ]) {
+            expect(geometry?.derivation.window).toBe(120_000);
+            expect(geometry?.usableSoft).toBe(100_000);
+            expect(geometry?.usableHard).toBe(120_000 - 4_096);
+        }
     });
 
     test("a persisted estimate below the hard wall refines the soft threshold only", () => {

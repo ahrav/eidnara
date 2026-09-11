@@ -61,42 +61,25 @@ describe("badgeTextColor (AFT parity with #186 safety net)", () => {
 });
 
 describe("readableTextColorOn", () => {
-    test("dark accent gets white text", () => {
-        expect(readableTextColorOn({ r: 0.1, g: 0.1, b: 0.3 })).toBe("#ffffff");
-        expect(readableTextColorOn({ r: 0, g: 0, b: 0 })).toBe("#ffffff");
-    });
-
-    test("light accent gets black text", () => {
-        // White text does not meet the contrast threshold on this accent.
-        expect(readableTextColorOn({ r: 0.9, g: 0.9, b: 0.7 })).toBe("#000000");
-        expect(readableTextColorOn({ r: 1, g: 1, b: 1 })).toBe("#000000");
-    });
-
-    test("mid-tone orange accent prefers white (white-bias, matches sibling badges)", () => {
-        // readableTextColorOn prefers white when it meets the bold-text contrast threshold, even if black has higher contrast.
-        expect(readableTextColorOn({ r: 0.69, g: 0.455, b: 0.188 })).toBe("#ffffff");
-        expect(readableTextColorOn({ r: 0.741, g: 0.482, b: 0.2 })).toBe("#ffffff");
-    });
-
-    test("pure green is treated as light (white fails the contrast bar)", () => {
-        // White text does not meet the contrast threshold on this green.
-        expect(readableTextColorOn({ r: 0, g: 1, b: 0 })).toBe("#000000");
-    });
-
-    test("medium-light gray gets black text (white is only ~2.1:1)", () => {
-        // Luminance ~0.448: white contrast ~2.1:1 fails the 3:1 bar; black contrast ~10:1.
-        expect(readableTextColorOn({ r: 0.7, g: 0.7, b: 0.7 })).toBe("#000000");
-    });
-
-    test("pure blue is treated as dark (low luma weight)", () => {
-        // Blue's low perceived brightness requires light text.
-        expect(readableTextColorOn({ r: 0, g: 0, b: 1 })).toBe("#ffffff");
-    });
-
-    test("does not depend on the (possibly transparent) background alpha", () => {
-        const a = readableTextColorOn({ r: 0.2, g: 0.2, b: 0.2 });
-        const b = readableTextColorOn({ r: 0.2, g: 0.2, b: 0.2 });
-        expect(a).toBe(b);
-        expect(a).toBe("#ffffff");
+    test("picks white on dark and white-biased accents and black where white fails the 3:1 bar", () => {
+        const cases: Array<[{ r: number; g: number; b: number }, string, string]> = [
+            [{ r: 0.1, g: 0.1, b: 0.3 }, "#ffffff", "dark navy"],
+            [{ r: 0, g: 0, b: 0 }, "#ffffff", "black"],
+            [{ r: 0.2, g: 0.2, b: 0.2 }, "#ffffff", "dark gray"],
+            // Blue's low perceived brightness requires light text.
+            [{ r: 0, g: 0, b: 1 }, "#ffffff", "pure blue"],
+            // White is preferred once it meets the bold-text contrast threshold, even when black has higher contrast.
+            [{ r: 0.69, g: 0.455, b: 0.188 }, "#ffffff", "mid-tone orange"],
+            [{ r: 0.741, g: 0.482, b: 0.2 }, "#ffffff", "mid-tone orange, lighter"],
+            // White text does not meet the contrast threshold on these accents.
+            [{ r: 0.9, g: 0.9, b: 0.7 }, "#000000", "light cream"],
+            [{ r: 1, g: 1, b: 1 }, "#000000", "white"],
+            [{ r: 0, g: 1, b: 0 }, "#000000", "pure green"],
+            // Luminance ~0.448: white contrast ~2.1:1 fails the 3:1 bar; black contrast ~10:1.
+            [{ r: 0.7, g: 0.7, b: 0.7 }, "#000000", "medium-light gray"],
+        ];
+        for (const [accent, expected, label] of cases) {
+            expect(readableTextColorOn(accent), label).toBe(expected);
+        }
     });
 });

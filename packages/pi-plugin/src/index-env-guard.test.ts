@@ -44,6 +44,8 @@ describe("Pi full extension subagent env guard", () => {
         expect(registrations.flags).toEqual([]);
         expect(registrations.commands).toEqual([]);
         expect(registrations.entryRenderers).toEqual([]);
+        // The environment guard returns before setting the latch, so a later in-process initialization still registers fully.
+        expect(__test.isPiEidnaraActiveInProcess()).toBe(false);
     });
 
     it("registers the full runtime when the subagent guard is absent", async () => {

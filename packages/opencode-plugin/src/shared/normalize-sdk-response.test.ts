@@ -6,9 +6,15 @@ const normalize = (response: unknown, options?: { preferResponseOnMissingData?: 
     normalizeSDKResponse<unknown>(response, FB, options);
 
 describe("normalizeSDKResponse", () => {
-    it("returns fallback for null and undefined", () => {
+    it("returns fallback for null, undefined, primitives, non-enveloped objects, and envelopes without data", () => {
         expect(normalize(null)).toBe(FB);
         expect(normalize(undefined)).toBe(FB);
+        expect(normalize({ id: "sess_1" })).toBe(FB);
+        expect(normalize(true)).toBe(FB);
+        expect(normalize("raw")).toBe(FB);
+        expect(normalize(42)).toBe(FB);
+        expect(normalize({ data: null, error: { code: 500 } })).toBe(FB);
+        expect(normalize({ data: undefined })).toBe(FB);
     });
 
     it("passes arrays through untouched", () => {
@@ -21,18 +27,6 @@ describe("normalizeSDKResponse", () => {
         expect(normalize({ data, error: undefined })).toBe(data);
         expect(normalize({ data: 0 })).toBe(0);
         expect(normalize({ data: "" })).toBe("");
-    });
-
-    it("returns fallback for an envelope whose data is null or undefined", () => {
-        expect(normalize({ data: null, error: { code: 500 } })).toBe(FB);
-        expect(normalize({ data: undefined })).toBe(FB);
-    });
-
-    it("returns fallback for non-enveloped objects and primitives by default", () => {
-        expect(normalize({ id: "sess_1" })).toBe(FB);
-        expect(normalize(true)).toBe(FB);
-        expect(normalize("raw")).toBe(FB);
-        expect(normalize(42)).toBe(FB);
     });
 
     it("returns the response itself when preferResponseOnMissingData is set", () => {

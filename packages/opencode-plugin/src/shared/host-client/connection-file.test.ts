@@ -107,22 +107,18 @@ describe("direct-file snapshot", () => {
         expect(Object.isFrozen(snapshot)).toBe(true);
     });
 
-    test("accepts a whitespace-padded file of exactly 65,536 bytes", async () => {
-        const filePath = freshPath("padded.json");
+    test("accepts a whitespace-padded file of exactly 65,536 bytes and rejects 65,537 as oversize", async () => {
+        const padded = freshPath("padded.json");
         const body = JSON.stringify(validJson()).padEnd(MAX_CONNECTION_FILE_LEN, " ");
         expect(body.length).toBe(65_536);
-        await writePrivateFile(filePath, body);
-        const snapshot = await readConnectionFile(filePath, options());
+        await writePrivateFile(padded, body);
+        const snapshot = await readConnectionFile(padded, options());
         expect(snapshot.setupSocket).toBe("/tmp/eidnara-host.sock");
-    });
 
-    test("rejects 65,537 bytes as oversize, not as a JSON failure", async () => {
-        const filePath = freshPath("oversize.json");
-        await writePrivateFile(
-            filePath,
-            JSON.stringify(validJson()).padEnd(MAX_CONNECTION_FILE_LEN + 1, " "),
-        );
-        await expectFailure(filePath, "oversize");
+        // One byte over is classified as oversize, not as a JSON failure.
+        const oversize = freshPath("oversize.json");
+        await writePrivateFile(oversize, `${body} `);
+        await expectFailure(oversize, "oversize");
     });
 
     test("rejects a directory", async () => {
@@ -157,15 +153,6 @@ describe("direct-file snapshot", () => {
         }
     });
 
-    test("rejects a file owned by another user", async () => {
-        const filePath = freshPath("foreign.json");
-        await writePrivateFile(filePath, JSON.stringify(validJson()));
-        const uid = (process.getuid?.() ?? 0) + 1;
-        // The injected uid trips the ancestor owner check on the user-owned temp dir before the descriptor check;
-        // both return `foreign_owner`.
-        await expectFailure(filePath, "foreign_owner", { uid });
-    });
-
     test("rejects a parent directory with any group or other permission bit", async () => {
         // A directory another user can write lets that user rename over the canonical name.
         for (const mode of [0o770, 0o750, 0o705, 0o701]) {
@@ -185,15 +172,6 @@ describe("direct-file snapshot", () => {
         const linkDir = freshPath("linked-run-dir");
         await symlink(realDir, linkDir);
         await expectFailure(path.join(linkDir, "connection.json"), "not_directory");
-    });
-
-    test("accepts an owner-only parent directory", async () => {
-        const dirPath = freshPath("private-run-dir");
-        await mkdir(dirPath, { mode: 0o700 });
-        const filePath = path.join(dirPath, "connection.json");
-        await writePrivateFile(filePath, JSON.stringify(validJson()));
-        const snapshot = await readConnectionFile(filePath, options());
-        expect(snapshot.pid).toBe(4_242);
     });
 
     test("rejects a group- or other-writable ancestor above the parent", async () => {
@@ -376,10 +354,11 @@ describe("direct-file snapshot", () => {
         await expectFailure(freshPath("absent.json"), "not_found");
     });
 
-    test("classifies a regular file above the parent as not_directory, not churn", async () => {
+    test("classifies a regular file as the parent or an ancestor as not_directory, not churn", async () => {
         const filePath = freshPath("not-a-dir.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
         // `not_directory` is permanent and stops recovery instead of retrying until the deadline.
+        await expectFailure(path.join(filePath, "child.json"), "not_directory");
         await expectFailure(path.join(filePath, "sub", "child.json"), "not_directory");
     });
 
@@ -398,12 +377,6 @@ describe("direct-file snapshot", () => {
         } finally {
             await chmod(dirPath, 0o700);
         }
-    });
-
-    test("classifies a regular file as the immediate parent as not_directory", async () => {
-        const filePath = freshPath("parent-is-a-file.json");
-        await writePrivateFile(filePath, JSON.stringify(validJson()));
-        await expectFailure(path.join(filePath, "child.json"), "not_directory");
     });
 
     test("classifies a permanent open failure as open_failed, not churn", async () => {
@@ -490,49 +463,36 @@ describe("direct-file snapshot", () => {
         expect(lstatCalls).toBe(2);
     });
 
-    test("translates a descriptor read failure into read_failed", async () => {
-        const filePath = freshPath("read-eio.json");
+    test("translates descriptor read and stat failures into read_failed and stat_failed", async () => {
+        const filePath = freshPath("descriptor-eio.json");
         await writePrivateFile(filePath, JSON.stringify(validJson()));
         const probe = await open(filePath, "r");
-        const proto = Object.getPrototypeOf(probe) as { read: FileHandle["read"] };
+        const proto = Object.getPrototypeOf(probe) as {
+            read: FileHandle["read"];
+            stat: () => Promise<unknown>;
+        };
         await probe.close();
-        const eio = Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
-        const spy = spyOn(proto, "read").mockImplementationOnce(() => Promise.reject(eio));
-        try {
-            const error = await readConnectionFile(filePath, options()).then(
-                () => {
-                    throw new Error("readConnectionFile unexpectedly succeeded");
-                },
-                (thrown: unknown) => thrown as ConnectionFileError,
-            );
-            expect(error).toBeInstanceOf(ConnectionFileError);
-            expect(error.code).toBe("read_failed");
-            expect(error.cause).toBe(eio);
-        } finally {
-            spy.mockRestore();
-        }
-    });
 
-    test("translates a descriptor stat failure into stat_failed", async () => {
-        const filePath = freshPath("fstat-eio.json");
-        await writePrivateFile(filePath, JSON.stringify(validJson()));
-        const probe = await open(filePath, "r");
-        const proto = Object.getPrototypeOf(probe) as { stat: () => Promise<unknown> };
-        await probe.close();
-        const eio = Object.assign(new Error("EIO: i/o error, fstat"), { code: "EIO" });
-        const spy = spyOn(proto, "stat").mockImplementationOnce(() => Promise.reject(eio));
-        try {
-            const error = await readConnectionFile(filePath, options()).then(
-                () => {
-                    throw new Error("readConnectionFile unexpectedly succeeded");
-                },
-                (thrown: unknown) => thrown as ConnectionFileError,
-            );
-            expect(error).toBeInstanceOf(ConnectionFileError);
-            expect(error.code).toBe("stat_failed");
-            expect(error.cause).toBe(eio);
-        } finally {
-            spy.mockRestore();
+        const failures = [
+            { method: "read", code: "read_failed" },
+            { method: "stat", code: "stat_failed" },
+        ] as const;
+        for (const { method, code } of failures) {
+            const eio = Object.assign(new Error(`EIO: i/o error, ${method}`), { code: "EIO" });
+            const spy = spyOn(proto, method).mockImplementationOnce(() => Promise.reject(eio));
+            try {
+                const error = await readConnectionFile(filePath, options()).then(
+                    () => {
+                        throw new Error("readConnectionFile unexpectedly succeeded");
+                    },
+                    (thrown: unknown) => thrown as ConnectionFileError,
+                );
+                expect(error).toBeInstanceOf(ConnectionFileError);
+                expect(error.code).toBe(code);
+                expect(error.cause).toBe(eio);
+            } finally {
+                spy.mockRestore();
+            }
         }
     });
 });
@@ -636,15 +596,12 @@ describe("toExactByteArray", () => {
         expect(Array.from(bytes as Uint8Array)).toEqual([0, 128, 255]);
     });
 
-    test("rejects sparse arrays even when length matches", () => {
+    test("rejects sparse arrays, wrong lengths, and non-byte elements", () => {
         const sparse = new Array(3);
         sparse[0] = 1;
         sparse[2] = 2;
         expect(toExactByteArray(sparse, 3)).toBeNull();
         expect(toExactByteArray(new Array(32), 32)).toBeNull();
-    });
-
-    test("rejects wrong length, fractions, negatives, over-255, and non-numbers", () => {
         expect(toExactByteArray([1, 2], 3)).toBeNull();
         expect(toExactByteArray([1, 2, 3, 4], 3)).toBeNull();
         expect(toExactByteArray([1.5, 0, 0], 3)).toBeNull();

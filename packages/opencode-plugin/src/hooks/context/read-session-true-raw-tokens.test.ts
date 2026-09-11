@@ -682,11 +682,16 @@ describe("tool token accounting", () => {
         ).toBe(0);
     });
 
-    it("never reads content as text for a text part", () => {
-        const message = singlePartMessage({ type: "text", content: "stale content ".repeat(100) });
-        expect(
-            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
-        ).toBe(0);
+    it("never reads content as text for a text part, whether text is absent or empty", () => {
+        const options = { providerShapeVersion: "opencode-v1" as const };
+        const absent = singlePartMessage({ type: "text", content: "stale content ".repeat(100) });
+        const empty = singlePartMessage({
+            type: "text",
+            text: "",
+            content: "stale compat content ".repeat(30),
+        });
+        expect(estimateTrueRawMessageTokens(absent, options).total).toBe(0);
+        expect(estimateTrueRawMessageTokens(empty, options).total).toBe(0);
     });
 
     it("ignores non-string OpenCode output values", () => {
@@ -790,13 +795,15 @@ describe("tool token accounting", () => {
         expect(breakdown.other).toBeGreaterThan(1000);
     });
 
-    it("keeps an unknown image-like type opaque", () => {
-        const message = singlePartMessage({ type: "image-cache", payload: "X".repeat(20_000) });
-        const breakdown = estimateTrueRawMessageTokens(message, {
-            providerShapeVersion: "opencode-v1",
-        });
-        expect(breakdown.image).toBe(0);
-        expect(breakdown.other).toBeGreaterThan(1000);
+    it("keeps unknown part types opaque, including image-like names", () => {
+        for (const type of ["image-cache", "profile"]) {
+            const breakdown = estimateTrueRawMessageTokens(
+                singlePartMessage({ type, payload: "X".repeat(20_000) }),
+                { providerShapeVersion: "opencode-v1" },
+            );
+            expect(breakdown.image).toBe(0);
+            expect(breakdown.other).toBeGreaterThan(1000);
+        }
     });
 
     it("reads only the decoder's reasoning fields", () => {
@@ -1055,17 +1062,6 @@ describe("tool token accounting", () => {
         expect(pi.reasoning).toBeLessThan(10);
     });
 
-    it("lets an explicitly empty OpenCode text field win over retained content", () => {
-        const message = singlePartMessage({
-            type: "text",
-            text: "",
-            content: "stale compat content ".repeat(30),
-        });
-        expect(
-            estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" }).total,
-        ).toBe(0);
-    });
-
     it("skips compaction marker parts", () => {
         const message = singlePartMessage({
             type: "compaction",
@@ -1143,26 +1139,26 @@ describe("tool token accounting", () => {
         );
     });
 
-    it("treats a typed OpenCode attachment with a MIME field as media", () => {
-        const message = singlePartMessage({
-            type: "tool",
-            callID: "c",
-            tool: "read",
-            state: {
-                status: "completed",
-                input: {},
-                output: "",
-                attachments: [
-                    { type: "attachment", mime: "application/pdf", data: "P".repeat(20_000) },
-                ],
-            },
-        });
-        const breakdown = estimateTrueRawMessageTokens(message, {
-            providerShapeVersion: "opencode-v1",
-            imageTokenHeuristic: () => 400,
-        });
-        expect(breakdown.image).toBe(400);
-        expect(breakdown.toolOutput).toBe(0);
+    it("counts OpenCode tool attachments as media whatever their block type", () => {
+        const attachments = [
+            { type: "file", mime: "image/png", url: "file:///x.png" },
+            { type: "attachment", mime: "application/pdf", data: "P".repeat(20_000) },
+            { type: "text", mime: "application/pdf", data: "P".repeat(20_000) },
+        ];
+        for (const attachment of attachments) {
+            const message = singlePartMessage({
+                type: "tool",
+                callID: "c",
+                tool: "read",
+                state: { status: "completed", input: {}, output: "", attachments: [attachment] },
+            });
+            const breakdown = estimateTrueRawMessageTokens(message, {
+                providerShapeVersion: "opencode-v1",
+                imageTokenHeuristic: () => 400,
+            });
+            expect(breakdown.image).toBe(400);
+            expect(breakdown.toolOutput).toBe(0);
+        }
     });
 
     it("ignores a result field on OpenCode tool parts", () => {
@@ -1176,35 +1172,6 @@ describe("tool token accounting", () => {
             estimateTrueRawMessageTokens(message, { providerShapeVersion: "opencode-v1" })
                 .toolOutput,
         ).toBe(0);
-    });
-
-    it("treats a text-typed OpenCode attachment with a MIME field as media", () => {
-        const message = singlePartMessage({
-            type: "tool",
-            callID: "c",
-            tool: "read",
-            state: {
-                status: "completed",
-                input: {},
-                output: "",
-                attachments: [{ type: "text", mime: "application/pdf", data: "P".repeat(20_000) }],
-            },
-        });
-        const breakdown = estimateTrueRawMessageTokens(message, {
-            providerShapeVersion: "opencode-v1",
-            imageTokenHeuristic: () => 400,
-        });
-        expect(breakdown.image).toBe(400);
-        expect(breakdown.toolOutput).toBe(0);
-    });
-
-    it("classifies only an exact file type as media", () => {
-        const breakdown = estimateTrueRawMessageTokens(
-            singlePartMessage({ type: "profile", payload: "X".repeat(20_000) }),
-            { providerShapeVersion: "opencode-v1" },
-        );
-        expect(breakdown.image).toBe(0);
-        expect(breakdown.other).toBeGreaterThan(1000);
     });
 
     it("keeps source parts opaque", () => {
@@ -1235,32 +1202,6 @@ describe("tool token accounting", () => {
         });
         expect(empty.toolOutput).toBe(0);
         expect(short.toolOutput).toBeGreaterThan(0);
-    });
-
-    it("counts OpenCode tool attachments as media", () => {
-        const message: RawMessage = {
-            id: "read",
-            role: "assistant",
-            parts: [
-                {
-                    type: "tool",
-                    callID: "c1",
-                    tool: "read",
-                    state: {
-                        status: "completed",
-                        input: { path: "x.png" },
-                        output: "",
-                        attachments: [{ type: "file", mime: "image/png", url: "file:///x.png" }],
-                    },
-                },
-            ],
-            ordinal: 1,
-        };
-        const breakdown = estimateTrueRawMessageTokens(message, {
-            providerShapeVersion: "opencode-v1",
-            imageTokenHeuristic: () => 333,
-        });
-        expect(breakdown.image).toBe(333);
     });
 
     it("counts media blocks in tool results through the image heuristic, not as text", () => {

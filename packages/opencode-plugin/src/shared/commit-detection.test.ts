@@ -9,32 +9,23 @@ import {
 } from "./commit-detection";
 
 describe("textMentionsRecentCommit", () => {
-    it("fires on a hash + commit-action verb in the same text", () => {
+    it("fires on a hash + commit-action verb, including every cherry-pick spelling", () => {
         expect(textMentionsRecentCommit("Committed abc1234 with the fix")).toBe(true);
         expect(textMentionsRecentCommit("merged a1b2c3d into main")).toBe(true);
         expect(textMentionsRecentCommit("rebased onto feedb4d cleanly")).toBe(true);
         expect(textMentionsRecentCommit("cherry-picked deadbeef")).toBe(true);
-    });
-
-    it("accepts hyphenated, spaced, and joined cherry-pick spellings", () => {
         expect(textMentionsRecentCommit("cherry picked deadbeef")).toBe(true);
         expect(textMentionsRecentCommit("cherrypicked deadbeef")).toBe(true);
         expect(textMentionsRecentCommit("Cherry Picking deadbeef")).toBe(true);
         expect(textMentionsRecentCommit("cherry pick deadbeef")).toBe(true);
     });
 
-    it("does NOT fire on a hash alone, or the bare word 'hash'/'sha' + hex", () => {
+    it("does NOT fire on a hash alone, a verb alone, 'hash'/'sha' + hex, or hex outside 7-12 chars", () => {
         expect(textMentionsRecentCommit("the value is abc1234")).toBe(false);
         // 'hash' and 'sha' do not count as commit-action verbs.
         expect(textMentionsRecentCommit("hash is abc1234567")).toBe(false);
         expect(textMentionsRecentCommit("sha abc1234")).toBe(false);
-    });
-
-    it("does NOT fire on a verb alone (no hash)", () => {
         expect(textMentionsRecentCommit("I will commit later")).toBe(false);
-    });
-
-    it("respects the 7-12 hex length bound", () => {
         expect(textMentionsRecentCommit("committed abc12")).toBe(false); // too short
         expect(textMentionsRecentCommit("committed abc1234567890abcdef")).toBe(false); // too long
     });

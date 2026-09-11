@@ -19,7 +19,7 @@ describe("shared-memory soak runner", () => {
         expect(invocation.environment).toEqual({});
     });
 
-    it("selects the release soak and converts hours to seconds", () => {
+    it("selects the release soak, converts hours to seconds, and defaults to five hours", () => {
         const invocation = soakInvocation(["--hours", "5"]);
         expect(invocation.command).toContain("--locked");
         expect(invocation.command).toContain("--release");
@@ -28,9 +28,7 @@ describe("shared-memory soak runner", () => {
         );
         expect(invocation.command.slice(-3)).toEqual(["--", "--ignored", "--exact"]);
         expect(invocation.environment).toEqual({ EIDNARA_SHM_SOAK_SECONDS: "18000" });
-    });
-
-    it("defaults to a duration the six-hour hosted-runner limit can hold", () => {
+        // The default duration fits inside the six-hour hosted-runner limit.
         expect(soakInvocation([]).environment).toEqual({ EIDNARA_SHM_SOAK_SECONDS: "18000" });
     });
 

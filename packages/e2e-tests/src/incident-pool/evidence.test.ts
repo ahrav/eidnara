@@ -482,13 +482,10 @@ describe("ownership matrix (U3 approach 4)", () => {
 });
 
 describe("verifier-change mutation replay gate (R14)", () => {
-    it("requires no replay while verifier bytes match the accepted digests", () => {
+    it("replays only the mutations bound to a verifier whose bytes changed and fails when one no longer reddens", () => {
         const view = committedView();
         expect(changedVerifiers(view.verifierDigests, view.verifierDigests)).toEqual([]);
-    });
 
-    it("fails contributor verification when a bound mutation no longer produces the expected red result", () => {
-        const view = committedView();
         const verifier = "crates/daemon/src/differential_goldens.rs";
         const changed = changedVerifiers(view.verifierDigests, {
             ...view.verifierDigests,

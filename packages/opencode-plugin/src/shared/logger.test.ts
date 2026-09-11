@@ -76,9 +76,7 @@ afterEach(() => {
     }
 });
 
-async function runLoggerScenario(
-    scenario: "recovery" | "diagnostics" | "sanitize",
-): Promise<LoggerScenarioResult> {
+async function runLoggerScenario(scenario: "recovery" | "sanitize"): Promise<LoggerScenarioResult> {
     const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
     scenarioRoots.push(root);
     const stdout = await spawnScenario(loggerScenario, scenario, root);
@@ -610,16 +608,11 @@ describe.each([undefined, "info"])("logger hardening (minimum=%s)", (minimum) =>
         else process.env.EIDNARA_LOG_LEVEL = minimum;
     });
 
-    test("recreates a log directory removed while the process is running", async () => {
+    test("recreates a removed log directory and reports swallowed writes while healthy writes leave the counter at zero", async () => {
         const result = await runLoggerScenario("recovery");
 
         expect(result.exists).toBe(true);
         expect(result.content).toContain("second");
-    });
-
-    test("reports swallowed writes while healthy writes leave the counter at zero", async () => {
-        const result = await runLoggerScenario("diagnostics");
-
         expect(result.healthyDiagnostics).toEqual({
             swallowedWriteCount: 0,
             lastErrorMessage: null,
@@ -679,9 +672,12 @@ describe.each([undefined, "info"])("logger hardening (minimum=%s)", (minimum) =>
         },
     );
 
-    test("keeps the message when its data cannot be serialized", async () => {
+    test("flushes on exit without holding the process open and keeps the message when its data cannot be serialized", async () => {
         const result = await runExitScenario();
 
+        expect(result.content.split("\n").filter(Boolean)).toHaveLength(6);
+        // A referenced 500ms timer would keep the process alive for at least 500ms.
+        expect(result.idleMsBeforeExit).toBeLessThan(250);
         expect(result.content).toContain("with bigint [unserializable data: ");
         expect(result.content).toContain("with cycle [unserializable data: ");
         expect(result.content).toContain("with throwing toJSON [unserializable data: nope]");
@@ -689,14 +685,6 @@ describe.each([undefined, "info"])("logger hardening (minimum=%s)", (minimum) =>
         expect(result.content).toContain("with function undefined");
         expect(result.content).toContain("with symbol undefined");
         expect(result.content).toContain('plain {"ok":true}');
-    });
-
-    test("flushes on exit without holding the process open for the flush interval", async () => {
-        const result = await runExitScenario();
-
-        expect(result.content.split("\n").filter(Boolean)).toHaveLength(6);
-        // A referenced 500ms timer would keep the process alive for at least 500ms.
-        expect(result.idleMsBeforeExit).toBeLessThan(250);
     });
 
     test.skipIf(process.platform === "win32")(

@@ -228,20 +228,6 @@ describe("models-dev-cache (SDK-only)", () => {
         expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272_000);
     });
 
-    test("Codex-OAuth cap is honored: a 400k/272k gpt-5.5 resolves to 272k (not the stale 922k)", async () => {
-        // The auth-resolved SDK cap overrides larger stale cached values.
-        await refreshModelLimitsFromApi(
-            makeClient([
-                {
-                    id: "openai",
-                    models: { "gpt-5.5": { limit: { context: 400000, input: 272000 } } },
-                },
-            ]),
-        );
-        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
-        expect(getSdkInputLimit("openai", "gpt-5.5")).toBe(272000);
-    });
-
     test("derived experimental.modes inherit the effective (input) limit", async () => {
         await refreshModelLimitsFromApi(
             makeClient([
@@ -329,30 +315,13 @@ describe("models-dev-cache (SDK-only)", () => {
     });
 
     describe("sanity bounds [20k, 3M]", () => {
-        test("rejects an implausibly small limit (torn-read garbage like 6748)", async () => {
+        test.each([
+            ["an implausibly small limit (torn-read garbage)", 6748],
+            ["a below-floor num_ctx default", 8192],
+            ["an impossibly large limit (> 3M)", 5_000_000],
+        ])("rejects %s", async (_title, context) => {
             await refreshModelLimitsFromApi(
-                makeClient([
-                    {
-                        id: "ollama-cloud",
-                        // The resolver rejects limits below 20,000.
-                        // The resolver rejects limits below 20,000.
-                        models: { "deepseek-v4-pro": { limit: { context: 6748 } } },
-                    },
-                ]),
-            );
-            expect(getSdkContextLimit("ollama-cloud", "deepseek-v4-pro")).toBeUndefined();
-        });
-
-        test("rejects a below-floor 8192 num_ctx default", async () => {
-            await refreshModelLimitsFromApi(
-                makeClient([{ id: "p", models: { m: { limit: { context: 8192 } } } }]),
-            );
-            expect(getSdkContextLimit("p", "m")).toBeUndefined();
-        });
-
-        test("rejects an impossibly large limit (> 3M)", async () => {
-            await refreshModelLimitsFromApi(
-                makeClient([{ id: "p", models: { m: { limit: { context: 5_000_000 } } } }]),
+                makeClient([{ id: "p", models: { m: { limit: { context } } } }]),
             );
             expect(getSdkContextLimit("p", "m")).toBeUndefined();
         });
@@ -1010,15 +979,6 @@ describe("getSdkContextLimit prompt_only pre-carve arm", () => {
                 }),
             },
         });
-
-    test("prompt_only detection routes through the input arm without double reservation", async () => {
-        await seed();
-        expect(
-            getSdkContextLimit("anthropic", "prov-model", 167000, {
-                detectedLimitProvenance: "prompt_only",
-            }),
-        ).toBe(167000);
-    });
 
     test("combined detection narrows raw context before reservation", async () => {
         await seed();

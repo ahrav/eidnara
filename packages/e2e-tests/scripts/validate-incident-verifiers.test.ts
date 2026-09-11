@@ -20,36 +20,20 @@ function committedCatalog() {
 }
 
 describe("incident verifier contributor gate", () => {
-    it("accepts unchanged bound verifier bytes", () => {
-        expect(() =>
-            assertBoundVerifierBytesUnchanged(
-                { "tests/verifier.test.ts": "a".repeat(64) },
-                { "tests/verifier.test.ts": "a".repeat(64) },
-            ),
-        ).not.toThrow();
-    });
-
-    it("blocks a changed bound verifier without replay support", () => {
-        expect(() =>
-            assertBoundVerifierBytesUnchanged(
-                { "tests/verifier.test.ts": "a".repeat(64) },
-                { "tests/verifier.test.ts": "b".repeat(64) },
-            ),
-        ).toThrow(/changed without recorded mutation replay support/);
-    });
-
-    it("blocks dropping every record that bound an accepted verifier", () => {
-        // Otherwise deleting the record exempts the verifier from replay.
-        expect(() =>
-            assertBoundVerifierBytesUnchanged({ "tests/verifier.test.ts": "a".repeat(64) }, {}),
-        ).toThrow(/no longer bind accepted verifiers/);
-    });
-
-    it("accepts a verifier the accepted base never bound", () => {
+    it("accepts unchanged or newly bound verifier bytes and blocks changed or dropped bindings", () => {
+        const bound = { "tests/verifier.test.ts": "a".repeat(64) };
+        expect(() => assertBoundVerifierBytesUnchanged(bound, { ...bound })).not.toThrow();
         // An unbound base has no recorded bytes to compare.
         expect(() =>
             assertBoundVerifierBytesUnchanged({}, { "tests/verifier.test.ts": "b".repeat(64) }),
         ).not.toThrow();
+        expect(() =>
+            assertBoundVerifierBytesUnchanged(bound, { "tests/verifier.test.ts": "b".repeat(64) }),
+        ).toThrow(/changed without recorded mutation replay support/);
+        // Otherwise deleting the record exempts the verifier from replay.
+        expect(() => assertBoundVerifierBytesUnchanged(bound, {})).toThrow(
+            /no longer bind accepted verifiers/,
+        );
     });
 });
 
@@ -69,36 +53,20 @@ describe("catalog-bound executable verifier gate", () => {
         expect(builtinIncidentCaseRegistry().size).toBe(2);
     });
 
-    it("accepts unchanged bound module bytes", () => {
-        expect(() =>
-            assertCatalogBoundVerifierBytesUnchanged(
-                { [key]: "a".repeat(64) },
-                { [key]: "a".repeat(64) },
-            ),
-        ).not.toThrow();
-    });
-
-    it("blocks a changed bound module", () => {
-        expect(() =>
-            assertCatalogBoundVerifierBytesUnchanged(
-                { [key]: "a".repeat(64) },
-                { [key]: "b".repeat(64) },
-            ),
-        ).toThrow(/changed without recorded replay support/);
-    });
-
-    it("blocks dropping an accepted binding", () => {
-        // Otherwise removing the binding exempts the module from the gate.
-        expect(() =>
-            assertCatalogBoundVerifierBytesUnchanged({ [key]: "a".repeat(64) }, {}),
-        ).toThrow(/no longer binds accepted executable verifiers/);
-    });
-
-    it("accepts a module the accepted base never bound", () => {
+    it("accepts unchanged or newly bound module bytes and blocks changed or dropped bindings", () => {
+        const bound = { [key]: "a".repeat(64) };
+        expect(() => assertCatalogBoundVerifierBytesUnchanged(bound, { ...bound })).not.toThrow();
         // The accepted base has no bytes for a newly bound module to drift from.
         expect(() =>
             assertCatalogBoundVerifierBytesUnchanged({}, { [key]: "b".repeat(64) }),
         ).not.toThrow();
+        expect(() =>
+            assertCatalogBoundVerifierBytesUnchanged(bound, { [key]: "b".repeat(64) }),
+        ).toThrow(/changed without recorded replay support/);
+        // Otherwise removing the binding exempts the module from the gate.
+        expect(() => assertCatalogBoundVerifierBytesUnchanged(bound, {})).toThrow(
+            /no longer binds accepted executable verifiers/,
+        );
     });
 });
 

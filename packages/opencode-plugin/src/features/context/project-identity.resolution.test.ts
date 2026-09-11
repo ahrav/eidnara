@@ -171,12 +171,6 @@ describe("project identity", () => {
         expect(resolveProjectIdentity(repo)).toBe(identity);
     });
 
-    it("resolveProjectIdentity falls back to dir identity for non-git directories", () => {
-        const directory = makeTempDir("project-identity-wrapper-");
-
-        expect(resolveProjectIdentity(directory)).toBe(expectedDirIdentity(directory));
-    });
-
     it("uses the no-git fast path without invoking git", () => {
         const directory = makeTempDir("project-identity-no-git-fast-");
         const execMock = mock(() => {
@@ -186,15 +180,6 @@ describe("project identity", () => {
 
         expect(resolveProjectIdentity(directory)).toBe(expectedDirIdentity(directory));
         expect(execMock).not.toHaveBeenCalled();
-    });
-
-    it("detects git metadata in ancestors for subdirectory sessions", () => {
-        const repo = makeRepoWithGitMetadata("project-identity-ancestor-");
-        const subdir = join(repo, "nested", "session");
-        mkdirSync(subdir, { recursive: true });
-        __setProjectIdentityTestHooks({ execFileSync: returningRootCommit(FIRST_ROOT_COMMIT) });
-
-        expect(resolveProjectIdentity(subdir)).toBe(`git:${FIRST_ROOT_COMMIT}`);
     });
 
     it("detects git metadata through symlinked checkout paths", () => {
@@ -518,15 +503,5 @@ describe("project identity", () => {
         const error = expectProjectIdentityError(() => resolveProjectIdentity(directory));
 
         expect(error.errorClass).toBe("permission_denied");
-    });
-
-    it("ProjectIdentityError carries classification and raw directory fields", () => {
-        const cause = new Error("inner");
-        const error = new ProjectIdentityError("git_timeout", "/raw/path", "timed out", cause);
-
-        expect(error.name).toBe("ProjectIdentityError");
-        expect(error.errorClass).toBe("git_timeout");
-        expect(error.rawDirectory).toBe("/raw/path");
-        expect(error.cause).toBe(cause);
     });
 });

@@ -17,7 +17,8 @@
 //! - Zero git subprocesses on cache hits →
 //!   `acceptance_cache_hits_do_no_git_work_and_nothing_spawns`.
 //! - Failed read repair blocks without waiting for deep verification →
-//!   `acceptance_failed_check_blocks_before_deep_verification`.
+//!   `kernel_read_repair.rs`
+//!   `failed_check_appends_observation_event_and_job_in_one_commit`.
 //! - State changes atomic under known_as_of → `kernel_read_repair.rs`
 //!   fault-injection and bitemporal tests, plus the restart proof there.
 
@@ -36,8 +37,8 @@ use git_fixtures::{
     commit_snapshot, init_repo, materialize, set_head_detached, write_worktree_file,
 };
 use kernel::applicability::{
-    AppendOutcome, ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityRequest,
-    ApplicabilityState, CheckSpec, EvalBudget, EvaluationStats, ObjectApplicabilitySpec,
+    ApplicabilityCandidate, ApplicabilityEngine, ApplicabilityRequest, ApplicabilityState,
+    CheckSpec, EvalBudget, EvaluationStats, ObjectApplicabilitySpec,
 };
 use kernel::{
     AnchorRowSpec, CommitIntent, DecisionPayload, DecisionSpec, DomainSpec, KernelStore,
@@ -429,52 +430,4 @@ fn acceptance_work_stays_bounded_and_cancellable() {
         "no cache or repository work runs after the snapshot is refused"
     );
     assert!(report.auto_injectable().next().is_none());
-}
-
-#[test]
-fn acceptance_failed_check_blocks_before_deep_verification() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repo_dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(repo_dir.path());
-    let tip = commit_snapshot(&fixture.repo, "main", &[], &[("f.txt", "one\n")], "tip", 1);
-    set_head_detached(&fixture.repo, tip);
-    materialize(&fixture.repo, tip);
-
-    let store = seed_store(store_dir.path(), &["object-blocked"]);
-    let engine = ApplicabilityEngine::new();
-    let failing = ApplicabilityCandidate {
-        payload: Some(
-            ObjectApplicabilitySpec::new(
-                vec![],
-                vec![CheckSpec::FileExists {
-                    path: "missing.rs".to_string(),
-                }],
-            )
-            .encode(),
-        ),
-        ..candidate("object-blocked")
-    };
-    let query = QueryContext::default();
-    let scope = ScopeMatchContext::new();
-    let candidates = [failing];
-    let report = engine
-        .evaluate(
-            &store,
-            &ApplicabilityRequest {
-                checkout_path: repo_dir.path(),
-                query: &query,
-                scope_context: &scope,
-                candidates: &candidates,
-                actor: "test",
-                observed_at: 42,
-            },
-            &EvalBudget::unbounded(),
-        )
-        .unwrap();
-    assert_eq!(report.objects[0].state, ApplicabilityState::Stale);
-    assert!(report.auto_injectable().next().is_none());
-    assert!(matches!(
-        *report.appends().next().expect("an append").1,
-        AppendOutcome::Landed { .. }
-    ));
 }

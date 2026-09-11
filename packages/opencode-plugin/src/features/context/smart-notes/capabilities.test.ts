@@ -47,17 +47,6 @@ async function createTaggedRepository(dir: string): Promise<void> {
 }
 
 describe("smart-note readFile capability", () => {
-    test("reads regular project files", async () => {
-        await withTempDir(async (dir) => {
-            await writeFile(path.join(dir, "README.md"), "hello", "utf8");
-            const cap = createSmartNoteCapabilities({
-                projectRoot: dir,
-                signal: new AbortController().signal,
-            });
-            expect(await cap.readFile("README.md")).toBe("hello");
-        });
-    });
-
     test("keeps leading and trailing whitespace in names and rejects blank input", async () => {
         await withTempDir(async (dir) => {
             await writeFile(path.join(dir, "status.txt"), "plain", "utf8");

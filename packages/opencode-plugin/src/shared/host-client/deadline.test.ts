@@ -41,17 +41,19 @@ describe("Deadline", () => {
         expect(deadline.remainingMs()).toBe(0);
     });
 
-    test("stage budget takes the cap when the cap is shorter", () => {
-        const { clock } = fakeClock();
-        const deadline = Deadline.start(10_000, clock);
-        expect(deadline.stageBudgetMs(2_000)).toBe(2_000);
-    });
-
-    test("stage budget takes the remaining time when the cap is longer", () => {
+    test("stage budget is the shorter of the cap and the remaining time, never negative", () => {
         const { clock, advance } = fakeClock();
-        const deadline = Deadline.start(1_000, clock);
+        const capped = Deadline.start(10_000, clock);
+        expect(capped.stageBudgetMs(2_000)).toBe(2_000);
+
+        const remaining = Deadline.start(1_000, clock);
         advance(800);
-        expect(deadline.stageBudgetMs(30_000)).toBe(200);
+        expect(remaining.stageBudgetMs(30_000)).toBe(200);
+
+        advance(500);
+        expect(remaining.isExpired()).toBe(true);
+        expect(remaining.stageBudgetMs(1_000)).toBe(0);
+        expect(remaining.stage(1_000).remainingMs()).toBe(0);
     });
 
     test("a derived stage deadline never extends the operation end", () => {
@@ -96,14 +98,6 @@ describe("Deadline", () => {
             (deadline as unknown as { endMs: number }).endMs = 999_999;
         }).toThrow();
         expect(deadline.endMs).toBe(100);
-    });
-
-    test("an expired deadline yields zero stage budget, never a negative one", () => {
-        const { clock, advance } = fakeClock();
-        const deadline = Deadline.start(50, clock);
-        advance(500);
-        expect(deadline.stageBudgetMs(1_000)).toBe(0);
-        expect(deadline.stage(1_000).remainingMs()).toBe(0);
     });
 
     test("rejects non-finite and negative timeouts and caps", () => {
@@ -163,39 +157,24 @@ function fakeScheduler(): {
 }
 
 describe("armExpiryTimer", () => {
-    test("an early-fired timer re-arms instead of reporting expiry", () => {
+    test("every early fire re-arms and expiry is reported only once the deadline is provably expired", () => {
+        // setTimeout can fire before endMs when its delay is truncated. The expiry callback
+        // must not run before isExpired() returns true, however many early fires occur.
         const { clock, advance } = fakeClock();
         const { scheduler, fireNext, scheduledCount } = fakeScheduler();
-        const deadline = Deadline.start(30, clock);
-        let expired = 0;
-        armExpiryTimer(deadline, () => (expired += 1), scheduler);
-
-        // setTimeout can fire before endMs when its delay is truncated.
-        // The expiry callback must not run before isExpired() returns true.
-        advance(29);
-        fireNext();
-        expect(expired).toBe(0);
-        expect(scheduledCount()).toBe(2);
-
-        // After re-arming the expiry timer, the expiry callback runs only after isExpired() returns true.
-        advance(1);
-        expect(deadline.isExpired()).toBe(true);
-        fireNext();
-        expect(expired).toBe(1);
-    });
-
-    test("re-arms repeatedly until the deadline is provably expired", () => {
-        const { clock, advance } = fakeClock();
-        const { scheduler, fireNext } = fakeScheduler();
         const deadline = Deadline.start(10, clock);
         let expired = 0;
         armExpiryTimer(deadline, () => (expired += 1), scheduler);
+        expect(scheduledCount()).toBe(1);
 
         for (let elapsed = 0; elapsed < 10; elapsed += 2) {
             fireNext();
             expect(expired).toBe(0);
+            // Each early fire arms exactly one replacement timer.
+            expect(scheduledCount()).toBe(elapsed / 2 + 2);
             advance(2);
         }
+        expect(deadline.isExpired()).toBe(true);
         fireNext();
         expect(expired).toBe(1);
     });

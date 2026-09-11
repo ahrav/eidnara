@@ -26,6 +26,9 @@ fn fixture_page_size_matches_host() -> bool {
     host_page_size() == FIXTURE_PAGE_SIZE
 }
 
+/// A corpus decoder and whether its `valid` seed encodes a page-size-dependent layout.
+type CorpusTarget = (&'static str, fn(&[u8]) -> bool, bool);
+
 fn replay(target: &str, decoder: fn(&[u8]) -> bool, valid_seed_is_page_size_dependent: bool) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fuzz/corpus")
@@ -73,18 +76,15 @@ fn replay(target: &str, decoder: fn(&[u8]) -> bool, valid_seed_is_page_size_depe
 }
 
 #[test]
-fn frame_descriptor_corpus_replays_without_panic() {
-    replay("frame_descriptor", harness::frame_descriptor, false);
-}
-
-#[test]
-fn provider_grant_corpus_replays_without_panic() {
-    replay("provider_grant", harness::provider_grant, true);
-}
-
-#[test]
-fn provider_sample_corpus_replays_without_panic() {
-    replay("provider_sample", harness::provider_sample, false);
+fn every_decoder_corpus_replays_without_panic() {
+    let targets: [CorpusTarget; 3] = [
+        ("frame_descriptor", harness::frame_descriptor, false),
+        ("provider_grant", harness::provider_grant, true),
+        ("provider_sample", harness::provider_sample, false),
+    ];
+    for (target, decoder, valid_seed_is_page_size_dependent) in targets {
+        replay(target, decoder, valid_seed_is_page_size_dependent);
+    }
 }
 
 /// The `provider_grant/valid` seed is also the frozen encoding of the depth-32 ring profile,

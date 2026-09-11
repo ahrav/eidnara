@@ -281,35 +281,23 @@ function commitCallWith(
 describe("FakeKernel admission classes", () => {
     const insert = [{ op: "insert_decision", spec: decisionSpec("mem_new") }];
 
-    it("refuses a source class above the derived one as class_over_declared and applies nothing", () => {
-        const kernel = new FakeKernel();
-        const reply = kernel.reply(
-            commitCallWith(insert, { asserted_source_class: "explicit_user" }),
-        );
-        expect(reply).toEqual({ state: { kind: "invalid", reason: "class_over_declared" } });
-        expect(kernel.objects.size).toBe(0);
-        expect(kernel.tip).toBe(0);
+    it("refuses a source or taint class above the derived one as class_over_declared and applies nothing", () => {
+        for (const fields of [
+            { asserted_source_class: "explicit_user" },
+            { asserted_taint_class: "current_code" },
+        ]) {
+            const kernel = new FakeKernel();
+            const reply = kernel.reply(commitCallWith(insert, fields));
+            expect(reply).toEqual({ state: { kind: "invalid", reason: "class_over_declared" } });
+            expect(kernel.objects.size).toBe(0);
+            expect(kernel.tip).toBe(0);
+        }
     });
 
-    it("refuses a taint class above the derived one as class_over_declared", () => {
-        const kernel = new FakeKernel();
-        const reply = kernel.reply(
-            commitCallWith(insert, { asserted_taint_class: "current_code" }),
-        );
-        expect(reply).toEqual({ state: { kind: "invalid", reason: "class_over_declared" } });
-        expect(kernel.tip).toBe(0);
-    });
-
-    it("refuses an unknown source_kind as invalid_input", () => {
-        const kernel = new FakeKernel();
-        const reply = kernel.reply(commitCallWith(insert, { source_kind: "oracle" }));
-        expect(reply).toEqual({ state: { kind: "invalid", reason: "invalid_input" } });
-        expect(kernel.tip).toBe(0);
-    });
-
-    it("refuses an unknown class name as invalid_input", () => {
+    it("refuses an unknown source_kind or class name as invalid_input", () => {
         const kernel = new FakeKernel();
         for (const fields of [
+            { source_kind: "oracle" },
             { asserted_source_class: "oracle" },
             { asserted_taint_class: "oracle" },
             { asserted_source_class: 7 },
@@ -474,45 +462,28 @@ describe("FakeKernel decision identity", () => {
 });
 
 describe("FakeKernel envelope limits", () => {
-    it("refuses more operations than the daemon carries with the invalid_params transport error", () => {
-        const kernel = new FakeKernel();
-        const operations = Array.from({ length: MAX_COMMIT_OPERATIONS + 1 }, (_, i) => ({
+    it("refuses more operations or tokens than the daemon carries, or a missing source_kind, with the invalid_params transport error", () => {
+        const insert = [{ op: "insert_decision", spec: decisionSpec("mem_new") }];
+        const overLimitOperations = Array.from({ length: MAX_COMMIT_OPERATIONS + 1 }, (_, i) => ({
             op: "insert_decision",
             spec: decisionSpec(`mem_${i}`),
         }));
-        expect(() => kernel.reply(commitCall(operations))).toThrow(
-            expect.objectContaining({ kind: "terminal", code: "invalid_params" }),
-        );
-        expect(kernel.tip).toBe(0);
-        expect(kernel.objects.size).toBe(0);
-    });
-
-    it("refuses more tokens than the daemon carries with the invalid_params transport error", () => {
-        const kernel = new FakeKernel();
-        const tokens = Array.from({ length: MAX_COMMIT_TOKENS + 1 }, (_, i) => ({
+        const overLimitTokens = Array.from({ length: MAX_COMMIT_TOKENS + 1 }, (_, i) => ({
             object_id: `mem_${i}`,
             known_as_of: 0,
         }));
-        expect(() =>
-            kernel.reply(
-                commitCallWith([{ op: "insert_decision", spec: decisionSpec("mem_new") }], {
-                    tokens,
-                }),
-            ),
-        ).toThrow(expect.objectContaining({ kind: "terminal", code: "invalid_params" }));
-        expect(kernel.tip).toBe(0);
-    });
-
-    it("refuses a missing source_kind with the invalid_params transport error", () => {
-        const kernel = new FakeKernel();
-        expect(() =>
-            kernel.reply(
-                commitCallWith([{ op: "insert_decision", spec: decisionSpec("mem_new") }], {
-                    source_kind: undefined,
-                }),
-            ),
-        ).toThrow(expect.objectContaining({ kind: "terminal", code: "invalid_params" }));
-        expect(kernel.tip).toBe(0);
+        for (const call of [
+            commitCall(overLimitOperations),
+            commitCallWith(insert, { tokens: overLimitTokens }),
+            commitCallWith(insert, { source_kind: undefined }),
+        ]) {
+            const kernel = new FakeKernel();
+            expect(() => kernel.reply(call)).toThrow(
+                expect.objectContaining({ kind: "terminal", code: "invalid_params" }),
+            );
+            expect(kernel.tip).toBe(0);
+            expect(kernel.objects.size).toBe(0);
+        }
     });
 
     it("surfaces the transport refusal through the client as invalid_input", async () => {

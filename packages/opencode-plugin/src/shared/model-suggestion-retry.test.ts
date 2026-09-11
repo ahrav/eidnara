@@ -47,68 +47,25 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         expect(prompt).toHaveBeenCalledTimes(1);
     });
 
-    test("primary succeeds with no fallbacks configured", async () => {
-        const prompt = mock(async () => ({}));
-        const client = createClient(prompt);
+    test("the first succeeding fallback ends iteration", async () => {
+        const fallbackModels = ["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"];
+        const cases = [
+            { failures: 1, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" } },
+            { failures: 2, model: { providerID: "google", modelID: "gemini-3-flash" } },
+        ];
+        for (const { failures, model } of cases) {
+            const prompt = mock(async () => {
+                if (prompt.mock.calls.length <= failures)
+                    throw new Error(`failed ${prompt.mock.calls.length}`);
+                return {};
+            });
+            const client = createClient(prompt);
 
-        await promptSyncWithModelSuggestionRetry(client, createArgs());
+            await promptSyncWithModelSuggestionRetry(client, createArgs(), { fallbackModels });
 
-        expect(prompt).toHaveBeenCalledTimes(1);
-    });
-
-    test("primary fails, fallback[0] succeeds", async () => {
-        const prompt = mock(async () => {
-            if (prompt.mock.calls.length === 1) throw new Error("primary failed");
-            return {};
-        });
-        const client = createClient(prompt);
-
-        await promptSyncWithModelSuggestionRetry(client, createArgs(), {
-            fallbackModels: ["anthropic/claude-sonnet-4-6"],
-        });
-
-        expect(prompt).toHaveBeenCalledTimes(2);
-        expect((prompt.mock.calls[1]?.[0] as PromptCall).body.model).toEqual({
-            providerID: "anthropic",
-            modelID: "claude-sonnet-4-6",
-        });
-    });
-
-    test("primary fails, fallback[0] fails, fallback[1] succeeds", async () => {
-        const prompt = mock(async () => {
-            if (prompt.mock.calls.length <= 2)
-                throw new Error(`failed ${prompt.mock.calls.length}`);
-            return {};
-        });
-        const client = createClient(prompt);
-
-        await promptSyncWithModelSuggestionRetry(client, createArgs(), {
-            fallbackModels: ["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"],
-        });
-
-        expect(prompt).toHaveBeenCalledTimes(3);
-        expect((prompt.mock.calls[2]?.[0] as PromptCall).body.model).toEqual({
-            providerID: "google",
-            modelID: "gemini-3-flash",
-        });
-    });
-
-    test("all attempts fail throws the last fallback error", async () => {
-        const primaryError = new Error("primary failed");
-        const firstFallbackError = new Error("fallback 0 failed");
-        const lastFallbackError = new Error("fallback 1 failed");
-        const errors = [primaryError, firstFallbackError, lastFallbackError];
-        const prompt = mock(async () => {
-            throw errors[prompt.mock.calls.length - 1];
-        });
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), {
-                fallbackModels: ["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"],
-            }),
-        ).rejects.toBe(lastFallbackError);
-        expect(prompt).toHaveBeenCalledTimes(3);
+            expect(prompt).toHaveBeenCalledTimes(failures + 1);
+            expect((prompt.mock.calls[failures]?.[0] as PromptCall).body.model).toEqual(model);
+        }
     });
 
     test("abort signal short-circuits", async () => {
@@ -129,66 +86,58 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         expect(prompt).toHaveBeenCalledTimes(0);
     });
 
-    test("AbortError name short-circuits", async () => {
+    test("abort, timeout, and context-overflow failures short-circuit whether thrown or resolved as { error }", async () => {
         const abortError = new Error("aborted by provider");
         abortError.name = "AbortError";
-        const prompt = mock(async () => {
-            throw abortError;
-        });
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), {
-                fallbackModels: ["anthropic/claude-sonnet-4-6"],
-            }),
-        ).rejects.toBe(abortError);
-        expect(prompt).toHaveBeenCalledTimes(1);
-    });
-
-    test("timeout short-circuits", async () => {
-        const timeoutError = new Error("prompt timed out after 5000ms");
-        const prompt = mock(async () => {
-            throw timeoutError;
-        });
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), {
-                fallbackModels: ["anthropic/claude-sonnet-4-6"],
-            }),
-        ).rejects.toBe(timeoutError);
-        expect(prompt).toHaveBeenCalledTimes(1);
-    });
-
-    test("context overflow short-circuits", async () => {
-        const overflowError = new Error("prompt is too long: 50000 tokens > 32000");
-        const prompt = mock(async () => {
-            throw overflowError;
-        });
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), {
-                fallbackModels: ["anthropic/claude-sonnet-4-6"],
-            }),
-        ).rejects.toBe(overflowError);
-        expect(prompt).toHaveBeenCalledTimes(1);
-    });
-
-    test("timeout fires session.abort on the child session", async () => {
-        const prompt = mock((opts: { signal?: AbortSignal }) => {
-            return new Promise((_resolve, reject) => {
-                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        const cases: Array<{ error: unknown; delivery: "throw" | "resolve" }> = [
+            { error: abortError, delivery: "throw" },
+            { error: new Error("prompt timed out after 5000ms"), delivery: "throw" },
+            { error: new Error("prompt is too long: 50000 tokens > 32000"), delivery: "throw" },
+            {
+                error: { name: "AbortError", message: "The operation was aborted" },
+                delivery: "resolve",
+            },
+            { error: { message: "prompt timed out after 5ms" }, delivery: "resolve" },
+        ];
+        for (const { error, delivery } of cases) {
+            const prompt = mock(async () => {
+                if (delivery === "throw") throw error;
+                return { error, response: {} };
             });
-        });
-        const abort = mock(async () => ({}));
-        const client = createClient(prompt as never, abort);
+            const client = createClient(prompt);
 
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
-        ).rejects.toThrow(/timed out/);
-        expect(abort).toHaveBeenCalledTimes(1);
-        expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("ses-test");
+            await expect(
+                promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                    fallbackModels: ["anthropic/claude-sonnet-4-6"],
+                }),
+            ).rejects.toBe(error);
+            expect(prompt).toHaveBeenCalledTimes(1);
+        }
+    });
+
+    test("a timeout fires session.abort on the child session and an abort failure never masks the timeout error", async () => {
+        const abortBehaviors: Array<() => Promise<unknown>> = [
+            async () => ({}),
+            async () => {
+                throw new Error("abort endpoint 500");
+            },
+            async () => ({ error: { message: "abort endpoint 500" } }),
+        ];
+        for (const behavior of abortBehaviors) {
+            const prompt = mock((opts: { signal?: AbortSignal }) => {
+                return new Promise((_resolve, reject) => {
+                    opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+                });
+            });
+            const abort = mock(behavior);
+            const client = createClient(prompt as never, abort);
+
+            await expect(
+                promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
+            ).rejects.toThrow(/timed out/);
+            expect(abort).toHaveBeenCalledTimes(1);
+            expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("ses-test");
+        }
     });
 
     test("external abort fires session.abort on the child session", async () => {
@@ -207,40 +156,6 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         ).rejects.toThrow(/aborted by external signal/);
         expect(abort).toHaveBeenCalledTimes(1);
         expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("ses-test");
-    });
-
-    // A failing session.abort must not mask the original timeout/abort error.
-    test("session.abort failure does not mask the timeout error", async () => {
-        const prompt = mock((opts: { signal?: AbortSignal }) => {
-            return new Promise((_resolve, reject) => {
-                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-            });
-        });
-        const abort = mock(async () => {
-            throw new Error("abort endpoint 500");
-        });
-        const client = createClient(prompt as never, abort);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
-        ).rejects.toThrow(/timed out/);
-        expect(abort).toHaveBeenCalledTimes(1);
-    });
-
-    test("a resolved { error } from session.abort does not mask the timeout error", async () => {
-        const prompt = mock((opts: { signal?: AbortSignal }) => {
-            return new Promise((_resolve, reject) => {
-                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-            });
-        });
-        // The SDK's non-throwing mode resolves an HTTP failure instead of rejecting.
-        const abort = mock(async () => ({ error: { message: "abort endpoint 500" } }));
-        const client = createClient(prompt as never, abort);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
-        ).rejects.toThrow(/timed out/);
-        expect(abort).toHaveBeenCalledTimes(1);
     });
 
     test("duplicate and whitespace-variant fallback specs are attempted once", async () => {
@@ -290,35 +205,6 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         expect(total).toBe(3);
     });
 
-    test("suggestion retry within attempt succeeds", async () => {
-        const suggestionError = new Error("model not found");
-        suggestionError.name = "ProviderModelNotFoundError";
-        Object.assign(suggestionError, {
-            data: {
-                providerID: "anthropic",
-                modelID: "claude-sonnet-4-6",
-                suggestions: ["claude-sonnet-4-7"],
-            },
-        });
-        const prompt = mock(async () => {
-            if (prompt.mock.calls.length === 1) throw suggestionError;
-            return {};
-        });
-        const client = createClient(prompt);
-
-        await promptSyncWithModelSuggestionRetry(
-            client,
-            createArgs({ providerID: "anthropic", modelID: "claude-sonnet-4-6" }),
-            { fallbackModels: ["google/gemini-3-flash"] },
-        );
-
-        expect(prompt).toHaveBeenCalledTimes(2);
-        expect((prompt.mock.calls[1]?.[0] as PromptCall).body.model).toEqual({
-            providerID: "anthropic",
-            modelID: "claude-sonnet-4-7",
-        });
-    });
-
     test("invalid fallback specs are skipped", async () => {
         const prompt = mock(async () => {
             if (prompt.mock.calls.length === 1) throw new Error("primary failed");
@@ -337,9 +223,15 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         });
     });
 
-    test("iteration order respected", async () => {
+    test("iteration order is respected and the last fallback's error is rethrown when every attempt fails", async () => {
+        const errors = [
+            new Error("primary failed"),
+            new Error("fallback 0 failed"),
+            new Error("fallback 1 failed"),
+            new Error("fallback 2 failed"),
+        ];
         const prompt = mock(async () => {
-            throw new Error(`failed ${prompt.mock.calls.length}`);
+            throw errors[prompt.mock.calls.length - 1];
         });
         const client = createClient(prompt);
 
@@ -351,7 +243,7 @@ describe("promptSyncWithModelSuggestionRetry", () => {
                     "openrouter/qwen3-coder",
                 ],
             }),
-        ).rejects.toThrow("failed 4");
+        ).rejects.toBe(errors[3]);
 
         expect(prompt).toHaveBeenCalledTimes(4);
         expect(prompt.mock.calls.map((call) => (call[0] as PromptCall).body.model)).toEqual([
@@ -362,17 +254,30 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         ]);
     });
 
-    test("empty fallbackModels = legacy", async () => {
-        const originalError = new Error("primary failed without suggestion");
-        const prompt = mock(async () => {
-            throw originalError;
-        });
-        const client = createClient(prompt);
+    test("with no fallbacks, the primary failure is rethrown by identity whether thrown, cyclic, or resolved as { error }", async () => {
+        const cyclic = new Error("upstream 500 from provider") as Error & { cause?: unknown };
+        cyclic.cause = cyclic;
+        const cases: Array<{ error: unknown; delivery: "throw" | "resolve" }> = [
+            { error: new Error("primary failed without suggestion"), delivery: "throw" },
+            // A self-referential cause chain must not recurse forever during classification.
+            { error: cyclic, delivery: "throw" },
+            {
+                error: { name: "NotFoundError", data: { message: "session not found" } },
+                delivery: "resolve",
+            },
+        ];
+        for (const { error, delivery } of cases) {
+            const prompt = mock(async () => {
+                if (delivery === "throw") throw error;
+                return { error, response: {} };
+            });
+            const client = createClient(prompt);
 
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), { fallbackModels: [] }),
-        ).rejects.toBe(originalError);
-        expect(prompt).toHaveBeenCalledTimes(1);
+            await expect(
+                promptSyncWithModelSuggestionRetry(client, createArgs(), { fallbackModels: [] }),
+            ).rejects.toBe(error);
+            expect(prompt).toHaveBeenCalledTimes(1);
+        }
     });
 
     // Without `throwOnError`, the SDK client resolves `{ error }` on HTTP errors instead of rejecting.
@@ -398,43 +303,6 @@ describe("promptSyncWithModelSuggestionRetry", () => {
             providerID: "google",
             modelID: "gemini-3-flash",
         });
-    });
-
-    test("a resolved { error } result with no fallbacks rejects with that error", async () => {
-        const sdkError = { name: "NotFoundError", data: { message: "session not found" } };
-        const prompt = mock(async () => ({ error: sdkError, response: {} }));
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), { fallbackModels: [] }),
-        ).rejects.toBe(sdkError);
-        expect(prompt).toHaveBeenCalledTimes(1);
-    });
-
-    test("a resolved plain-object AbortError payload stops fallback iteration", async () => {
-        const sdkError = { name: "AbortError", message: "The operation was aborted" };
-        const prompt = mock(async () => ({ error: sdkError, response: {} }));
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), {
-                fallbackModels: ["google/gemini-3-flash"],
-            }),
-        ).rejects.toBe(sdkError);
-        expect(prompt).toHaveBeenCalledTimes(1);
-    });
-
-    test("a resolved plain-object timeout payload stops fallback iteration", async () => {
-        const sdkError = { message: "prompt timed out after 5ms" };
-        const prompt = mock(async () => ({ error: sdkError, response: {} }));
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), {
-                fallbackModels: ["google/gemini-3-flash"],
-            }),
-        ).rejects.toBe(sdkError);
-        expect(prompt).toHaveBeenCalledTimes(1);
     });
 
     // SDK `throwOnError` clients wrap the decoded body as `Error(message, { cause: { body, status } })`.
@@ -469,20 +337,6 @@ describe("promptSyncWithModelSuggestionRetry", () => {
             providerID: "anthropic",
             modelID: "claude-sonnet-4-7",
         });
-    });
-
-    test("a cyclic error graph surfaces the original error, not a stack overflow", async () => {
-        const cyclic = new Error("upstream 500 from provider") as Error & { cause?: unknown };
-        cyclic.cause = cyclic;
-        const prompt = mock(async () => {
-            throw cyclic;
-        });
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithModelSuggestionRetry(client, createArgs(), { fallbackModels: [] }),
-        ).rejects.toBe(cyclic);
-        expect(prompt).toHaveBeenCalledTimes(1);
     });
 
     test("timeout path leaves no live timers behind", async () => {
@@ -600,42 +454,35 @@ describe("promptSyncWithValidatedOutputRetry", () => {
         });
     });
 
-    test("all empty outputs surface the original validation failure", async () => {
+    test("all validation failures rethrow the primary attempt's original error object after every fallback", async () => {
         const prompt = mock(async () => ({}));
         const messages = mock(async () => "");
         const client = createClient(prompt, undefined, messages);
+        const thrown: Error[] = [];
 
-        await expect(
-            promptSyncWithValidatedOutputRetry(client, createArgs(), {
-                fallbackModels: ["anthropic/claude-sonnet-4-6"],
-                fetchOutput: async () => messages(),
-                validateOutput: (output: string, attempt) => {
-                    if (output.trim().length === 0) {
-                        throw new Error(`empty output from ${attempt.label}`);
-                    }
-                    return output.trim();
-                },
-            }),
-        ).rejects.toThrow("empty output from primary");
+        const rejection = await promptSyncWithValidatedOutputRetry(client, createArgs(), {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            fetchOutput: async () => messages(),
+            validateOutput: (output: string, attempt) => {
+                if (output.trim().length === 0) {
+                    const error = new Error(`empty output from ${attempt.label}`);
+                    thrown.push(error);
+                    throw error;
+                }
+                return output.trim();
+            },
+        }).then(
+            () => "resolved",
+            (error: unknown) => error,
+        );
 
+        expect(thrown.map((error) => error.message)).toEqual([
+            "empty output from primary",
+            "empty output from anthropic/claude-sonnet-4-6",
+        ]);
+        expect(rejection).toBe(thrown[0]);
         expect(prompt).toHaveBeenCalledTimes(2);
         expect(messages).toHaveBeenCalledTimes(2);
-    });
-
-    test("all validation failures rethrow the caller's original error object", async () => {
-        const prompt = mock(async () => ({}));
-        const validationError = new Error("empty output");
-        const client = createClient(prompt);
-
-        await expect(
-            promptSyncWithValidatedOutputRetry(client, createArgs(), {
-                fallbackModels: ["anthropic/claude-sonnet-4-6"],
-                fetchOutput: async () => "",
-                validateOutput: () => {
-                    throw validationError;
-                },
-            }),
-        ).rejects.toBe(validationError);
     });
 
     test("a validation error quoting overflow phrasing still advances to the next fallback", async () => {

@@ -186,24 +186,6 @@ describe("loadPiConfig", () => {
         }
     });
 
-    it("honors user storage permissions while ignoring a project-tier override", () => {
-        const cwd = makeTempRoot("eidnara-pi-cwd-");
-        const home = makeTempRoot("eidnara-pi-home-");
-        withHome(home);
-        writeUserConfig(home, JSON.stringify({ storage: { enforce_private_permissions: false } }));
-        writeProjectConfig(
-            cwd,
-            JSON.stringify({
-                storage: { enforce_private_permissions: true, futureSibling: 1 },
-            }),
-        );
-
-        const result = loadPiConfig({ cwd });
-
-        expect(result.config.storage.enforce_private_permissions).toBe(false);
-        expect(result.warnings.join("\n")).toContain("storage.enforce_private_permissions");
-    });
-
     it("merges user then project with project overrides winning", () => {
         const cwd = makeTempRoot("eidnara-pi-cwd-");
         const home = makeTempRoot("eidnara-pi-home-");
@@ -399,32 +381,49 @@ describe("loadPiConfig", () => {
         );
     });
 
-    it("strips language from PROJECT config but honors USER config", () => {
-        const cwd = makeTempRoot("eidnara-pi-cwd-");
-        const home = makeTempRoot("eidnara-pi-home-");
-        withHome(home);
-        writeUserConfig(home, JSON.stringify({ language: "pt" }));
-        writeProjectConfig(cwd, JSON.stringify({ language: "tr" }));
+    it("strips user-tier-only fields from PROJECT config but honors USER config", () => {
+        const rows: Array<{
+            key: string;
+            user: Record<string, unknown>;
+            project: Record<string, unknown>;
+            read: (config: ReturnType<typeof loadPiConfig>["config"]) => unknown;
+            expected: unknown;
+        }> = [
+            {
+                key: "language",
+                user: { language: "pt" },
+                project: { language: "tr" },
+                read: (config) => config.language,
+                expected: "pt",
+            },
+            {
+                key: "allow_home_project",
+                user: { allow_home_project: false },
+                project: { allow_home_project: true },
+                read: (config) => config.allow_home_project,
+                expected: false,
+            },
+            {
+                // The project sibling proves the strip is field-scoped rather than dropping the whole block.
+                key: "storage.enforce_private_permissions",
+                user: { storage: { enforce_private_permissions: false } },
+                project: { storage: { enforce_private_permissions: true, futureSibling: 1 } },
+                read: (config) => config.storage.enforce_private_permissions,
+                expected: false,
+            },
+        ];
+        for (const row of rows) {
+            const cwd = makeTempRoot("eidnara-pi-cwd-");
+            const home = makeTempRoot("eidnara-pi-home-");
+            withHome(home);
+            writeUserConfig(home, JSON.stringify(row.user));
+            writeProjectConfig(cwd, JSON.stringify(row.project));
 
-        const result = loadPiConfig({ cwd });
+            const result = loadPiConfig({ cwd });
 
-        expect(result.config.language).toBe("pt");
-        expect(result.warnings.join("\n")).toContain("Ignoring language from project config");
-    });
-
-    it("strips allow_home_project from PROJECT config but honors USER config", () => {
-        const cwd = makeTempRoot("eidnara-pi-cwd-");
-        const home = makeTempRoot("eidnara-pi-home-");
-        withHome(home);
-        writeUserConfig(home, JSON.stringify({ allow_home_project: false }));
-        writeProjectConfig(cwd, JSON.stringify({ allow_home_project: true }));
-
-        const result = loadPiConfig({ cwd });
-
-        expect(result.config.allow_home_project).toBe(false);
-        expect(result.warnings.join("\n")).toContain(
-            "Ignoring allow_home_project from project config",
-        );
+            expect(row.read(result.config)).toBe(row.expected);
+            expect(result.warnings.join("\n")).toContain(`Ignoring ${row.key} from project config`);
+        }
     });
 
     it("keeps historian model selection user-owned when project config tries to override it", () => {

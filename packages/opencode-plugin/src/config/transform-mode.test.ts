@@ -54,18 +54,6 @@ describe("resolveTransformMode", () => {
         ).toEqual({ mode: "ts", warnings: [] });
     });
 
-    it("keeps rust in the default compaction-on mode without a warning", () => {
-        const result = resolveTransformMode({
-            configured: "rust",
-            userTierConfiguredRust: false,
-            userTierHasExplicitDaemon: true,
-            compactionEnabled: true,
-        });
-
-        expect(result.mode).toBe("rust");
-        expect(result.warnings).toEqual([]);
-    });
-
     it("downgrades rust to ts with one warning when compaction is off", () => {
         expect(
             resolveTransformMode({

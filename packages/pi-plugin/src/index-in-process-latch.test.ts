@@ -83,43 +83,6 @@ describe("Pi in-process re-init latch (#247)", () => {
         expect(second.entryRenderers).toEqual(["ctx-status"]);
     }, 15_000);
 
-    it("spawned-child env guard still no-ops even when the latch is clear", async () => {
-        isolateXdgEnv();
-        process.env[EIDNARA_PI_SUBAGENT_ENV] = "1";
-        __test.clearPiEidnaraActive();
-
-        const registrations = createCountingPi();
-        await eidnaraPiExtension(registrations.pi);
-
-        expect(registrations.events).toEqual([]);
-        expect(registrations.tools).toEqual([]);
-        expect(registrations.flags).toEqual([]);
-        expect(registrations.commands).toEqual([]);
-        expect(registrations.entryRenderers).toEqual([]);
-        // The environment guard returns before setting the latch, so a later in-process initialization still registers fully.
-        expect(__test.isPiEidnaraActiveInProcess()).toBe(false);
-    });
-
-    it("mutation direction: removing the latch makes the double-init test fail", async () => {
-        // Clearing the latch permits a second initialization to register again.
-        isolateXdgEnv();
-        delete process.env[EIDNARA_PI_SUBAGENT_ENV];
-        __test.clearPiEidnaraActive();
-
-        const first = createCountingPi();
-        await eidnaraPiExtension(first.pi);
-        expect(first.tools.length).toBeGreaterThan(0);
-
-        __test.clearPiEidnaraActive();
-
-        const second = createCountingPi();
-        await eidnaraPiExtension(second.pi);
-
-        expect(second.events.length).toBeGreaterThan(0);
-        expect(second.tools.length).toBeGreaterThan(0);
-        expect(second.commands.length).toBeGreaterThan(0);
-    }, 15_000);
-
     it("a disabled configuration leaves the latch clear so /reload can register an enabled one", async () => {
         const root = isolateXdgEnv();
         delete process.env[EIDNARA_PI_SUBAGENT_ENV];

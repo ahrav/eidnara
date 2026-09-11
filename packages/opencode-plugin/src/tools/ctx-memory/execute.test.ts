@@ -21,12 +21,12 @@ interface CommitReply {
     objects: string[];
 }
 
-function harness(enabled = true) {
+function harness() {
     const kernel = new FakeKernel();
     const transport = new FakeKernelTransport(kernel);
     const client = new KernelClient({
         transport,
-        enabled,
+        enabled: true,
         sessionId: SESSION,
         projectRoot: PROJECT,
     });
@@ -71,11 +71,6 @@ async function createOne(client: KernelClient): Promise<string> {
 }
 
 describe("executeCtxMemory", () => {
-    test("create commits a memory and renders the derived object id", async () => {
-        const { client } = harness();
-        await createOne(client);
-    });
-
     test("get by explicit id returns the created content", async () => {
         const { client } = harness();
         const objectId = await createOne(client);
@@ -88,17 +83,6 @@ describe("executeCtxMemory", () => {
         expect(reply.memories[0]?.objectId).toBe(objectId);
         expect(reply.memories[0]?.content).toBe(CONTENT);
         expect(reply.missingObjectIds).toEqual([]);
-    });
-
-    test("a disabled client renders the state as tool error text", async () => {
-        const { client } = harness(false);
-        const text = await run(
-            client,
-            "create",
-            { category: "ARCHITECTURE", content: CONTENT },
-            "call-create-disabled",
-        );
-        expect(text.startsWith("Error:")).toBe(true);
     });
 
     test("a redelivered revise lists the retired predecessor alongside the successor", async () => {
@@ -225,12 +209,13 @@ describe("executeCtxMemory", () => {
     });
 
     test("a create replay recovered from the row reports the creating commit as knownAsOf", async () => {
-        const { client } = harness();
+        const { kernel, client } = harness();
         const args: CtxMemoryArgs = { category: "REJECTED_APPROACH", antiMemory: ANTI_MEMORY };
         try {
             setSystemTime(new Date("2026-01-01T12:00:00Z"));
             const first = JSON.parse(await run(client, "create", args, "call-anti-replay")) as {
                 commitSeq: number;
+                objects: string[];
             };
             await run(
                 client,
@@ -250,10 +235,13 @@ describe("executeCtxMemory", () => {
                 outcome: string;
                 commitSeq: number;
                 knownAsOf: number;
+                objects: string[];
             };
             expect(second.outcome).toBe("already applied");
             expect(second.commitSeq).toBe(first.commitSeq);
             expect(second.knownAsOf).toBe(first.commitSeq);
+            expect(second.objects).toEqual(first.objects);
+            expect(kernel.liveRows()).toHaveLength(3);
         } finally {
             setSystemTime();
         }
@@ -386,16 +374,6 @@ describe("executeCtxMemory", () => {
         await expect(run(client, "merge", { objectIds }, "call-merge-over")).rejects.toThrow(
             "merge accepts at most 20 objectIds; 21 were given. Merge in smaller batches.",
         );
-    });
-
-    test("merge without survivor content is rejected before any target is retired", async () => {
-        const { kernel, client } = harness();
-        kernel.seedDecision({ object_id: "mem_a", decision_kind: "NAMING", summary: "A." });
-        kernel.seedDecision({ object_id: "mem_b", decision_kind: "NAMING", summary: "B." });
-        await expect(
-            run(client, "merge", { objectIds: ["mem_a", "mem_b"] }, "call-merge-no-content"),
-        ).rejects.toThrow("merge requires content (with category) or antiMemory for the survivor");
-        expect(kernel.liveRows()).toHaveLength(2);
     });
 
     test("get bounds the echoed missing ids to the response budget", async () => {

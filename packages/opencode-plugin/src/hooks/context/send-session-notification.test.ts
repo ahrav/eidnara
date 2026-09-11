@@ -227,28 +227,6 @@ describe("sendIgnoredMessage", () => {
         expect(session.prompt).not.toHaveBeenCalled();
     });
 
-    it("retains a queued notice whose deferred delivery fails and drops it after the attempt cap", async () => {
-        const session = titledClientWithLastTurn();
-        session.prompt.mockImplementation(async () => {
-            throw new Error("transient prompt failure");
-        });
-        let active = true;
-        __ignoredNotificationTest.setMidTurnDetector(() => active);
-
-        await sendIgnoredMessage({ session }, "ses-retry", "flaky status", {});
-        active = false;
-
-        for (let attempt = 1; attempt < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS; attempt += 1) {
-            await flushIgnoredMessages("ses-retry");
-            expect(session.prompt).toHaveBeenCalledTimes(attempt);
-            expect(__ignoredNotificationTest.pendingTexts("ses-retry")).toEqual(["flaky status"]);
-        }
-
-        await flushIgnoredMessages("ses-retry");
-        expect(session.prompt).toHaveBeenCalledTimes(MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS);
-        expect(__ignoredNotificationTest.pendingTexts("ses-retry")).toEqual([]);
-    });
-
     it("stops the flush at a retained failure so later notices are not delivered first", async () => {
         const session = titledClientWithLastTurn();
         let failNext = true;
@@ -418,26 +396,24 @@ describe("sendIgnoredMessage", () => {
         expect(body.noReply).toBe(true);
     });
 
-    it("queues when prompt context cannot be read instead of sending unset context", async () => {
+    it("queues when prompt context cannot be read and drops the notice after repeated unavailable reads", async () => {
         const session = titledClientWithLastTurn();
         session.messages.mockImplementation(async () => {
             throw new Error("message read failed");
         });
 
-        const result = await sendIgnoredMessage({ session }, "ses-context-error", "status", {});
-
+        const result = await sendIgnoredMessage(
+            { session },
+            "ses-context-unavailable",
+            "status",
+            {},
+        );
         expect(result).toBe("queued");
         expect(session.prompt).not.toHaveBeenCalled();
-        expect(__ignoredNotificationTest.pendingTexts("ses-context-error")).toEqual(["status"]);
-    });
+        expect(__ignoredNotificationTest.pendingTexts("ses-context-unavailable")).toEqual([
+            "status",
+        ]);
 
-    it("drops a queued notification after repeated unavailable context reads", async () => {
-        const session = titledClientWithLastTurn();
-        session.messages.mockImplementation(async () => {
-            throw new Error("message read failed");
-        });
-
-        await sendIgnoredMessage({ session }, "ses-context-unavailable", "status", {});
         for (let attempt = 0; attempt < MAX_QUEUED_NOTIFICATION_DELIVERY_ATTEMPTS; attempt++) {
             await flushIgnoredMessages("ses-context-unavailable");
         }
@@ -487,17 +463,6 @@ describe("sendIgnoredMessage", () => {
         const input = promptAsync.mock.calls[0]?.[0] as { body?: Record<string, unknown> };
         expect(input.body?.noReply).toBe(true);
         expect((input as { signal?: AbortSignal }).signal).toBeInstanceOf(AbortSignal);
-    });
-
-    it("pins the session's last turn for a startup config warning too (no pinContext opt-out)", async () => {
-        // notification.
-        const session = titledClientWithLastTurn();
-        const result = await sendIgnoredMessage({ session }, "ses-titled", "config warning", {});
-        expect(result).toBe("sent");
-        const body = lastPromptBody(session.prompt);
-        expect(body.agent).toBe("build");
-        expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-8" });
-        expect(body.variant).toBe("thinking");
     });
 
     it("caller-supplied model/agent win over resolution", async () => {

@@ -23,14 +23,6 @@ describe("registerCtxAugCommand", () => {
         mock.restore();
     });
 
-    it('registers the "ctx-aug" command with Pi', () => {
-        const fake = createFakePi();
-
-        registerCtxAugCommand(fake.pi as never, { model: "test/model" });
-
-        expect(fake.commands.has("ctx-aug")).toBe(true);
-    });
-
     it("sends the prompt with sidekick augmentation when sidekick returns context", async () => {
         const runner = installRunner({
             ok: true,

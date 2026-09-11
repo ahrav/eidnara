@@ -330,29 +330,6 @@ async fn status_and_cancel_are_scoped_to_the_bound_session() {
     supervisor.shutdown().await;
 }
 
-/// A panicking backend produces exactly one `failed` terminal.
-/// Without a terminal, a run remains `running`, retains its active-run slot, and strands subscribers.
-#[tokio::test]
-async fn backend_panic_commits_one_failed_terminal() {
-    let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
-        Box::pin(async { panic!("backend bug") })
-    });
-    let supervisor = Supervisor::new(backend as Arc<_>);
-    let run_id = send(&supervisor, "s-panic", "p1");
-    until(
-        || supervisor.status(&key("s-panic"), &run_id) == Ok("failed"),
-        "panicked run fails",
-    )
-    .await;
-    // `finish` frees the run slot, so a fresh run in another session still admits and reaches its own terminal.
-    let second = send(&supervisor, "s-after-panic", "p2");
-    until(
-        || supervisor.status(&key("s-after-panic"), &second) == Ok("failed"),
-        "post-panic run still executes",
-    )
-    .await;
-}
-
 #[tokio::test(start_paused = true)]
 async fn early_and_late_subscribers_replay_byte_identical_units() {
     let (backend, gate) = ScriptedBackend::gated("streamed text");
@@ -742,52 +719,24 @@ async fn unproven_teardown_fails_cancel_and_delete() {
     );
 }
 
-/// `finish` preserves the first terminal, but `cancel` still reports unproven teardown when the backend cannot confirm it.
+/// `cancel` and `delete` preserve teardown, cleanup, and record-retention failures after cancellation sets the terminal.
 #[tokio::test]
-async fn cancellation_winning_the_terminal_still_reports_unproven_teardown() {
-    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
-        Box::pin(async move {
-            cancel.cancelled().await;
+async fn cancellation_winning_the_terminal_still_reports_every_residue_verdict() {
+    type Counter = fn(&Supervisor) -> usize;
+    let cases: [(&str, BackendTerminal, &str, Option<Counter>); 3] = [
+        (
+            "s-cancel-unproven",
             BackendTerminal::FailedUnresolved(BackendError {
                 class: ErrorClass::Transient,
                 message: "process group teardown was not confirmed".to_owned(),
                 retry_after_secs: None,
                 provider_code: None,
-            })
-        })
-    });
-    let supervisor = Supervisor::new(backend as Arc<_>);
-
-    let run_id = send(&supervisor, "s-cancel-unproven", "p1");
-    until(
-        || supervisor.status(&key("s-cancel-unproven"), &run_id) == Ok("running"),
-        "the backend starts before the cancel races it",
-    )
-    .await;
-
-    let cancelled = supervisor
-        .cancel(&key("s-cancel-unproven"), &run_id)
-        .await
-        .expect_err("cancel cannot claim a teardown the backend disproved");
-    assert_eq!(cancelled.code, "teardown_unconfirmed");
-    assert_eq!(
-        supervisor.status(&key("s-cancel-unproven"), &run_id),
-        Ok("cancelled")
-    );
-
-    let deleted = supervisor
-        .delete(&key("s-cancel-unproven"))
-        .await
-        .expect_err("delete reports the same unproven teardown");
-    assert_eq!(deleted.code, "teardown_unconfirmed");
-}
-
-/// A committed cancellation terminal replaces the backend terminal, so the cleanup failure it carries must stay observable from cancel and delete.
-#[tokio::test]
-async fn cancellation_winning_the_terminal_still_reports_cleanup_residue() {
-    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
-        Box::pin(async move {
-            cancel.cancelled().await;
+            }),
+            "teardown_unconfirmed",
+            None,
+        ),
+        (
+            "s-cancel-residue",
             // The message mirrors `merge_cleanup` output for a cancelled run whose private-directory removal failed.
             BackendTerminal::Failed(BackendError {
                 class: ErrorClass::Permanent,
@@ -796,36 +745,61 @@ async fn cancellation_winning_the_terminal_still_reports_cleanup_residue() {
                     .to_owned(),
                 retry_after_secs: None,
                 provider_code: None,
+            }),
+            "cleanup_unconfirmed",
+            Some(Supervisor::cleanup_unresolved_runs),
+        ),
+        (
+            "s-cancel-record",
+            // The message mirrors `merge_record_retained` output for a run whose record removal failed.
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Transient,
+                message: "pi backend could not remove its crash-ownership record".to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            }),
+            "record_unconfirmed",
+            Some(Supervisor::record_unresolved_runs),
+        ),
+    ];
+    for (session, terminal, code, counter) in cases {
+        let backend = ScriptedBackend::with_behavior(move |_request, _events, cancel| {
+            let terminal = terminal.clone();
+            Box::pin(async move {
+                cancel.cancelled().await;
+                terminal
             })
-        })
-    });
-    let supervisor = Supervisor::new(backend as Arc<_>);
+        });
+        let supervisor = Supervisor::new(backend as Arc<_>);
 
-    let run_id = send(&supervisor, "s-cancel-residue", "p1");
-    until(
-        || supervisor.status(&key("s-cancel-residue"), &run_id) == Ok("running"),
-        "the backend starts before the cancel races it",
-    )
-    .await;
+        let run_id = send(&supervisor, session, "p1");
+        until(
+            || supervisor.status(&key(session), &run_id) == Ok("running"),
+            "the backend starts before the cancel races it",
+        )
+        .await;
 
-    let cancelled = supervisor
-        .cancel(&key("s-cancel-residue"), &run_id)
-        .await
-        .expect_err("cancel cannot report success while private files may remain");
-    assert_eq!(cancelled.code, "cleanup_unconfirmed");
-    assert_eq!(
-        supervisor.status(&key("s-cancel-residue"), &run_id),
-        Ok("cancelled")
-    );
+        let cancelled = supervisor
+            .cancel(&key(session), &run_id)
+            .await
+            .expect_err("cancel cannot claim success over the backend's verdict");
+        assert_eq!(cancelled.code, code, "{session}");
+        assert_eq!(
+            supervisor.status(&key(session), &run_id),
+            Ok("cancelled"),
+            "{session}"
+        );
 
-    let deleted = supervisor
-        .delete(&key("s-cancel-residue"))
-        .await
-        .expect_err("delete reports the same cleanup residue");
-    assert_eq!(deleted.code, "cleanup_unconfirmed");
-
-    // The counter, not the index, keeps the verdict for shutdown reporting.
-    assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
+        let deleted = supervisor
+            .delete(&key(session))
+            .await
+            .expect_err("delete reports the same verdict");
+        assert_eq!(deleted.code, code, "{session}");
+        if let Some(counter) = counter {
+            // The counter, not the index, keeps the verdict for shutdown reporting.
+            assert_eq!(counter(&supervisor), 1, "{session}");
+        }
+    }
 }
 
 /// Unproven teardown outranks cleanup residue: live descendants can still bill a request, so that verdict must not be hidden.
@@ -867,48 +841,8 @@ async fn unproven_teardown_outranks_cleanup_residue() {
     assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
 }
 
-/// A retained crash-ownership record must survive cancellation arbitration the same way private-file residue does.
-#[tokio::test]
-async fn cancellation_winning_the_terminal_still_reports_record_residue() {
-    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
-        Box::pin(async move {
-            cancel.cancelled().await;
-            // The message mirrors `merge_record_retained` output for a run whose record removal failed.
-            BackendTerminal::Failed(BackendError {
-                class: ErrorClass::Transient,
-                message: "pi backend could not remove its crash-ownership record".to_owned(),
-                retry_after_secs: None,
-                provider_code: None,
-            })
-        })
-    });
-    let supervisor = Supervisor::new(backend as Arc<_>);
-
-    let run_id = send(&supervisor, "s-cancel-record", "p1");
-    until(
-        || supervisor.status(&key("s-cancel-record"), &run_id) == Ok("running"),
-        "the backend starts before the cancel races it",
-    )
-    .await;
-
-    let cancelled = supervisor
-        .cancel(&key("s-cancel-record"), &run_id)
-        .await
-        .expect_err("cancel cannot report success while a record remains");
-    assert_eq!(cancelled.code, "record_unconfirmed");
-    assert_eq!(
-        supervisor.status(&key("s-cancel-record"), &run_id),
-        Ok("cancelled")
-    );
-    let deleted = supervisor
-        .delete(&key("s-cancel-record"))
-        .await
-        .expect_err("delete reports the same record residue");
-    assert_eq!(deleted.code, "record_unconfirmed");
-    assert_eq!(supervisor.record_unresolved_runs(), 1);
-}
-
 /// A panicking backend leaves its process group unproven: unwinding kills only the leader, so settlement must not report success.
+/// `finish` still frees the run slot, so a fresh run in another session admits and reaches its own terminal.
 #[tokio::test]
 async fn backend_panic_reports_unconfirmed_teardown() {
     let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
@@ -920,6 +854,12 @@ async fn backend_panic_reports_unconfirmed_teardown() {
     until(
         || supervisor.status(&key("s-panic-teardown"), &run_id) == Ok("failed"),
         "the panicked run commits its failed terminal",
+    )
+    .await;
+    let second = send(&supervisor, "s-after-panic", "p2");
+    until(
+        || supervisor.status(&key("s-after-panic"), &second) == Ok("failed"),
+        "post-panic run still executes",
     )
     .await;
 
@@ -935,8 +875,8 @@ async fn backend_panic_reports_unconfirmed_teardown() {
     assert_eq!(deleted.code, "teardown_unconfirmed");
     assert_eq!(
         supervisor.shutdown().await,
-        1,
-        "shutdown must surface the panicked run's unproven teardown"
+        2,
+        "shutdown must surface every panicked run's unproven teardown"
     );
 }
 

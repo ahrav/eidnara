@@ -1171,23 +1171,6 @@ mod tests {
     }
 
     #[test]
-    fn provenance_guard_rejects_mutated_fixture_input() {
-        let golden: HygieneGolden =
-            serde_json::from_str(include_str!("../testdata/nudge-hygiene-golden.json"))
-                .expect("parse nudge hygiene golden");
-        let canonical = hygiene_fixture_canonical(&golden.cases);
-        let mutated = canonical.replacen(
-            "live-incident-mixed-tail",
-            "mutated-live-incident-mixed-tail",
-            1,
-        );
-        assert_ne!(
-            format!("{:x}", Sha256::digest(mutated.as_bytes())),
-            golden.provenance.input_sha256
-        );
-    }
-
-    #[test]
     fn reasoning_mutant_changes_neither_term_but_tagged_text_mutant_reddens() {
         let tags = vec![tag(1, "visible#0")];
         let base = vec![

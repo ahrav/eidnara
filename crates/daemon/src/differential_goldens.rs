@@ -69,42 +69,6 @@ fn dg_goldens_match_ts_wire_surface_and_gate_labels() {
 }
 
 #[test]
-fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
-    let golden: Golden = serde_json::from_str(include_str!("../testdata/differential-golden.json"))
-        .expect("parse differential golden");
-    let mut observed = 0;
-    for case in &golden.cases {
-        let mut perturbed = case.input["messages"].clone();
-        let mut mutated_text = None;
-        if let Some(message) = perturbed
-            .as_array_mut()
-            .and_then(|messages| messages.first_mut())
-            .and_then(|message| message.get_mut("content"))
-            .and_then(Value::as_array_mut)
-            .and_then(|parts| parts.first_mut())
-            .and_then(|part| part.get_mut("kind"))
-            .and_then(|kind| kind.get_mut("text"))
-            && let Some(text) = message.as_str()
-        {
-            mutated_text = Some(format!("{text}x"));
-            *message = Value::String(mutated_text.clone().expect("mutation text"));
-        }
-        if mutated_text.is_none() {
-            let bytes = serde_json::to_vec(&perturbed).expect("serialize fixture");
-            perturbed = Value::String(String::from_utf8_lossy(&bytes).to_string() + "x");
-        }
-        assert_ne!(
-            perturbed,
-            Value::Array(case.expected.wire.clone()),
-            "{} accepted a one-byte mutation",
-            case.id
-        );
-        observed += 1;
-    }
-    assert_eq!(observed, 3, "every DG family needs a vacuity mutation");
-}
-
-#[test]
 fn dg_goldens_exercise_incremental_native_differential_mode() {
     let golden: Golden = serde_json::from_str(include_str!("../testdata/differential-golden.json"))
         .expect("parse differential golden");

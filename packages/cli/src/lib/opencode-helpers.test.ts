@@ -120,16 +120,12 @@ describe("OpenCode command execution", () => {
 });
 
 describe.if(isPosix)("opencode helpers with a resolved binary path", () => {
-    it("getAvailableModels invokes the given absolute binary", () => {
+    it("invokes the given absolute binary for version and model probes", () => {
         const bin = fakeOpencode(
-            'if [ "$1" = "models" ]; then printf "anthropic/claude-opus-4-8\\nopenai/gpt-5.5\\n"; fi',
+            'if [ "$1" = "--version" ]; then echo "1.2.3"; fi\nif [ "$1" = "models" ]; then printf "anthropic/claude-opus-4-8\\nopenai/gpt-5.5\\n"; fi',
         );
-        expect(getAvailableModels(bin)).toEqual(["anthropic/claude-opus-4-8", "openai/gpt-5.5"]);
-    });
-
-    it("getOpenCodeVersion invokes the given absolute binary", () => {
-        const bin = fakeOpencode('if [ "$1" = "--version" ]; then echo "1.2.3"; fi');
         expect(getOpenCodeVersion(bin)).toBe("1.2.3");
+        expect(getAvailableModels(bin)).toEqual(["anthropic/claude-opus-4-8", "openai/gpt-5.5"]);
     });
 
     it("reports a clean exit with no version output as unknown", () => {

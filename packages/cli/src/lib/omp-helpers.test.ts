@@ -49,13 +49,16 @@ describe("OMP binary discovery", () => {
         return { root, binDir };
     }
 
-    it("honors a validated PI_PACKAGE_DIR install root when Bun can run it", () => {
+    it("honors a validated PI_PACKAGE_DIR install root and routes its CLI script through the Bun on PATH", () => {
         const { root, binDir } = makePackageRoot();
         process.env.PATH = binDir;
+        const cli = join(root, "pkg", "dist", "cli.js");
 
-        expect(detectOmpBinary()).toEqual({
-            path: join(root, "pkg", "dist", "cli.js"),
-            source: "package",
+        expect(detectOmpBinary()).toEqual({ path: cli, source: "package" });
+        expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
+            command: join(binDir, "bun"),
+            args: [cli, "--version"],
+            env: { PATH: `${binDir}${delimiter}${process.env.PATH}` },
         });
     });
 
@@ -94,18 +97,6 @@ describe("OMP binary discovery", () => {
             command: join(bunBin, "bun"),
             args: [cli, "--version"],
             env: { PATH: `${bunBin}${delimiter}${process.env.PATH}` },
-        });
-    });
-
-    it("routes a package CLI script through Bun instead of spawning it directly", () => {
-        const { root, binDir } = makePackageRoot();
-        process.env.PATH = binDir;
-        const cli = join(root, "pkg", "dist", "cli.js");
-
-        expect(getOmpCommandInvocation(cli, ["--version"])).toEqual({
-            command: join(binDir, "bun"),
-            args: [cli, "--version"],
-            env: { PATH: `${binDir}${delimiter}${process.env.PATH}` },
         });
     });
 

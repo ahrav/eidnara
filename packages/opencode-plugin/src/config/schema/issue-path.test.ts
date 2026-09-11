@@ -3,52 +3,51 @@ import { describe, expect, it } from "bun:test";
 import { redactConfigIssuePath } from "./issue-path";
 
 describe("redactConfigIssuePath", () => {
-    it("prints static schema fields verbatim", () => {
-        expect(redactConfigIssuePath(["memory", "git_commit_indexing", "since_days"])).toEqual([
-            "memory",
-            "git_commit_indexing",
-            "since_days",
-        ]);
-    });
-
-    it("withholds record keys under a hidden-agent block", () => {
-        expect(redactConfigIssuePath(["historian", "tools", "SECRET-TOOL"])).toEqual([
-            "historian",
-            "tools",
-            "<key>",
-        ]);
-        expect(redactConfigIssuePath(["historian", "permission", "SECRET-TOOL"])).toEqual([
-            "historian",
-            "permission",
-            "<key>",
-        ]);
-    });
-
-    it("withholds prompt_surface.tool_descriptions keys", () => {
-        expect(
-            redactConfigIssuePath(["prompt_surface", "tool_descriptions", "SECRET-KEY"]),
-        ).toEqual(["prompt_surface", "tool_descriptions", "<key>"]);
-    });
-
-    it("keeps `default` and withholds model keys inside a threshold object", () => {
-        expect(redactConfigIssuePath(["execute_threshold_percentage", "default"])).toEqual([
-            "execute_threshold_percentage",
-            "default",
-        ]);
-        expect(
-            redactConfigIssuePath(["execute_threshold_percentage", "openai/SECRET-MODEL"]),
-        ).toEqual(["execute_threshold_percentage", "<key>"]);
-    });
-
-    it("prints array indices as [n]", () => {
-        expect(redactConfigIssuePath(["historian", "disallowed_tools", 0])).toEqual([
-            "historian",
-            "disallowed_tools",
-            "[0]",
-        ]);
-    });
-
-    it("withholds every segment below an unknown key", () => {
-        expect(redactConfigIssuePath(["not_a_field", "child"])).toEqual(["<key>", "<key>"]);
+    it("prints static fields and array indices, and withholds record keys and unknown segments", () => {
+        const cases: Array<[string, Array<string | number>, string[]]> = [
+            [
+                "static schema fields print verbatim",
+                ["memory", "git_commit_indexing", "since_days"],
+                ["memory", "git_commit_indexing", "since_days"],
+            ],
+            [
+                "record keys under a hidden-agent tools block are withheld",
+                ["historian", "tools", "SECRET-TOOL"],
+                ["historian", "tools", "<key>"],
+            ],
+            [
+                "record keys under a hidden-agent permission block are withheld",
+                ["historian", "permission", "SECRET-TOOL"],
+                ["historian", "permission", "<key>"],
+            ],
+            [
+                "prompt_surface.tool_descriptions keys are withheld",
+                ["prompt_surface", "tool_descriptions", "SECRET-KEY"],
+                ["prompt_surface", "tool_descriptions", "<key>"],
+            ],
+            [
+                "`default` inside a threshold object is kept",
+                ["execute_threshold_percentage", "default"],
+                ["execute_threshold_percentage", "default"],
+            ],
+            [
+                "model keys inside a threshold object are withheld",
+                ["execute_threshold_percentage", "openai/SECRET-MODEL"],
+                ["execute_threshold_percentage", "<key>"],
+            ],
+            [
+                "array indices print as [n]",
+                ["historian", "disallowed_tools", 0],
+                ["historian", "disallowed_tools", "[0]"],
+            ],
+            [
+                "every segment below an unknown key is withheld",
+                ["not_a_field", "child"],
+                ["<key>", "<key>"],
+            ],
+        ];
+        for (const [title, path, expected] of cases) {
+            expect([title, redactConfigIssuePath(path)]).toEqual([title, expected]);
+        }
     });
 });

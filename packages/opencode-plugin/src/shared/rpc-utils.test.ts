@@ -176,19 +176,6 @@ describe("classifyProcessKind", () => {
         expect(classifyProcessKind("/usr/local/bin/pi --model test")).toBe("Pi");
     });
 
-    test("recognizes a Pi harness when interpreter flags precede the pi-coding-agent path", () => {
-        expect(
-            classifyProcessKind(
-                "node --enable-source-maps /opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-            ),
-        ).toBe("Pi");
-        expect(
-            classifyProcessKind(
-                "bun run /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
-            ),
-        ).toBe("Pi");
-    });
-
     test("finds the package marker in flattened ps text when the script path contains spaces", () => {
         // `ps -o command=` drops argument boundaries, so the path splits at each space.
         expect(
@@ -220,7 +207,17 @@ describe("classifyProcessKind", () => {
         expect(classifyProcessKind("bash -c cd /work && pi --model test")).toBe("process");
     });
 
-    test("skips an interpreter option's value when locating the script", () => {
+    test("locates the script past interpreter flags, interpreter option values, and `bun run`", () => {
+        expect(
+            classifyProcessKind(
+                "node --enable-source-maps /opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            ),
+        ).toBe("Pi");
+        expect(
+            classifyProcessKind(
+                "bun run /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+            ),
+        ).toBe("Pi");
         expect(
             classifyProcessKind(
                 "node --require ./setup.js /opt/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
@@ -568,46 +565,33 @@ describe("isPidAlive", () => {
 });
 
 describe("isPidIdentityPlausible", () => {
-    test("rejects a reused Linux PID when proc start time is substantially newer", () => {
-        const readPaths: string[] = [];
-        __setRpcIdentityTestHooks({
-            platform: "linux",
-            nowMs: () => NOW_MS,
-            readFileSync: ((path: string | URL) => {
-                readPaths.push(String(path));
-                const files = {
-                    [`/proc/${PID}/stat`]: procStat(10_000),
-                    "/proc/uptime": `${UPTIME_SECONDS}.0 0.0`,
-                };
-                return files[String(path) as keyof typeof files];
-            }) as typeof readFileSync,
-            execFileSync: (() => {
-                throw new Error("ps must not run on Linux");
-            }) as typeof execFileSync,
-        });
-
-        expect(isPidIdentityPlausible(record(500_000))).toBe("implausible");
-        expect(readPaths).toEqual([`/proc/${PID}/stat`, "/proc/uptime"]);
-    });
-
-    test("accepts a genuine Linux record when the process started no later than the record", () => {
+    test("a Linux start time outside the skew window decides alone without reading cmdline", () => {
         // procStat(10_000) reconstructs a start time of 1_100_000 ms.
-        const readPaths: string[] = [];
-        __setRpcIdentityTestHooks({
-            platform: "linux",
-            nowMs: () => NOW_MS,
-            readFileSync: ((path: string | URL) => {
-                readPaths.push(String(path));
-                return linuxFiles({
-                    [`/proc/${PID}/stat`]: procStat(10_000),
-                    "/proc/uptime": `${UPTIME_SECONDS}.0 0.0`,
-                })(path);
-            }) as typeof readFileSync,
-        });
+        const cases: Array<[number, "plausible" | "implausible"]> = [
+            [500_000, "implausible"],
+            [1_100_000, "plausible"],
+            [1_500_000, "plausible"],
+        ];
+        for (const [startedAt, verdict] of cases) {
+            const readPaths: string[] = [];
+            __setRpcIdentityTestHooks({
+                platform: "linux",
+                nowMs: () => NOW_MS,
+                readFileSync: ((path: string | URL) => {
+                    readPaths.push(String(path));
+                    return linuxFiles({
+                        [`/proc/${PID}/stat`]: procStat(10_000),
+                        "/proc/uptime": `${UPTIME_SECONDS}.0 0.0`,
+                    })(path);
+                }) as typeof readFileSync,
+                execFileSync: (() => {
+                    throw new Error("ps must not run on Linux");
+                }) as typeof execFileSync,
+            });
 
-        expect(isPidIdentityPlausible(record(1_100_000))).toBe("plausible");
-        expect(isPidIdentityPlausible(record(1_500_000))).toBe("plausible");
-        expect(readPaths).not.toContain(`/proc/${PID}/cmdline`);
+            expect(isPidIdentityPlausible(record(startedAt)), String(startedAt)).toBe(verdict);
+            expect(readPaths, String(startedAt)).toEqual([`/proc/${PID}/stat`, "/proc/uptime"]);
+        }
     });
 
     test("lets the command decide when the start time lands inside the skew window", () => {
