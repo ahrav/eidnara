@@ -197,7 +197,7 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [serialized-client]: ../../../../packages/opencode-plugin/src/shared/host-client/client.test.ts#L108-L175
 [serialized-unpaged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1456
 [serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1425
-[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1412
+[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1415
 [serialized-host]: ../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
 [serialized-campaign]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-do-the-unpaged-correction-and-registered-cargo-test-prove
 

@@ -336,7 +336,7 @@ candidate was not committed and has no immutable source revision.
 [growth-bound]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L637-L669
 [snapshot-test]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
 [pager-spy]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1425
-[carrier-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1412
+[carrier-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1415
 [carrier-corpus]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/serialized-transform-corpus.ts
 [writer-test]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L55
 [host-runner]: ../../../../../packages/e2e-tests/scripts/verify-serialized-transform-pages.ts
