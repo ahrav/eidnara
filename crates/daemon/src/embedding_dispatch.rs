@@ -55,6 +55,11 @@ pub enum DispatchEvent {
         job_id: String,
         host_job_id: String,
     },
+    /// The charge did not bind the row to this host job: it rolled back, or the row had changed underneath it. The host still runs the job, but no row will ask for its result.
+    Orphaned {
+        job_id: String,
+        host_job_id: String,
+    },
     /// The host holds the job and the row's episode carries `attempts` charged so far; re-admission after a job-table eviction reports the same count.
     Admitted {
         job_id: String,
@@ -128,6 +133,8 @@ pub enum DispatchFault {
     RefuseChargeStatement,
     /// The admission charge commits, then its reply arrives as a store failure.
     LoseChargeReply,
+    /// The ledger read that reconciles a lost charge reply fails, so the charge's outcome stays unknown.
+    RefuseLedgerRead,
 }
 
 /// `run_pass` blocks and requires a multi-threaded Tokio runtime; `block_in_place` yields the worker while the pass waits.
@@ -136,7 +143,7 @@ pub struct EmbeddingDispatcher<'a> {
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
     quarantine: Option<Quarantine>,
-    fault: Option<DispatchFault>,
+    faults: Vec<DispatchFault>,
 }
 
 impl<'a> EmbeddingDispatcher<'a> {
@@ -150,22 +157,23 @@ impl<'a> EmbeddingDispatcher<'a> {
             projection,
             synapse,
             quarantine: None,
-            fault: None,
+            faults: Vec::new(),
         }
     }
 
-    /// Arms `fault` for the next store call it names; the fault is consumed when it fires.
+    /// Arms `fault` for the next store call it names; each armed fault is consumed when it fires, so several can be armed for one pass.
     #[cfg(feature = "test-support")]
     pub fn inject_fault_for_test(&mut self, fault: DispatchFault) {
-        self.fault = Some(fault);
+        self.faults.push(fault);
     }
 
     fn take_fault(&mut self, fault: DispatchFault) -> bool {
-        if self.fault == Some(fault) {
-            self.fault = None;
-            true
-        } else {
-            false
+        match self.faults.iter().position(|armed| *armed == fault) {
+            Some(index) => {
+                self.faults.remove(index);
+                true
+            }
+            None => false,
         }
     }
 
@@ -476,17 +484,29 @@ impl<'a> EmbeddingDispatcher<'a> {
             {
                 return Err(self.enter_quarantine(QuarantineKind::Integrity, &error));
             }
-            // The charge's statement failed or its reply was lost: the row, not the error, says whether it committed. A row still pending was not charged and is re-admitted by the next pass; anything else is unknown and stops dispatch.
-            Err(lost) => match self.projection.read(|conn| job_ledger(conn, &job.job_id)) {
-                Ok(Some(ledger))
-                    if ledger.state == "admitted"
-                        && ledger.host_job_id.as_deref() == Some(host_job_id.as_str()) =>
-                {
-                    Admission::AlreadyCharged
+            // The charge's statement failed or its reply was lost: the row, not the error, says whether it committed. A row still pending was not charged and is re-admitted by the next pass; anything else is unknown and stops dispatch without a word about the host job, whose claim stays open.
+            Err(lost) => {
+                let ledger = if self.take_fault(DispatchFault::RefuseLedgerRead) {
+                    Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                        "database is locked".to_owned(),
+                    )))
+                } else {
+                    self.projection.read(|conn| job_ledger(conn, &job.job_id))
+                };
+                match ledger {
+                    Ok(Some(ledger))
+                        if ledger.state == "admitted"
+                            && ledger.host_job_id.as_deref() == Some(host_job_id.as_str()) =>
+                    {
+                        Admission::AlreadyCharged
+                    }
+                    Ok(Some(ledger)) if ledger.state == "pending" => {
+                        self.orphan(job, &host_job_id, observer);
+                        return Ok(Err(None));
+                    }
+                    _ => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
                 }
-                Ok(Some(ledger)) if ledger.state == "pending" => return Ok(Err(None)),
-                _ => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
-            },
+            }
         };
         let attempts = match charged {
             Admission::Charged { attempts } => attempts,
@@ -498,7 +518,10 @@ impl<'a> EmbeddingDispatcher<'a> {
                 });
                 return Ok(Err(None));
             }
-            Admission::NotPending => return Ok(Err(None)),
+            Admission::NotPending => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(None));
+            }
         };
         observer(DispatchEvent::Admitted {
             job_id: job.job_id.clone(),
@@ -506,6 +529,19 @@ impl<'a> EmbeddingDispatcher<'a> {
             attempts,
         });
         Ok(Ok(host_job_id))
+    }
+
+    /// Reports a host job the row will never ask for: its charge rolled back or the row changed underneath it.
+    fn orphan(
+        &self,
+        job: &DispatchJob,
+        host_job_id: &str,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) {
+        observer(DispatchEvent::Orphaned {
+            job_id: job.job_id.clone(),
+            host_job_id: host_job_id.to_owned(),
+        });
     }
 
     fn readmit(
@@ -522,6 +558,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         let rebound =
             self.write(|conn| rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now))?;
         if !rebound {
+            self.orphan(job, &host_job_id, observer);
             return Ok(Err(None));
         }
         observer(DispatchEvent::Admitted {

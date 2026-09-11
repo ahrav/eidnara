@@ -108,8 +108,18 @@ const NATIVE_EXIT_POLL: Duration = Duration::from_millis(20);
 struct HostJob {
     /// The durable job whose episode submitted this host job; one durable job owns a new host job per episode.
     job_id: String,
-    /// Whether an admitted row owns this job's result: set by the `Admitted` that charged it, cleared when the row is retried or stopped. A submission whose charge rolled back or whose row changed underneath never sets it.
-    result_expected: bool,
+    claim: Claim,
+}
+
+/// Whether a durable row asks for a host job's result. A submission starts `Unknown`: the charge that follows may commit, roll back, or end the pass without a verdict, and only the pass's later events settle it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// The charge's outcome has not reached the census; a ready result is kept, as a row may be admitted and expecting it.
+    Unknown,
+    /// An `Admitted` charged the row for this job and the row has not since been retried or stopped.
+    Expected,
+    /// No row will ask for the result: the charge rolled back, the row changed underneath it, or the row was later retried or stopped.
+    Released,
 }
 
 pub struct EmbeddingSupervisor {
@@ -128,7 +138,7 @@ pub struct EmbeddingSupervisor {
     /// Where the next identity sweep resumes its selection; `None` starts a pass over the table.
     sweep_cursor: Mutex<Option<String>>,
     panic_next_slice: AtomicBool,
-    dispatch_fault: Mutex<Option<DispatchFault>>,
+    dispatch_faults: Mutex<Vec<DispatchFault>>,
     #[cfg(feature = "test-support")]
     dispatch_tap: Mutex<Option<DispatchTap>>,
 }
@@ -156,7 +166,7 @@ impl EmbeddingSupervisor {
             admitted: Mutex::new(BTreeMap::new()),
             sweep_cursor: Mutex::new(None),
             panic_next_slice: AtomicBool::new(false),
-            dispatch_fault: Mutex::new(None),
+            dispatch_faults: Mutex::new(Vec::new()),
             #[cfg(feature = "test-support")]
             dispatch_tap: Mutex::new(None),
         })
@@ -168,13 +178,13 @@ impl EmbeddingSupervisor {
         self.panic_next_slice.store(true, Ordering::SeqCst);
     }
 
-    /// Arms `fault` on the next backfill slice's dispatcher.
+    /// Arms `fault` on the next backfill slice's dispatcher; several faults may be armed for one slice.
     #[cfg(feature = "test-support")]
     pub fn inject_dispatch_fault_for_test(&self, fault: DispatchFault) {
-        *self
-            .dispatch_fault
+        self.dispatch_faults
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fault);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(fault);
     }
 
     /// Runs slices until shutdown or a stop. Must run inside a Tokio runtime; each slice is a tracked blocking task, and the loop yields between slices. The loop itself holds a tracker token, so `shutdown` cannot report a drain while a slice could still start. One supervisor runs one loop: a later call returns at once, whether the first loop is still running or has stopped, since two loops would interleave slices and their events over the same census and a stop is terminal.
@@ -270,12 +280,12 @@ impl EmbeddingSupervisor {
         match kind {
             SliceKind::Backfill => {
                 let mut dispatcher = EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.synapse);
-                if let Some(fault) = self
-                    .dispatch_fault
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take()
-                {
+                for fault in std::mem::take(
+                    &mut *self
+                        .dispatch_faults
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                ) {
                     #[cfg(feature = "test-support")]
                     dispatcher.inject_fault_for_test(fault);
                     #[cfg(not(feature = "test-support"))]
@@ -310,11 +320,11 @@ impl EmbeddingSupervisor {
                                     host_job_id,
                                     HostJob {
                                         job_id,
-                                        result_expected: false,
+                                        claim: Claim::Unknown,
                                     },
                                 );
                             }
-                            // Only a charged admission binds the row to this job's result. The entry is recreated if a census ran between the submission and this charge and retired a result no row expected yet.
+                            // Only a charged admission binds the row to this job's result.
                             DispatchEvent::Admitted {
                                 job_id,
                                 host_job_id,
@@ -325,9 +335,15 @@ impl EmbeddingSupervisor {
                                     .entry(host_job_id)
                                     .or_insert(HostJob {
                                         job_id,
-                                        result_expected: false,
+                                        claim: Claim::Unknown,
                                     })
-                                    .result_expected = true;
+                                    .claim = Claim::Expected;
+                            }
+                            // The pass learned that no row will ask for this job's result.
+                            DispatchEvent::Orphaned { host_job_id, .. } => {
+                                if let Some(job) = self.lock_admitted().get_mut(&host_job_id) {
+                                    job.claim = Claim::Released;
+                                }
                             }
                             DispatchEvent::Published { host_job_id, .. } => {
                                 published += 1;
@@ -342,7 +358,7 @@ impl EmbeddingSupervisor {
                                     .values_mut()
                                     .filter(|job| job.job_id == job_id)
                                 {
-                                    job.result_expected = false;
+                                    job.claim = Claim::Released;
                                 }
                             }
                             _ => {}
@@ -440,19 +456,19 @@ impl EmbeddingSupervisor {
         })
     }
 
-    /// `(running, held)` counts over the host jobs this supervisor submitted and has not seen published: calls the host still owns, and settled results an admitted row still expects. A job the host no longer holds, a failed job, and a result no row expects carry no obligation and are dropped as they are counted.
+    /// `(running, held)` counts over the host jobs this supervisor submitted and has not seen published: calls the host still owns, and settled results a row expects or may still turn out to expect. A job the host no longer holds, a failed job, and a result whose claim is released carry no obligation and are dropped as they are counted.
     fn native_census(&self) -> (usize, usize) {
         let mut admitted = self.lock_admitted();
         let (mut running, mut held) = (0, 0);
         admitted.retain(|host_job_id, job| {
-            // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
+            // Anything the table still holds that is not a settled result counts as owned native work, and a claim the pass never settled is kept: both fail closed.
             match self.maintained.synapse.job_status(host_job_id) {
                 None | Some("failed") => false,
-                Some("ready") if job.result_expected => {
+                Some("ready") if job.claim == Claim::Released => false,
+                Some("ready") => {
                     held += 1;
                     true
                 }
-                Some("ready") => false,
                 Some(_) => {
                     running += 1;
                     true

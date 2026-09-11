@@ -1507,3 +1507,56 @@ async fn a_second_run_returns_while_the_first_loop_owns_the_schedule() {
         .unwrap();
     assert_eq!(engine.calls(), 1, "one loop ran one inference");
 }
+
+/// A charge whose reply is lost and whose reconciliation read then fails ends the pass in quarantine with the charge's outcome unknown; the census keeps the ready result as held, since the row may be admitted and expecting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_unsettled_charge_keeps_its_ready_result_through_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("unsettled", "unsettled text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        slice_bounds(Duration::from_secs(5)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    supervisor.inject_dispatch_fault_for_test(DispatchFault::LoseChargeReply);
+    supervisor.inject_dispatch_fault_for_test(DispatchFault::RefuseLedgerRead);
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let stop = within(Duration::from_secs(30), async {
+        loop {
+            if let SupervisorEvent::Stopped(stop) = next_event(&mut events).await {
+                break stop;
+            }
+        }
+    })
+    .await;
+    assert!(matches!(stop, Stop::Quarantined(_)), "{stop:?}");
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The charge did commit: the row is admitted on the host job whose result the host now holds.
+    let admitted = row(dir.path(), &occurrence);
+    assert_eq!(admitted.0, "admitted");
+    let host_job = admitted.2.unwrap();
+    within(Duration::from_secs(10), async {
+        while synapse.job_status(&host_job) != Some("ready") {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    let report = supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
+    assert!(matches!(report.stop, Some(Stop::Quarantined(_))));
+    assert_eq!(
+        report.held_results, 1,
+        "a claim the pass never settled keeps the ready result held"
+    );
+}
