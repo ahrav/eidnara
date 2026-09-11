@@ -18,6 +18,16 @@ use crate::envelope::check_fence;
 use crate::{KernelError, KernelStore};
 
 const HOUR_MS: i64 = 60 * 60 * 1_000;
+/// The result of probing one object file on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectPresence {
+    Present,
+    /// The shard or the file does not exist, or the path is not a regular file.
+    Absent,
+    /// The probe failed for a reason other than absence.
+    Unreadable,
+}
+
 pub(crate) const REFERENCED_GRACE_MS: i64 = 14 * 24 * HOUR_MS;
 const ORPHAN_GRACE_MS: i64 = HOUR_MS;
 
@@ -387,16 +397,25 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
+        self.artifact_object_presence(digest) != ObjectPresence::Absent
+    }
+
+    /// Whether the object file for `digest` is on disk. `digest` must satisfy
+    /// `is_artifact_digest`; callers that need "positively present" and
+    /// callers that need "not positively absent" read different arms.
+    pub(crate) fn artifact_object_presence(&self, digest: &str) -> ObjectPresence {
         match self.shard_directory(digest, false) {
             Ok(Some(shard)) => {
                 match rfs::statat(&*shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
-                    Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
-                    Err(rustix::io::Errno::NOENT) => false,
-                    Err(_) => true,
+                    Ok(stat) if rfs::FileType::from_raw_mode(stat.st_mode).is_file() => {
+                        ObjectPresence::Present
+                    }
+                    Ok(_) | Err(rustix::io::Errno::NOENT) => ObjectPresence::Absent,
+                    Err(_) => ObjectPresence::Unreadable,
                 }
             }
-            Ok(None) => false,
-            Err(_) => true,
+            Ok(None) => ObjectPresence::Absent,
+            Err(_) => ObjectPresence::Unreadable,
         }
     }
 

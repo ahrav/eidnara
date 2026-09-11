@@ -447,7 +447,8 @@ impl KernelStore {
                         .execute(
                             "UPDATE capture_pins
                              SET purge_degraded_at=?1,purge_barrier_id=?2
-                             WHERE released_at IS NULL AND capture_pin_id IN (
+                             WHERE released_at IS NULL AND purge_degraded_at IS NULL
+                               AND capture_pin_id IN (
                                  SELECT r.capture_pin_id FROM capture_pin_refs r
                                  JOIN evidence_meta e USING(evidence_id)
                                  WHERE e.artifact_digest=?3 AND r.released_at IS NULL

@@ -8,7 +8,8 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
 use super::redaction::{RedactedField, identity, redact};
 use super::retention::begin_fenced_write;
-use super::{CachedSql, KernelError, KernelStore, map_sqlite};
+use super::source_hold::release_consumer_holds_in_tx;
+use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 /// Result of pruning rows through the minimum consumer checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,7 @@ pub struct ConsumerAbandonment {
     /// Human-readable reason, redacted before durable storage.
     pub reason: String,
     /// Nonnegative abandonment timestamp in caller-defined durable time units.
+    /// Source-hold cleanup uses Unix-epoch milliseconds independently of the caller's audit time.
     pub abandoned_at: i64,
     /// Optional barrier that must already record this consumer.
     pub barrier_id: Option<String>,
@@ -112,6 +114,8 @@ impl Envelope<'_> {
         Ok(checkpoint)
     }
 
+    /// Source-hold cleanup uses Unix-epoch milliseconds independently of the caller's audit time.
+    ///
     /// # Errors
     ///
     /// - Returns [`KernelError::InvalidInput`] when `recorded_at` is negative or `consumer_id` is empty.
@@ -136,6 +140,9 @@ impl Envelope<'_> {
         }
         // A missing `outbox_consumers` row counts as checkpoint -1.
         complete_satisfied_barriers(self.tx, recorded_at)?;
+        // A consumer that leaves takes its pins with it; otherwise its bytes stay
+        // pinned until expiry with no registered owner left to release them.
+        release_consumer_holds_in_tx(self.tx, &consumer_id, None, current_time_ms())?;
         self.tx
             .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",
@@ -255,6 +262,7 @@ impl Envelope<'_> {
                 )
                 .map_err(map_sqlite)?;
         }
+        release_consumer_holds_in_tx(self.tx, &consumer_id, None, current_time_ms())?;
         self.tx
             .execute_cached(
                 "DELETE FROM outbox_consumers WHERE consumer_id=?1",
