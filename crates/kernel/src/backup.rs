@@ -362,7 +362,14 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| KernelError::Io)?;
         check_fence(&tx, self.lease_epoch())?;
-        if !release_capture_pin_in_tx(&tx, capture_pin_id, released_at)? {
+        let is_backup: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM capture_pins WHERE capture_pin_id=?1 AND pin_kind='backup')",
+                [capture_pin_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| KernelError::Io)?;
+        if !is_backup || !release_capture_pin_in_tx(&tx, capture_pin_id, released_at)? {
             return Err(KernelError::NotFound);
         }
         tx.commit().map_err(|_| KernelError::Io)

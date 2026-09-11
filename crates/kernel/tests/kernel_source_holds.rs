@@ -950,6 +950,33 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn backup_release_refuses_source_holds_without_changing_their_references() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let references = fixture.pin_refs(&hold.hold_id);
+    assert_eq!(
+        fixture
+            .store
+            .release_capture_pin(&hold.hold_id, hold.captured_at),
+        Err(KernelError::NotFound)
+    );
+    assert_eq!(fixture.pin_refs(&hold.hold_id), references);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Ok(hold.clone())
+    );
+    fixture
+        .store
+        .release_source_hold(&binding, &hold.hold_id, hold.captured_at)
+        .unwrap();
+    assert!(fixture.pin_refs(&hold.hold_id).is_empty());
+}
+
+#[test]
 fn hold_status_observes_invalidation_during_object_verification() {
     for purge in [true, false] {
         let mut fixture = Fixture::open();
