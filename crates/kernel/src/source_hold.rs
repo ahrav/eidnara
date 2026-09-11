@@ -506,6 +506,9 @@ impl KernelStore {
                 uncovered: usize::try_from(uncovered).map_err(corrupt)?,
             });
         }
+        if current_time_ms() >= pin.expires_at {
+            return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
+        }
         acknowledge_outbox_in_tx(&tx, &binding.consumer_id, through, updated_at)?;
         tx.commit().map_err(sqlite)?;
         Ok(())
@@ -1016,10 +1019,116 @@ struct StoredPin {
 
 #[cfg(test)]
 mod tests {
+    use std::num::{NonZeroU64, NonZeroUsize};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use rusqlite::{Connection, StatementStatus, params};
 
-    use super::Window;
+    use super::{
+        SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
+        SourceHoldInvalidity, Window,
+    };
     use crate::schema::apply_kernel_schema;
+    use crate::{CommitIntent, KernelStore, current_time_ms};
+
+    #[test]
+    fn acknowledgement_expiring_during_coverage_preserves_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        store
+            .commit(
+                CommitIntent {
+                    producer: "source-hold-test".to_string(),
+                    operation_key: "register".to_string(),
+                    request_digest: "a".repeat(64),
+                    actor: "test".to_string(),
+                    cause: "test".to_string(),
+                },
+                |envelope| {
+                    envelope.register_outbox_consumer("search", 1)?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let checkpoint_sql = "SELECT checkpoint_commit_seq,updated_at FROM outbox_consumers WHERE consumer_id='search'";
+        let before: (i64, i64) = store
+            .lock_writer()
+            .unwrap()
+            .query_row(checkpoint_sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(before, (0, 1));
+        let binding = SourceHoldBinding {
+            consumer_id: "search".to_string(),
+            lease_epoch: store.lease_epoch(),
+            source_policy_version: "source-policy.v1".to_string(),
+        };
+        let hold = store
+            .capture_source_hold(
+                &binding,
+                SourceHoldBounds {
+                    admission: SourceHoldAdmission {
+                        max_references: NonZeroUsize::new(1).unwrap(),
+                        max_encoded_bytes: NonZeroU64::new(1).unwrap(),
+                    },
+                    expiry_ms: NonZeroU64::new(1_000).unwrap(),
+                },
+            )
+            .unwrap();
+        assert!(hold.snapshot > before.0);
+        let (coverage_tx, coverage_rx) = mpsc::channel();
+        let mut pin_read = false;
+        let mut delayed = false;
+        store
+            .lock_writer()
+            .unwrap()
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                match context.action {
+                    AuthAction::Read {
+                        table_name: "capture_pins",
+                        ..
+                    } => pin_read = true,
+                    AuthAction::Read {
+                        table_name: "capture_pin_refs",
+                        ..
+                    } if !delayed => {
+                        delayed = true;
+                        let started = current_time_ms();
+                        let remaining = u64::try_from((hold.expires_at - started).max(0)).unwrap();
+                        std::thread::sleep(Duration::from_millis(remaining + 1));
+                        coverage_tx
+                            .send((pin_read, started, current_time_ms()))
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                Authorization::Allow
+            }))
+            .unwrap();
+        let result =
+            store.acknowledge_through_source_hold(&binding, &hold.hold_id, hold.snapshot, 2);
+        let writer = store.lock_writer().unwrap();
+        writer
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .unwrap();
+        let after: (i64, i64) = writer
+            .query_row(checkpoint_sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        let (pin_read, started, finished) = coverage_rx.try_recv().unwrap();
+        assert!(pin_read, "the same call reads the pin before coverage");
+        assert!(started < hold.expires_at, "coverage starts before expiry");
+        assert!(
+            finished >= hold.expires_at,
+            "the coverage hook crosses expiry"
+        );
+        assert_eq!(
+            result,
+            Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired)),
+            "checkpoint before={before:?}, after={after:?}"
+        );
+        assert_eq!(after, before, "a refused acknowledgement writes nothing");
+    }
 
     #[test]
     fn held_pages_seek_without_sorting_the_inventory() {
