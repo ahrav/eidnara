@@ -199,7 +199,7 @@ questions above are resolved only as preservation requirements: neither
 observer semantics nor fingerprint identifiers change.
 
 [ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2092-L2141
-[message-view]: ../../../../../crates/daemon/src/wire.rs#L383
+[message-view]: ../../../../../crates/daemon/src/wire.rs#L385
 [reference-test]: ../../../../../crates/daemon/src/transform.rs#L27331
 [delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23118
 [delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L22851

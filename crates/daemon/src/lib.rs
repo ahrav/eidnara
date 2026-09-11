@@ -36389,3 +36389,121 @@ mod release_contract_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[test]
+fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
+    use test_support::FixtureBuilder;
+
+    let store_fixture = FixtureBuilder::store();
+    let store = Arc::new(store_fixture.store);
+    let handler = Handler::new();
+    handler.install_store_for_test(Arc::clone(&store));
+    let mut fixture = FixtureBuilder::synthetic_todo_armed();
+    fixture.session_id = "compaction-mode-projection-cache".into();
+    for message in &mut fixture.messages {
+        message.ck.meta.synthetic = false;
+        message.ck.meta.harness_id = Some(message.mid.clone());
+        message.ck.mark_modified();
+    }
+    let mut live = FixtureBuilder::session_with_boundary().messages;
+    for message in &mut live {
+        message.ordinal += 2;
+    }
+    fixture.messages.extend(live);
+    let mut request: TransformRequest = serde_json::from_value(fixture.call_transform()).unwrap();
+    request.serializer_profile = "opencode-aisdk".into();
+    request.full_array_fingerprint = Some("compaction-mode-unchanged-input".into());
+    let original = serde_json::to_vec(&request).unwrap();
+    let mut ctx = transform::ProducerContext {
+        project_memory: None,
+        project_path: "git:projection-cache",
+        note_project_path: "git:projection-cache",
+        project_directory: store_fixture.dir.path().to_str().unwrap(),
+        history_budget_tokens: 60_000.0,
+        user_profile_budget_tokens: 4_000.0,
+        memory_enabled: false,
+        inject_docs: false,
+        temporal_awareness: false,
+        now_ms: 0,
+        execute_threshold_percentage: 65.0,
+        compaction_enabled: false,
+        smart_drops: true,
+        cache_ttl: "5m".into(),
+        cache_ttl_provenance: config::CacheTtlProvenance::Default,
+        model_key: None,
+        observed_last_response_at_ms: None,
+        guidance_date: None,
+        historian_active: false,
+        wrapup_active: false,
+        injected_reductions: Vec::new(),
+    };
+
+    // Route-bound compaction settings can differ while the session and ingress stay the same.
+    for (pass, compaction_enabled) in [false, true, true, false, true].into_iter().enumerate() {
+        ctx.compaction_enabled = compaction_enabled;
+        let cached = handler.lookup_full_projection_cache(&request);
+        assert_eq!(cached.is_some(), pass > 0);
+        if let Some(cache) = &cached {
+            assert_eq!(cache.replace_from, request.messages.len());
+        }
+        let result = transform::transform_with_projection_cached(
+            &store,
+            &request,
+            &ctx,
+            &handler.serialized_outputs,
+            cached.as_ref(),
+        )
+        .expect("compaction mode switch must preserve projection correctness");
+        if compaction_enabled {
+            let timings = result.response.timings.as_ref().expect("transform timings");
+            assert_eq!(
+                (
+                    timings.projection_reused_messages,
+                    timings.projection_projected_messages,
+                ),
+                if pass == 2 { (4, 0) } else { (0, 4) },
+                "pass {pass}"
+            );
+        }
+        let mut expected = wire::MessageProjection::new(&request.messages);
+        if compaction_enabled {
+            for message in &request.messages[..2] {
+                expected.mark_synthetic(message);
+            }
+        }
+        assert_eq!(
+            result.projection,
+            expected.project().unwrap(),
+            "pass {pass}"
+        );
+        let reattached = result
+            .projection
+            .reattach_messages_prefix(request.messages.len())
+            .unwrap();
+        assert!(
+            reattached[..2]
+                .iter()
+                .all(|message| message.ck.meta.synthetic == compaction_enabled)
+        );
+        assert!(
+            reattached[2..]
+                .iter()
+                .all(|message| !message.ck.meta.synthetic)
+        );
+        if pass == 2 {
+            let cache = cached.as_ref().unwrap();
+            assert!(Arc::ptr_eq(
+                &result.projection.blocks[0].wire,
+                &cache.projection.blocks[0].wire,
+            ));
+        }
+        handler.store_projection_cache(
+            &request,
+            result.revert_epoch,
+            Arc::new(result.projection),
+            None,
+        );
+        assert_eq!(serde_json::to_vec(&request).unwrap(), original);
+    }
+}
