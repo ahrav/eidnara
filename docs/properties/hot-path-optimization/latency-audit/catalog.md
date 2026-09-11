@@ -909,7 +909,9 @@ valid, so two successful allows cannot invent a deny. A completion after
 invalidation, deletion, eviction, or TTL expiry cannot publish or return an
 allow. These are per-read safety checks, not campaign occurrence checks.
 Fault/timing angle: The [shared resolver][permission-cache-resolver] owns the
-2,000 ms timeout and the cache. The pending promise belongs to one LRU entry;
+2,000 ms timeout and the cache. Undefined-agent reads require only
+`session.get`; named-agent reads also require `app.agents`.
+The pending promise belongs to one LRU entry;
 followers share its deadline rather than restart it. Entry identity and an
 explicit invalidation flag reject superseded completions. Publication and
 caller return both check read-start expiry, including after event-loop stalls.
@@ -935,7 +937,7 @@ absent.
 Open questions: None. User approval provenance for the changed failure default
 and accepted staleness window is appended to the evidence investigation log.
 
-[permission-cache-resolver]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L295-L351
+[permission-cache-resolver]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L306-L362
 
 ### mid-turn-read-is-invariant-under-query-collapse-and-statement-caching
 
@@ -2511,7 +2513,7 @@ evaluation of this area and its disposition are recorded in
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
+[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
 [dbexists]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L33-L35

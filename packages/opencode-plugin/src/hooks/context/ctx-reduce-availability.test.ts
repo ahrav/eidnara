@@ -416,7 +416,7 @@ describe("permission cache lifetime", () => {
         await expect(read("build", `${sessionId}-other`)).resolves.toBe(true);
         await expect(read("build")).resolves.toBe(false);
         await expect(read("plan")).resolves.toBe(true);
-        expect(agents).toHaveBeenCalledTimes(7);
+        expect(agents).toHaveBeenCalledTimes(6);
         expect(get).toHaveBeenCalledTimes(7);
     });
 
@@ -477,6 +477,99 @@ describe("permission cache lifetime", () => {
             await expect(read()).resolves.toBe(true);
         }
     });
+
+    it("preserves supported permission shapes and rule order", async () => {
+        for (const [permission, denied] of [
+            [undefined, false],
+            [{}, false],
+            [[], false],
+            [{ todowrite: "deny" }, true],
+            [{ todowrite: { "*": "ask" } }, false],
+            [[{ permission: "todowrite", pattern: "*", action: "deny" }], true],
+            [[{ tool: "todowrite", value: "deny" }], true],
+            [[{ name: "todowrite", pattern: ["src/**", "*"], action: "deny" }], true],
+            [
+                {
+                    rules: [{ permission: "todowrite", pattern: "*", action: "deny" }],
+                    todowrite: "allow",
+                },
+                false,
+            ],
+        ] as const) {
+            invalidateToolPermissionDenied(sessionId);
+            get.mockResolvedValueOnce({ data: { permission } });
+            await expect(read()).resolves.toBe(denied);
+            expect(peekToolPermissionDeniedForTest(sessionId, "todowrite", "build")).toBe(denied);
+        }
+    });
+
+    for (const source of ["agent", "permission", "permissions"] as const) {
+        it(`rejects malformed nested ${source} payloads without caching an allow`, async () => {
+            for (const permission of [
+                42,
+                null,
+                { todowrite: 42 },
+                { todowrite: "invalid" },
+                { todowrite: { "*": "invalid" } },
+                { rules: 42 },
+                [42],
+                [{ permission: "todowrite", action: "invalid" }],
+                [{ permission: 42, action: "deny" }],
+                [{ permission: "todowrite", pattern: 42, action: "deny" }],
+                [{ permission: "todowrite", pattern: ["*", 42], action: "deny" }],
+            ]) {
+                clearToolPermissionDenied(sessionId);
+                get.mockResolvedValueOnce({ data: { permission: { todowrite: "deny" } } });
+                await expect(read()).resolves.toBe(true);
+                invalidateToolPermissionDenied(sessionId);
+                if (source === "agent") {
+                    agents.mockResolvedValueOnce({ data: [{ name: "build", permission }] });
+                } else {
+                    get.mockResolvedValueOnce({ data: { [source]: permission } });
+                }
+                await expect(read()).resolves.toBe(true);
+                expect(peekToolPermissionDeniedForTest(sessionId, "todowrite", "build")).toBe(true);
+                const reads = get.mock.calls.length;
+                await expect(read()).resolves.toBe(false);
+                expect(get).toHaveBeenCalledTimes(reads + 1);
+            }
+        });
+    }
+
+    for (const failure of ["missing", "rejected", "malformed", "hung"] as const) {
+        it(`uses session rules alone with no active agent and a ${failure} agent-list API`, async () => {
+            const response = Promise.withResolvers<unknown>();
+            if (failure === "rejected") agents.mockRejectedValue(new Error("unavailable"));
+            if (failure === "malformed") agents.mockResolvedValue({ data: 42 });
+            if (failure === "hung") agents.mockReturnValue(response.promise);
+            const sessionOnlyClient =
+                failure === "missing" ? ({ session: { get } } as never) : client;
+            try {
+                const pending = resolveToolPermissionDenied(
+                    sessionOnlyClient,
+                    sessionId,
+                    "todowrite",
+                    undefined,
+                );
+                expect(agents).not.toHaveBeenCalled();
+                await expect(pending).resolves.toBe(false);
+                get.mockResolvedValue({ data: { permission: { todowrite: "deny" } } });
+                invalidateToolPermissionDenied(sessionId);
+                await expect(
+                    resolveToolPermissionDenied(
+                        sessionOnlyClient,
+                        sessionId,
+                        "todowrite",
+                        undefined,
+                    ),
+                ).resolves.toBe(true);
+                expect(agents).not.toHaveBeenCalled();
+                expect(get).toHaveBeenCalledTimes(2);
+            } finally {
+                response.resolve({ data: [] });
+            }
+        });
+    }
 
     for (const boundary of ["invalidation", "deletion", "timeout"] as const) {
         it(`a late allow cannot publish after ${boundary} or clear a newer deny`, async () => {

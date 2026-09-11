@@ -83,7 +83,7 @@ not a runtime assertion.
 ### Q: Are the stage fields a contract with the plugin or free to change?
 
 - Sources examined: [`rust-mode-transform.ts:999-1042`][ts-stages], the
-  plugin test at [`test.ts:244`][ts-test], `docs/host-wire-protocol.md` for
+  plugin test at [`test.ts:248`][ts-test], `docs/host-wire-protocol.md` for
   `timings`.
 - Findings: The plugin reads `handler_total`, `total`, and 22 stage keys,
   and the test asserts only that the `rust module stages:` line appears for
@@ -108,4 +108,4 @@ not a runtime assertion.
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[ts-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
+[ts-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248

@@ -483,6 +483,7 @@ describe("Rust mode transform request", () => {
         const transform = createRustModeTransform(deps, { moduleClient: client });
         const messages = makeMessages(sessionId);
         (messages[0]!.info as { tools?: Record<string, boolean> }).tools = {};
+        (messages[0]!.info as { agent?: string }).agent = "build";
 
         const startedAt = performance.now();
         await transform.run(sessionId, messages, { messages: messages as unknown[] });
