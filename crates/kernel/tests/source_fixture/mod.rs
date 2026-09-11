@@ -528,16 +528,25 @@ impl Fixture {
     /// Rewrites one observation's stored payload in place, standing in for
     /// history the store can no longer honour.
     pub fn tamper_observation_payload(&self, object_id: &str, payload: &[u8]) {
+        self.tamper(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![payload, object_id],
+        );
+    }
+
+    pub fn tamper_hold_expiry(&self, hold_id: &str) {
+        self.tamper(
+            "UPDATE capture_pins SET expires_at=NULL WHERE capture_pin_id=?1",
+            [hold_id],
+        );
+    }
+
+    fn tamper(&self, sql: &str, params: impl rusqlite::Params) {
         let connection = Connection::open(self.root.path().join("kernel.sqlite")).unwrap();
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .unwrap();
-        let changed = connection
-            .execute(
-                "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
-                rusqlite::params![payload, object_id],
-            )
-            .unwrap();
+        let changed = connection.execute(sql, params).unwrap();
         assert_eq!(changed, 1);
     }
 

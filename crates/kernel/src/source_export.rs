@@ -16,9 +16,12 @@ use rusqlite::TransactionBehavior;
 
 use super::cas::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
 use super::slice::ObservationPayload;
-use super::source_descriptor::{SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescriptorDetail};
+use super::source_descriptor::{
+    SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescriptorDetail, descriptor_object_id,
+};
 use super::source_hold::{
-    HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, Window, check_coverage, check_window,
+    Descriptors, HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, check_coverage,
+    check_window, descriptor_rows_sql,
 };
 use super::{KernelError, KernelStore, map_sqlite};
 
@@ -102,8 +105,10 @@ pub enum PageBound {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SourceExportError {
+    /// `SourceHoldError::Kernel` converts to [`Self::Kernel`], so `Hold`
+    /// never contains a [`KernelError`].
     #[error(transparent)]
-    Hold(#[from] SourceHoldError),
+    Hold(SourceHoldError),
     #[error(
         "source row {object_id} charges {bytes} bytes against {bound:?}, more than an empty page admits"
     )]
@@ -121,6 +126,15 @@ pub enum SourceExportError {
     },
     #[error(transparent)]
     Kernel(#[from] KernelError),
+}
+
+impl From<SourceHoldError> for SourceExportError {
+    fn from(error: SourceHoldError) -> Self {
+        match error {
+            SourceHoldError::Kernel(kernel) => Self::Kernel(kernel),
+            other => Self::Hold(other),
+        }
+    }
 }
 
 impl From<rusqlite::Error> for SourceExportError {
@@ -152,8 +166,10 @@ impl Preflight {
 impl KernelStore {
     /// One admitted page of `window` after `cursor`, read at the hold's S in
     /// one short transaction and materialized from the object store after
-    /// that transaction closes. The hold must be valid at `now` and, for a
-    /// catch-up window, already extended through its end.
+    /// that transaction closes. The hold must be valid at `now`. A catch-up
+    /// window's first page also proves the hold is extended through its end;
+    /// coverage remains valid while `through` is fixed and the hold remains
+    /// valid, so a page continued from a cursor does not repeat that proof.
     pub fn export_source_page(
         &self,
         binding: &SourceHoldBinding,
@@ -169,18 +185,16 @@ impl KernelStore {
             let hold = self.load_valid_hold(&tx, binding, hold_id, now)?;
             let (body, end, start) = match window {
                 ExportWindow::Snapshot => (
-                    Window::at_snapshot(hold.snapshot).cited_evidence_sql(),
+                    Descriptors::LiveAtEnd.cited_evidence_sql(),
                     hold.snapshot,
                     0,
                 ),
                 ExportWindow::CatchUp { through } => {
                     check_window(&tx, &hold, through)?;
-                    check_coverage(&tx, &hold, through)?;
-                    (
-                        catch_up_body(hold.snapshot, through),
-                        through,
-                        hold.snapshot,
-                    )
+                    if cursor.is_none() {
+                        check_coverage(&tx, &hold, through)?;
+                    }
+                    (catch_up_body(), through, hold.snapshot)
                 }
             };
             let keyset = Keyset::after(cursor, bounds.max_rows);
@@ -276,13 +290,13 @@ const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence
 /// `(S, through]` exactly as the hold pins them, or the descriptors live at S
 /// that were invalidated inside the window, which carry the invalidation fact
 /// and export no text. `?1` is `through` and `?2` is S.
-fn catch_up_body(snapshot: i64, through: i64) -> String {
+fn catch_up_body() -> String {
     format!(
         "{rows} AND (({created}) OR ({live_at_s}
                AND b.invalidated_commit_seq>?2 AND b.invalidated_commit_seq<=?1))",
-        rows = Window::descriptor_rows_sql(),
-        created = Window::catch_up(snapshot, through).predicate("?1", "?2"),
-        live_at_s = Window::at_snapshot(snapshot).predicate("?2", "0"),
+        rows = descriptor_rows_sql(),
+        created = Descriptors::CreatedInWindow.predicate("?1", "?2"),
+        live_at_s = Descriptors::LiveAtEnd.predicate("?2", "0"),
     )
 }
 
@@ -371,6 +385,8 @@ fn preflight(
         .ok_or_else(|| malformed(&object_id))?;
     if detail.descriptor_version != SOURCE_DESCRIPTOR_DETAIL_VERSION
         || detail.class != raw.class
+        || detail.revision != raw.revision.to_string()
+        || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
         || detail.evidence_id != raw.evidence_id
         || detail.artifact_digest != raw.digest
         || !is_artifact_digest(&raw.digest)

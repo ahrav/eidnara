@@ -167,7 +167,7 @@ fn owner_id(binding: &SourceHoldBinding) -> String {
 
 /// Which descriptors in a commit window cite evidence a hold protects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Descriptors {
+pub(crate) enum Descriptors {
     /// Descriptors live at the window's end: a capture over `(0, S]` drops
     /// descriptors invalidated at or before S, because the projection at S
     /// never sees them.
@@ -178,55 +178,14 @@ enum Descriptors {
     CreatedInWindow,
 }
 
-/// One commit window `(after, through]` of descriptor creations.
-#[derive(Clone, Copy)]
-pub(crate) struct Window {
-    after: i64,
-    through: i64,
-    descriptors: Descriptors,
-}
-
-impl Window {
-    pub(crate) fn at_snapshot(snapshot: i64) -> Self {
-        Self {
-            after: 0,
-            through: snapshot,
-            descriptors: Descriptors::LiveAtEnd,
-        }
-    }
-
-    pub(crate) fn catch_up(snapshot: i64, through: i64) -> Self {
-        Self {
-            after: snapshot,
-            through,
-            descriptors: Descriptors::CreatedInWindow,
-        }
-    }
-
-    /// The rows every window reads from: source descriptors joined to their
-    /// registry object and evidence row. Ends in `WHERE` so a predicate can
-    /// be appended with `AND`.
-    pub(crate) fn descriptor_rows_sql() -> String {
-        format!(
-            "FROM observations b
-             JOIN object_registry o ON o.object_id=b.object_id
-             JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-             WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'"
-        )
-    }
-
-    /// The window's membership test with the placeholders or literals `end`
-    /// and `start` standing for its bounds: the descriptor was created in
-    /// `(start, end]` and its evidence row is not invalidated at or before
-    /// `end`. A logical delete or a purge invalidates the evidence row, so a
-    /// descriptor over deleted bytes is not a candidate rather than a held
-    /// reference that can never be read.
+impl Descriptors {
+    /// `end` and `start` are inserted verbatim into the SQL predicate.
     pub(crate) fn predicate(self, end: &str, start: &str) -> String {
-        let descriptor_liveness = match self.descriptors {
-            Descriptors::LiveAtEnd => {
+        let descriptor_liveness = match self {
+            Self::LiveAtEnd => {
                 format!("AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>{end})")
             }
-            Descriptors::CreatedInWindow => String::new(),
+            Self::CreatedInWindow => String::new(),
         };
         format!(
             "b.created_commit_seq>{start} AND b.created_commit_seq<={end}
@@ -241,9 +200,47 @@ impl Window {
     pub(crate) fn cited_evidence_sql(self) -> String {
         format!(
             "{} AND {}",
-            Self::descriptor_rows_sql(),
+            descriptor_rows_sql(),
             self.predicate("?1", "?2")
         )
+    }
+}
+
+/// The rows every window reads from: source descriptors joined to their
+/// registry object and evidence row. Ends in `WHERE` so a predicate can be
+/// appended with `AND`.
+pub(crate) fn descriptor_rows_sql() -> String {
+    format!(
+        "FROM observations b
+         JOIN object_registry o ON o.object_id=b.object_id
+         JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+         WHERE b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'"
+    )
+}
+
+/// One commit window `(after, through]` of descriptor creations.
+#[derive(Clone, Copy)]
+struct Window {
+    after: i64,
+    through: i64,
+    descriptors: Descriptors,
+}
+
+impl Window {
+    fn at_snapshot(snapshot: i64) -> Self {
+        Self {
+            after: 0,
+            through: snapshot,
+            descriptors: Descriptors::LiveAtEnd,
+        }
+    }
+
+    fn catch_up(snapshot: i64, through: i64) -> Self {
+        Self {
+            after: snapshot,
+            through,
+            descriptors: Descriptors::CreatedInWindow,
+        }
     }
 
     /// Distinct cited evidence that hold `?3` does not reference yet, with
@@ -254,7 +251,7 @@ impl Window {
                AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                               WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
              GROUP BY e.evidence_id",
-            self.cited_evidence_sql()
+            self.descriptors.cited_evidence_sql()
         )
     }
 }
@@ -631,7 +628,7 @@ impl KernelStore {
             .prepare_cached(&Keyset::sql(
                 "o.source_kind,o.object_id,o.source_revision,e.evidence_id,
                  e.artifact_digest,e.byte_length,b.invalidated_commit_seq",
-                &window.cited_evidence_sql(),
+                &window.descriptors.cited_evidence_sql(),
             ))
             .map_err(sqlite)?;
         let mut rows = statement

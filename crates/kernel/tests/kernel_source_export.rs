@@ -10,9 +10,9 @@ use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use kernel::{
-    ArtifactDeletionKind, ArtifactErrorKind, ExportWindow, HeldCursor, ObservationPayload,
-    PageBound, SourceDescriptorDetail, SourceExportError, SourceHold, SourceHoldError,
-    SourceHoldInvalidity, SourcePage, SourcePageBounds, SourceRow,
+    ArtifactDeletionKind, ArtifactErrorKind, ExportWindow, HeldCursor, KernelError,
+    ObservationPayload, PageBound, SourceDescriptorDetail, SourceExportError, SourceHold,
+    SourceHoldError, SourceHoldInvalidity, SourcePage, SourcePageBounds, SourceRow,
 };
 use source_fixture::*;
 
@@ -670,6 +670,14 @@ fn dead_holds_and_lost_history_prevent_completion_and_a_reopen_needs_a_new_s() {
         invalid(SourceHoldInvalidity::PurgeDegraded)
     );
 
+    // Hold-phase and page-phase kernel errors share one variant.
+    let unreadable = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    fixture.tamper_hold_expiry(&unreadable.hold_id);
+    assert_eq!(
+        export(&fixture, &unreadable, unreadable.captured_at),
+        Err(SourceExportError::Kernel(KernelError::CorruptCanonicalRow))
+    );
+
     // Lost history: missing bytes and bytes that no longer hash to the digest
     // both refuse the page; nothing partial is handed back.
     let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
@@ -731,6 +739,34 @@ fn dead_holds_and_lost_history_prevent_completion_and_a_reopen_needs_a_new_s() {
             object_id: tampered.object_id.clone(),
         })
     );
+    // Export rejects a detail whose revision or lineage id differs from the
+    // stored row.
+    let genuine: ObservationPayload = serde_json::from_slice(&original_payload).unwrap();
+    let genuine_detail: SourceDescriptorDetail =
+        serde_json::from_str(genuine.detail.as_deref().unwrap()).unwrap();
+    let wrong_revision = SourceDescriptorDetail {
+        revision: "99".to_string(),
+        ..genuine_detail.clone()
+    };
+    let wrong_lineage = SourceDescriptorDetail {
+        lineage_id: "forged".to_string(),
+        ..genuine_detail
+    };
+    for (name, detail) in [("revision", wrong_revision), ("lineage", wrong_lineage)] {
+        let mut payload = genuine.clone();
+        payload.detail = Some(serde_json::to_string(&detail).unwrap());
+        fixture.tamper_observation_payload(
+            &tampered.object_id,
+            &serde_json::to_vec(&payload).unwrap(),
+        );
+        assert_eq!(
+            export(&fixture, &hold, hold.captured_at),
+            Err(SourceExportError::MalformedRow {
+                object_id: tampered.object_id.clone(),
+            }),
+            "tampered {name}"
+        );
+    }
     fixture.tamper_observation_payload(&tampered.object_id, &original_payload);
     assert_eq!(export(&fixture, &hold, hold.captured_at).unwrap(), full);
 
