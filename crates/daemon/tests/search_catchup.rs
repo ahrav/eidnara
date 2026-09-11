@@ -1587,8 +1587,15 @@ impl Cut {
 #[test]
 #[ignore = "re-executed by the crash-cut test with its environment set"]
 fn crash_child_entrypoint_reexecuted_by_the_parent() {
-    let root = PathBuf::from(std::env::var(CHILD_ROOT).unwrap());
-    let cut = Cut::parse(&std::env::var(CHILD_CUT).unwrap());
+    // An ignored-test sweep (`--ignored`/`--include-ignored`) invokes this
+    // entrypoint without the parent's environment; only the parent sets it.
+    let (root, cut) = match (std::env::var(CHILD_ROOT), std::env::var(CHILD_CUT)) {
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => return,
+        (Ok(root), Ok(cut)) => (root, cut),
+        (root, cut) => panic!("incomplete child environment: {root:?}, {cut:?}"),
+    };
+    let root = PathBuf::from(root);
+    let cut = Cut::parse(&cut);
     let corpus = Corpus::open(&root);
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);

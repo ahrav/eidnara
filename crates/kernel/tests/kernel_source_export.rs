@@ -428,6 +428,18 @@ fn delta_pages_carry_exactly_one_step_of_the_catch_up_window() {
             .collect::<Vec<_>>(),
         vec![baseline.as_str(), first.as_str()]
     );
+    let retired_baseline = step_one
+        .iter()
+        .find(|row| row.object_id == baseline)
+        .unwrap();
+    assert_eq!(
+        retired_baseline.text, None,
+        "created before the step, no text"
+    );
+    assert_eq!(retired_baseline.invalidated, Some(middle));
+    let created_first = step_one.iter().find(|row| row.object_id == first).unwrap();
+    assert_eq!(created_first.text.as_deref(), Some("first message"));
+    assert_eq!(created_first.invalidated, None);
     // The second step creates `second` and retires `first`, which was live at
     // `middle`; `baseline` was already gone at `middle` and is not repeated.
     let step_two = walk(
