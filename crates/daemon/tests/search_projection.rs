@@ -1,14 +1,9 @@
-//! The daemon's search.sqlite connection: what it verifies at open, what a
-//! write commits or rolls back, and that canonical inputs exported from the
-//! kernel persist with the same identity before and after a name-only
-//! remediation.
-
 use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 
 use daemon::search_projection::{CACHE_KIB, SearchProjection, SearchProjectionError};
-use kernel::source_identity::{Occurrence, Span};
+use kernel::source_identity::{Occurrence, Span, select, validate_span};
 use kernel::{
     ArtifactIngestRequest, CommitIntent, DomainSpec, ExportWindow, KernelStore, ProviderEgress,
     RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorRequest,
@@ -289,8 +284,11 @@ fn intent(key: &str) -> CommitIntent {
     }
 }
 
-/// Persists exported kernel rows and returns whether each was newly inserted.
-fn persist_rows(projection: &SearchProjection, rows: &[SourceRow]) -> Vec<(String, bool)> {
+fn persist_fixture_rows(
+    projection: &SearchProjection,
+    rows: &[SourceRow],
+    source_buffer: &str,
+) -> Vec<(String, bool)> {
     projection
         .write(|conn| {
             let identities: Vec<Vec<(&str, &str)>> = rows
@@ -306,21 +304,30 @@ fn persist_rows(projection: &SearchProjection, rows: &[SourceRow]) -> Vec<(Strin
             let records: Vec<OccurrenceRecord<'_>> = rows
                 .iter()
                 .zip(&identities)
-                .map(|(row, identity)| OccurrenceRecord {
-                    occurrence: Occurrence {
-                        class: &row.detail.class,
-                        identity,
-                        revision: &row.detail.revision,
-                        representation: &row.detail.representation,
-                        span: row.detail.span.map(|(start, end)| Span { start, end }),
-                    },
-                    payload: Payload::Selected(row.text.as_deref().unwrap()),
-                    domain_id: "domain",
-                    sensitivity: Sensitivity::Normal,
-                    source_object_id: &row.object_id,
-                    source_evidence_id: &row.detail.evidence_id,
-                    source_artifact_digest: &row.detail.artifact_digest,
-                    created_commit_seq: row.created_commit_seq,
+                .map(|(row, identity)| {
+                    let span = row.detail.span.map(|(start, end)| Span { start, end });
+                    validate_span(span, source_buffer).unwrap();
+                    assert_eq!(
+                        select(span, source_buffer),
+                        row.text.as_deref().unwrap().as_bytes(),
+                        "exported bytes match the original fixture selection"
+                    );
+                    OccurrenceRecord {
+                        occurrence: Occurrence {
+                            class: &row.detail.class,
+                            identity,
+                            revision: &row.detail.revision,
+                            representation: &row.detail.representation,
+                            span,
+                        },
+                        payload: Payload::Selected(row.text.as_deref().unwrap()),
+                        domain_id: "domain",
+                        sensitivity: Sensitivity::Normal,
+                        source_object_id: &row.object_id,
+                        source_evidence_id: &row.detail.evidence_id,
+                        source_artifact_digest: &row.detail.artifact_digest,
+                        created_commit_seq: row.created_commit_seq,
+                    }
                 })
                 .collect();
             Ok(persist_occurrences(conn, &records, bounds(), 1)?
@@ -351,6 +358,12 @@ fn a_name_only_remediation_changes_no_persisted_input() {
         })
         .unwrap();
     let text = "the message text stays the same";
+    let selections = [
+        (None, text),
+        (Some(Span { start: 0, end: 3 }), "the"),
+        (Some(Span { start: 4, end: 11 }), "message"),
+        (Some(Span { start: 4, end: 4 }), ""),
+    ];
     let handle = kernel
         .ingest_exact_artifact(ArtifactIngestRequest {
             intent: intent("artifact"),
@@ -375,24 +388,26 @@ fn a_name_only_remediation_changes_no_persisted_input() {
         .unwrap();
     kernel
         .commit(intent("publish"), |envelope| {
-            envelope
-                .publish_source_descriptor(&SourceDescriptorRequest {
-                    occurrence: Occurrence {
-                        class: "messages",
-                        identity: MSG_A,
-                        revision: "1",
-                        representation: "text",
-                        span: None,
-                    },
-                    domain_id: "domain",
-                    scope_id: None,
-                    evidence_id: &handle.evidence_id,
-                    artifact_digest: &handle.digest,
-                    buffer: text,
-                    sensitivity: Sensitivity::Normal,
-                    observed_at: 1,
-                })
-                .unwrap();
+            for (span, _) in selections {
+                envelope
+                    .publish_source_descriptor(&SourceDescriptorRequest {
+                        occurrence: Occurrence {
+                            class: "messages",
+                            identity: MSG_A,
+                            revision: "1",
+                            representation: "text",
+                            span,
+                        },
+                        domain_id: "domain",
+                        scope_id: None,
+                        evidence_id: &handle.evidence_id,
+                        artifact_digest: &handle.digest,
+                        buffer: text,
+                        sensitivity: Sensitivity::Normal,
+                        observed_at: 1,
+                    })
+                    .unwrap();
+            }
             Ok(String::new())
         })
         .unwrap();
@@ -433,7 +448,14 @@ fn a_name_only_remediation_changes_no_persisted_input() {
             .rows
     };
     let before = export(&kernel);
-    assert_eq!(before.len(), 1);
+    assert_eq!(before.len(), selections.len());
+    for (span, selected) in selections {
+        let row = before
+            .iter()
+            .find(|row| row.detail.span == span.map(|span| (span.start, span.end)))
+            .unwrap();
+        assert_eq!(row.text.as_deref(), Some(selected));
+    }
 
     let projection = SearchProjection::open(dir.path()).unwrap();
     projection
@@ -455,8 +477,15 @@ fn a_name_only_remediation_changes_no_persisted_input() {
         projection.set_pragma_for_test(pragma, pinned);
         projection.verify_connection().unwrap();
     }
-    let first = persist_rows(&projection, &before);
-    assert!(first[0].1, "first persistence inserts");
+    let first = persist_fixture_rows(&projection, &before, text);
+    assert_eq!(
+        first,
+        before
+            .iter()
+            .map(|row| (row.detail.occurrence_id.clone(), true))
+            .collect::<Vec<_>>(),
+        "first persistence inserts every exported occurrence under its own identity"
+    );
 
     // Rename the domain. The name is not an input: the exported rows are byte
     // for byte the same, and persisting them again inserts nothing.
@@ -477,17 +506,29 @@ fn a_name_only_remediation_changes_no_persisted_input() {
         after, before,
         "a name-only remediation changes no exported input"
     );
-    let second = persist_rows(&projection, &after);
-    assert_eq!(second, vec![(first[0].0.clone(), false)]);
+    let second = persist_fixture_rows(&projection, &after, text);
+    assert_eq!(
+        second,
+        first
+            .iter()
+            .map(|(id, _)| (id.clone(), false))
+            .collect::<Vec<_>>()
+    );
     projection
         .read(|conn| {
-            let stored = read_occurrence(conn, &first[0].0)?.unwrap();
-            assert_eq!(stored.bytes, text.as_bytes());
-            assert_eq!(stored.domain_id, "domain");
-            assert_ne!(
-                stored.domain_id, "Original Name",
-                "an identifier, never the name"
-            );
+            for row in &after {
+                let stored = read_occurrence(conn, &row.detail.occurrence_id)?.unwrap();
+                assert_eq!(stored.occurrence_id, row.detail.occurrence_id);
+                assert_eq!(stored.lineage_id, row.detail.lineage_id);
+                assert_eq!(stored.payload_id, row.detail.payload_id);
+                assert_eq!(stored.span, row.detail.span);
+                assert_eq!(stored.bytes, row.text.as_deref().unwrap().as_bytes());
+                assert_eq!(stored.domain_id, "domain");
+                assert_ne!(
+                    stored.domain_id, "Original Name",
+                    "an identifier, never the name"
+                );
+            }
             Ok(())
         })
         .unwrap();

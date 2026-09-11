@@ -276,6 +276,9 @@ pub fn install_identity(
     identity: &ProjectionIdentity,
     installed_at: i64,
 ) -> Result<(), ProjectionError> {
+    if identity.schema_version != SCHEMA_VERSION {
+        return Err(ProjectionError::IdentityMismatch);
+    }
     if let Some(stored) = read_identity(conn)? {
         return if stored == *identity {
             Ok(())

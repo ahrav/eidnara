@@ -24,6 +24,7 @@ struct Column {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Table {
+    strict: bool,
     columns: Vec<Column>,
     /// Table-level constraints and index definitions, whitespace-normalized.
     constraints: Vec<String>,
@@ -40,13 +41,20 @@ fn documented() -> BTreeMap<String, Table> {
         repo_root().join("docs/properties/search-projection/projection-schema.md"),
     )
     .unwrap();
+    assert!(text.contains("Every table below is `STRICT`."));
     let mut tables: BTreeMap<String, Table> = BTreeMap::new();
     let mut current: Option<String> = None;
     let mut section = "";
     for line in text.lines() {
         if let Some(name) = line.strip_prefix("## `") {
             let name = name.trim_end_matches('`').to_string();
-            tables.insert(name.clone(), Table::default());
+            tables.insert(
+                name.clone(),
+                Table {
+                    strict: true,
+                    ..Table::default()
+                },
+            );
             current = Some(name);
             section = "";
             continue;
@@ -116,9 +124,8 @@ fn open(dir: &Path, baseline: &str) -> SqliteStore {
     .unwrap()
 }
 
-/// The inventory a store built from `baseline` actually has, read through
-/// `PRAGMA table_info` and `sqlite_schema`, ignoring the storage crate's own
-/// infrastructure tables.
+/// Reads the store inventory through SQLite's table metadata and schema SQL.
+/// Storage infrastructure tables are outside the projection inventory.
 fn stored(baseline: &str) -> BTreeMap<String, Table> {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path(), baseline);
@@ -217,9 +224,15 @@ fn stored(baseline: &str) -> BTreeMap<String, Table> {
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
+                let strict = conn.query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema='main' AND name=?1",
+                    [&name],
+                    |row| row.get(0),
+                )?;
                 tables.insert(
                     name,
                     Table {
+                        strict,
                         columns,
                         constraints,
                         indexes,
@@ -360,6 +373,16 @@ fn the_check_vocabularies_equal_the_rust_enums() {
 #[test]
 fn an_omitted_field_or_constraint_fails_the_inventory() {
     let documented = with_implied_not_null(documented());
+    let missing_strict = retrieval::BASELINE.replacen(") STRICT", ")", 1);
+    assert_ne!(missing_strict, retrieval::BASELINE);
+    let differences = compare(&documented, &with_implied_not_null(stored(&missing_strict)));
+    assert_eq!(
+        differences.len(),
+        1,
+        "removing STRICT must fail the inventory: {differences:?}"
+    );
+    assert!(differences[0].starts_with("projection_identity:"));
+
     let missing_column = retrieval::BASELINE.replace("    persisted_at INTEGER NOT NULL,\n", "");
     assert_ne!(missing_column, retrieval::BASELINE);
     let differences = compare(&documented, &with_implied_not_null(stored(&missing_column)));
