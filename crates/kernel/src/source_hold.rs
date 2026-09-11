@@ -7,6 +7,7 @@
 //! whole rather than narrowed.
 
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::time::Instant;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -359,7 +360,7 @@ impl KernelStore {
         })
     }
 
-    /// Whether the hold still protects every byte it captured at `now`.
+    /// Elapsed monotonic milliseconds advance `now` so expiry during verification is not missed.
     /// Checked before a candidate built from the hold is published, and never
     /// answered from a cached earlier check. A hold that no longer protects
     /// its bytes is reported as [`SourceHoldError::Invalid`].
@@ -394,6 +395,7 @@ impl KernelStore {
         now: i64,
         after_snapshot: Option<&mut dyn FnMut()>,
     ) -> Result<SourceHold, SourceHoldError> {
+        let started = Instant::now();
         let mut reader = self.lock_reader()?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -449,7 +451,8 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
-        self.load_valid_pin(&tx, binding, hold_id, now)?;
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        self.load_valid_pin(&tx, binding, hold_id, now.saturating_add(elapsed_ms))?;
         Ok(hold)
     }
 
