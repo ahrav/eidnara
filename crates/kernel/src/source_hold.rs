@@ -10,6 +10,7 @@
 //! narrowed. Every use of a hold in another store incarnation is refused.
 
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
@@ -156,6 +157,9 @@ pub enum SourceHoldError {
     CaptureWorkLimitReached { max_descriptor_rows: usize },
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
+    /// The hold may still be valid; retry the status check.
+    #[error("source hold verification changed; retry the status check")]
+    VerificationChanged,
     #[error("source hold is not valid: {0:?}")]
     Invalid(SourceHoldInvalidity),
     #[error(transparent)]
@@ -227,16 +231,22 @@ impl Window {
     /// can never be read. Shared by every count, insert, and page so they
     /// cannot disagree.
     fn cited_evidence_sql(self) -> String {
-        let descriptor_liveness = match self.descriptors {
-            Descriptors::LiveAtEnd => {
-                "AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)"
-            }
-            Descriptors::CreatedInWindow => "",
+        let (descriptor_scan, descriptor_liveness) = match self.descriptors {
+            // Identity order lets keyset pages stop at LIMIT without sorting.
+            Descriptors::LiveAtEnd => (
+                "FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
+                 CROSS JOIN observations b ON b.object_id=o.object_id",
+                "AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)",
+            ),
+            // Creation order skips observations outside the catch-up window.
+            Descriptors::CreatedInWindow => (
+                "FROM observations b INDEXED BY idx_observations_known_as_of
+                 CROSS JOIN object_registry o ON o.object_id=b.object_id",
+                "",
+            ),
         };
-        // The descriptor-only index and join order let keyset pages stop at LIMIT without sorting.
         format!(
-            "FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
-             CROSS JOIN observations b ON b.object_id=o.object_id
+            "{descriptor_scan}
              CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
              WHERE o.object_id GLOB 'srcdesc:*'
                AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
@@ -544,6 +554,7 @@ impl KernelStore {
     /// Each distinct object is read and hashed, with one object buffer bounded
     /// by [`crate::MAX_PAYLOAD_BYTES`]. Storage failures return [`KernelError::Io`].
     /// The pin is rechecked after hashing; this check does not synchronize a later publication.
+    /// [`SourceHoldError::VerificationChanged`] requires a fresh status check.
     pub fn source_hold_status(
         &self,
         binding: &SourceHoldBinding,
@@ -577,6 +588,7 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
+        let restore_generation = self.restore_generation.load(Ordering::SeqCst);
         let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
         let hold = self.hold_from_pin(&tx, binding, hold_id, &pin)?;
         // Every referenced evidence row must still exist with its object on disk.
@@ -630,6 +642,20 @@ impl KernelStore {
             .map_err(sqlite)?;
         let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
         self.load_valid_pin(&tx, binding, hold_id, now.saturating_add(elapsed_ms))?;
+        if self.restore_generation.load(Ordering::SeqCst) != restore_generation {
+            return Err(SourceHoldError::VerificationChanged);
+        }
+        // With restores excluded, valid holds only gain references; release is required for reclamation.
+        let references: i64 = tx
+            .query_row_cached(
+                "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1",
+                [hold_id],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if usize::try_from(references).map_err(corrupt)? != hold.references {
+            return Err(SourceHoldError::VerificationChanged);
+        }
         Ok(hold)
     }
 
@@ -1160,6 +1186,7 @@ mod tests {
     fn held_pages_seek_without_sorting_the_inventory() {
         let mut baseline_steps = None;
         let mut baseline_work_steps = None;
+        let mut baseline_catch_up_steps = None;
         for count in [32, 512] {
             let mut conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -1242,6 +1269,55 @@ mod tests {
                     "page work grew from {baseline} to {steps} steps"
                 );
             }
+            conn.execute_batch(
+                "INSERT INTO commit_log VALUES (2,'query-plan-catch-up',1,'test','catch-up','digest',0,'test','test');
+                 INSERT INTO object_registry(object_id,object_kind,domain_id,source_kind,source_id,
+                     source_revision,created_commit_seq,sensitivity_class)
+                 VALUES ('catch-up-evidence','evidence','domain','artifact','catch-up-evidence',1,2,'normal'),
+                        ('srcdesc:catch-up:1','observation','domain','messages','catch-up',1,2,'normal');
+                 INSERT INTO evidence_meta(evidence_id,object_id,artifact_reference,artifact_digest,
+                     byte_length,media_type,retention_class,provider_egress_class,redaction_metadata,
+                     created_commit_seq,sensitivity_class)
+                 VALUES ('catch-up-evidence','catch-up-evidence','object','catch-up-digest',7,
+                         'text/plain','canonical','local_only',x'5b5d',2,'normal');
+                 INSERT INTO observations(observation_id,object_id,evidence_id,
+                     observation_kind,observation_payload,observed_at,created_commit_seq,
+                     sensitivity_class)
+                 VALUES ('srcdesc:catch-up:1','srcdesc:catch-up:1','catch-up-evidence',
+                         'source_descriptor',x'7b7d',0,2,'normal');",
+            )
+            .unwrap();
+            let window = Window::catch_up(1, 2);
+            let mut statement = conn.prepare(&window.unreferenced_evidence_sql()).unwrap();
+            let rows = statement
+                .query_map(params![window.through, window.after, "pin"], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![(
+                    "catch-up-evidence".to_string(),
+                    7,
+                    "catch-up-digest".to_string()
+                )]
+            );
+            let steps = statement.get_status(StatementStatus::VmStep);
+            eprintln!(
+                "SQLite {} catch-up: history={count}, steps={steps}",
+                rusqlite::version()
+            );
+            let baseline = *baseline_catch_up_steps.get_or_insert(steps);
+            assert!(
+                steps <= baseline * 2,
+                "catch-up work grew from {baseline} to {steps} steps with unrelated history"
+            );
         }
     }
 }

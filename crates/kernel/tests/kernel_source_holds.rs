@@ -1304,6 +1304,132 @@ fn hold_status_expires_while_verifying_objects() {
 }
 
 #[test]
+fn hold_status_requires_revalidation_after_extension() {
+    for with_existing in [false, true] {
+        for object_state in ["missing", "corrupt", "healthy"] {
+            let mut fixture = Fixture::open();
+            if with_existing {
+                fixture.publish("messages", "existing", 1, "existing evidence");
+            }
+            let binding = fixture.binding();
+            let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+            assert_hold_matches_ledger(&fixture, &hold, 4);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+                Ok(hold.clone())
+            );
+            let added = fixture.publish("messages", "added", 1, "added evidence");
+            let through = fixture.store.tip().unwrap();
+            assert!(through > hold.snapshot);
+            let path = fixture.object_path(&fixture.ledger[&added].digest);
+            let mut extended = hold.clone();
+            let result = fixture.store.source_hold_status_with_hook_for_test(
+                &binding,
+                &hold.hold_id,
+                hold.captured_at,
+                || {
+                    match object_state {
+                        "missing" => fs::remove_file(&path).unwrap(),
+                        "corrupt" => fs::write(&path, b"wrong evidence").unwrap(),
+                        "healthy" => {}
+                        _ => unreachable!(),
+                    }
+                    extended = fixture
+                        .store
+                        .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+                        .unwrap();
+                },
+            );
+            assert_eq!(extended.references, hold.references + 1);
+            assert_extended_hold_matches_ledger(&fixture, &extended, through);
+            assert!(
+                result.is_err(),
+                "extension requires revalidation: with_existing={with_existing}, \
+                 object_state={object_state}, result={result:?}, extended={extended:?}"
+            );
+            assert_eq!(result, Err(SourceHoldError::VerificationChanged));
+            let stable =
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, hold.captured_at);
+            if object_state == "healthy" {
+                assert_eq!(stable, Ok(extended));
+            } else {
+                assert_eq!(
+                    stable,
+                    Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hold_status_requires_revalidation_after_restore_replaces_equal_count_refs() {
+    let mut fixture = Fixture::open();
+    let store = Arc::clone(&fixture.store);
+    let binding = fixture.binding();
+    let empty = store.capture_source_hold(&binding, wide()).unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    fs::set_permissions(destination.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = store
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    fixture.publish("messages", "before-restore", 1, "before restore");
+    let hold = store
+        .extend_source_hold(
+            &binding,
+            &empty.hold_id,
+            store.tip().unwrap(),
+            wide_admission(),
+        )
+        .unwrap();
+    let original_refs = fixture.pin_refs(&hold.hold_id);
+    assert_eq!(hold.references, 1);
+    let result = store.source_hold_status_with_hook_for_test(
+        &binding,
+        &hold.hold_id,
+        hold.captured_at,
+        || {
+            store.restore(&backup.destination_path).unwrap();
+            assert_eq!(fixture.binding(), binding);
+            assert_eq!(
+                store.source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+                Ok(empty.clone()),
+                "restore removes references without invalidating the hold"
+            );
+            fixture.ledger.clear();
+            let added = fixture.publish("messages", "after-restore", 1, "after restore!");
+            let through = store.tip().unwrap();
+            let extended = store
+                .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+                .unwrap();
+            assert_eq!(extended, hold, "metadata and totals can remain identical");
+            assert_extended_hold_matches_ledger(&fixture, &extended, through);
+            let current_refs = fixture.pin_refs(&hold.hold_id);
+            assert_eq!(current_refs.len(), original_refs.len());
+            assert_ne!(current_refs, original_refs);
+            fs::remove_file(fixture.object_path(&fixture.ledger[&added].digest)).unwrap();
+        },
+    );
+    assert_eq!(
+        store.source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+    );
+    assert!(
+        result.is_err(),
+        "different references at equal counts require revalidation: {result:?}"
+    );
+    assert_eq!(result, Err(SourceHoldError::VerificationChanged));
+}
+
+#[test]
 fn hold_status_observes_invalidation_during_object_verification() {
     for purge in [true, false] {
         let mut fixture = Fixture::open();
