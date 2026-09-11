@@ -154,7 +154,9 @@ pub fn batch_from_rows<'a>(
             representation: &row.detail.representation,
             span: row.detail.span.map(|(start, end)| Span { start, end }),
         };
-        if kernel::source_identity::encode(&occurrence)?.occurrence_id != row.detail.occurrence_id {
+        if kernel::source_identity::encode_preserving_span(&occurrence)?.occurrence_id
+            != row.detail.occurrence_id
+        {
             return Err(ProjectionError::MalformedBatch);
         }
         if let Some(text) = row.text.as_deref() {

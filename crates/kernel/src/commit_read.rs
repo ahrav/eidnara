@@ -13,12 +13,28 @@ use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReadRequest {
     pub consumer_id: String,
-    /// The store incarnation the target was captured in, as `KernelStore::lease_epoch` reports it.
-    pub lease_epoch: u64,
+    pub incarnation: CommitReadIncarnation,
     /// Commits at or below this sequence are already applied.
     pub after_commit: i64,
     /// The fixed terminal target; nothing above it is read.
     pub through_commit: i64,
+}
+
+/// Identifies the history that a captured request's commit sequences refer to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommitReadIncarnation {
+    open_nonce: i64,
+    /// A restore keeps `open_nonce` but can let later commits reuse sequences a captured request
+    /// already names.
+    restore_generation: u64,
+}
+
+/// A reader guard captures the target and incarnation together, preventing a restore from
+/// separating them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitReadTarget {
+    pub through_commit: i64,
+    pub incarnation: CommitReadIncarnation,
 }
 
 /// Page capacity, checked from `COUNT` and `SUM(LENGTH())` before any payload is selected.
@@ -91,24 +107,33 @@ fn sqlite(error: rusqlite::Error) -> CommitReadError {
     CommitReadError::Kernel(map_sqlite(error))
 }
 
+fn tip(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
+    tx.query_row_cached(
+        "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
+        [],
+        |row| row.get(0),
+    )
+}
+
 struct CommitShape {
     rows: usize,
     payload_bytes: u64,
 }
 
 fn shape(tx: &Transaction<'_>, commit_seq: i64) -> Result<CommitShape, CommitReadError> {
-    let (events, event_ordinals): (i64, Option<i64>) = tx
+    let (events, event_ordinals): (i64, (Option<i64>, Option<i64>)) = tx
         .query_row_cached(
-            "SELECT COUNT(*),MAX(ordinal) FROM change_event WHERE commit_seq=?1",
+            "SELECT COUNT(*),MIN(ordinal),MAX(ordinal) FROM change_event WHERE commit_seq=?1",
             [commit_seq],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))),
         )
         .map_err(sqlite)?;
-    let (rows, row_ordinals, payload_bytes): (i64, Option<i64>, Option<i64>) = tx
+    let (rows, row_ordinals, payload_bytes): (i64, (Option<i64>, Option<i64>), Option<i64>) = tx
         .query_row_cached(
-            "SELECT COUNT(*),MAX(ordinal),SUM(LENGTH(payload)) FROM outbox WHERE commit_seq=?1",
+            "SELECT COUNT(*),MIN(ordinal),MAX(ordinal),SUM(LENGTH(payload))
+             FROM outbox WHERE commit_seq=?1",
             [commit_seq],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?), row.get(3)?)),
         )
         .map_err(sqlite)?;
     if rows < events {
@@ -117,9 +142,12 @@ fn shape(tx: &Transaction<'_>, commit_seq: i64) -> Result<CommitShape, CommitRea
     if rows > events {
         return Err(CommitReadError::SurplusRows { commit_seq });
     }
-    let contiguous = |max: Option<i64>| match max {
-        None => rows == 0,
-        Some(max) => max + 1 == rows,
+    // Both ends are checked because `ordinal` has no CHECK constraint, and `rows-1` is used
+    // because `MAX+1` overflows at `i64::MAX`.
+    let contiguous = |(min, max): (Option<i64>, Option<i64>)| match (min, max) {
+        (None, None) => rows == 0,
+        (Some(0), Some(max)) => max == rows - 1,
+        _ => false,
     };
     if !contiguous(event_ordinals) || !contiguous(row_ordinals) {
         return Err(CommitReadError::MalformedOrdinals { commit_seq });
@@ -154,22 +182,39 @@ fn outbox_rows(
     if rows.len() != shape.rows {
         return Err(CommitReadError::Kernel(KernelError::CorruptCanonicalRow));
     }
-    #[cfg(feature = "test-support")]
-    MATERIALIZED_ROWS.fetch_add(rows.len(), std::sync::atomic::Ordering::SeqCst);
     Ok(rows)
 }
 
-/// Payload rows selected by every `read_complete_commits` call in this process, so a test can show
-/// that a refused or deferred commit selected none.
-#[cfg(feature = "test-support")]
-static MATERIALIZED_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(feature = "test-support")]
-pub fn materialized_outbox_rows_for_test() -> usize {
-    MATERIALIZED_ROWS.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 impl KernelStore {
+    #[cfg(feature = "test-support")]
+    pub fn materialized_outbox_rows_for_test(&self) -> usize {
+        self.materialized_outbox_rows
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Captures the committed tip and the incarnation it belongs to from one reader snapshot.
+    pub fn capture_commit_read_target(&self) -> Result<CommitReadTarget, KernelError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(map_sqlite)?;
+        Ok(CommitReadTarget {
+            through_commit: tip(&tx).map_err(map_sqlite)?,
+            incarnation: self.incarnation(),
+        })
+    }
+
+    /// Must run under a reader guard because a restore holds every guard while advancing
+    /// `restore_generation` and swapping the database.
+    fn incarnation(&self) -> CommitReadIncarnation {
+        CommitReadIncarnation {
+            open_nonce: self.open_nonce,
+            restore_generation: self
+                .restore_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
     /// Reads whole commits in `(after_commit, through_commit]` for a registered consumer until a
     /// bound is reached. Shapes are measured with `COUNT` and `SUM(LENGTH())` before a payload is
     /// selected, so admission precedes materialization. Consumer, incarnation, target, and
@@ -187,10 +232,10 @@ impl KernelStore {
         {
             return Err(CommitReadError::InvalidRequest);
         }
-        if request.lease_epoch != self.lease_epoch() {
+        let mut reader = self.lock_reader()?;
+        if request.incarnation != self.incarnation() {
             return Err(CommitReadError::IncarnationMismatch);
         }
-        let mut reader = self.lock_reader()?;
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
@@ -206,14 +251,7 @@ impl KernelStore {
         if request.after_commit < checkpoint {
             return Err(CommitReadError::BelowCheckpoint);
         }
-        let tip: i64 = tx
-            .query_row_cached(
-                "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(sqlite)?;
-        if request.through_commit > tip {
+        if request.through_commit > tip(&tx).map_err(sqlite)? {
             return Err(CommitReadError::TargetBeyondTip);
         }
         // One more than the page can hold, so the commit that ends the page is seen without enumerating the whole range.
@@ -231,8 +269,6 @@ impl KernelStore {
                 params![request.after_commit, request.through_commit, limit],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(sqlite)?
-            .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(sqlite)?;
 
         let mut commits = Vec::new();
@@ -241,9 +277,17 @@ impl KernelStore {
         let mut used_bytes = 0u64;
         let mut end = None;
         for commit_seq in sequences {
+            let commit_seq = commit_seq.map_err(sqlite)?;
+            // A page full by count ends before inspecting the next commit; defects in that commit
+            // belong to the page it opens.
+            if commits.len() == bounds.max_commits.get() {
+                end = Some(PageEnd::Deferred {
+                    next_commit: commit_seq,
+                });
+                break;
+            }
             let shape = shape(&tx, commit_seq)?;
-            let fits = commits.len() < bounds.max_commits.get()
-                && used_rows + shape.rows <= bounds.max_rows.get()
+            let fits = used_rows + shape.rows <= bounds.max_rows.get()
                 && used_bytes + shape.payload_bytes <= bounds.max_payload_bytes.get();
             if !fits {
                 end = Some(if commits.is_empty() {
@@ -260,6 +304,9 @@ impl KernelStore {
                 break;
             }
             let rows = outbox_rows(&tx, commit_seq, &shape)?;
+            #[cfg(feature = "test-support")]
+            self.materialized_outbox_rows
+                .fetch_add(rows.len(), std::sync::atomic::Ordering::SeqCst);
             used_rows += shape.rows;
             used_bytes += shape.payload_bytes;
             through = commit_seq;

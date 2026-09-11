@@ -87,6 +87,37 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_data_home_is_rejected_without_creating_either_path() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_home = dir.path().join(OsString::from_vec(b"data-\xff".to_vec()));
+    let lossy_home = dir.path().join("data-\u{fffd}");
+    let result = SearchProjection::open(&data_home).map(|_| ());
+
+    for home in [&data_home, &lossy_home] {
+        assert_eq!(
+            (
+                home.try_exists().unwrap(),
+                home.join("search/search.sqlite").try_exists().unwrap(),
+            ),
+            (false, false),
+            "non-UTF-8 input must not create the root or database at {home:?}"
+        );
+    }
+    assert!(
+        matches!(
+            &result,
+            Err(SearchProjectionError::Store(storage::StoreError::Io(error)))
+                if error.kind() == std::io::ErrorKind::InvalidInput
+        ),
+        "expected InvalidInput, got {result:?}"
+    );
+}
+
 #[test]
 fn the_connection_is_verified_owner_only_and_rows_survive_close_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -398,6 +429,7 @@ fn a_name_only_remediation_changes_no_persisted_input() {
                             representation: "text",
                             span,
                         },
+                        source_policy: kernel::SourceDescriptorPolicy::Native,
                         domain_id: "domain",
                         scope_id: None,
                         evidence_id: &handle.evidence_id,
@@ -592,6 +624,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
             .commit(intent(&format!("publish-{key}")), |envelope| {
                 envelope
                     .publish_source_descriptor(&SourceDescriptorRequest {
+                        source_policy: kernel::SourceDescriptorPolicy::Native,
                         occurrence: Occurrence {
                             class,
                             identity,
@@ -828,6 +861,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         .commit(intent("publish-span"), |envelope| {
             envelope
                 .publish_source_descriptor(&SourceDescriptorRequest {
+                    source_policy: kernel::SourceDescriptorPolicy::Native,
                     occurrence: Occurrence {
                         class: "raw_tool_spans",
                         identity: TOOL_SPAN,

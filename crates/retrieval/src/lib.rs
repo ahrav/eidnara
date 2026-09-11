@@ -19,8 +19,8 @@ use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
 use kernel::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, covers_whole, encode, payload_id, select,
-    validate_span,
+    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, encode_preserving_span, payload_id,
+    select,
 };
 use rusqlite::{CachedStatement, OptionalExtension, params};
 use storage::GuardedConn;
@@ -30,12 +30,11 @@ use storage::GuardedConn;
 /// identity checked on every open.
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
-/// The schema version the baseline text implements. A projection whose stored
-/// identity names another version is rebuilt.
+/// A schema mismatch requires a rebuild from canonical state.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The identity every row in one projection was built under. Any component
-/// that differs at open makes the projection incompatible.
+/// Connection opening does not compare projection identities.
+/// A matching identity does not establish completeness or authorize search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionIdentity {
     pub schema_version: u32,
@@ -224,6 +223,10 @@ pub enum ProjectionError {
     )]
     NonPositiveTombstoneSequence { occurrence_id: String },
     #[error(
+        "the tombstone for occurrence {occurrence_id} must name a commit sequence after its creation"
+    )]
+    TombstoneNotAfterCreation { occurrence_id: String },
+    #[error(
         "occurrence {occurrence_id} is stored with a different tuple under the same identifier"
     )]
     OccurrenceCollision { occurrence_id: String },
@@ -270,7 +273,19 @@ fn parse_sensitivity(value: &str) -> Option<Sensitivity> {
         .find(|candidate| candidate.as_str() == value)
 }
 
-/// Installs the identity in an empty projection or checks an installed one.
+/// A successful identity check does not prove that the projection is complete.
+/// Pass the expected build identity; replaying the stored row cannot detect drift.
+/// Opening the connection does not call this check.
+/// This operation does not rebuild, delete, or authorize serving the projection.
+///
+/// # Errors
+///
+/// Returns [`ProjectionError::IdentityMismatch`] for an unsupported schema version.
+/// The schema-version check also applies before the first identity insert.
+/// Any stored identity component mismatch returns the same error.
+/// Insertion returns [`ProjectionError::CorruptRow`] for epochs above `i64::MAX`.
+/// A negative stored epoch also returns [`ProjectionError::CorruptRow`].
+/// Returns [`ProjectionError::Sqlite`] if reading or inserting the identity fails.
 pub fn install_identity(
     conn: &GuardedConn<'_>,
     identity: &ProjectionIdentity,
@@ -388,25 +403,19 @@ struct Prepared<'a> {
     insert_payload: bool,
 }
 
-/// Whole-buffer spans encode as spanless occurrences so equivalent payload
-/// spellings share one identity. Admission and the writer share this so the
-/// identity admission charges against is the one the row lands under.
+/// `Whole` normalizes spans against its buffer; `Selected` preserves the producer's span and checks its length against the selected text.
+/// Admission and the writer share this encoding so both use the same occurrence identity.
 pub(crate) fn encode_record<'a>(
     record: &OccurrenceRecord<'a>,
 ) -> Result<(EncodedOccurrence, &'a [u8]), ProjectionError> {
-    let mut encoded = encode(&record.occurrence)?;
-    let selected: &[u8] = match record.payload {
+    match record.payload {
         Payload::Whole(buffer) => {
-            validate_span(record.occurrence.span, buffer)?;
-            if covers_whole(encoded.span, buffer) {
-                encoded = encode(&Occurrence {
-                    span: None,
-                    ..record.occurrence
-                })?;
-            }
-            select(record.occurrence.span, buffer)
+            let encoded = encode(&record.occurrence, buffer)?;
+            let selected = select(encoded.span, buffer);
+            Ok((encoded, selected))
         }
         Payload::Selected(text) => {
+            let encoded = encode_preserving_span(&record.occurrence)?;
             if let Some(span) = encoded.span {
                 let span_len = span
                     .end
@@ -416,10 +425,9 @@ pub(crate) fn encode_record<'a>(
                     return Err(OccurrenceRefusal::SpanOutOfRange.into());
                 }
             }
-            text.as_bytes()
+            Ok((encoded, text.as_bytes()))
         }
-    };
-    Ok((encoded, selected))
+    }
 }
 
 /// A batch prepares these statements once rather than once per record.
@@ -640,6 +648,7 @@ fn persist_with_digests<'c>(
 /// Records that an occurrence stopped being live. Recording the same
 /// tombstone again is a no-op; a different one for the same occurrence is a
 /// collision, because an invalidation fact never changes.
+/// The invalidation commit must be strictly after the stored creation commit.
 pub fn tombstone_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
@@ -651,13 +660,20 @@ pub fn tombstone_occurrence(
             occurrence_id: occurrence_id.to_string(),
         });
     }
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM occurrences WHERE occurrence_id=?1)",
-        [occurrence_id],
-        |row| row.get(0),
-    )?;
-    if !exists {
+    let created_commit_seq: Option<i64> = conn
+        .query_row(
+            "SELECT created_commit_seq FROM occurrences WHERE occurrence_id=?1",
+            [occurrence_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(created_commit_seq) = created_commit_seq else {
         return Err(ProjectionError::UnknownOccurrence {
+            occurrence_id: occurrence_id.to_string(),
+        });
+    };
+    if tombstone.invalidated_commit_seq <= created_commit_seq {
+        return Err(ProjectionError::TombstoneNotAfterCreation {
             occurrence_id: occurrence_id.to_string(),
         });
     }
@@ -710,7 +726,7 @@ pub fn read_occurrence(
                     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,
                     o.created_commit_seq,t.invalidated_commit_seq,t.reason
              FROM occurrences o
-             JOIN payloads p ON p.payload_id=o.payload_id
+             LEFT JOIN payloads p ON p.payload_id=o.payload_id
              LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
              WHERE o.occurrence_id=?1",
             [occurrence_id],
@@ -743,7 +759,7 @@ pub fn read_occurrence(
                     representation: row.get(5)?,
                     span,
                     payload_id: row.get(8)?,
-                    bytes: row.get(9)?,
+                    bytes: row.get::<_, Option<Vec<u8>>>(9)?.ok_or_else(corrupt)?,
                     domain_id: row.get(10)?,
                     sensitivity: parse_sensitivity(&row.get::<_, String>(11)?)
                         .ok_or_else(corrupt)?,

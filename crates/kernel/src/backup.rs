@@ -362,7 +362,14 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| KernelError::Io)?;
         check_fence(&tx, self.lease_epoch())?;
-        if !release_capture_pin_in_tx(&tx, capture_pin_id, released_at)? {
+        let is_backup: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM capture_pins WHERE capture_pin_id=?1 AND pin_kind='backup')",
+                [capture_pin_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| KernelError::Io)?;
+        if !is_backup || !release_capture_pin_in_tx(&tx, capture_pin_id, released_at)? {
             return Err(KernelError::NotFound);
         }
         tx.commit().map_err(|_| KernelError::Io)
@@ -676,6 +683,10 @@ impl KernelStore {
                 for (guard, connection) in readers.iter_mut().zip(new_readers) {
                     **guard = connection;
                 }
+                // `restore_generation` advances while all connection guards are held, preventing
+                // reads from pairing the displaced history's incarnation with the installed database.
+                self.restore_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(source_seq)
             }
             Err(error) => {
@@ -998,9 +1009,8 @@ fn capture_state_inner(
     })
 }
 
-/// Marks the pin and every reference it owns released at `released_at`,
-/// inside the caller's transaction. Returns `false` when the pin was already
-/// released or does not exist, so callers decide whether that is an error.
+/// A finite expiry caps `released_at` so release cannot extend retention.
+/// Returns `false` when the pin is already released or does not exist.
 pub(crate) fn release_capture_pin_in_tx(
     tx: &rusqlite::Transaction<'_>,
     capture_pin_id: &str,
@@ -1008,7 +1018,7 @@ pub(crate) fn release_capture_pin_in_tx(
 ) -> Result<bool, KernelError> {
     let changed = tx
         .execute(
-            "UPDATE capture_pins SET released_at=?1
+            "UPDATE capture_pins SET released_at=MIN(?1,COALESCE(expires_at,?1))
              WHERE capture_pin_id=?2 AND released_at IS NULL",
             params![released_at, capture_pin_id],
         )
@@ -1017,9 +1027,10 @@ pub(crate) fn release_capture_pin_in_tx(
         return Ok(false);
     }
     tx.execute(
-        "UPDATE capture_pin_refs SET released_at=?1
-         WHERE capture_pin_id=?2 AND released_at IS NULL",
-        params![released_at, capture_pin_id],
+        "UPDATE capture_pin_refs
+         SET released_at=(SELECT released_at FROM capture_pins WHERE capture_pin_id=?1)
+         WHERE capture_pin_id=?1 AND released_at IS NULL",
+        [capture_pin_id],
     )
     .map_err(|_| KernelError::Io)?;
     Ok(true)

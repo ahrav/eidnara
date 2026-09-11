@@ -63,10 +63,9 @@ pub use cas::{
     BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason, MAX_PAYLOAD_BYTES,
     ProviderEgress,
 };
-#[cfg(feature = "test-support")]
-pub use commit_read::materialized_outbox_rows_for_test;
 pub use commit_read::{
-    CommitPage, CommitPageBounds, CommitReadError, CommitReadRequest, CompleteCommit, PageEnd,
+    CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
+    CommitReadTarget, CompleteCommit, PageEnd,
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
@@ -97,17 +96,17 @@ pub use slice::{
 };
 pub use source_descriptor::{
     MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
-    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome,
+    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
     SourceDescriptorRequest, descriptor_object_id,
 };
 pub use source_export::{
-    ExportWindow, PageBound, SourceExportError, SourcePage, SourcePageBounds, SourcePageCharge,
-    SourceRow,
+    ExportWindow, PageBound, SourceCursor, SourceExportError, SourcePage, SourcePageBounds,
+    SourcePageCharge, SourceRow,
 };
 pub use source_hold::{
-    HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_OWNER, SourceHold,
-    SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
-    SourceHoldInvalidity,
+    HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER,
+    MAX_SOURCE_HOLD_LIFETIME_MS, SourceHold, SourceHoldAdmission, SourceHoldBinding,
+    SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement

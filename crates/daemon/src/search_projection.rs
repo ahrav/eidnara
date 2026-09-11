@@ -1,8 +1,11 @@
-//! The daemon's connection to `search.sqlite`, the disposable search
-//! projection. The retrieval crate owns the schema and the pure mutations;
-//! this module owns the effects: where the file lives, the single fenced
-//! writer, the query-only reader, the connection checks, and owner-only
-//! permissions. Rebuilding replaces the file; nothing here migrates.
+//! The daemon's connection to the disposable `search.sqlite` projection.
+//! The retrieval crate owns the schema and pure mutations.
+//! This module owns file placement, the fenced writer, query-only reads,
+//! connection checks, and owner-only permissions.
+//!
+//! This module does not rebuild, delete, or migrate the projection.
+//! Lifecycle state, recovery authorization, and replacement selection belong
+//! outside this disposable database.
 
 use std::path::{Path, PathBuf};
 
@@ -45,10 +48,21 @@ pub struct SearchProjection {
 }
 
 impl SearchProjection {
-    /// Opens or creates `<data_home>/search/search.sqlite` under the storage
-    /// crate's lease and epoch fence, applies the retrieval baseline to a
-    /// pristine file, and pins the connection state. The storage crate keeps the
-    /// directory, the database, and its journal files owner-only.
+    /// Opens `<data_home>/search/search.sqlite` with the storage lease and fence.
+    /// A missing file is created; a pristine file receives the retrieval baseline.
+    /// An existing initialized file must match the baseline.
+    /// The connection's pragmas are pinned and verified.
+    /// On Unix, storage keeps the directory, database, and journals owner-only.
+    ///
+    /// Call [`retrieval::install_identity`] separately with the expected identity.
+    /// Opening does not establish projection compatibility or completeness.
+    /// A successful open does not authorize serving search.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] on storage or pragma access errors.
+    /// A baseline mismatch is a storage error.
+    /// Returns [`SearchProjectionError::Connection`] on pragma value mismatches.
     pub fn open(data_home: &Path) -> Result<Self, SearchProjectionError> {
         let path = data_home.join("search").join("search.sqlite");
         let descriptor = StorageDescriptor {
@@ -56,7 +70,15 @@ impl SearchProjection {
             storage_namespace: "search-projection".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: path.to_string_lossy().into_owned(),
+                path: path
+                    .to_str()
+                    .ok_or_else(|| {
+                        StoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "search projection path is not valid UTF-8",
+                        ))
+                    })?
+                    .to_owned(),
             },
         };
         let store = open_sqlite(&descriptor, BASELINE)?;

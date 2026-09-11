@@ -13,8 +13,8 @@ use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest,
     CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelStore, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission,
-    SourceHoldBinding, SourceHoldBounds, SourceHoldError,
+    RepositoryProvenance, Sensitivity, SourceDescriptorPolicy, SourceDescriptorRequest, SourceHold,
+    SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourceHoldError,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -288,6 +288,13 @@ impl Fixture {
                 representation: representation(class),
                 span: span.map(|(start, end)| Span { start, end }),
             },
+            source_policy: if class == "git_commits" {
+                SourceDescriptorPolicy::Git {
+                    version: POLICY.to_string(),
+                }
+            } else {
+                SourceDescriptorPolicy::Native
+            },
             domain_id: DOMAIN,
             scope_id: None,
             evidence_id: &evidence_id,
@@ -528,16 +535,25 @@ impl Fixture {
     /// Rewrites one observation's stored payload in place, standing in for
     /// history the store can no longer honour.
     pub fn tamper_observation_payload(&self, object_id: &str, payload: &[u8]) {
+        self.tamper(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![payload, object_id],
+        );
+    }
+
+    pub fn tamper_hold_expiry(&self, hold_id: &str) {
+        self.tamper(
+            "UPDATE capture_pins SET expires_at=NULL WHERE capture_pin_id=?1",
+            [hold_id],
+        );
+    }
+
+    pub fn tamper(&self, sql: &str, params: impl rusqlite::Params) {
         let connection = Connection::open(self.root.path().join("kernel.sqlite")).unwrap();
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .unwrap();
-        let changed = connection
-            .execute(
-                "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
-                rusqlite::params![payload, object_id],
-            )
-            .unwrap();
+        let changed = connection.execute(sql, params).unwrap();
         assert_eq!(changed, 1);
     }
 

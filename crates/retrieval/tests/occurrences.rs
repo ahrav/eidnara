@@ -193,7 +193,7 @@ fn row_counts(store: &SqliteStore) -> (i64, i64) {
 /// The identifier the canonical digests give `record`.
 fn occurrence_id_of(record: &Owned) -> String {
     let identity = borrowed(&record.identity);
-    kernel::source_identity::encode(&record.record(&identity).occurrence)
+    kernel::source_identity::encode(&record.record(&identity).occurrence, &record.payload)
         .unwrap()
         .occurrence_id
 }
@@ -405,6 +405,54 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
                 assert_eq!(stored.tuple[0], 0x02, "encoding version");
                 assert_eq!(stored.tuple[1], 0x00, "occurrence role");
             }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn missing_payload_is_corruption_not_absence() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let mut empty = Owned::from_json(&fixtures["records"][1]);
+    empty.payload.clear();
+    let dir = tempfile::tempdir().unwrap();
+    let outcomes = {
+        let store = open(dir.path());
+        store
+            .with_conn_fenced(|conn| Ok(persist_all(conn, &[record, empty]).unwrap()))
+            .unwrap()
+    };
+
+    // Corruption injection uses a raw connection; the guarded store is closed.
+    {
+        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+        raw.pragma_update(None, "foreign_keys", false).unwrap();
+        assert_eq!(
+            raw.execute(
+                "DELETE FROM payloads WHERE payload_id=?1",
+                [&outcomes[0].payload_id],
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    let store = open(dir.path());
+    assert_eq!(row_counts(&store), (2, 1));
+    store
+        .with_conn(|conn| {
+            assert_eq!(read_occurrence(conn, "no-such-occurrence"), Ok(None));
+            assert_eq!(
+                read_occurrence(conn, &outcomes[1].occurrence_id)
+                    .unwrap()
+                    .map(|stored| stored.bytes),
+                Some(Vec::new())
+            );
+            assert_eq!(
+                read_occurrence(conn, &outcomes[0].occurrence_id),
+                Err(ProjectionError::CorruptRow)
+            );
             Ok(())
         })
         .unwrap();
@@ -693,8 +741,93 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
         .unwrap();
 }
 
-/// `persist_occurrences` detects all collisions before writing, so a refused
-/// batch writes no records even if its transaction commits.
+#[test]
+fn tombstones_require_a_commit_after_occurrence_creation() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let outcomes = store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, &[record]).unwrap()))
+        .unwrap();
+    let occurrence_id = &outcomes[0].occurrence_id;
+    let mut expected = store
+        .with_conn(|conn| Ok(read_occurrence(conn, occurrence_id).unwrap().unwrap()))
+        .unwrap();
+    assert_eq!(expected.created_commit_seq, 7);
+    assert_eq!(expected.tombstone, None);
+
+    for invalidated_commit_seq in [6, 7] {
+        let (result, changed_rows) = store
+            .with_conn_fenced(|conn| {
+                let before: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                let result = tombstone_occurrence(
+                    conn,
+                    occurrence_id,
+                    Tombstone {
+                        invalidated_commit_seq,
+                        reason: TombstoneReason::Superseded,
+                    },
+                    2,
+                );
+                let after: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                Ok((result, after - before))
+            })
+            .unwrap();
+        assert_eq!(
+            result.map_err(|error| error.to_string()),
+            Err(format!(
+                "the tombstone for occurrence {occurrence_id} must name a commit sequence after its creation"
+            )),
+            "invalidation at {invalidated_commit_seq} must follow creation at 7"
+        );
+        assert_eq!(changed_rows, 0, "a rejected request must not mutate rows");
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    read_occurrence(conn, occurrence_id).unwrap(),
+                    Some(expected.clone())
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    let stone = Tombstone {
+        invalidated_commit_seq: 8,
+        reason: TombstoneReason::Superseded,
+    };
+    store
+        .with_conn_fenced(|conn| {
+            assert_eq!(
+                tombstone_occurrence(conn, occurrence_id, stone, 3),
+                Ok(true)
+            );
+            assert_eq!(
+                tombstone_occurrence(conn, occurrence_id, stone, 4),
+                Ok(false)
+            );
+            Ok(())
+        })
+        .unwrap();
+    expected.tombstone = Some(stone);
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                read_occurrence(conn, occurrence_id).unwrap(),
+                Some(expected)
+            );
+            let recorded_at: i64 = conn.query_row(
+                "SELECT recorded_at FROM occurrence_tombstones WHERE occurrence_id=?1",
+                [occurrence_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(recorded_at, 3, "replay must retain the original timestamp");
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn a_collision_anywhere_in_a_batch_writes_none_of_the_batch() {
     let fixtures = fixtures();
@@ -1052,7 +1185,8 @@ fn malformed_and_oversized_records_refuse_before_anything_is_written() {
         let mut selected = good.record(&good_identity);
         selected.occurrence.span = Some(span);
         selected.payload = Payload::Selected("héllo");
-        let expected = kernel::source_identity::encode(&selected.occurrence).unwrap();
+        let expected =
+            kernel::source_identity::encode_preserving_span(&selected.occurrence).unwrap();
         store
             .with_conn_fenced(|conn| {
                 let persisted = persist_occurrences(conn, &[selected], bounds(), 1).unwrap();

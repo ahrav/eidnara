@@ -1,10 +1,18 @@
 # Search projection schema
 
 This document freezes the field inventory of `search.sqlite`, the disposable
-search projection that the retrieval crate's baseline (`crates/retrieval/baseline.sql`)
-creates. The projection is rebuilt from the canonical store whenever its
-identity or schema no longer matches; there is no migration path, so a change
-to this inventory is a new schema version and a rebuild.
+search projection that the retrieval crate's
+[baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
+incompatibility requires a rebuild from the canonical store, not a schema
+migration. A change to this inventory requires a new schema version and a
+rebuild.
+
+The [lifecycle contract](spec-traceability.md) requires staging and verifying a
+complete, compatible replacement before selecting it. During replacement,
+search must use a compatible old projection or return explicit unavailability.
+Lifecycle state and recovery authorization belong outside the disposable
+database. The persistence APIs described here do not implement this rebuild and
+selection protocol.
 
 Every table below is `STRICT`. Columns are listed in declaration order; a
 column is marked as primary key when it is the rowid alias, the declared
@@ -21,7 +29,16 @@ Wire and byte contracts these fields carry are CC1 through CC5 and CC11 in
 
 ## `projection_identity`
 
-The single identity the projection was built under. One row; any component that differs at open makes the projection incompatible, and it is rebuilt.
+At most one row records the projection's build identity. The baseline creates
+the table without an identity row. The caller must supply the expected
+`ProjectionIdentity` to `retrieval::install_identity`, which checks
+`SCHEMA_VERSION` even before the first insert, inserts an absent identity, and
+returns `IdentityMismatch` if any stored identity component differs.
+
+`SearchProjection::open` checks the storage baseline and pins and verifies
+connection pragmas; it does not compare this row with the expected projection
+identity. Neither opening the connection nor installing the identity rebuilds
+or deletes the projection, proves completeness, or authorizes serving search.
 
 | Column | Type | Not null | Primary key | Column constraints |
 | --- | --- | --- | --- | --- |

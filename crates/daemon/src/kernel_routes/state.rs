@@ -295,6 +295,7 @@ impl From<ArtifactErrorKind> for KernelOutcome {
             }
             ArtifactErrorKind::StorageExhausted
             | ArtifactErrorKind::CorruptObject
+            | ArtifactErrorKind::DigestCollision
             | ArtifactErrorKind::MissingObject
             | ArtifactErrorKind::ReferenceCommit
             | ArtifactErrorKind::AlignmentRebuild
@@ -318,8 +319,7 @@ impl From<ArtifactErrorKind> for KernelOutcome {
             | ArtifactErrorKind::UnredactableSecret
             | ArtifactErrorKind::ScanIncomplete
             | ArtifactErrorKind::ExactBytesRewritten
-            | ArtifactErrorKind::UnsupportedShape
-            | ArtifactErrorKind::DigestCollision => Self::invalid(InvalidReason::ArtifactUnusable),
+            | ArtifactErrorKind::UnsupportedShape => Self::invalid(InvalidReason::ArtifactUnusable),
         }
     }
 }
@@ -368,6 +368,7 @@ mod tests {
             }
             K::StorageExhausted
             | K::CorruptObject
+            | K::DigestCollision
             | K::MissingObject
             | K::ReferenceCommit
             | K::AlignmentRebuild
@@ -387,8 +388,7 @@ mod tests {
             | K::UnredactableSecret
             | K::ScanIncomplete
             | K::ExactBytesRewritten
-            | K::UnsupportedShape
-            | K::DigestCollision => KernelOutcome::invalid(InvalidReason::ArtifactUnusable),
+            | K::UnsupportedShape => KernelOutcome::invalid(InvalidReason::ArtifactUnusable),
         }
     }
 

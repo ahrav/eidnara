@@ -228,11 +228,17 @@ pub fn select(span: Option<Span>, buffer: &str) -> &[u8] {
     }
 }
 
-pub fn covers_whole(span: Option<Span>, buffer: &str) -> bool {
-    span.is_some_and(|span| span.start == 0 && span.end == buffer.len() as u64)
+/// Returns `None` when `span` covers all of `buffer`, so whole-buffer
+/// selections share one identifier however the producer spelled them.
+pub fn normalize_span(span: Option<Span>, buffer: &str) -> Option<Span> {
+    normalize_span_for_length(span, buffer.len() as u64)
 }
 
-fn well_formed_value(value: &str) -> bool {
+fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option<Span> {
+    span.filter(|span| !(span.start == 0 && span.end == byte_length))
+}
+
+pub(crate) fn well_formed_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTITY_VALUE_BYTES
         && !value.chars().any(char::is_control)
@@ -264,9 +270,34 @@ fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<Span>) -> Vec<u8>
     out
 }
 
-/// Callers must run [`validate_span`] against the source buffer before selecting
-/// bytes; identity encoding alone cannot establish bounds or UTF-8 alignment.
-pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+/// The buffer supplies span bounds and UTF-8 boundaries, not identity bytes.
+/// Whole-buffer spans normalize to `None` before occurrence and lineage IDs are minted.
+pub fn encode(
+    occurrence: &Occurrence<'_>,
+    buffer: &str,
+) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+    let encoded = encode_metadata(occurrence, buffer.len() as u64)?;
+    validate_span(occurrence.span, buffer)?;
+    Ok(encoded)
+}
+
+/// Callers validate span bounds and, when bytes are available, UTF-8 alignment.
+pub(crate) fn encode_metadata(
+    occurrence: &Occurrence<'_>,
+    byte_length: u64,
+) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+    encode_preserving_span(&Occurrence {
+        span: normalize_span_for_length(occurrence.span, byte_length),
+        ..*occurrence
+    })
+}
+
+/// Encodes identity fields without validating or normalizing the span.
+/// The producer must normalize whole-buffer spans and validate their bounds and UTF-8 alignment against the original buffer.
+/// [`encode`] performs these checks when the original buffer is available.
+pub fn encode_preserving_span(
+    occurrence: &Occurrence<'_>,
+) -> Result<EncodedOccurrence, OccurrenceRefusal> {
     let class =
         OccurrenceClass::from_code(occurrence.class).ok_or(OccurrenceRefusal::UnknownClass)?;
     let fields = class.identity_fields();
@@ -316,11 +347,7 @@ pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, Occurren
     if !class.representations().contains(&occurrence.representation) {
         return Err(OccurrenceRefusal::UnknownRepresentation);
     }
-    if let Some(span) = occurrence.span
-        && (usize::try_from(span.start).is_err() || usize::try_from(span.end).is_err())
-    {
-        return Err(OccurrenceRefusal::MalformedSpan);
-    }
+    let span = occurrence.span;
 
     let mut prefix = Vec::new();
     push_str(&mut prefix, class.code());
@@ -333,20 +360,15 @@ pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, Occurren
         &prefix,
         ROLE_OCCURRENCE,
         &[occurrence.revision, occurrence.representation],
-        occurrence.span,
+        span,
     );
-    let lineage = finish(
-        &prefix,
-        ROLE_LINEAGE,
-        &[occurrence.representation],
-        occurrence.span,
-    );
+    let lineage = finish(&prefix, ROLE_LINEAGE, &[occurrence.representation], span);
     Ok(EncodedOccurrence {
         class,
         occurrence_id: format!("{:x}", Sha256::digest(&tuple)),
         lineage_id: format!("{:x}", Sha256::digest(&lineage)),
         tuple,
         revision,
-        span: occurrence.span,
+        span,
     })
 }

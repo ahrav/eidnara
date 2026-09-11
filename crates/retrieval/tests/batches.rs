@@ -309,7 +309,7 @@ fn setup(store: &SqliteStore) {
 /// The identifier the kernel encoder gives a record; the ledger's own view of
 /// identity, computed without the store.
 fn occurrence_id(record: &OccurrenceRecord<'_>) -> String {
-    kernel::source_identity::encode(&record.occurrence)
+    kernel::source_identity::encode_preserving_span(&record.occurrence)
         .unwrap()
         .occurrence_id
 }
@@ -1357,7 +1357,7 @@ fn exported_row(
         .map(|(n, v)| (n.as_str(), v.as_str()))
         .collect();
     let revision_text = revision.to_string();
-    let encoded = kernel::source_identity::encode(&Occurrence {
+    let encoded = kernel::source_identity::encode_preserving_span(&Occurrence {
         class: "messages",
         identity: &borrowed,
         revision: &revision_text,
@@ -1370,11 +1370,13 @@ fn exported_row(
         revision,
         detail: kernel::SourceDescriptorDetail {
             descriptor_version: kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION,
+            source_policy: kernel::SourceDescriptorPolicy::Native,
             class: "messages".to_string(),
             identity,
             revision: revision_text,
             representation: "text".to_string(),
             span,
+            occurrence_tuple: encoded.tuple,
             occurrence_id: encoded.occurrence_id,
             lineage_id: encoded.lineage_id,
             payload_id: kernel::source_identity::payload_id(text.unwrap_or_default().as_bytes()),
