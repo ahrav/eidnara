@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import { serializedJsonText } from "../../shared/host-client/serialized-json-body";
 import * as logger from "../../shared/logger";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { Database } from "../../shared/sqlite";
@@ -265,7 +266,7 @@ describe("Rust mode transform request", () => {
             ...responses[index],
             native_messages: makeMessages(sessionId),
         }));
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "debug");
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
             for (let index = 0; index < 2; index += 1) {
@@ -314,7 +315,9 @@ describe("Rust mode transform request", () => {
             prompt_surface_config_identity: promptSurfaceConfigIdentity(undefined),
             prompt_surface_tool_descriptions: {},
         });
-        expect(first.native_messages).toEqual(makeMessages(sessionId));
+        // The carried text is the wire contract; `output.messages` is rewritten in place after the send.
+        const firstWire = JSON.parse(serializedJsonText(first)!) as Record<string, unknown>;
+        expect(firstWire.native_messages).toEqual(makeMessages(sessionId));
         expect(Array.isArray(first.messages)).toBe(true);
         expect("pass_inputs" in first).toBe(false);
         expect(output.messages).toEqual(native);
@@ -502,7 +505,7 @@ describe("Rust mode transform request", () => {
         const { client, bodies } = recordingClient(() => ({
             native_messages: [{ role: "assistant", parts: [] }],
         }));
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
             for (let turn = 1; turn <= 4; turn += 1) {
@@ -592,7 +595,7 @@ describe("Rust mode transform transport", () => {
                 ? { decision: "HARD", served_from: "transform", native_messages: native }
                 : { staged: true };
         });
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
             const output = { messages: messages as unknown[] };
@@ -632,7 +635,7 @@ describe("Rust mode transform transport", () => {
                 ? { decision: "HARD", served_from: "transform", native_messages: native }
                 : { staged: true };
         });
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
             const output = { messages: messages as unknown[] };
@@ -728,7 +731,7 @@ describe("Rust mode transform transport", () => {
         const deleteSession = mock(async () => {});
         const { client, calls } = recordingClient(() => ({ native_messages: [] }));
         client.deleteSession = deleteSession;
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "debug");
         try {
             const transform = createRustModeTransform(deps, { moduleClient: client });
             const messages = makeMessages(sessionId);
@@ -1121,7 +1124,7 @@ describe("native output delta", () => {
                 }
             },
         );
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
             const input = makeMessages(sessionId);
@@ -1235,7 +1238,7 @@ describe("native output delta", () => {
                 return { ok: true };
             },
         );
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
             const input = makeMessages(sessionId);
@@ -1382,7 +1385,7 @@ describe("native output delta", () => {
         changed[0]!.parts = [{ type: "text", text: "changed after warm prime" }];
         healedNative = structuredClone(changed);
         const output = { messages: [...changed] as unknown[] };
-        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        const logSpy = spyOn(logger.sessionLog, "debug");
         try {
             await transform.run(sessionId, changed, output);
             // The retry pass builds two bodies (the delta and its full replacement); the send itself is transport time, not wire-build time.

@@ -108,4 +108,4 @@ not a runtime assertion.
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[ts-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
+[ts-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249

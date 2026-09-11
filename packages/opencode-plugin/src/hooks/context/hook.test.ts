@@ -168,7 +168,17 @@ describe("eidnara hook", () => {
             useTempDataHome("hook-permission-failure-");
             jest.useFakeTimers();
             const sessionId = `ses-deny-read-${failure}`;
-            const logSpy = spyOn(logger, "sessionLog");
+            const logMock = Object.assign(
+                mock(() => {}),
+                {
+                    debug: mock(() => {}),
+                    info: mock(() => {}),
+                    warn: mock(() => {}),
+                    error: mock(() => {}),
+                },
+            );
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation(logMock);
+            Object.assign(logSpy, logMock);
             clearToolPermissionDenied(sessionId);
             const client = createClientMock();
             const agents = mock(async () => ({

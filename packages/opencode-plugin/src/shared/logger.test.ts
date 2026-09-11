@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -66,8 +66,11 @@ console.log(JSON.stringify({
 `;
 
 const scenarioRoots: string[] = [];
+const originalLogLevel = process.env.EIDNARA_LOG_LEVEL;
 
 afterEach(() => {
+    if (originalLogLevel === undefined) delete process.env.EIDNARA_LOG_LEVEL;
+    else process.env.EIDNARA_LOG_LEVEL = originalLogLevel;
     for (const root of scenarioRoots.splice(0)) {
         rmSync(root, { recursive: true, force: true });
     }
@@ -116,10 +119,16 @@ type HardeningScenarioResult = {
     fileMode: number;
     victimContent: string;
     swallowedWriteCount: number;
+    unsafeDirectoryWritten: boolean;
+    unsafeDirectoryError: string | null;
+    foreignOwnerSwallowed: number;
+    foreignOwnerError: string | null;
 };
 
 const hardeningScenario = `
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spyOn } from "bun:test";
+import * as fs from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -140,6 +149,8 @@ chmodSync(userRoot, 0o777);
 
 logger.log("default");
 logger.flushLogger();
+const mode = (p) => statSync(p).mode & 0o777;
+const privateModes = { userRootMode: mode(userRoot), harnessDirMode: mode(harnessDir), fileMode: mode(defaultPath) };
 
 // A symlink planted at the log path must not redirect the append into another file.
 const victim = path.join(root, "victim.txt");
@@ -152,15 +163,45 @@ process.env.EIDNARA_LOG_PATH = planted;
 logger.log("hijack");
 logger.flushLogger();
 
-const mode = (p) => statSync(p).mode & 0o777;
+const unsafeTarget = path.join(root, "unsafe-directory");
+mkdirSync(unsafeTarget);
+rmSync(harnessDir, { recursive: true });
+symlinkSync(unsafeTarget, harnessDir);
+delete process.env.EIDNARA_LOG_PATH;
+logger.log("directory hijack");
+logger.flushLogger();
+const unsafeDirectoryError = logger.getLoggerDiagnostics().lastErrorMessage;
+const unsafeDirectoryWritten = existsSync(path.join(unsafeTarget, "eidnara.log"));
+rmSync(harnessDir);
+mkdirSync(harnessDir, { mode: 0o700 });
+const lstat = fs.lstatSync;
+const ownerSpy = spyOn(fs, "lstatSync").mockImplementation((p, options) => {
+    const stat = lstat(p, options);
+    if (p === userRoot) return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: process.getuid() + 1 });
+    return stat;
+});
+const beforeForeignOwner = logger.getLoggerDiagnostics().swallowedWriteCount;
+let foreignOwnerError;
+try {
+    logger.log("foreign owner");
+    logger.flushLogger();
+    foreignOwnerError = logger.getLoggerDiagnostics().lastErrorMessage;
+} finally {
+    ownerSpy.mockRestore();
+}
+const foreignOwnerSwallowed = logger.getLoggerDiagnostics().swallowedWriteCount - beforeForeignOwner;
+logger.log("restored directory");
+logger.flushLogger();
 console.log(JSON.stringify({
     defaultPath,
     defaultExists: existsSync(defaultPath),
-    userRootMode: mode(userRoot),
-    harnessDirMode: mode(harnessDir),
-    fileMode: existsSync(defaultPath) ? mode(defaultPath) : -1,
+    ...privateModes,
     victimContent: readFileSync(victim, "utf8"),
     swallowedWriteCount: logger.getLoggerDiagnostics().swallowedWriteCount,
+    unsafeDirectoryWritten,
+    unsafeDirectoryError,
+    foreignOwnerSwallowed,
+    foreignOwnerError,
 }));
 `;
 
@@ -197,6 +238,7 @@ logger.log("with throwing toJSON", { toJSON() { throw new Error("nope"); } });
 logger.log("with function", () => 1);
 logger.log("with symbol", Symbol("s"));
 logger.log("plain", { ok: true });
+if (process.env.LOGGER_SCENARIO === "exit-off") process.env.EIDNARA_LOG_LEVEL = "off";
 const idleSince = Date.now();
 
 // Registered after the logger's own exit handler, so it observes the flushed file.
@@ -332,6 +374,242 @@ async function runExistingFileScenario(): Promise<ExistingFileScenarioResult> {
 }
 
 describe("logger", () => {
+    test("off skips caller inspection, sanitization, serialization, timestamps and writes", async () => {
+        const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+        scenarioRoots.push(root);
+        const stdout = await spawnScenario(
+            `
+            import { spyOn } from "bun:test";
+            import * as fs from "node:fs";
+            const logger = await import(process.env.LOGGER_MODULE_URL);
+            process.env.EIDNARA_LOG_PATH = process.env.LOGGER_SCENARIO_ROOT + "/off.log";
+            process.env.EIDNARA_LOG_LEVEL = "off";
+            let inspections = 0;
+            let dates = 0;
+            const poison = {
+                get [Symbol.iterator]() { inspections++; return () => "poison"[Symbol.iterator](); },
+                get [Symbol.toPrimitive]() { inspections++; return () => "poison"; },
+            };
+            const data = { get value() { inspections++; return "data"; } };
+            const jsonData = { toJSON() { inspections++; return "json"; } };
+            const OriginalDate = Date;
+            globalThis.Date = new Proxy(Date, {
+                construct(target, args) { dates++; return Reflect.construct(target, args); },
+            });
+            const spies = [
+                spyOn(String.prototype, Symbol.iterator),
+                spyOn(JSON, "stringify"),
+                spyOn(globalThis, "setTimeout"),
+                spyOn(fs, "mkdirSync"),
+                spyOn(fs, "openSync"),
+                spyOn(fs, "writeSync"),
+            ];
+            try {
+                for (let index = 0; index < 50; index++) logger.log("gated", data);
+                logger.log("gated json", jsonData);
+                logger.log(poison);
+                logger.sessionLog(poison, poison, jsonData);
+                for (const level of ["debug", "info", "warn", "error"]) {
+                    logger.log[level](poison, jsonData);
+                    logger.sessionLog[level](poison, poison, jsonData);
+                }
+                process.env.EIDNARA_LOG_LEVEL = "warn";
+                logger.log.debug(poison, jsonData);
+                logger.sessionLog.info(poison, poison, data);
+                logger.flushLogger();
+                const calls = spies.map(spy => spy.mock.calls.length);
+                const swallowed = logger.getLoggerDiagnostics().swallowedWriteCount;
+                for (const spy of spies) spy.mockRestore();
+                console.log(JSON.stringify({ inspections, dates, calls, swallowed }));
+            } finally {
+                for (const spy of spies) spy.mockRestore();
+                globalThis.Date = OriginalDate;
+            }
+        `,
+            "off",
+            root,
+        );
+        expect(JSON.parse(stdout)).toEqual({
+            inspections: 0,
+            dates: 0,
+            calls: [0, 0, 0, 0, 0, 0],
+            swallowed: 0,
+        });
+    });
+
+    test("orders levels, preserves plain call shape and defaults unknown config to debug", async () => {
+        const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+        scenarioRoots.push(root);
+        const stdout = await spawnScenario(
+            `
+            import { existsSync, readFileSync } from "node:fs";
+            const { LogLevel, log, sessionLog, flushLogger } = await import(process.env.LOGGER_MODULE_URL);
+            const frozenLevels = Object.isFrozen(LogLevel) && !Reflect.set(LogLevel, "off", 0);
+            const independentInfo = log.info !== log && sessionLog.info !== sessionLog;
+            const results = [];
+            for (const minimum of [undefined, "debug", "info", "warn", "error", "off", "", "DEBUG", "__proto__"]) {
+                if (minimum === undefined) delete process.env.EIDNARA_LOG_LEVEL;
+                else process.env.EIDNARA_LOG_LEVEL = minimum;
+                const file = process.env.LOGGER_SCENARIO_ROOT + "/level-" + results.length;
+                process.env.EIDNARA_LOG_PATH = file;
+                log("plain", { ok: true });
+                sessionLog("session", "plain", { ok: true });
+                for (const level of ["debug", "info", "warn", "error"]) {
+                    log[level](level);
+                    sessionLog[level]("session", level);
+                }
+                flushLogger();
+                results.push(existsSync(file) ? readFileSync(file, "utf8").split("\\n").filter(Boolean)
+                    .map(line => line.slice(line.indexOf("] ") + 2)) : []);
+            }
+            console.log(JSON.stringify({ results, frozenLevels, independentInfo }));
+        `,
+            "levels",
+            root,
+        );
+        const plain = ['plain {"ok":true}', '[eidnara][session] plain {"ok":true}'];
+        const debug = ["debug", "[eidnara][session] debug"];
+        const info = ["info", "[eidnara][session] info"];
+        const warn = ["warn", "[eidnara][session] warn"];
+        const error = ["error", "[eidnara][session] error"];
+        const all = [...plain, ...debug, ...info, ...warn, ...error];
+        const result = JSON.parse(stdout);
+        expect(result.frozenLevels).toBe(true);
+        expect(result.independentInfo).toBe(true);
+        expect(result.results).toEqual([
+            all,
+            all,
+            [...plain, ...info, ...warn, ...error],
+            [...warn, ...error],
+            error,
+            [],
+            all,
+            all,
+            all,
+        ]);
+    });
+
+    test("off preserves explicit flush failure accounting and exit flush of admitted entries", async () => {
+        process.env.EIDNARA_LOG_LEVEL = "debug";
+        const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+        scenarioRoots.push(root);
+        const result = JSON.parse(
+            await spawnScenario(exitScenario, "exit-off", root),
+        ) as ExitScenarioResult;
+        expect(result.content.split("\n").filter(Boolean)).toHaveLength(6);
+        expect(result.idleMsBeforeExit).toBeLessThan(250);
+        const stdout = await spawnScenario(
+            `
+            const logger = await import(process.env.LOGGER_MODULE_URL);
+            process.env.EIDNARA_LOG_LEVEL = "warn";
+            process.env.EIDNARA_LOG_PATH = process.env.LOGGER_SCENARIO_ROOT;
+            logger.log.warn("admitted failure");
+            process.env.EIDNARA_LOG_LEVEL = "off";
+            logger.log.error("not admitted");
+            logger.flushLogger();
+            logger.flushLogger();
+            console.log(JSON.stringify(logger.getLoggerDiagnostics().swallowedWriteCount));
+        `,
+            "flush-off",
+            root,
+        );
+        expect(JSON.parse(stdout)).toBe(1);
+    });
+
+    test("real transforms and events filter debug lines without changing served bytes or fallback", async () => {
+        const root = mkdtempSync(path.join(os.tmpdir(), "eidnara-logger-test-"));
+        scenarioRoots.push(root);
+        const stdout = await spawnScenario(
+            `
+            import { existsSync, readFileSync } from "node:fs";
+            process.env.EIDNARA_LOG_LEVEL = "off";
+            process.env.XDG_DATA_HOME = process.env.LOGGER_SCENARIO_ROOT;
+            const { flushLogger, getLoggerDiagnostics } = await import(process.env.LOGGER_MODULE_URL);
+            const { createRustModeTransform } = await import("../hooks/context/rust-mode-transform.ts");
+            const { createEventHandler } = await import("../hooks/context/event-handler.ts");
+            const { setRawMessageProvider } = await import("../hooks/context/read-session-chunk.ts");
+            const { BoundedSessionMap } = await import("./bounded-session-map.ts");
+            const sessionId = "logging-hook";
+            const input = [{ info: { id: "m-1", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "input" }] }];
+            const native = [{ role: "user", parts: [{ type: "text", text: "served\\nbytes" }] }];
+            const row = { id: "m-1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true };
+            const unregister = setRawMessageProvider(sessionId, {
+                readMessages: () => [row],
+                readMessageOrdinalPage: after => after ? [] : [row],
+                getStoredMessageCount: () => 1,
+            });
+            const results = [];
+            try {
+                for (const minimum of ["debug", "warn", "off"]) {
+                    const logFile = process.env.LOGGER_SCENARIO_ROOT + "/hook-" + minimum;
+                    process.env.EIDNARA_LOG_PATH = logFile;
+                    process.env.EIDNARA_LOG_LEVEL = minimum;
+                    const contextUsageMap = new BoundedSessionMap(8);
+                    let fail = false;
+                    let calls = 0;
+                    const transform = createRustModeTransform({
+                        client: { session: { get: async () => ({ data: { directory: process.env.LOGGER_SCENARIO_ROOT } }) } },
+                        contextUsageMap, clearReasoningAge: 50, cacheTtl: "5m", compactionOff: true,
+                        directory: process.env.LOGGER_SCENARIO_ROOT, sessionDirectoryBySession: new Map(),
+                        isSubagentSession: () => false, systemPromptHashFor: () => "",
+                    }, { moduleClient: { call: async () => {
+                        calls++;
+                        if (fail) throw new Error("provider\\nfailed\\u0007");
+                        return { native_messages: native, decision: "HARD", timings: { handler_total: 5 } };
+                    } } });
+                    const output = { messages: structuredClone(input) };
+                    await transform.run(sessionId, structuredClone(input), output);
+                    fail = true;
+                    const fallback = { messages: structuredClone(input) };
+                    await transform.run(sessionId, structuredClone(input), fallback);
+                    const handle = createEventHandler({ contextUsageMap });
+                    const event = { event: { type: "message.updated", properties: { info: {
+                        role: "assistant", sessionID: sessionId, tokens: { input: 0 },
+                    } } } };
+                    const eventBefore = JSON.stringify(event);
+                    await handle(event);
+                    flushLogger();
+                    results.push({ served: JSON.stringify(output.messages), fallback: JSON.stringify(fallback.messages),
+                        calls, failures: transform.getState(sessionId).failureCount,
+                        eventUnchanged: JSON.stringify(event) === eventBefore, usageSize: contextUsageMap.size,
+                        content: existsSync(logFile) ? readFileSync(logFile, "utf8") : "",
+                        swallowed: getLoggerDiagnostics().swallowedWriteCount });
+                }
+            } finally { unregister(); }
+            console.log(JSON.stringify({ results, input: JSON.stringify(input), native: JSON.stringify(native) }));
+        `,
+            "hooks",
+            root,
+        );
+        const { results, input, native } = JSON.parse(stdout);
+        for (const result of results) {
+            expect(result.served).toBe(native);
+            expect(result.fallback).toBe(input);
+            expect(result.calls).toBe(2);
+            expect(result.failures).toBe(1);
+            expect(result.eventUnchanged).toBe(true);
+            expect(result.usageSize).toBe(0);
+            expect(result.swallowed).toBe(0);
+        }
+        const [debug, warn, off] = results.map((result: { content: string }) => result.content);
+        expect(debug.match(/rust pass:/g)).toHaveLength(2);
+        expect(debug).toContain("transform stage: stage=rust.");
+        expect(debug).toContain("rust module stages:");
+        expect(debug.match(/event message.updated:/g)).toHaveLength(2);
+        expect(warn.trim().split("\n")).toHaveLength(1);
+        expect(warn).toContain("rust transform failed; serving the input unchanged:");
+        expect(warn).toContain("provider failed");
+        expect(warn).not.toContain("\u0007");
+        expect(off).toBe("");
+    });
+});
+
+describe.each([undefined, "info"])("logger hardening (minimum=%s)", (minimum) => {
+    beforeEach(() => {
+        if (minimum === undefined) delete process.env.EIDNARA_LOG_LEVEL;
+        else process.env.EIDNARA_LOG_LEVEL = minimum;
+    });
+
     test("recreates a log directory removed while the process is running", async () => {
         const result = await runLoggerScenario("recovery");
 
@@ -376,6 +654,10 @@ describe("logger", () => {
         const oversized = lines.find((line) => line.includes("oversized"));
         expect(oversized).toBeDefined();
         expect((oversized as string).length).toBeLessThan(5_000);
+        const payload = (oversized as string).replace(/^\[[^\]]+\] /, "");
+        expect(payload).toBe(
+            `oversized: ${"x".repeat(2048 - "oversized: ".length)}… {"detail":"${"y".repeat(2048 - '{"detail":"'.length)}…`,
+        );
     });
 
     test.skipIf(process.platform === "win32")(
@@ -389,7 +671,11 @@ describe("logger", () => {
             expect(result.harnessDirMode).toBe(0o700);
             expect(result.fileMode).toBe(0o600);
             expect(result.victimContent).toBe("untouched");
-            expect(result.swallowedWriteCount).toBe(1);
+            expect(result.swallowedWriteCount).toBe(3);
+            expect(result.unsafeDirectoryWritten).toBe(false);
+            expect(result.unsafeDirectoryError).toMatch(/not a plain directory/);
+            expect(result.foreignOwnerSwallowed).toBe(1);
+            expect(result.foreignOwnerError).toMatch(/owned by another user/);
         },
     );
 

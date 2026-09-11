@@ -657,6 +657,12 @@ function hostNumberGrowthBound(text: string): number {
     return growth;
 }
 
+/** Upper bound on the bytes one array item occupies after the host reserializes its page. */
+function itemByteLengthBound(value: unknown): number {
+    const text = JSON.stringify(value) ?? "null";
+    return Buffer.byteLength(text) + hostNumberGrowthBound(text);
+}
+
 export function buildPagedModuleTransformPayloads(
     body: Record<string, unknown>,
 ): ModuleTransformWirePage[] {
@@ -666,7 +672,8 @@ export function buildPagedModuleTransformPayloads(
     if (unpagedBytes <= MODULE_PAGE_MAX_BYTES) {
         return [{ page: unpaged, bytes: unpagedBytes }];
     }
-    body = unpaged;
+    // The per-item byte bound matches its in-page bytes only after every nested value is plain JSON.
+    body = JSON.parse(unpagedText) as Record<string, unknown>;
 
     const arrayFields = [
         "input",
@@ -689,6 +696,7 @@ export function buildPagedModuleTransformPayloads(
             field,
             value: values[itemIndex],
             itemIndex,
+            bound: itemByteLengthBound(values[itemIndex]),
         }));
     });
     const emptyArrays = (): Record<string, unknown[]> =>
@@ -723,10 +731,6 @@ export function buildPagedModuleTransformPayloads(
         Object.values(arrays).some((values) => values.length > 0);
 
     // The encoder assigns digests only to emitted pages.
-    const itemByteLengthBound = (value: unknown): number => {
-        const text = JSON.stringify(value) ?? "null";
-        return Buffer.byteLength(text) + hostNumberGrowthBound(text);
-    };
     const pageByteLengthBound = (args: {
         index: number;
         total: number;
@@ -762,8 +766,7 @@ export function buildPagedModuleTransformPayloads(
         const pages: Record<string, unknown[]>[] = [];
         let current = emptyArrays();
         let currentByteBounds = Object.fromEntries(arrayFields.map((field) => [field, 2]));
-        const appendUnit = (field: string, value: unknown): boolean => {
-            const valueBytes = itemByteLengthBound(value);
+        const appendUnit = (field: string, value: unknown, valueBytes: number): boolean => {
             const previousBytes = currentByteBounds[field] ?? 2;
             current[field].push(value);
             currentByteBounds[field] =
@@ -804,7 +807,10 @@ export function buildPagedModuleTransformPayloads(
 
         for (const item of items) {
             // The daemon reads any object-valued reserved key as a marker, so an item that carries one itself travels as a continuation; its JSON text reassembles to the original value.
-            if (!looksLikeContinuationMarker(item.value) && appendUnit(item.field, item.value)) {
+            if (
+                !looksLikeContinuationMarker(item.value) &&
+                appendUnit(item.field, item.value, item.bound)
+            ) {
                 continue;
             }
             const serialized = JSON.stringify(item.value) ?? "null";
@@ -827,7 +833,7 @@ export function buildPagedModuleTransformPayloads(
                     },
                     chunk,
                 };
-                if (!appendUnit(item.field, marker)) {
+                if (!appendUnit(item.field, marker, itemByteLengthBound(marker))) {
                     throw new Error("module transform continuation exceeds the 512 KiB page limit");
                 }
             }

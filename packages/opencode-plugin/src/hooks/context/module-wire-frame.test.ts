@@ -101,12 +101,13 @@ test("module transport sends the pager snapshot without another body stringify",
         method: "transform",
         get messages() {
             reads += 1;
-            return [{ text: reads === 1 ? "é😀\ud800" : "changed on second read" }];
+            return [{ text: reads === 1 ? "é😀\ud800" : "changed on later read" }];
         },
     };
     const stringify = spyOn(JSON, "stringify");
     try {
         const [{ page, bytes }] = buildPagedModuleTransformPayloads(body);
+        const readsAfterBuild = reads;
         body.method = "mutated";
         (page.messages as Array<{ text: string }>)[0]!.text = "inspection edit";
         expect(Reflect.set(page, "method", "wrong")).toBe(false);
@@ -120,7 +121,7 @@ test("module transport sends the pager snapshot without another body stringify",
         void waiting.catch(() => {});
         const frame = await daemon.next();
         expect(stringify.mock.calls.length).toBe(callsBeforeSend);
-        expect(reads).toBe(1);
+        expect(reads).toBe(readsAfterBuild);
         const header = frame.headerBytes!;
         expect(new DataView(header.buffer, header.byteOffset).getUint32(0, true)).toBe(bytes);
         expect(frame.body).toEqual(

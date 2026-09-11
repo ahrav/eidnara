@@ -1088,9 +1088,10 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Sanitizer, size bound, private modes, planted symlink,
-and swallowed-write counter have tests; none asserts secret redaction on this
-path because none exists, and none asserts line counts per pass or event.
+Exercised: yes - Production-mode subprocesses check default and info-level
+sanitization, truncation, modes, symlink and foreign-owner refusal, swallowed
+batches, and exit flush. Real transforms and events exercise debug, warn,
+and off with equal served bytes and unchanged failure fallback.
 Guarantee: A level gate removes lines; it never weakens the sanitization,
 truncation, permissions, or swallow accounting of the lines that remain.
 Check: `always` - Every line the logger appends begins with an ISO-8601
@@ -1101,28 +1102,34 @@ truncated at `MAX_FIELD_CHARS = 2048` with a trailing ellipsis
 with `O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK` at mode `0600` under a
 managed `0700` chain owned by the current uid ([`ensureLogDir`][ensuredir],
 [`appendPrivate`][appendpriv]); a write failure increments
-`swallowedWriteCount` and never throws. `always` because the sanitizer and
+`swallowedWriteCount` once per failed batch and never throws. A gated call
+does not inspect caller objects, sanitize, serialize, timestamp, schedule a
+flush, or write. Explicit and exit flushes still drain admitted entries after
+the level becomes off. `always` because the sanitizer and
 hardening are the only defense against log forgery and symlink redirection,
 and a gate changes which lines exist, not what a written line may contain.
-Fault/timing angle: A gate placed inside `log()` before `buffer.push` keeps
-[`sessionLog`][sessionlog] observable to spies; a gate at call sites removes
-the calls the [per-pass log test][t244] observes; a gate that bypasses
-`sanitizeField` for "cheap" levels reintroduces newline injection.
+Fault/timing angle: The shared [`writeLog` gate][sessionlog] precedes session
+prefix conversion and all entry processing. Calls remain observable through
+the level methods, including the [per-pass debug spy][t244]. Environment
+changes apply on the next call, not to an already-buffered batch.
+Untagged calls use info regardless of message wording. Warn/error thresholds
+cover only explicitly classified paths; info retains other diagnostic errors.
+Call-site argument construction still runs before the shared gate.
 `sanitizeField` does not strip C1 controls or `U+2028`/`U+2029`; that is the
 current contract, not a defect claim.
 Required faults and enabling state: Untrusted text with embedded newlines and
-control characters in a message or data field; a planted symlink at the log
-path; a directory owned by another uid in the managed chain.
+control characters in a message or data field; file and managed-directory
+symlinks; a foreign uid returned by the directory-stat seam; caller getters
+and `toJSON` under a rejecting level; a pending batch when the level turns off.
 Confidence: high - [Evidence](evidence/log-lines-keep-sanitizer-and-file-hardening-guarantees.md).
-The sanitizer, the [batched flush][flush] (50 lines or 500 ms), and the
-hardening are source-verified. The audit's "synchronous file flush per line"
-and "regex-scans the body once more" claims are not reproduced on this path;
-the only body check before send is [`isModuleCallBodyValid`][bodyvalid], a
-field test, and [`shared/redaction.ts`][redaction] is imported only by
-`packages/cli` and `packages/e2e-tests`.
+The [gate, hardening, and hook checks][log-gate-checks] pass locally. The
+[batched flush][flush] remains bounded at 50 lines or 500 ms. Logging does not
+invoke [`shared/redaction.ts`][redaction]; the gate adds no secret-redaction
+policy, cache, or claim about end-to-end latency.
 Existing check: [Plugin checks](existing-checks.md#plugin-pre-send) cover
 control characters, size bound, modes, symlink, swallow counter, exit flush,
-and the per-pass lines; all unaudited.
+level ordering, zero-work rejection, and actual transform/event lines; all
+unaudited for independent adequacy review.
 Impact: Untrusted text forges log lines, or the log is redirected through a
 symlink.
 Open questions:
@@ -1158,7 +1165,7 @@ hook with SDK mocks and Bun fake timers; adequacy remains unaudited.
 Impact: P1's fallback clause passes without the window ever opening.
 Open questions: None.
 
-[permission-failure-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L208-L234
+[permission-failure-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L218-L244
 [permission-failure-test]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L167
 
 ## Ring arena and direct frame
@@ -2391,7 +2398,7 @@ evaluation of this area and its disposition are recorded in
 [outcome]: ../../../../crates/host-runtime/src/handler.rs#L230-L235
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
 [scratchconst]: ../../../../crates/host-runtime/src/config.rs#L21-L31
-[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
+[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
@@ -2521,21 +2528,22 @@ evaluation of this area and its disposition are recorded in
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
+[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L223-L231
 [dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L215
 [midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L233-L287
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L300-L357
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
-[paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
+[paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
 [pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
 [numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
 [bodyvalid]: ../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L494-L501
 [encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
 [utf8body]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
-[sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L200
+[sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
+[log-gate-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
 [ensuredir]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L98-L109
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
