@@ -29,7 +29,8 @@ use crate::handler::{
 };
 pub use embed_tokens::EmbedTokens;
 use inference::{Backend, InferenceError, OrtIdentity};
-use jobs::{AdmitOutcome, JobTable, PollOutcome};
+use jobs::{AdmitOutcome, JobTable};
+pub use jobs::{PollOutcome, ResultLease, ResultPage};
 pub use preflight::{
     AdmittedInput, DenseUnavailable, EmbeddingIdentity, EmbeddingInputLimits, InferenceFailureKind,
     LaneUnavailableState,
@@ -391,6 +392,66 @@ impl SynapseComponent {
         Ok(vectors.pop().expect("one vector for one admitted text"))
     }
 
+    /// The job table's incarnation nonce; every job identifier this component issues starts with it, so a persisted job identifier names the host that admitted it.
+    pub fn host_incarnation(&self) -> &str {
+        self.inner.jobs.incarnation()
+    }
+
+    /// Admits one preflighted text into the job table as a single-item batch keyed by `item_id`, under the lane it was admitted for.
+    /// The request key is derived from the item identity and the text alone, so the same input under the same item always names the same job, a resubmission while the job is retained returns that job, and the job stays pollable after the lane that admitted it fails.
+    /// Admission charges no wire budget: the caller's text is already bounded by preflight. Requires a Tokio runtime context, because an admitted job starts its inference worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable::LaneUnavailable`] when no lane serves and [`DenseUnavailable::IdentityChanged`] when the serving lane is no longer the admitting one.
+    pub fn submit_admitted(
+        &self,
+        admitted: &AdmittedInput<'_>,
+        item_id: &str,
+    ) -> Result<SubmitOutcome, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        if !admitted.identity().matches(&lane.lane) {
+            return Err(DenseUnavailable::IdentityChanged);
+        }
+        let item = local_item(item_id, admitted.text());
+        let key = local_key(&item);
+        let dims = lane.lane.dims;
+        Ok(
+            match self.inner.jobs.admit_charged(
+                key.clone(),
+                &key,
+                vec![item],
+                dims,
+                &mut crate::wire::ByteCharge::none(),
+            ) {
+                AdmitOutcome::Existing(descriptor) => SubmitOutcome::Queued {
+                    job_id: descriptor.job_id,
+                },
+                AdmitOutcome::Admitted { job_id, seq } => {
+                    self.spawn_batch_worker(lane, seq);
+                    SubmitOutcome::Queued { job_id }
+                }
+                // The submitted key is its own canonical key, so only a retained key with a different payload can mismatch.
+                AdmitOutcome::Conflict | AdmitOutcome::KeyMismatch => {
+                    SubmitOutcome::Refused("idempotency_conflict")
+                }
+                AdmitOutcome::Full => SubmitOutcome::Full {
+                    retry_after_ms: self.inner.limits.retry_after_ms,
+                },
+                AdmitOutcome::ResultTooLarge => SubmitOutcome::Refused("unsupported_shape"),
+                AdmitOutcome::Closed => SubmitOutcome::Closing,
+            },
+        )
+    }
+
+    /// Polls the job `submit_admitted` issued for `item_id` and `text`, recomputing the request key from them so the caller persists only the job identifier.
+    /// A single-item job returns its whole result in one page; the page's lease keeps the result bytes counted while the caller holds the vector.
+    /// A job identifier from another incarnation or an evicted job polls as [`PollOutcome::Restarted`]; a failed lane still answers for the jobs it settled.
+    pub fn poll_admitted(&self, job_id: &str, item_id: &str, text: &str) -> PollOutcome {
+        let key = local_key(&local_item(item_id, text));
+        self.inner.jobs.poll(job_id, &key, None)
+    }
+
     /// One lock acquisition answers both whether a lane serves and, if not, which state refuses.
     fn ready_or_unavailable(&self) -> Result<Arc<ReadyLane>, DenseUnavailable> {
         let state = match &*self.inner.lock_state() {
@@ -505,6 +566,32 @@ fn mark_disabled(inner: &SynapseInner, mut reason: String) {
     let mut state = inner.lock_state();
     if matches!(&*state, LaneState::Ready(_)) {
         *state = LaneState::Disabled { reason };
+    }
+}
+
+/// How the job table answered an in-process single-item admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    /// The job is queued, running, or already complete; poll it with [`SynapseComponent::poll_admitted`].
+    Queued { job_id: String },
+    /// Admission or result capacity is exhausted; the same submission may succeed after `retry_after_ms`.
+    Full { retry_after_ms: u64 },
+    /// The table refuses the item for good: `idempotency_conflict` when its key is retained with a different payload, `unsupported_shape` when its single result exceeds the retained-result byte limit.
+    Refused(&'static str),
+    /// The component is shutting down and admits nothing.
+    Closing,
+}
+
+/// The in-process request key: the item identity and content digest, hashed like a wire key so the table's digest and conflict rules apply unchanged.
+fn local_key(item: &jobs::BatchItem) -> String {
+    protocol::sha256_hex(format!("local\u{1f}{}\u{1f}{}", item.id, item.content_sha256).as_bytes())
+}
+
+fn local_item(item_id: &str, text: &str) -> jobs::BatchItem {
+    jobs::BatchItem {
+        id: item_id.to_owned(),
+        content_sha256: protocol::sha256_hex(text.as_bytes()),
+        text: text.to_owned(),
     }
 }
 

@@ -356,6 +356,11 @@ impl JobTable {
         parse_canonical_decimal(seq)
     }
 
+    /// The random nonce every job identifier of this table carries; a job identifier from another incarnation polls as `Restarted`.
+    pub fn incarnation(&self) -> &str {
+        &self.incarnation
+    }
+
     pub fn key_is_retained(&self, key: &str) -> bool {
         // Declare permits before the table guard so permit release runs after the guard drops.
         let mut released = Released::default();

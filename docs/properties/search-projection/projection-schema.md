@@ -165,7 +165,7 @@ Indexes:
 
 ## `embedding_jobs`
 
-Durable embedding work and retry accounting. A pending row is the crash source for the process-local job table.
+Durable embedding work and retry accounting. A pending row is the crash source for the process-local job table. An episode is one finite grant of attempts under one deadline; only an explicit authorization reference opens another, and a stop reason holds the row until one arrives. An admitted row names the host incarnation holding it; work held by any other incarnation returns to pending.
 
 | Column | Type | Not null | Primary key | Column constraints |
 | --- | --- | --- | --- | --- |
@@ -177,6 +177,13 @@ Durable embedding work and retry accounting. A pending row is the crash source f
 | `last_failure_kind` | TEXT | no | no |  |
 | `next_attempt_at` | INTEGER | no | no |  |
 | `admitted_epoch` | INTEGER | no | no |  |
+| `episode_id` | TEXT | no | no |  |
+| `episode_allowance` | INTEGER | yes | no | `DEFAULT 0 CHECK(episode_allowance>=0)` |
+| `episode_deadline` | INTEGER | no | no |  |
+| `host_job_id` | TEXT | no | no |  |
+| `host_incarnation` | TEXT | no | no |  |
+| `stop_reason` | TEXT | no | no |  |
+| `authorization_ref` | TEXT | no | no |  |
 | `created_at` | INTEGER | yes | no |  |
 | `updated_at` | INTEGER | yes | no |  |
 

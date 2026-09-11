@@ -12,6 +12,7 @@
 //! Payloads are never logged; refusals name identities and sizes, not content.
 
 pub mod batch;
+pub mod dispatch;
 pub mod vectors;
 
 use std::collections::HashMap;
