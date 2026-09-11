@@ -279,7 +279,9 @@ impl KernelStore {
             hook();
         }
         let rows = self.materialize(admitted)?;
-        self.recheck_source_hold_after_read(binding, hold_id, now, started)?;
+        let mut reader = self.lock_reader()?;
+        let tx = reader.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        self.recheck_source_hold_after_read(&tx, binding, hold_id, now, started)?;
         let next = next.map(|key| SourceCursor {
             hold_id: hold_id.to_string(),
             window,
@@ -354,7 +356,7 @@ fn catch_up_body() -> String {
     format!(
         "{rows} AND (({created}) OR ({live_at_s}
                AND o.invalidated_commit_seq>?2 AND o.invalidated_commit_seq<=?1))",
-        rows = descriptor_rows_sql(),
+        rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
         created = Descriptors::CreatedInWindow.predicate("?1", "?2"),
         live_at_s = Descriptors::LiveAtEnd.predicate("?2", "0"),
     )

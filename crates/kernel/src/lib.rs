@@ -103,6 +103,8 @@ pub use source_export::{
     ExportWindow, PageBound, SourceCursor, SourceExportError, SourcePage, SourcePageBounds,
     SourcePageCharge, SourceRow,
 };
+#[cfg(feature = "test-support")]
+pub use source_hold::SourceHoldCheckPhase;
 pub use source_hold::{
     HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER,
     MAX_SOURCE_HOLD_LIFETIME_MS, SourceHold, SourceHoldAdmission, SourceHoldBinding,

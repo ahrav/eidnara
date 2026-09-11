@@ -428,9 +428,10 @@ fn evidence_manifest_pin_release_and_stale_reap_are_typed() {
         KernelError::InvalidInput
     );
     let now = unix_time_ms();
+    let stale_expires_at = now + 60_000;
     let stale = store
         .backup(BackupRequest {
-            capture_pin_expires_at: Some(now + 60_000),
+            capture_pin_expires_at: Some(stale_expires_at),
             ..request(destination.path())
         })
         .unwrap()
@@ -495,7 +496,7 @@ fn evidence_manifest_pin_release_and_stale_reap_are_typed() {
             .query_row(
                 "SELECT COUNT(*) FROM capture_pin_refs
                  WHERE capture_pin_id=?1 AND released_at=?2",
-                rusqlite::params![stale, now + 90_000],
+                rusqlite::params![stale, stale_expires_at],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),

@@ -287,51 +287,56 @@ fn active_capture_pin_and_pin_release_grace_protect_artifact() {
 }
 
 #[test]
-fn same_maintenance_pass_does_not_reclaim_just_reaped_pin() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let handle = store.ingest_artifact(request("reaped", b"reaped")).unwrap();
-    invalidate(root.path(), &handle.evidence_id, 0);
-    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-    let commit_seq: i64 = connection
-        .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    connection
+fn maintenance_preserves_only_the_grace_remaining_after_pin_expiry() {
+    for (first_sweep_days, reclaimed_first) in [(5, 0), (20, 1)] {
+        let root = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(root.path()).unwrap();
+        seed_domain(&store);
+        let handle = store.ingest_artifact(request("reaped", b"reaped")).unwrap();
+        invalidate(root.path(), &handle.evidence_id, 0);
+        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+        let commit_seq: i64 = connection
+            .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        connection
         .execute(
             "INSERT INTO capture_pins(capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,created_at,expires_at)
              VALUES ('stale-pin','backup','test',?1,?2,?2,0,1)",
             params![commit_seq, i64::try_from(store.lease_epoch()).unwrap()],
         )
         .unwrap();
-    connection
-        .execute(
-            "INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
+        connection
+            .execute(
+                "INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
              VALUES ('stale-pin',?1,1)",
-            [&handle.evidence_id],
-        )
-        .unwrap();
-    drop(connection);
+                [&handle.evidence_id],
+            )
+            .unwrap();
+        drop(connection);
 
-    assert_eq!(
-        store
-            .run_staging_maintenance(20 * DAY_MS)
-            .unwrap()
-            .artifact_gc
-            .reclaimed_objects,
-        0
-    );
-    assert!(object_path(root.path(), &handle.digest).exists());
-    assert_eq!(
-        store
-            .run_staging_maintenance(35 * DAY_MS)
-            .unwrap()
-            .artifact_gc
-            .reclaimed_objects,
-        1
-    );
+        assert_eq!(
+            store
+                .run_staging_maintenance(first_sweep_days * DAY_MS)
+                .unwrap()
+                .artifact_gc
+                .reclaimed_objects,
+            reclaimed_first
+        );
+        assert_eq!(
+            object_path(root.path(), &handle.digest).exists(),
+            reclaimed_first == 0
+        );
+        assert_eq!(
+            store
+                .run_staging_maintenance(35 * DAY_MS)
+                .unwrap()
+                .artifact_gc
+                .reclaimed_objects,
+            1 - reclaimed_first
+        );
+    }
 }
 
 #[test]
@@ -663,6 +668,43 @@ fn seed_pending_unlink(root: &std::path::Path, digest: &str) {
             params![digest, reference],
         )
         .unwrap();
+}
+
+#[test]
+fn natural_orphan_reclaim_recovers_without_an_mtime_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"orphan"));
+    write_object(root.path(), &digest, b"orphan");
+    File::options()
+        .write(true)
+        .open(object_path(root.path(), &digest))
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(
+        store.run_staging_maintenance_with_fault_for_test(
+            2 * HOUR_MS,
+            ArtifactGcFault::AfterReclaiming
+        ),
+        Err(KernelError::Fault)
+    );
+    assert!(object_path(root.path(), &digest).exists());
+    drop(store);
+
+    let _reopened = KernelStore::open(root.path()).unwrap();
+    assert!(!object_path(root.path(), &digest).exists());
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_ingestion_reservations",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 /// Replaces an expected object file with a directory so unlink fails for only
