@@ -16,6 +16,7 @@ use host_runtime::synapse::inference::InferenceError;
 use host_runtime::synapse::{
     EmbedTokens, EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits,
 };
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
@@ -190,14 +191,21 @@ fn grant(allowance: u32, deadline: i64) -> EpisodeGrant {
     }
 }
 
-fn bounds(result_wait: Duration) -> DispatchBounds {
+fn bounds() -> DispatchBounds {
     DispatchBounds {
         max_jobs: NonZeroUsize::new(16).unwrap(),
         grant: grant(3, NOW + DAY_MS),
         retry_after: 10,
-        result_wait,
-        guard_deadline: Duration::from_secs(10),
+        result_wait: Duration::from_secs(5),
     }
+}
+
+/// One pass budget: an absolute deadline `wait` from now, with its own sticky cancellation.
+fn budget(wait: Duration) -> EvalBudget {
+    EvalBudget::new(
+        Some(std::time::Instant::now() + wait),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
 }
 
 fn eligibility(project: &ProjectScope) -> EligibilityBinding<'_> {
@@ -449,16 +457,25 @@ fn pass(
     projection: &SearchProjection,
     synapse: &SynapseComponent,
     bounds: &DispatchBounds,
+    wait: Duration,
     now: i64,
 ) -> (Option<Blocked>, Vec<DispatchEvent>) {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
+    let bounds = DispatchBounds {
+        result_wait: wait,
+        ..*bounds
+    };
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, synapse);
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), bounds, now, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(30)),
+                now,
+                &mut |event| events.push(event),
+            )
             .unwrap()
     });
     (end, events)
@@ -716,7 +733,11 @@ fn sweep(
     limit: NonZeroUsize,
 ) -> SweepReport {
     let mut sweeper = IdentitySweeper::new(projection, synapse);
-    tokio::task::block_in_place(|| sweeper.run_sweep(limit).unwrap())
+    tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(limit, &budget(Duration::from_secs(30)))
+            .unwrap()
+    })
 }
 
 fn embed_all(corpus: &Corpus, projection: &SearchProjection, synapse: &SynapseComponent) -> usize {
@@ -724,7 +745,8 @@ fn embed_all(corpus: &Corpus, projection: &SearchProjection, synapse: &SynapseCo
         corpus,
         projection,
         synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     events
@@ -1095,7 +1117,8 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_millis(50)),
+        &bounds(),
+        Duration::from_millis(50),
         NOW,
     );
     assert_eq!(
@@ -1189,7 +1212,11 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
-    let report = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
+    let report = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(
         (
             report.candidates,
@@ -1205,7 +1232,11 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     // A reply lost after the write applied: the rows say the identity is gone, once.
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
     sweeper.lose_next_reclaim_reply_for_test();
-    let report = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
+    let report = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(
         (
             report.candidates,
@@ -1222,7 +1253,11 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
             .any(|(o, _, _)| o == occurrence_of(&rows, &kept))
     );
     assert_eq!(required_vectors(dir.path()), required);
-    let again = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
+    let again = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(again, SweepReport::default());
     drop(projection);
     let _ = SearchProjection::open(dir.path()).unwrap();

@@ -758,13 +758,16 @@ impl JobTable {
 
     /// Whether the table still holds the job, after expiring what retention no longer keeps. Unlike a poll, this neither issues a page nor refreshes the job's retention rank.
     pub fn retains(&self, job_id: &str) -> bool {
-        let Some(seq) = self.parse_job_id(job_id) else {
-            return false;
-        };
+        self.status(job_id).is_some()
+    }
+
+    /// The job's status word (`queued`, `running`, `ready`, `failed`) while the table holds it, after expiring what retention no longer keeps; `None` once it is gone or when another incarnation issued it. Unlike a poll, this neither issues a page nor refreshes the job's retention rank.
+    pub fn status(&self, job_id: &str) -> Option<&'static str> {
+        let seq = self.parse_job_id(job_id)?;
         let mut released = Released::default();
         let mut jobs = self.lock_jobs();
         self.sweep_expired(&mut jobs, &mut released);
-        jobs.by_seq.contains_key(&seq)
+        jobs.by_seq.get(&seq).map(Job::status)
     }
 
     fn sweep_expired(&self, jobs: &mut Jobs, released: &mut Released) {

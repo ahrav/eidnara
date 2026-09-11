@@ -5,6 +5,7 @@
 use std::num::NonZeroUsize;
 
 use host_runtime::synapse::SynapseComponent;
+use kernel::applicability::EvalBudget;
 use retrieval::identity_sweep::{Candidate, candidates, presence, reclaim};
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
@@ -55,14 +56,21 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Selects at most `max_candidates` identities and reclaims those no holder protects.
+    /// Selects at most `max_candidates` identities and reclaims those no holder protects. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves every free candidate as a survivor for the next sweep.
     ///
     /// # Errors
     ///
     /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused or its outcome cannot be reconciled, and on every later call of this sweeper.
-    pub fn run_sweep(&mut self, max_candidates: NonZeroUsize) -> Result<SweepReport, SweepError> {
+    pub fn run_sweep(
+        &mut self,
+        max_candidates: NonZeroUsize,
+        budget: &EvalBudget,
+    ) -> Result<SweepReport, SweepError> {
         if let Some(quarantine) = &self.quarantine {
             return Err(SweepError::Quarantined(quarantine.clone()));
+        }
+        if budget.is_exhausted() {
+            return Ok(SweepReport::default());
         }
         let selected = self
             .projection
@@ -77,6 +85,10 @@ impl<'a> IdentitySweeper<'a> {
             .partition(|candidate| self.holds(candidate));
         report.held = held;
         if free.is_empty() {
+            return Ok(report);
+        }
+        if budget.is_exhausted() {
+            report.survivors = free.len();
             return Ok(report);
         }
         let reclaimed = self.projection.write(|conn| reclaim(conn, &free));

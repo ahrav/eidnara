@@ -20,6 +20,7 @@ use host_runtime::synapse::{
     EmbedTokens, EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SynapseComponent,
     SynapseLimits,
 };
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
@@ -208,14 +209,21 @@ fn grant(allowance: u32, deadline: i64) -> EpisodeGrant {
     }
 }
 
-fn bounds(result_wait: Duration) -> DispatchBounds {
+fn bounds() -> DispatchBounds {
     DispatchBounds {
         max_jobs: NonZeroUsize::new(16).unwrap(),
         grant: grant(3, NOW + DAY_MS),
         retry_after: 10,
-        result_wait,
-        guard_deadline: Duration::from_secs(10),
+        result_wait: Duration::from_secs(5),
     }
+}
+
+/// One pass budget: an absolute deadline `wait` from now, with its own sticky cancellation.
+fn budget(wait: Duration) -> EvalBudget {
+    EvalBudget::new(
+        Some(std::time::Instant::now() + wait),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
 }
 
 fn eligibility(project: &ProjectScope) -> EligibilityBinding<'_> {
@@ -562,16 +570,25 @@ fn pass(
     projection: &SearchProjection,
     synapse: &SynapseComponent,
     bounds: &DispatchBounds,
+    wait: Duration,
     now: i64,
 ) -> (Option<Blocked>, Vec<DispatchEvent>) {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
+    let bounds = DispatchBounds {
+        result_wait: wait,
+        ..*bounds
+    };
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, synapse);
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), bounds, now, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(30)),
+                now,
+                &mut |event| events.push(event),
+            )
             .unwrap()
     });
     (end, events)
@@ -672,7 +689,8 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(end, None);
@@ -752,7 +770,8 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(end, None);
@@ -772,9 +791,9 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let synapse = component(&engine, SynapseLimits::default());
-    let short = bounds(Duration::from_millis(50));
+    let short = Duration::from_millis(50);
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &short, NOW);
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), short, NOW);
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     assert!(published(&events).is_empty());
@@ -786,7 +805,7 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
 
     // Duplicate passes poll the held job under its stored identity; they neither admit nor charge again.
     for _ in 0..2 {
-        let (_, events) = pass(&corpus, &projection, &synapse, &short, NOW);
+        let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), short, NOW);
         assert!(admitted(&events).is_empty(), "{events:?}");
         assert_eq!(ledger(dir.path(), occurrence).attempts, 1);
     }
@@ -797,7 +816,8 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(
@@ -830,8 +850,8 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let first = component(&engine, SynapseLimits::default());
-    let short = bounds(Duration::from_millis(50));
-    let (_, events) = pass(&corpus, &projection, &first, &short, NOW);
+    let short = Duration::from_millis(50);
+    let (_, events) = pass(&corpus, &projection, &first, &bounds(), short, NOW);
     assert_eq!(admitted(&events).len(), 1);
     let held = ledger(dir.path(), occurrence);
     assert_eq!(held.state, "admitted");
@@ -862,7 +882,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
             SynapseLimits::default(),
         )
         .unwrap();
-        let (end, events) = pass(&corpus, &projection, &wrong, &short, NOW);
+        let (end, events) = pass(&corpus, &projection, &wrong, &bounds(), short, NOW);
         assert_eq!(end, Some(Blocked::BindingMismatch));
         assert!(events.is_empty());
         assert_eq!(ledger(dir.path(), occurrence), held);
@@ -885,7 +905,8 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
         &corpus,
         &projection,
         &second,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(end, None);
@@ -954,7 +975,8 @@ async fn over_limit_input_stops_without_inference_and_keeps_lexical_state() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(end, None);
@@ -997,7 +1019,8 @@ async fn over_limit_input_stops_without_inference_and_keeps_lexical_state() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
@@ -1021,6 +1044,7 @@ fn scenario(
     text: &str,
     limits: SynapseLimits,
     bounds: DispatchBounds,
+    wait: Duration,
     arrange: impl FnOnce(&Corpus, &SearchProjection, &Arc<TestEngine>, &str, &str),
 ) -> Scenario {
     let dir = tempfile::tempdir().unwrap();
@@ -1032,7 +1056,7 @@ fn scenario(
     let engine = TestEngine::new();
     arrange(&corpus, &projection, &engine, &object, &occurrence);
     let synapse = component(&engine, limits);
-    let (end, events) = pass(&corpus, &projection, &synapse, &bounds, NOW);
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds, wait, NOW);
     (
         dir, corpus, projection, occurrence, engine, synapse, events, end,
     )
@@ -1041,12 +1065,13 @@ fn scenario(
 /// AC5, AC6: a transient failure keeps the row pending under the same episode with its attempt charged, and it is eligible again only when its retry time comes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_failure_retries_under_the_same_episode() {
-    let standard = bounds(Duration::from_secs(5));
+    let standard = Duration::from_secs(5);
 
     // Transient execution failure: pending again under the same episode, one attempt charged, eligible only after `retry_after`.
     let (dir, corpus, projection, occurrence, _, synapse, events, end) = scenario(
         "retry me",
         SynapseLimits::default(),
+        bounds(),
         standard,
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Execution("transient".to_owned()));
@@ -1065,9 +1090,16 @@ async fn transient_failure_retries_under_the_same_episode() {
     assert_eq!(job.last_failure_kind.as_deref(), Some("execution_failure"));
     let (projection, ledgers) = reopen(dir.path(), projection, &[&occurrence]);
     let job = ledgers.into_iter().next().unwrap();
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW + 9);
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), standard, NOW + 9);
     assert!(admitted(&events).is_empty(), "not yet eligible: {events:?}");
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW + 10);
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &bounds(),
+        standard,
+        NOW + 10,
+    );
     assert_eq!(admitted(&events), vec![(job.job_id.clone(), 2)]);
     assert_eq!(published(&events).len(), 1);
     let done = ledger(dir.path(), &occurrence);
@@ -1081,12 +1113,13 @@ async fn transient_failure_retries_under_the_same_episode() {
 /// AC5: terminal dispositions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_dispositions_stop_dispatch_until_authorized() {
-    let standard = bounds(Duration::from_secs(5));
+    let standard = Duration::from_secs(5);
 
     // An artifact fault is the lane's disposition, not the input's: the lane goes down, the pass blocks, and the attempted row keeps its charge as admitted work for the next serving host to reconcile.
     let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
         "artifact",
         SynapseLimits::default(),
+        bounds(),
         standard,
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Artifact("bad artifact".to_owned()));
@@ -1101,11 +1134,25 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         ("admitted", 1, true)
     );
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (end, events) = pass(&corpus, &projection, &synapse, &standard, NOW + DAY_MS / 2);
+    let (end, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &bounds(),
+        standard,
+        NOW + DAY_MS / 2,
+    );
     assert!(matches!(end, Some(Blocked::LaneUnavailable(_))), "{end:?}");
     assert!(events.is_empty());
     let fresh = component(&engine, SynapseLimits::default());
-    let (_, events) = pass(&corpus, &projection, &fresh, &standard, NOW + DAY_MS / 2);
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &fresh,
+        &bounds(),
+        standard,
+        NOW + DAY_MS / 2,
+    );
     assert_eq!(
         events[0],
         DispatchEvent::Bound(BindingOutcome::Rebound { released: 1 })
@@ -1122,6 +1169,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
         "malformed",
         SynapseLimits::default(),
+        bounds(),
         standard,
         |_, _, engine, _, _| {
             *engine.malformed.lock().unwrap() = true;
@@ -1135,7 +1183,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     assert_eq!(admitted(&events), vec![(job.job_id.clone(), 1)]);
     for attempt in 2..=3 {
         let lane = component(&engine, SynapseLimits::default());
-        let (end, events) = pass(&corpus, &projection, &lane, &standard, NOW);
+        let (end, events) = pass(&corpus, &projection, &lane, &bounds(), standard, NOW);
         assert_eq!(
             end,
             Some(Blocked::LaneUnavailable(LaneUnavailableState::Failing))
@@ -1143,7 +1191,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         assert_eq!(admitted(&events), vec![(job.job_id.clone(), attempt)]);
     }
     let lane = component(&engine, SynapseLimits::default());
-    let (end, events) = pass(&corpus, &projection, &lane, &standard, NOW);
+    let (end, events) = pass(&corpus, &projection, &lane, &bounds(), standard, NOW);
     assert_eq!(end, None);
     assert_eq!(
         events[0],
@@ -1165,6 +1213,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
         "wrong generation",
         SynapseLimits::default(),
+        bounds(),
         standard,
         |_, projection, _, _, occurrence| {
             let other = VectorGeneration {
@@ -1196,7 +1245,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     );
     assert_eq!(engine.calls(), 0);
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     drop((synapse, projection, corpus, dir));
 
@@ -1204,6 +1253,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let (dir, corpus, projection, occurrence, _, synapse, events, _) = scenario(
         "conflict",
         SynapseLimits::default(),
+        bounds(),
         standard,
         |_, projection, _, _, occurrence| {
             let other = encode(&TestEngine::vector_for("something else"));
@@ -1225,7 +1275,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     );
     assert_eq!(job.state, "failed");
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     drop((synapse, projection, corpus, dir));
 
@@ -1233,6 +1283,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
     let (dir, corpus, projection, occurrence, engine, synapse, events, _) = scenario(
         "retired",
         SynapseLimits::default(),
+        bounds(),
         standard,
         |corpus, _, _, object, _| {
             corpus.retire(object);
@@ -1251,7 +1302,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         ("obsolete", true)
     );
     let (projection, _) = reopen(dir.path(), projection, &[&occurrence]);
-    let (_, events) = pass(&corpus, &projection, &synapse, &standard, NOW);
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), standard, NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(engine.calls(), 1);
     drop((synapse, projection, corpus, dir));
@@ -1262,8 +1313,9 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         SynapseLimits::default(),
         DispatchBounds {
             grant: grant(3, NOW - 1),
-            ..standard
+            ..bounds()
         },
+        standard,
         |_, _, _, _, _| {},
     );
     let job = ledger(dir.path(), &occurrence);
@@ -1279,14 +1331,16 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
 /// AC6: an allowance of one is exhausted by one failure; reopen and a later deadline resume nothing; an explicit authorization opens exactly one new episode, and replaying it grants nothing more. Reopen resets neither deadline nor allowance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
+    let wait = Duration::from_secs(5);
     let tight = DispatchBounds {
         grant: grant(1, NOW + DAY_MS),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
     let (dir, corpus, projection, occurrence, engine, synapse, events, _) = scenario(
         "exhaust me",
         SynapseLimits::default(),
         tight,
+        wait,
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Execution("transient".to_owned()));
         },
@@ -1310,7 +1364,14 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         grant: grant(9, NOW + 2 * DAY_MS),
         ..tight
     };
-    let (_, events) = pass(&corpus, &projection, &synapse, &generous, NOW + DAY_MS);
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &generous,
+        wait,
+        NOW + DAY_MS,
+    );
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(
         ledger(dir.path(), &occurrence),
@@ -1360,7 +1421,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         )
         .unwrap();
     let projection = SearchProjection::open(dir.path()).unwrap();
-    let (_, events) = pass(&corpus, &projection, &synapse, &generous, NOW);
+    let (_, events) = pass(&corpus, &projection, &synapse, &generous, wait, NOW);
     assert_eq!(
         stopped(&events),
         vec![(job.job_id.clone(), "deadline_expired".to_string())]
@@ -1372,7 +1433,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         .unwrap();
     assert!(matches!(granted_again, Recovery::Granted { .. }));
 
-    let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let (_, events) = pass(&corpus, &projection, &synapse, &tight, wait, NOW);
     assert_eq!(admitted(&events), vec![(job.job_id.clone(), 1)]);
     assert_eq!(
         published(&events),
@@ -1407,9 +1468,9 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
             ..SynapseLimits::default()
         },
     );
-    let short = bounds(Duration::from_millis(50));
+    let short = Duration::from_millis(50);
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &short, NOW);
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), short, NOW);
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     assert_eq!(retried(&events).len(), 1);
@@ -1441,7 +1502,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
                 &held.job_id,
                 &host,
                 held.host_job_id.as_deref().unwrap(),
-                short.grant,
+                bounds().grant,
                 NOW,
             )
         })
@@ -1459,7 +1520,8 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW + 10,
     );
     assert_eq!(published(&events).len(), 2, "{events:?}");
@@ -1489,12 +1551,16 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     dispatcher.lose_next_charge_reply_for_test();
     let mut events = Vec::new();
-    let bounds = bounds(Duration::from_secs(5));
+    let bounds = bounds();
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(5)),
+                NOW,
+                &mut |event| events.push(event),
+            )
             .unwrap()
     });
     assert_eq!(end, None);
@@ -1510,7 +1576,13 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     // The dispatcher is not quarantined: a later pass runs and finds nothing to do.
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), &bounds, NOW, &mut |_| {})
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(5)),
+                NOW,
+                &mut |_| {},
+            )
             .unwrap()
     });
     assert_eq!(end, None);
@@ -1537,7 +1609,8 @@ fn crash_child_entrypoint_reexecuted_by_the_parent() {
         let result = tokio::task::block_in_place(|| {
             dispatcher.run_pass(
                 eligibility(&project),
-                &bounds(Duration::from_secs(600)),
+                &bounds(),
+                &budget(Duration::from_secs(600)),
                 NOW,
                 &mut |event| {
                     if let DispatchEvent::Admitted { .. } = event {
@@ -1629,7 +1702,8 @@ async fn crash_after_charge_reopens_state_and_accounting_together() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     assert_eq!(end, None);

@@ -449,6 +449,11 @@ impl SynapseComponent {
         self.inner.jobs.retains(job_id)
     }
 
+    /// The table's status word for `job_id` (`queued`, `running`, `ready`, `failed`), or `None` once the table no longer holds it. `queued` and `running` mean native work this component still owns.
+    pub fn job_status(&self, job_id: &str) -> Option<&'static str> {
+        self.inner.jobs.status(job_id)
+    }
+
     /// Polls the job `submit_admitted` issued for `item_id` and `text`, recomputing the request key from them so the caller persists only the job identifier.
     /// A single-item job returns its whole result in one page; the page's lease keeps the result bytes counted while the caller holds the vector.
     /// A job identifier from another incarnation or an evicted job polls as [`PollOutcome::Restarted`]; a failed lane still answers for the jobs it settled.
