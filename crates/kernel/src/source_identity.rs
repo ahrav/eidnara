@@ -193,10 +193,13 @@ fn push_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
-/// Lowercase SHA-256 hex of the exact payload bytes: the payload identifier.
-pub fn payload_id(bytes: &[u8]) -> String {
+/// Lowercase SHA-256 hex of the exact input bytes.
+pub fn identity_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+/// The digest of exact payload bytes is the payload identifier.
+pub use identity_digest as payload_id;
 
 /// Validates the span against the buffer it selects. `MalformedSpan` covers a
 /// span that cannot be a byte range at all; the other three name which rule a
@@ -353,8 +356,8 @@ pub(crate) fn encode_metadata(
     let lineage = finish(&prefix, ROLE_LINEAGE, &[occurrence.representation], span);
     Ok(EncodedOccurrence {
         class,
-        occurrence_id: format!("{:x}", Sha256::digest(&tuple)),
-        lineage_id: format!("{:x}", Sha256::digest(&lineage)),
+        occurrence_id: identity_digest(&tuple),
+        lineage_id: identity_digest(&lineage),
         tuple,
         revision,
         span,
