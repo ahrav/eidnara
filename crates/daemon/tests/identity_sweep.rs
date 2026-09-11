@@ -1084,14 +1084,26 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     let object = corpus.publish("held", "held text");
+    let evict_object = corpus.publish("evict", "evict text");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
+    let evict_occurrence = occurrence_of(&rows, &evict_object);
+    // The second occurrence evicts the first job without relying on a clock.
+    projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE embedding_jobs SET next_attempt_at=?2 WHERE occurrence_id=?1",
+                rusqlite::params![evict_occurrence, NOW + DAY_MS],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let synapse = component(
         &engine,
         SynapseLimits {
-            retention: Duration::from_millis(200),
+            max_retained_jobs: 1,
             ..SynapseLimits::default()
         },
     );
@@ -1126,7 +1138,7 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 1, 0)
     );
-    assert_eq!(inventory(dir.path()).len(), 1);
+    assert_eq!(inventory(dir.path()).len(), 2);
     assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
 
     // Native exit with the result leased in the table: still held, and the host proves the result is ready.
@@ -1161,15 +1173,33 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     );
     assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
 
-    // Once the table forgets the job, nothing holds the identity.
-    std::thread::sleep(Duration::from_millis(400));
+    // Retaining the second result evicts the first job, releasing its identity.
+    projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE embedding_jobs SET next_attempt_at=NULL WHERE occurrence_id=?1",
+                [evict_occurrence],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    assert!(
+        !synapse.holds_job(&host_job),
+        "retention keeps one job: the newer result evicts the held one"
+    );
     let report = sweep(&projection, &synapse, ten());
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 0, 1)
     );
-    assert!(inventory(dir.path()).is_empty());
-    assert_eq!(engine.calls(), 1);
+    assert!(
+        inventory(dir.path())
+            .iter()
+            .all(|(occurrence, _, _)| occurrence == evict_occurrence),
+        "only the live evicting identity remains"
+    );
+    assert_eq!(engine.calls(), 2);
 }
 
 /// A served result page lets lost-commit reconciliation distinguish landed commits from unresolved commits.
