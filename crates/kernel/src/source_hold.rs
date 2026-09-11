@@ -517,11 +517,34 @@ impl KernelStore {
     /// its bytes is reported as [`SourceHoldError::Invalid`].
     /// Each distinct object is read and hashed, with one object buffer bounded
     /// by [`crate::MAX_PAYLOAD_BYTES`]. Storage failures return [`KernelError::Io`].
+    /// The pin is rechecked after hashing; this check does not synchronize a later publication.
     pub fn source_hold_status(
         &self,
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.source_hold_status_inner(binding, hold_id, now, None)
+    }
+
+    /// Runs `after_snapshot` after releasing the reader and before verifying objects.
+    #[cfg(feature = "test-support")]
+    pub fn source_hold_status_with_hook_for_test(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        mut after_snapshot: impl FnMut(),
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.source_hold_status_inner(binding, hold_id, now, Some(&mut after_snapshot))
+    }
+
+    fn source_hold_status_inner(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        after_snapshot: Option<&mut dyn FnMut()>,
     ) -> Result<SourceHold, SourceHoldError> {
         let mut reader = self.lock_reader()?;
         let tx = reader
@@ -547,6 +570,9 @@ impl KernelStore {
         // The filesystem probes run with no reader connection held.
         drop(tx);
         drop(reader);
+        if let Some(after_snapshot) = after_snapshot {
+            after_snapshot();
+        }
         for digest in &digests {
             let Some(digest) = digest
                 .as_deref()
@@ -570,6 +596,12 @@ impl KernelStore {
                 }
             })?;
         }
+        // A purge can commit degradation while its object is still readable.
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite)?;
+        self.load_valid_pin(&tx, binding, hold_id, now)?;
         Ok(hold)
     }
 
