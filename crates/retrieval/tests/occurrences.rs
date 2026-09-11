@@ -179,6 +179,25 @@ fn persist_all(
     persist_occurrences(conn, &requests, bounds(), 1)
 }
 
+fn row_counts(store: &SqliteStore) -> (i64, i64) {
+    store
+        .with_conn(|conn| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM occurrences", [], |r| r.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM payloads", [], |r| r.get(0))?,
+            ))
+        })
+        .unwrap()
+}
+
+/// The identifier the canonical digests give `record`.
+fn occurrence_id_of(record: &Owned) -> String {
+    let identity = borrowed(&record.identity);
+    kernel::source_identity::encode(&record.record(&identity).occurrence)
+        .unwrap()
+        .occurrence_id
+}
+
 /// Every stored occurrence identifier in `(class, source_object_id, revision)`
 /// order, the order a ledger comparison walks.
 fn stored_occurrence_ids(conn: &GuardedConn<'_>) -> Vec<String> {
@@ -636,7 +655,7 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
                     },
                     4
                 ),
-                Err(ProjectionError::OccurrenceCollision {
+                Err(ProjectionError::TombstoneCollision {
                     occurrence_id: victim.clone(),
                 })
             );
@@ -650,7 +669,9 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
                     },
                     4
                 ),
-                Err(ProjectionError::NonPositiveSequence { index: 0 })
+                Err(ProjectionError::NonPositiveTombstoneSequence {
+                    occurrence_id: victim.clone(),
+                })
             );
             assert_eq!(
                 tombstone_occurrence(conn, "no-such-occurrence", stone, 4),
@@ -670,6 +691,135 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
             Ok(())
         })
         .unwrap();
+}
+
+/// `persist_occurrences` detects all collisions before writing, so a refused
+/// batch writes no records even if its transaction commits.
+#[test]
+fn a_collision_anywhere_in_a_batch_writes_none_of_the_batch() {
+    let fixtures = fixtures();
+    let m1 = Owned::from_json(
+        fixtures["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "m1")
+            .unwrap(),
+    );
+    let variant = |id: &str, payload: &str| {
+        let mut record = m1.clone();
+        record.id = id.to_string();
+        record
+            .identity
+            .iter_mut()
+            .find(|(name, _)| name == "message_id")
+            .unwrap()
+            .1 = format!("msg-{id}");
+        record.payload = payload.to_string();
+        record
+    };
+    let a = variant("a", "payload of a");
+    let b = variant("b", "payload of b");
+    let mut b_altered = b.clone();
+    b_altered.id = "b-altered".to_string();
+    b_altered.payload = "payload of b, altered".to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+
+    // `b` and `b_altered` share an occurrence identity but select different
+    // bytes.
+    let in_batch_tuple = store
+        .with_conn_fenced(|conn| {
+            Ok(persist_all(
+                conn,
+                &[a.clone(), b.clone(), b_altered.clone()],
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        in_batch_tuple,
+        Err(ProjectionError::OccurrenceCollision {
+            occurrence_id: occurrence_id_of(&b),
+        })
+    );
+    assert_eq!(row_counts(&store), (0, 0), "a and b were not written");
+
+    // `c` is forced under `a`'s payload digest with different bytes.
+    let c = variant("c", "payload of c");
+    let a_payload_id = kernel::source_identity::payload_id(a.payload.as_bytes());
+    let c_occurrence_id = occurrence_id_of(&c);
+    let in_batch_payload = store
+        .with_conn_fenced(|conn| {
+            let identities: Vec<Vec<(&str, &str)>> =
+                [&a, &b, &c].iter().map(|r| borrowed(&r.identity)).collect();
+            let requests: Vec<OccurrenceRecord<'_>> = [&a, &b, &c]
+                .iter()
+                .zip(&identities)
+                .map(|(record, identity)| record.record(identity))
+                .collect();
+            Ok(persist_occurrences_with_digests_for_test(
+                conn,
+                &requests,
+                bounds(),
+                1,
+                &|encoded, selected| {
+                    let payload_id = if encoded.occurrence_id == c_occurrence_id {
+                        a_payload_id.clone()
+                    } else {
+                        kernel::source_identity::payload_id(selected)
+                    };
+                    (encoded.occurrence_id.clone(), payload_id)
+                },
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        in_batch_payload,
+        Err(ProjectionError::PayloadCollision {
+            payload_id: a_payload_id,
+        })
+    );
+    assert_eq!(row_counts(&store), (0, 0), "a and b were not written");
+
+    // `a_altered` collides with the `a` row an earlier call stored.
+    store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, std::slice::from_ref(&a)).unwrap()))
+        .unwrap();
+    assert_eq!(row_counts(&store), (1, 1));
+    let mut a_altered = a.clone();
+    a_altered.id = "a-altered".to_string();
+    a_altered.payload = "payload of a, altered".to_string();
+    let stored_tuple = store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, &[b.clone(), a_altered.clone()])))
+        .unwrap();
+    assert_eq!(
+        stored_tuple,
+        Err(ProjectionError::OccurrenceCollision {
+            occurrence_id: occurrence_id_of(&a),
+        })
+    );
+    assert_eq!(
+        row_counts(&store),
+        (1, 1),
+        "b was not written beside the refused record"
+    );
+
+    let outcomes = store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, &[b.clone(), a.clone(), b.clone()]).unwrap()))
+        .unwrap();
+    assert_eq!(
+        outcomes.iter().map(|o| o.inserted).collect::<Vec<_>>(),
+        [true, false, false],
+        "b is new, a replays the stored row, the second b replays the first"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .map(|o| o.payload_inserted)
+            .collect::<Vec<_>>(),
+        [true, false, false]
+    );
+    assert_eq!(row_counts(&store), (2, 2));
 }
 
 #[test]
@@ -704,15 +854,7 @@ fn malformed_and_oversized_records_refuse_before_anything_is_written() {
         covered += 1;
     }
     assert!(covered >= 25, "{covered} expressible invalid records");
-    let (rows, payloads): (i64, i64) = store
-        .with_conn(|conn| {
-            Ok((
-                conn.query_row("SELECT COUNT(*) FROM occurrences", [], |r| r.get(0))?,
-                conn.query_row("SELECT COUNT(*) FROM payloads", [], |r| r.get(0))?,
-            ))
-        })
-        .unwrap();
-    assert_eq!((rows, payloads), (0, 0));
+    assert_eq!(row_counts(&store), (0, 0));
 
     // Oversized payloads and batches refuse from sizes, and a refusal in the
     // middle of a batch writes none of it.
@@ -806,16 +948,8 @@ fn malformed_and_oversized_records_refuse_before_anything_is_written() {
         result,
         Err(ProjectionError::NonPositiveSequence { index: 0 })
     );
-    let (rows, payloads): (i64, i64) = store
-        .with_conn(|conn| {
-            Ok((
-                conn.query_row("SELECT COUNT(*) FROM occurrences", [], |r| r.get(0))?,
-                conn.query_row("SELECT COUNT(*) FROM payloads", [], |r| r.get(0))?,
-            ))
-        })
-        .unwrap();
     assert_eq!(
-        (rows, payloads),
+        row_counts(&store),
         (0, 0),
         "no payload row precedes a refused occurrence"
     );

@@ -12,6 +12,7 @@
 //! values are refused without a suffix, a rename, or a replacement. Payloads
 //! are never logged; refusals name identities and sizes, not content.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
@@ -19,7 +20,7 @@ use kernel::source_identity::{
     EncodedOccurrence, Occurrence, OccurrenceRefusal, covers_whole, encode, payload_id, select,
     validate_span,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{CachedStatement, OptionalExtension, params};
 use storage::GuardedConn;
 
 /// The complete schema, applied once to a pristine file by
@@ -151,14 +152,16 @@ pub enum TombstoneReason {
 }
 
 impl TombstoneReason {
-    const ALL: [Self; 4] = [
+    /// The whole vocabulary, in the order the schema's `CHECK` spells it.
+    pub const ALL: [Self; 4] = [
         Self::Superseded,
         Self::Retired,
         Self::EvidenceInvalidated,
         Self::Purged,
     ];
 
-    fn as_str(self) -> &'static str {
+    /// The spelling stored in `occurrence_tombstones.reason`.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Superseded => "superseded",
             Self::Retired => "retired",
@@ -195,11 +198,19 @@ pub enum ProjectionError {
     #[error("record {index} names a commit sequence that is not positive")]
     NonPositiveSequence { index: usize },
     #[error(
+        "the tombstone for occurrence {occurrence_id} names a commit sequence that is not positive"
+    )]
+    NonPositiveTombstoneSequence { occurrence_id: String },
+    #[error(
         "occurrence {occurrence_id} is stored with a different tuple under the same identifier"
     )]
     OccurrenceCollision { occurrence_id: String },
     #[error("payload {payload_id} is stored with different bytes under the same identifier")]
     PayloadCollision { payload_id: String },
+    #[error(
+        "occurrence {occurrence_id} already has a tombstone with a different sequence or reason"
+    )]
+    TombstoneCollision { occurrence_id: String },
     #[error("the projection identity is already installed and differs")]
     IdentityMismatch,
     #[error("occurrence {occurrence_id} is not stored")]
@@ -309,11 +320,8 @@ fn canonical_digests(encoded: &EncodedOccurrence, selected: &[u8]) -> (String, S
     (encoded.occurrence_id.clone(), payload_id(selected))
 }
 
-/// Persists `records` in order inside the caller's transaction. Every record
-/// is encoded and bounded before the first row is written; a refusal anywhere
-/// writes nothing. Equal records already stored replay as no-ops, so replaying
-/// a batch after an uncertain outcome changes nothing, and the order of
-/// insertion never changes an identity.
+/// Persists `records` in input order. Every collision check runs before the
+/// first `INSERT`, so a refused batch writes no rows.
 pub fn persist_occurrences(
     conn: &GuardedConn<'_>,
     records: &[OccurrenceRecord<'_>],
@@ -342,10 +350,132 @@ struct Prepared<'a> {
     selected: &'a [u8],
     occurrence_id: String,
     payload_id: String,
+    insert_occurrence: bool,
+    insert_payload: bool,
 }
 
-fn persist_with_digests(
-    conn: &GuardedConn<'_>,
+/// A batch prepares these statements once rather than once per record.
+struct Statements<'c> {
+    occurrence_lookup: CachedStatement<'c>,
+    payload_lookup: CachedStatement<'c>,
+    payload_insert: CachedStatement<'c>,
+    occurrence_insert: CachedStatement<'c>,
+}
+
+impl<'c> Statements<'c> {
+    fn prepare(conn: &GuardedConn<'c>) -> Result<Self, ProjectionError> {
+        Ok(Self {
+            occurrence_lookup: conn
+                .prepare_cached("SELECT tuple,payload_id FROM occurrences WHERE occurrence_id=?1")?,
+            payload_lookup: conn.prepare_cached("SELECT bytes FROM payloads WHERE payload_id=?1")?,
+            payload_insert: conn.prepare_cached(
+                "INSERT INTO payloads(payload_id,bytes,byte_length,created_at) VALUES (?1,?2,?3,?4)",
+            )?,
+            occurrence_insert: conn.prepare_cached(
+                "INSERT INTO occurrences(
+                     occurrence_id,tuple,lineage_id,class,revision,representation,
+                     span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                     source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            )?,
+        })
+    }
+
+    fn occurrence_stored(
+        &mut self,
+        occurrence_id: &str,
+        tuple: &[u8],
+        payload_id: &str,
+    ) -> Result<bool, ProjectionError> {
+        let stored: Option<(Vec<u8>, String)> = self
+            .occurrence_lookup
+            .query_row([occurrence_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        match stored {
+            None => Ok(false),
+            Some((stored_tuple, stored_payload))
+                if stored_tuple == tuple && stored_payload == payload_id =>
+            {
+                Ok(true)
+            }
+            Some(_) => Err(ProjectionError::OccurrenceCollision {
+                occurrence_id: occurrence_id.to_string(),
+            }),
+        }
+    }
+
+    fn payload_stored(
+        &mut self,
+        payload_id: &str,
+        selected: &[u8],
+    ) -> Result<bool, ProjectionError> {
+        let stored: Option<Vec<u8>> = self
+            .payload_lookup
+            .query_row([payload_id], |row| row.get(0))
+            .optional()?;
+        match stored {
+            None => Ok(false),
+            Some(bytes) if bytes == selected => Ok(true),
+            Some(_) => Err(ProjectionError::PayloadCollision {
+                payload_id: payload_id.to_string(),
+            }),
+        }
+    }
+
+    fn insert_payload(
+        &mut self,
+        item: &Prepared<'_>,
+        persisted_at: i64,
+    ) -> Result<(), ProjectionError> {
+        self.payload_insert.execute(params![
+            item.payload_id,
+            item.selected,
+            i64::try_from(item.selected.len()).map_err(|_| ProjectionError::CorruptRow)?,
+            persisted_at,
+        ])?;
+        Ok(())
+    }
+
+    fn insert_occurrence(
+        &mut self,
+        item: &Prepared<'_>,
+        persisted_at: i64,
+    ) -> Result<(), ProjectionError> {
+        let record = item.record;
+        let span = item
+            .encoded
+            .span
+            .map(|span| {
+                Ok::<_, ProjectionError>((
+                    i64::try_from(span.start).map_err(|_| ProjectionError::CorruptRow)?,
+                    i64::try_from(span.end).map_err(|_| ProjectionError::CorruptRow)?,
+                ))
+            })
+            .transpose()?;
+        self.occurrence_insert.execute(params![
+            item.occurrence_id,
+            item.encoded.tuple,
+            item.encoded.lineage_id,
+            item.encoded.class.code(),
+            item.encoded.revision,
+            record.occurrence.representation,
+            span.map(|(start, _)| start),
+            span.map(|(_, end)| end),
+            item.payload_id,
+            record.domain_id,
+            record.sensitivity.as_str(),
+            record.source_object_id,
+            record.source_evidence_id,
+            record.source_artifact_digest,
+            record.created_commit_seq,
+            persisted_at,
+        ])?;
+        Ok(())
+    }
+}
+
+fn persist_with_digests<'c>(
+    conn: &GuardedConn<'c>,
     records: &[OccurrenceRecord<'_>],
     bounds: PersistBounds,
     persisted_at: i64,
@@ -356,8 +486,10 @@ fn persist_with_digests(
             count: records.len(),
         });
     }
-    // Preflight: encode, validate, and bound every record before any write.
-    let mut prepared = Vec::with_capacity(records.len());
+    let mut statements = Statements::prepare(conn)?;
+    let mut prepared: Vec<Prepared<'_>> = Vec::with_capacity(records.len());
+    let mut batch_occurrences: HashMap<String, usize> = HashMap::new();
+    let mut batch_payloads: HashMap<String, usize> = HashMap::new();
     for (index, record) in records.iter().enumerate() {
         if record.created_commit_seq <= 0 {
             return Err(ProjectionError::NonPositiveSequence { index });
@@ -388,136 +520,63 @@ fn persist_with_digests(
             });
         }
         let (occurrence_id, payload_id) = digests(&encoded, selected);
+        let insert_occurrence = match batch_occurrences.get(&occurrence_id) {
+            Some(&earlier) => {
+                let earlier = &prepared[earlier];
+                if earlier.encoded.tuple != encoded.tuple || earlier.payload_id != payload_id {
+                    return Err(ProjectionError::OccurrenceCollision { occurrence_id });
+                }
+                false
+            }
+            None => {
+                let stored =
+                    statements.occurrence_stored(&occurrence_id, &encoded.tuple, &payload_id)?;
+                batch_occurrences.insert(occurrence_id.clone(), index);
+                !stored
+            }
+        };
+        let insert_payload = match batch_payloads.get(&payload_id) {
+            Some(&earlier) => {
+                if prepared[earlier].selected != selected {
+                    return Err(ProjectionError::PayloadCollision { payload_id });
+                }
+                false
+            }
+            None => {
+                let stored = statements.payload_stored(&payload_id, selected)?;
+                batch_payloads.insert(payload_id.clone(), index);
+                !stored
+            }
+        };
         prepared.push(Prepared {
             record,
             encoded,
             selected,
             occurrence_id,
             payload_id,
+            insert_occurrence,
+            insert_payload,
         });
     }
-    let mut outcomes = Vec::with_capacity(prepared.len());
-    for item in prepared {
-        // The occurrence identity is settled before its payload is written, so
-        // a refused occurrence leaves no payload row behind it.
-        let occurrence_known = check_occurrence(conn, &item)?;
-        let payload_inserted = persist_payload(conn, &item, persisted_at)?;
-        let inserted = if occurrence_known {
-            false
-        } else {
-            insert_occurrence(conn, &item, persisted_at)?;
-            true
-        };
-        outcomes.push(PersistedOccurrence {
+    // Insert payload rows before occurrence rows to satisfy the foreign key.
+    for item in &prepared {
+        if item.insert_payload {
+            statements.insert_payload(item, persisted_at)?;
+        }
+        if item.insert_occurrence {
+            statements.insert_occurrence(item, persisted_at)?;
+        }
+    }
+    Ok(prepared
+        .into_iter()
+        .map(|item| PersistedOccurrence {
             occurrence_id: item.occurrence_id,
             lineage_id: item.encoded.lineage_id,
             payload_id: item.payload_id,
-            inserted,
-            payload_inserted,
-        });
-    }
-    Ok(outcomes)
-}
-
-/// Stores the payload bytes under their identity, or verifies that the bytes
-/// already stored there are the same bytes.
-fn persist_payload(
-    conn: &GuardedConn<'_>,
-    item: &Prepared<'_>,
-    persisted_at: i64,
-) -> Result<bool, ProjectionError> {
-    let stored: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT bytes FROM payloads WHERE payload_id=?1",
-            [&item.payload_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    match stored {
-        Some(bytes) if bytes == item.selected => Ok(false),
-        Some(_) => Err(ProjectionError::PayloadCollision {
-            payload_id: item.payload_id.clone(),
-        }),
-        None => {
-            conn.execute(
-                "INSERT INTO payloads(payload_id,bytes,byte_length,created_at) VALUES (?1,?2,?3,?4)",
-                params![
-                    item.payload_id,
-                    item.selected,
-                    i64::try_from(item.selected.len()).map_err(|_| ProjectionError::CorruptRow)?,
-                    persisted_at,
-                ],
-            )?;
-            Ok(true)
-        }
-    }
-}
-
-/// Whether an occurrence is already stored under the identifier. A stored
-/// tuple or payload identity that differs from the incoming one is a
-/// collision; equal ones mean the record replays.
-fn check_occurrence(conn: &GuardedConn<'_>, item: &Prepared<'_>) -> Result<bool, ProjectionError> {
-    let stored: Option<(Vec<u8>, String)> = conn
-        .query_row(
-            "SELECT tuple,payload_id FROM occurrences WHERE occurrence_id=?1",
-            [&item.occurrence_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    match stored {
-        None => Ok(false),
-        Some((tuple, payload)) if tuple == item.encoded.tuple && payload == item.payload_id => {
-            Ok(true)
-        }
-        Some(_) => Err(ProjectionError::OccurrenceCollision {
-            occurrence_id: item.occurrence_id.clone(),
-        }),
-    }
-}
-
-/// Stores the occurrence beside its tuple bytes.
-fn insert_occurrence(
-    conn: &GuardedConn<'_>,
-    item: &Prepared<'_>,
-    persisted_at: i64,
-) -> Result<(), ProjectionError> {
-    let record = item.record;
-    let span = item
-        .encoded
-        .span
-        .map(|span| {
-            Ok::<_, ProjectionError>((
-                i64::try_from(span.start).map_err(|_| ProjectionError::CorruptRow)?,
-                i64::try_from(span.end).map_err(|_| ProjectionError::CorruptRow)?,
-            ))
+            inserted: item.insert_occurrence,
+            payload_inserted: item.insert_payload,
         })
-        .transpose()?;
-    conn.execute(
-        "INSERT INTO occurrences(
-             occurrence_id,tuple,lineage_id,class,revision,representation,
-             span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
-             source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-        params![
-            item.occurrence_id,
-            item.encoded.tuple,
-            item.encoded.lineage_id,
-            item.encoded.class.code(),
-            item.encoded.revision,
-            record.occurrence.representation,
-            span.map(|(start, _)| start),
-            span.map(|(_, end)| end),
-            item.payload_id,
-            record.domain_id,
-            record.sensitivity.as_str(),
-            record.source_object_id,
-            record.source_evidence_id,
-            record.source_artifact_digest,
-            record.created_commit_seq,
-            persisted_at,
-        ],
-    )?;
-    Ok(())
+        .collect())
 }
 
 /// Records that an occurrence stopped being live. Recording the same
@@ -530,7 +589,9 @@ pub fn tombstone_occurrence(
     recorded_at: i64,
 ) -> Result<bool, ProjectionError> {
     if tombstone.invalidated_commit_seq <= 0 {
-        return Err(ProjectionError::NonPositiveSequence { index: 0 });
+        return Err(ProjectionError::NonPositiveTombstoneSequence {
+            occurrence_id: occurrence_id.to_string(),
+        });
     }
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM occurrences WHERE occurrence_id=?1)",
@@ -555,7 +616,7 @@ pub fn tombstone_occurrence(
         {
             Ok(false)
         }
-        Some(_) => Err(ProjectionError::OccurrenceCollision {
+        Some(_) => Err(ProjectionError::TombstoneCollision {
             occurrence_id: occurrence_id.to_string(),
         }),
         None => {
