@@ -89,7 +89,7 @@ try {
         try {
             assert.equal(isMidTurn(undefined, chunkSession), true);
             const reader = withReadOnlySessionDb((db) => db);
-            assert.equal(preparations, 2);
+            assert.equal(preparations, 3);
             const sizes = growingChunks
                 ? Array.from({ length: 70 }, (_, i) => 801 + i)
                 : [800, 800];
@@ -128,8 +128,8 @@ try {
             }
             assert.deepEqual(
                 { preparations, closes, connections: preparingConnections.size },
-                { preparations: 5, closes: 0, connections: 1 },
-                "chunk growth must preserve five warm statements on one native connection",
+                { preparations: 6, closes: 0, connections: 1 },
+                "chunk growth must preserve six warm statements on one native connection",
             );
         } finally {
             Database.prototype.close = nativeClose;
