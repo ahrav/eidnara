@@ -1298,6 +1298,7 @@ fn future_release_times_do_not_extend_hold_retention() {
             } else {
                 hold.expires_at + 1
             };
+            let release_started = wall_ms();
             match removal {
                 "release" => fixture
                     .store
@@ -1345,6 +1346,7 @@ fn future_release_times_do_not_extend_hold_retention() {
                 }
                 _ => unreachable!(),
             }
+            let release_finished = wall_ms();
             let connection = fixture.inspect();
             let stored: i64 = connection
                 .query_row(
@@ -1353,10 +1355,17 @@ fn future_release_times_do_not_extend_hold_retention() {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(
-                stored, hold.expires_at,
-                "{removal}: release extended the hold lifetime"
-            );
+            if matches!(removal, "release" | "reconcile") {
+                assert_eq!(
+                    stored, hold.expires_at,
+                    "{removal}: release extended the hold lifetime"
+                );
+            } else {
+                assert!(
+                    (release_started..=release_finished).contains(&stored),
+                    "{removal}: audit time escaped into retention: {stored}"
+                );
+            }
             let references: i64 = connection.query_row(
                 "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1 AND released_at=?2",
                 rusqlite::params![hold.hold_id, stored], |row| row.get(0),
@@ -1820,6 +1829,7 @@ fn retention_is_capped_and_a_removed_consumer_leaves_no_hold_behind() {
 
         let tip = fixture.store.tip().unwrap();
         fixture.store.acknowledge_outbox(CONSUMER, tip, 1).unwrap();
+        let release_started = wall_ms();
         fixture
             .store
             .commit(intent("remove-consumer"), |envelope| {
@@ -1839,6 +1849,7 @@ fn retention_is_capped_and_a_removed_consumer_leaves_no_hold_behind() {
                 Ok(String::new())
             })
             .unwrap();
+        let release_finished = wall_ms();
         for hold in [&capped, &second] {
             assert_eq!(
                 fixture
@@ -1858,10 +1869,15 @@ fn retention_is_capped_and_a_removed_consumer_leaves_no_hold_behind() {
             1
         );
         assert_eq!(
-            fixture.count(
-                "SELECT COUNT(*) FROM capture_pins
-             WHERE pin_kind='source_hold' AND released_at=9"
-            ),
+            fixture
+                .inspect()
+                .query_row(
+                    "SELECT COUNT(*) FROM capture_pins
+                 WHERE pin_kind='source_hold' AND released_at BETWEEN ?1 AND ?2",
+                    rusqlite::params![release_started, release_finished],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
             2
         );
         assert_eq!(

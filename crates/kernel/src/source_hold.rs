@@ -7,7 +7,7 @@
 //! whole rather than narrowed.
 
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -172,6 +172,13 @@ fn owner_id(binding: &SourceHoldBinding) -> String {
         "{}{}{}",
         binding.consumer_id, OWNER_SEPARATOR, binding.source_policy_version
     )
+}
+
+fn verification_time_upper_bound(now: i64, elapsed: Duration) -> i64 {
+    match i64::try_from(elapsed.as_nanos().div_ceil(1_000_000)) {
+        Ok(elapsed_ms) => now.saturating_add(elapsed_ms),
+        Err(_) => i64::MAX,
+    }
 }
 
 /// Evidence cited by descriptors live at `?1`: the descriptor was created at
@@ -390,7 +397,7 @@ impl KernelStore {
         })
     }
 
-    /// Elapsed monotonic milliseconds advance `now` so expiry during verification is not missed.
+    /// Rounding elapsed monotonic time up prevents partial milliseconds from hiding expiry.
     /// Checked before a candidate built from the hold is published, and never
     /// answered from a cached earlier check. A hold that no longer protects
     /// its bytes is reported as [`SourceHoldError::Invalid`].
@@ -479,8 +486,12 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
-        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        self.load_valid_pin(&tx, binding, hold_id, now.saturating_add(elapsed_ms))?;
+        self.load_valid_pin(
+            &tx,
+            binding,
+            hold_id,
+            verification_time_upper_bound(now, started.elapsed()),
+        )?;
         Ok(hold)
     }
 
@@ -754,12 +765,33 @@ struct StoredPin {
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, StatementStatus, params};
+    use std::time::Duration;
 
     use super::{
         ACTIVE_SOURCE_HOLDS_SQL, CAPTURE_DESCRIPTOR_WORK_SQL, RELEASABLE_SOURCE_HOLDS_SQL,
         SOURCE_HOLD_KIND, SourceHoldBinding, held_descriptors_sql, owner_id,
     };
     use crate::schema::apply_kernel_schema;
+
+    #[test]
+    fn partial_milliseconds_cannot_hide_hold_expiry() {
+        for (now, elapsed, expected) in [
+            (10, Duration::ZERO, 10),
+            (10, Duration::from_nanos(1), 11),
+            (10, Duration::from_nanos(999_999), 11),
+            (10, Duration::from_millis(1), 11),
+            (10, Duration::from_nanos(1_000_001), 12),
+            (i64::MAX - 1, Duration::from_nanos(1), i64::MAX),
+            (i64::MAX, Duration::from_nanos(1), i64::MAX),
+            (-1, Duration::MAX, i64::MAX),
+        ] {
+            assert_eq!(
+                super::verification_time_upper_bound(now, elapsed),
+                expected,
+                "now={now}, elapsed={elapsed:?}"
+            );
+        }
+    }
 
     #[test]
     fn consumer_hold_queries_do_not_scan_other_consumers() {
