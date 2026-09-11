@@ -319,7 +319,6 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());
     setup(&store);
-    // The schema is U2a's: the same objects, nothing added.
     let objects: Vec<String> = store
         .with_conn_unfenced(|conn| {
             let mut statement = conn.prepare(
@@ -340,6 +339,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             "index:idx_retirement_receipts_generation",
             "index:idx_vector_generations_selected",
             "table:embedding_jobs",
+            "table:embedding_recovery_authorizations",
             "table:occurrence_tombstones",
             "table:occurrence_vectors",
             "table:occurrences",
@@ -1390,6 +1390,168 @@ fn exported_row(
         invalidated_commit_seq: invalidated,
         superseded_by: superseded_by.map(str::to_string),
         text: text.map(str::to_string),
+    }
+}
+
+#[test]
+fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{
+        Admission, Disposition, EpisodeGrant, LaneBinding, Recovery, authorize_recovery,
+        charge_admission, eligible_jobs, job_ledger, record_retry, stop_job,
+    };
+    use std::num::NonZeroU32;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = open(dir.path());
+    setup(&store);
+    let rows =
+        ["first", "second"].map(|key| exported_row(key, 1, Some("input"), None, 3, None, None));
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    let grant = EpisodeGrant {
+        allowance: NonZeroU32::new(1).unwrap(),
+        deadline: 100,
+    };
+    let host = LaneBinding {
+        embedding_model: "model-a".to_owned(),
+        bundle_fingerprint: "fp-a".to_owned(),
+        vector_dimension: 8,
+        table_epoch: 1,
+        host_incarnation: "host".to_owned(),
+    };
+    let jobs = store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let jobs = eligible_jobs(conn, NonZeroUsize::new(2).unwrap(), 3).unwrap();
+            assert_eq!(jobs.len(), 2);
+            assert_eq!(
+                authorize_recovery(conn, "unknown", "A", grant, 4).unwrap(),
+                Recovery::NotStopped
+            );
+            assert_eq!(
+                authorize_recovery(conn, &jobs[0].job_id, "A", grant, 4).unwrap(),
+                Recovery::NotStopped
+            );
+            for job in &jobs {
+                assert!(stop_job(conn, &job.job_id, "input", 4).unwrap());
+            }
+            Ok(jobs)
+        })
+        .unwrap();
+    let job_id = &jobs[0].job_id;
+    let before = store
+        .with_conn_fenced(|conn| Ok(job_ledger(conn, job_id).unwrap()))
+        .unwrap();
+    let rolled_back: Result<(), _> = store.with_conn_fenced(|conn| {
+        assert!(matches!(
+            authorize_recovery(conn, job_id, "A", grant, 5).unwrap(),
+            Recovery::Granted { .. }
+        ));
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    });
+    assert!(rolled_back.is_err());
+    drop(store);
+    store = open(dir.path());
+    assert_eq!(
+        store
+            .with_conn_fenced(|conn| Ok(job_ledger(conn, job_id).unwrap()))
+            .unwrap(),
+        before
+    );
+
+    for authorization in ["A", "B"] {
+        store
+            .with_conn_fenced(|conn| {
+                assert_eq!(
+                    authorize_recovery(conn, job_id, authorization, grant, 5).unwrap(),
+                    Recovery::Granted {
+                        episode_id: format!("{job_id}/auth/{authorization}")
+                    }
+                );
+                assert_eq!(
+                    charge_admission(conn, job_id, &host, authorization, grant, 6).unwrap(),
+                    Admission::Charged { attempts: 1 }
+                );
+                assert_eq!(
+                    record_retry(conn, job_id, "execution_failure", 7, 6).unwrap(),
+                    Disposition::Exhausted
+                );
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        store = open(dir.path());
+    }
+    store
+        .with_conn_fenced(|conn| {
+            let stopped = job_ledger(conn, job_id).unwrap().unwrap();
+            assert_eq!((stopped.state.as_str(), stopped.attempts), ("failed", 1));
+            assert_eq!(stopped.authorization_ref.as_deref(), Some("B"));
+            let larger = EpisodeGrant {
+                allowance: NonZeroU32::new(9).unwrap(),
+                deadline: 1000,
+            };
+            assert_eq!(
+                authorize_recovery(conn, job_id, "A", larger, 8).unwrap(),
+                Recovery::Replayed,
+                "A/B/A must not replenish the stopped B episode"
+            );
+            assert_eq!(job_ledger(conn, job_id).unwrap().unwrap(), stopped);
+            assert!(
+                eligible_jobs(conn, NonZeroUsize::new(2).unwrap(), 8)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                matches!(
+                    authorize_recovery(conn, &jobs[1].job_id, "A", grant, 8).unwrap(),
+                    Recovery::Granted { .. }
+                ),
+                "references are scoped to one job"
+            );
+            assert!(matches!(
+                authorize_recovery(conn, job_id, "C", grant, 8).unwrap(),
+                Recovery::Granted { .. }
+            ));
+            let pending = job_ledger(conn, job_id).unwrap();
+            assert_eq!(
+                authorize_recovery(conn, job_id, "A", larger, 9).unwrap(),
+                Recovery::Replayed,
+                "consumed history is checked before the non-stopped state"
+            );
+            assert_eq!(job_ledger(conn, job_id).unwrap(), pending);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn dispatch_job_debug_omits_text_and_reports_utf8_bytes() {
+    let job = retrieval::dispatch::DispatchJob {
+        job_id: "debug-job-identity".to_owned(),
+        occurrence_id: "occurrence".to_owned(),
+        generation: generation(),
+        payload_id: "payload".to_owned(),
+        source_object_id: "source".to_owned(),
+        revision: 1,
+        source_artifact_digest: "digest".to_owned(),
+        text: "private-dispatch-sentinel-雪".to_owned(),
+        state: "pending".to_owned(),
+        attempts: 0,
+        episode: None,
+        host_job_id: None,
+    };
+    for debug in [format!("{job:?}"), format!("{job:#?}")] {
+        assert!(
+            !debug.contains("private-dispatch-sentinel"),
+            "Debug must not expose payload text"
+        );
+        assert!(
+            debug.contains(&format!("text_bytes: {}", job.text.len())),
+            "Debug must report UTF-8 byte length"
+        );
+        assert!(debug.contains(&format!("job_id: {:?}", job.job_id)));
     }
 }
 

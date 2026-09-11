@@ -11,7 +11,8 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use daemon::embedding_dispatch::{
-    Blocked, DispatchBounds, DispatchEvent, EmbeddingDispatcher, lane_binding,
+    Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
+    lane_binding,
 };
 use daemon::embedding_publication::{ObsoleteCause, Publication};
 use daemon::search_projection::SearchProjection;
@@ -651,7 +652,179 @@ fn reopen(
     (projection, after)
 }
 
-/// AC1, AC4: the real pending → job table → leased result → guarded completion path; the durable ledger matches the admissions, and the stored binding matches the verified lane and the serving host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publication_scope_and_search_deadline_preserve_admission_without_recharging() {
+    for blocked in [Blocked::WrongScope, Blocked::SearchDeadline] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("publication-blocked", "admitted input");
+        let (projection, rows) = corpus.bootstrap(dir.path());
+        let occurrence = occurrence_of(&rows, &object);
+        let engine = TestEngine::new();
+        let synapse = component(&engine, SynapseLimits::default());
+        let project = ProjectScope::new(if blocked == Blocked::WrongScope {
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        } else {
+            PROJECT
+        })
+        .unwrap();
+        let mut bounds = bounds(Duration::from_secs(5));
+        bounds.guard_deadline = Duration::from_millis(300);
+        let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+        let mut events = Vec::new();
+        let mut at_admission = None;
+        let mut write_lock = None;
+        let end = dispatcher
+            .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+                if matches!(event, DispatchEvent::Admitted { .. }) {
+                    at_admission = Some(ledger(dir.path(), occurrence));
+                    if blocked == Blocked::SearchDeadline {
+                        let conn = Connection::open(search_path(dir.path())).unwrap();
+                        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                        write_lock = Some(conn);
+                    }
+                }
+                events.push(event);
+            })
+            .unwrap();
+        assert_eq!(end, Some(blocked));
+        let admitted_row = at_admission.expect("publication follows admission");
+        assert_eq!(admitted_row.state, "admitted");
+        assert_eq!(admitted_row.attempts, 1);
+        assert_eq!(ledger(dir.path(), occurrence), admitted_row);
+        assert!(stopped(&events).is_empty());
+        assert!(retried(&events).is_empty());
+        assert!(published(&events).is_empty());
+        assert_eq!(engine.calls(), 1);
+        assert!(projection.quarantine().is_none());
+
+        drop(write_lock);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        events.clear();
+        assert_eq!(
+            dispatcher
+                .run_pass(eligibility(&project), &bounds, NOW + 1, &mut |event| {
+                    events.push(event)
+                })
+                .unwrap(),
+            None
+        );
+        let completed = ledger(dir.path(), occurrence);
+        assert_eq!(completed.state, "embedded");
+        assert_eq!(completed.attempts, admitted_row.attempts);
+        assert_eq!(completed.host_job_id, admitted_row.host_job_id);
+        assert_eq!(completed.episode, admitted_row.episode);
+        assert_eq!(
+            completed.vector,
+            Some(encode(&TestEngine::vector_for("admitted input")))
+        );
+        assert!(admitted(&events).is_empty());
+        assert_eq!(
+            published(&events),
+            vec![(completed.job_id, Publication::Embedded)]
+        );
+        assert_eq!(
+            engine.calls(),
+            1,
+            "publication must reuse the retained result"
+        );
+    }
+}
+
+fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("lane-swap", "frozen lane input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine_a = TestEngine::new();
+    let engine_b = TestEngine::new();
+    let gate = engine_a.block_calls();
+    let synapse = component(&engine_a, SynapseLimits::default());
+    let before = ledger(dir.path(), occurrence);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut events = Vec::new();
+    let mut at_swap = None;
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let end = dispatcher
+        .run_pass(
+            eligibility(&project),
+            &bounds(Duration::from_secs(5)),
+            NOW,
+            &mut |event| {
+                if (matches!(event, DispatchEvent::Bound(_)) && !after_admission)
+                    || (matches!(event, DispatchEvent::Admitted { .. }) && after_admission)
+                {
+                    let mut replacement = lane(&"b2".repeat(32));
+                    replacement.model = "replacement-model".to_owned();
+                    replacement.table_epoch = 2;
+                    replacement.max_tokens = replacement_max_tokens;
+                    at_swap = Some(ledger(dir.path(), occurrence));
+                    synapse
+                        .replace_ready_with_engine_for_test(
+                            replacement,
+                            Arc::clone(&engine_b) as Arc<dyn EmbeddingEngine>,
+                        )
+                        .unwrap();
+                    TestEngine::release(&gate);
+                }
+                events.push(event);
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        end,
+        Some(Blocked::IdentityChanged),
+        "a pass cannot use a replacement lane"
+    );
+    assert_eq!(
+        ledger(dir.path(), occurrence),
+        at_swap.unwrap(),
+        "identity refusal changes no ledger"
+    );
+    assert_eq!(engine_b.calls(), 0, "replacement engine must not run");
+    assert_eq!(
+        engine_b.count_calls(),
+        0,
+        "identity mismatch must refuse before the replacement tokenizer runs"
+    );
+    assert!(published(&events).is_empty());
+    if after_admission {
+        let job = ledger(dir.path(), occurrence);
+        assert_eq!(events.len(), 2);
+        assert_eq!(admitted(&events), vec![(job.job_id.clone(), 1)]);
+        assert_eq!((job.state.as_str(), job.attempts), ("admitted", 1));
+        assert!(job.host_job_id.is_some());
+        assert!(job.vector.is_none());
+        assert_eq!(engine_a.calls(), 1, "the admitted worker retains engine A");
+        assert_eq!(engine_a.count_calls(), 1);
+    } else {
+        assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
+        assert_eq!(ledger(dir.path(), occurrence), before);
+        assert_eq!((before.state.as_str(), before.attempts), ("pending", 0));
+        assert!(before.host_job_id.is_none());
+        assert!(before.vector.is_none());
+        assert_eq!(engine_a.calls(), 0);
+        assert_eq!(engine_a.count_calls(), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_swap_after_binding_blocks_before_admission() {
+    for max_tokens in [1, 512] {
+        assert_lane_swap_blocked(false, max_tokens);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_swap_after_admission_blocks_completion() {
+    for max_tokens in [1, 512] {
+        assert_lane_swap_blocked(true, max_tokens);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_rows_reach_guarded_completion_through_one_job_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -873,6 +1046,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let second = component(&engine, SynapseLimits::default());
     assert!(matches!(
         second.poll_admitted(
+            &lane(FINGERPRINT),
             held.host_job_id.as_deref().unwrap(),
             held.episode.as_deref().unwrap(),
             "message across restart"
@@ -1320,12 +1494,12 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     assert_eq!(engine.calls(), 1);
 
     let recovered = projection
-        .write(|conn| authorize_recovery(conn, &job.job_id, "auth-1", grant(2, NOW + DAY_MS), NOW))
+        .write(|conn| authorize_recovery(conn, &job.job_id, "op-1", grant(2, NOW + DAY_MS), NOW))
         .unwrap();
     assert_eq!(
         recovered,
         Recovery::Granted {
-            episode_id: format!("{}/auth-1", job.job_id)
+            episode_id: format!("{}/auth/op-1", job.job_id)
         }
     );
     let reopened = ledger(dir.path(), &occurrence);
@@ -1337,10 +1511,10 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         ),
         ("pending", 0, 2)
     );
-    assert_eq!(reopened.authorization_ref.as_deref(), Some("auth-1"));
+    assert_eq!(reopened.authorization_ref.as_deref(), Some("op-1"));
     let replayed = projection
         .write(|conn| {
-            authorize_recovery(conn, &job.job_id, "auth-1", grant(5, NOW + 3 * DAY_MS), NOW)
+            authorize_recovery(conn, &job.job_id, "op-1", grant(5, NOW + 3 * DAY_MS), NOW)
         })
         .unwrap();
     assert_eq!(replayed, Recovery::Replayed);
@@ -1349,6 +1523,19 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
         reopened,
         "a replayed authorization grants nothing"
     );
+    // A reference that could not be a host item identity is refused before any row is read.
+    for invalid in [
+        "",
+        "has space",
+        "slash/inside",
+        &"x".repeat(retrieval::dispatch::MAX_AUTHORIZATION_REF_BYTES + 1),
+    ] {
+        let refused = projection
+            .write(|conn| authorize_recovery(conn, &job.job_id, invalid, grant(2, NOW), NOW))
+            .unwrap();
+        assert_eq!(refused, Recovery::InvalidReference, "{invalid:?}");
+    }
+    assert_eq!(ledger(dir.path(), &occurrence), reopened);
 
     // The stored episode deadline, not the pass grant, bounds the row: an expired stored deadline stops it even under a generous grant.
     drop(projection);
@@ -1368,7 +1555,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     assert_eq!(ledger(dir.path(), &occurrence).attempts, 0);
     assert_eq!(engine.calls(), 1);
     let granted_again = projection
-        .write(|conn| authorize_recovery(conn, &job.job_id, "auth-2", grant(2, NOW + DAY_MS), NOW))
+        .write(|conn| authorize_recovery(conn, &job.job_id, "op-2", grant(2, NOW + DAY_MS), NOW))
         .unwrap();
     assert!(matches!(granted_again, Recovery::Granted { .. }));
 
@@ -1385,7 +1572,7 @@ async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     );
     assert_eq!(
         done.episode.as_deref(),
-        Some(format!("{}/auth-2", job.job_id).as_str())
+        Some(format!("{}/auth/op-2", job.job_id).as_str())
     );
 }
 
@@ -1487,7 +1674,7 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
-    dispatcher.lose_next_charge_reply_for_test();
+    dispatcher.inject_fault_for_test(DispatchFault::LoseChargeReply);
     let mut events = Vec::new();
     let bounds = bounds(Duration::from_secs(5));
     let end = tokio::task::block_in_place(|| {
@@ -1514,6 +1701,112 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
             .unwrap()
     });
     assert_eq!(end, None);
+}
+
+/// A charge-statement store error rolls back the charge; the next pass reuses and admits the retained host job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_charge_statement_is_retried_not_quarantined() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "charge refused once");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
+    let bounds = bounds(Duration::from_secs(5));
+    let mut events = Vec::new();
+    let end = tokio::task::block_in_place(|| {
+        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+            events.push(event)
+        })
+    })
+    .unwrap();
+    assert_eq!(end, None);
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    let uncharged = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (
+            uncharged.state.as_str(),
+            uncharged.attempts,
+            uncharged.host_job_id
+        ),
+        ("pending", 0, None)
+    );
+
+    let mut events = Vec::new();
+    let end = tokio::task::block_in_place(|| {
+        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+            events.push(event)
+        })
+    })
+    .unwrap();
+    assert_eq!(end, None);
+    assert_eq!(admitted(&events), vec![(uncharged.job_id.clone(), 1)]);
+    assert_eq!(
+        published(&events),
+        vec![(uncharged.job_id.clone(), Publication::Embedded)]
+    );
+    assert_eq!(ledger(dir.path(), occurrence).attempts, 1);
+    assert_eq!(
+        engine.calls(),
+        1,
+        "the retained host job is reused, not re-run"
+    );
+}
+
+/// A store failure on the lane binding decides nothing, so the pass reports it as retryable and the next pass runs as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_binding_is_retryable_not_quarantined() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "bound on the second try");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    dispatcher.inject_fault_for_test(DispatchFault::RefuseBinding);
+    let bounds = bounds(Duration::from_secs(5));
+    let mut events = Vec::new();
+    let refused = tokio::task::block_in_place(|| {
+        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+            events.push(event)
+        })
+    });
+    assert!(
+        matches!(refused, Err(DispatchError::Retryable(_))),
+        "{refused:?}"
+    );
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(ledger(dir.path(), occurrence).state, "pending");
+
+    let mut events = Vec::new();
+    let end = tokio::task::block_in_place(|| {
+        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
+            events.push(event)
+        })
+    })
+    .unwrap();
+    assert_eq!(end, None);
+    assert_eq!(published(&events).len(), 1, "{events:?}");
+    assert_eq!(ledger(dir.path(), occurrence).state, "embedded");
+}
+
+/// A valid reference yields an episode identity within the host's item identity bound.
+#[test]
+fn an_authorized_episode_identity_fits_the_host_item_bound() {
+    let job_id = "0".repeat(64);
+    let longest = format!(
+        "{job_id}/auth/{}",
+        "x".repeat(retrieval::dispatch::MAX_AUTHORIZATION_REF_BYTES)
+    );
+    assert!(longest.len() <= host_runtime::synapse::jobs::MAX_ITEM_ID_BYTES);
 }
 
 /// The child bootstraps nothing: it reopens the stores the parent prepared, admits the one pending job to a host whose worker never finishes, prints its barrier once the admission is charged, and parks until the parent kills it.
@@ -1656,4 +1949,283 @@ async fn crash_after_charge_reopens_state_and_accounting_together() {
         Some(synapse.host_incarnation())
     );
     assert_ne!(done.host_incarnation.as_deref(), Some(dead_host.as_str()));
+}
+
+/// A charged admitted attempt is polled until it completes; exhaustion refuses only new attempts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_final_attempt_of_an_episode_completes_across_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "last attempt");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let synapse = component(&engine, SynapseLimits::default());
+    let tight = DispatchBounds {
+        grant: grant(1, NOW + DAY_MS),
+        ..bounds(Duration::from_millis(50))
+    };
+
+    let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    assert_eq!(end, None);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
+    assert_eq!((held.state.as_str(), held.attempts), ("admitted", 1));
+
+    // The result is still outstanding: the row is polled, not judged exhausted.
+    let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let still = ledger(dir.path(), occurrence);
+    TestEngine::release(&gate);
+    assert_eq!(end, None);
+    assert!(stopped(&events).is_empty(), "{events:?}");
+    assert!(admitted(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        (still.state.as_str(), still.attempts, still.stop_reason),
+        ("admitted", 1, None)
+    );
+
+    let (_, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &DispatchBounds {
+            grant: grant(1, NOW + DAY_MS),
+            ..bounds(Duration::from_secs(5))
+        },
+        NOW,
+    );
+    assert_eq!(
+        published(&events),
+        vec![(held.job_id.clone(), Publication::Embedded)]
+    );
+    let done = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (done.state.as_str(), done.attempts, done.host_job_id),
+        ("embedded", 1, held.host_job_id)
+    );
+    assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("m0", "evicted before polled");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let synapse = component(
+        &engine,
+        SynapseLimits {
+            retention: Duration::from_millis(100),
+            ..SynapseLimits::default()
+        },
+    );
+    let tight = DispatchBounds {
+        grant: grant(1, NOW + DAY_MS),
+        ..bounds(Duration::from_millis(50))
+    };
+    let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
+    let held = ledger(dir.path(), occurrence);
+    assert_eq!(admitted(&events), vec![(held.job_id.clone(), 1)]);
+    assert_eq!(held.state, "admitted");
+    let evicted_host_job = held.host_job_id.clone().unwrap();
+    let item = held.episode.clone().unwrap();
+
+    // The worker finishes and its result ages past retention before any pass polls it.
+    TestEngine::release(&gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if matches!(
+            synapse.poll_admitted(
+                &lane(FINGERPRINT),
+                &evicted_host_job,
+                &item,
+                "evicted before polled"
+            ),
+            PollOutcome::Restarted
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the completed job was never evicted"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(engine.calls(), 1);
+
+    let (end, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &DispatchBounds {
+            grant: grant(1, NOW + DAY_MS),
+            ..bounds(Duration::from_secs(5))
+        },
+        NOW,
+    );
+    assert_eq!(end, None);
+    assert!(stopped(&events).is_empty(), "{events:?}");
+    assert!(retried(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        admitted(&events),
+        vec![(held.job_id.clone(), 1)],
+        "the re-admission reports the attempt already charged"
+    );
+    assert_eq!(
+        published(&events),
+        vec![(held.job_id.clone(), Publication::Embedded)]
+    );
+    let done = ledger(dir.path(), occurrence);
+    assert_eq!(
+        (done.state.as_str(), done.attempts, done.episode),
+        ("embedded", 1, held.episode)
+    );
+    assert_ne!(done.host_job_id.as_deref(), Some(evicted_host_job.as_str()));
+    assert_eq!(
+        done.vector,
+        Some(encode(&TestEngine::vector_for("evicted before polled")))
+    );
+    assert_eq!(engine.calls(), 2, "the charged attempt ran again");
+}
+
+/// With room for one job, the pass takes the row created earliest even when its identifier sorts last.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eligible_rows_are_taken_oldest_first_not_by_identifier() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let objects: Vec<String> = (0..3)
+        .map(|i| corpus.publish(&format!("m{i}"), &format!("message number {i}")))
+        .collect();
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let mut job_ids: Vec<String> = objects
+        .iter()
+        .map(|object| ledger(dir.path(), occurrence_of(&rows, object)).job_id)
+        .collect();
+    job_ids.sort();
+    let last_by_identifier = job_ids.last().unwrap().clone();
+    drop(projection);
+    Connection::open(search_path(dir.path()))
+        .unwrap()
+        .execute(
+            "UPDATE embedding_jobs SET created_at=1 WHERE job_id=?1",
+            [&last_by_identifier],
+        )
+        .unwrap();
+    let projection = SearchProjection::open(dir.path()).unwrap();
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+
+    let one_at_a_time = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds(Duration::from_secs(5))
+    };
+    let (end, events) = pass(&corpus, &projection, &synapse, &one_at_a_time, NOW);
+    assert_eq!(end, None);
+    assert_eq!(
+        published(&events),
+        vec![(last_by_identifier, Publication::Embedded)],
+        "the oldest row goes first regardless of its identifier"
+    );
+}
+
+/// Recovering under the reference `1` opens an episode distinct from the first, so inference runs instead of replaying the stopped episode's retained failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_authorization_reference_cannot_name_the_first_episode() {
+    let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
+        "rejected by the model",
+        SynapseLimits::default(),
+        bounds(Duration::from_secs(5)),
+        |_, _, engine, _, _| {
+            engine.fail_next(InferenceError::Input("rejected".to_owned()));
+        },
+    );
+    assert_eq!(end, None);
+    let job = ledger(dir.path(), &occurrence);
+    assert_eq!(
+        stopped(&events),
+        vec![(job.job_id.clone(), "schema_violation".to_string())]
+    );
+    assert_eq!((job.state.as_str(), job.attempts), ("failed", 1));
+    assert_eq!(engine.calls(), 1);
+
+    let recovered = projection
+        .write(|conn| authorize_recovery(conn, &job.job_id, "1", grant(2, NOW + DAY_MS), NOW))
+        .unwrap();
+    let Recovery::Granted { episode_id } = recovered else {
+        panic!("{recovered:?}");
+    };
+    assert_ne!(
+        episode_id,
+        format!("{}/1", job.job_id),
+        "an authorized episode lives in its own namespace"
+    );
+
+    let (end, events) = pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &bounds(Duration::from_secs(5)),
+        NOW,
+    );
+    assert_eq!(end, None);
+    assert_eq!(
+        published(&events),
+        vec![(job.job_id.clone(), Publication::Embedded)],
+        "{events:?}"
+    );
+    let done = ledger(dir.path(), &occurrence);
+    assert_eq!(
+        (done.state.as_str(), done.attempts, done.episode),
+        ("embedded", 1, Some(episode_id))
+    );
+    assert_eq!(engine.calls(), 2, "the new episode ran its own inference");
+}
+
+/// A pass on a one-worker runtime must hand the worker off while it polls, or the inference it waits for never runs.
+#[test]
+fn a_pass_on_a_runtime_worker_yields_the_worker_to_the_inference_it_awaits() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let (end, published_count, calls) = runtime.block_on(async move {
+        tokio::spawn(async move {
+            let corpus = Corpus::open(&root);
+            corpus.seed();
+            corpus.publish("m0", "embedded from a worker");
+            let (projection, _) = corpus.bootstrap(&root);
+            let engine = TestEngine::new();
+            let synapse = component(&engine, SynapseLimits::default());
+            let project = ProjectScope::new(PROJECT).unwrap();
+            let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+            let mut events = Vec::new();
+            let end = dispatcher
+                .run_pass(
+                    eligibility(&project),
+                    &bounds(Duration::from_millis(300)),
+                    NOW,
+                    &mut |event| events.push(event),
+                )
+                .unwrap();
+            (end, published(&events).len(), engine.calls())
+        })
+        .await
+        .unwrap()
+    });
+    assert_eq!(end, None);
+    assert_eq!(
+        published_count, 1,
+        "the worker's inference ran while the pass polled"
+    );
+    assert_eq!(calls, 1);
 }

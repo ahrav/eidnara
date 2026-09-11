@@ -346,7 +346,7 @@ bodies opaque and states only the `invalid_params` cap codes
 [wire751]: ../../../../host-wire-protocol.md#L440
 [wire83]: ../../../../host-wire-protocol.md#L750
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
-[paging]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
+[paging]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [mapinsert]: https://docs.rs/serde_json/1.0.151/src/serde_json/map.rs.html#127-129
 [derivedup]: https://docs.rs/serde_derive/1.0.229/src/serde_derive/de/struct_.rs.html#269
 [t-cap]: ../../../../../crates/daemon/src/lib.rs#L18567-L18625

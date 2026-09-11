@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 use super::SynapseLimits;
 use crate::wire::ByteCharge;
 
-pub(crate) const MAX_ITEM_ID_BYTES: usize = 256;
+/// The longest item identity the table admits, on the wire and in process.
+pub const MAX_ITEM_ID_BYTES: usize = 256;
 pub(crate) const CONTENT_SHA256_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +223,7 @@ fn parse_canonical_decimal(digits: &str) -> Option<u64> {
 }
 
 /// While retained, a stored failure makes identical resubmissions report the same failure.
-fn failure_is_permanent(code: &str) -> bool {
+pub fn failure_is_permanent(code: &str) -> bool {
     matches!(
         code,
         "artifact_invalid"

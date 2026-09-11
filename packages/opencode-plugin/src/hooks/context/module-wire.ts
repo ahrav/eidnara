@@ -1,5 +1,10 @@
 import * as crypto from "node:crypto";
 import {
+    type SerializedJsonBody,
+    serializedJsonText,
+    serializeJsonBody,
+} from "../../shared/host-client/serialized-json-body";
+import {
     getRawSessionStoredMessageCount,
     readRawSessionMessageOrdinalPage,
 } from "./read-session-chunk";
@@ -54,13 +59,10 @@ function shortestDecimal(value: number): { negative: boolean; digits: string; po
 const I64_MIN = -(2n ** 63n);
 const U64_MAX = 2n ** 64n - 1n;
 
-/**
- * The positional integer text `JSON.stringify` puts on the wire for an integer-valued double
- * below 1e21, when `serde_json` parses that text as `i64` or `u64` rather than `f64`.
- */
-function wireIntegerText(value: number): string | undefined {
+/** Serde treats negative zero and decimal/exponent tokens as f64 rather than i64/u64. */
+function wireIntegerText(value: number | string): string | undefined {
     const text = String(value);
-    if (text.includes("e")) return undefined;
+    if (/[.eE]/.test(text) || text === "-0") return undefined;
     const wire = BigInt(text);
     return wire >= I64_MIN && wire <= U64_MAX ? text : undefined;
 }
@@ -627,17 +629,51 @@ export function moduleWireBodyBytes(payload: {
  * The module understands continuation markers for a single item that exceeds the page limit.
  */
 export interface ModuleTransformWirePage {
-    page: Record<string, unknown>;
+    page: SerializedJsonBody;
     /** The byte count must equal the UTF-8 length of the serialized page. */
     bytes: number;
+}
+
+const F64_JSON_MAX_BYTES = 24;
+
+function hasLoneJsonSurrogate(token: string): boolean {
+    if (!/\\u[dD][89a-fA-F]/.test(token)) return false;
+    const decoded = JSON.parse(token) as string & { isWellFormed(): boolean };
+    return !decoded.isWellFormed();
+}
+
+/** Invalid strings retain byte-only packing; valid f64 tokens use the formatter's maximum length. */
+function hostNumberGrowthBound(text: string): number {
+    let growth = 0;
+    for (const match of text.matchAll(
+        /"[^"\\]*(?:\\.[^"\\]*)*"|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    )) {
+        const token = match[1];
+        if (token === undefined && hasLoneJsonSurrogate(match[0])) return 0;
+        if (token !== undefined && wireIntegerText(token) === undefined) {
+            growth += Math.max(0, F64_JSON_MAX_BYTES - token.length);
+        }
+    }
+    return growth;
+}
+
+/** Upper bound on the bytes one array item occupies after the host reserializes its page. */
+function itemByteLengthBound(value: unknown): number {
+    const text = JSON.stringify(value) ?? "null";
+    return Buffer.byteLength(text) + hostNumberGrowthBound(text);
 }
 
 export function buildPagedModuleTransformPayloads(
     body: Record<string, unknown>,
 ): ModuleTransformWirePage[] {
-    // The returned serialized length prevents transport telemetry from serializing the body twice.
-    const unpagedBytes = Buffer.byteLength(JSON.stringify(body));
-    if (unpagedBytes <= MODULE_PAGE_MAX_BYTES) return [{ page: body, bytes: unpagedBytes }];
+    const unpaged = serializeJsonBody(body);
+    const unpagedText = serializedJsonText(unpaged);
+    const unpagedBytes = Buffer.byteLength(unpagedText, "utf8");
+    if (unpagedBytes <= MODULE_PAGE_MAX_BYTES) {
+        return [{ page: unpaged, bytes: unpagedBytes }];
+    }
+    // The per-item byte bound matches its in-page bytes only after every nested value is plain JSON.
+    body = JSON.parse(unpagedText) as Record<string, unknown>;
 
     const arrayFields = [
         "input",
@@ -660,6 +696,7 @@ export function buildPagedModuleTransformPayloads(
             field,
             value: values[itemIndex],
             itemIndex,
+            bound: itemByteLengthBound(values[itemIndex]),
         }));
     });
     const emptyArrays = (): Record<string, unknown[]> =>
@@ -673,7 +710,7 @@ export function buildPagedModuleTransformPayloads(
         const pageArrays = Object.fromEntries(
             arrayFields.map((field) => [field, args.arrays[field] ?? []]),
         );
-        const page: Record<string, unknown> = {
+        const value: Record<string, unknown> = {
             method: body.method,
             session_id: body.session_id,
             shadow_generation: body.shadow_generation,
@@ -686,21 +723,19 @@ export function buildPagedModuleTransformPayloads(
             transform_page_digest: transformPageDigest(pageArrays),
             ...pageArrays,
         };
-        if (args.complete) Object.assign(page, scalarFields);
-        // The returned `bytes` value is the serialized page's exact UTF-8 length.
-        return { page, bytes: Buffer.byteLength(JSON.stringify(page)) };
+        if (args.complete) Object.assign(value, scalarFields);
+        const page = serializeJsonBody(value);
+        return { page, bytes: Buffer.byteLength(serializedJsonText(page), "utf8") };
     };
     const hasItems = (arrays: Record<string, unknown[]>): boolean =>
         Object.values(arrays).some((values) => values.length > 0);
 
     // The encoder assigns digests only to emitted pages.
-    const serializedItemBytes = (value: unknown): number =>
-        Buffer.byteLength(JSON.stringify(value) ?? "null");
-    const pageByteLength = (args: {
+    const pageByteLengthBound = (args: {
         index: number;
         total: number;
         complete: boolean;
-        arrayBytes: Record<string, number>;
+        arrayByteBounds: Record<string, number>;
     }): number => {
         const skeleton: Record<string, unknown> = {
             method: body.method,
@@ -717,58 +752,54 @@ export function buildPagedModuleTransformPayloads(
         if (args.complete) Object.assign(skeleton, scalarFields);
         const emptyArrayBytes = 2 * arrayFields.length;
         const contentsBytes = arrayFields.reduce(
-            (sum, field) => sum + (args.arrayBytes[field] ?? 2),
+            (sum, field) => sum + (args.arrayByteBounds[field] ?? 2),
             0,
         );
-        return Buffer.byteLength(JSON.stringify(skeleton)) - emptyArrayBytes + contentsBytes;
+        const text = JSON.stringify(skeleton);
+        return (
+            Buffer.byteLength(text) + hostNumberGrowthBound(text) - emptyArrayBytes + contentsBytes
+        );
     };
 
     let assumedTotal = 1;
     for (let attempt = 0; attempt < 10; attempt += 1) {
-        const pages: ModuleTransformWirePage[] = [];
+        const pages: Record<string, unknown[]>[] = [];
         let current = emptyArrays();
-        let currentBytes = Object.fromEntries(arrayFields.map((field) => [field, 2]));
-        const appendUnit = (field: string, value: unknown): boolean => {
-            const valueBytes = serializedItemBytes(value);
-            const previousBytes = currentBytes[field] ?? 2;
+        let currentByteBounds = Object.fromEntries(arrayFields.map((field) => [field, 2]));
+        const appendUnit = (field: string, value: unknown, valueBytes: number): boolean => {
+            const previousBytes = currentByteBounds[field] ?? 2;
             current[field].push(value);
-            currentBytes[field] = previousBytes + valueBytes + (current[field].length > 1 ? 1 : 0);
+            currentByteBounds[field] =
+                previousBytes + valueBytes + (current[field].length > 1 ? 1 : 0);
             if (
-                pageByteLength({
+                pageByteLengthBound({
                     index: pages.length,
                     total: assumedTotal,
                     complete: false,
-                    arrayBytes: currentBytes,
+                    arrayByteBounds: currentByteBounds,
                 }) <= MODULE_PAGE_MAX_BYTES
             ) {
                 return true;
             }
             current[field].pop();
-            currentBytes[field] = previousBytes;
+            currentByteBounds[field] = previousBytes;
             if (hasItems(current)) {
-                pages.push(
-                    makePage({
-                        index: pages.length,
-                        total: assumedTotal,
-                        complete: false,
-                        arrays: current,
-                    }),
-                );
+                pages.push(current);
                 current = emptyArrays();
-                currentBytes = Object.fromEntries(arrayFields.map((name) => [name, 2]));
+                currentByteBounds = Object.fromEntries(arrayFields.map((name) => [name, 2]));
             }
             current[field].push(value);
-            currentBytes[field] = 2 + valueBytes;
+            currentByteBounds[field] = 2 + valueBytes;
             if (
-                pageByteLength({
+                pageByteLengthBound({
                     index: pages.length,
                     total: assumedTotal,
                     complete: false,
-                    arrayBytes: currentBytes,
+                    arrayByteBounds: currentByteBounds,
                 }) > MODULE_PAGE_MAX_BYTES
             ) {
                 current[field].pop();
-                currentBytes[field] = 2;
+                currentByteBounds[field] = 2;
                 return false;
             }
             return true;
@@ -776,7 +807,10 @@ export function buildPagedModuleTransformPayloads(
 
         for (const item of items) {
             // The daemon reads any object-valued reserved key as a marker, so an item that carries one itself travels as a continuation; its JSON text reassembles to the original value.
-            if (!looksLikeContinuationMarker(item.value) && appendUnit(item.field, item.value)) {
+            if (
+                !looksLikeContinuationMarker(item.value) &&
+                appendUnit(item.field, item.value, item.bound)
+            ) {
                 continue;
             }
             const serialized = JSON.stringify(item.value) ?? "null";
@@ -799,44 +833,46 @@ export function buildPagedModuleTransformPayloads(
                     },
                     chunk,
                 };
-                if (!appendUnit(item.field, marker)) {
+                if (!appendUnit(item.field, marker, itemByteLengthBound(marker))) {
                     throw new Error("module transform continuation exceeds the 512 KiB page limit");
                 }
             }
         }
 
-        let finalPage = makePage({
+        let finalByteBound = pageByteLengthBound({
             index: pages.length,
             total: assumedTotal,
             complete: true,
-            arrays: current,
+            arrayByteBounds: currentByteBounds,
         });
-        if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) {
+        if (finalByteBound > MODULE_PAGE_MAX_BYTES) {
             if (!hasItems(current)) {
                 throw new Error("module transform scalar tail exceeds the 512 KiB page limit");
             }
-            pages.push(
-                makePage({
-                    index: pages.length,
-                    total: assumedTotal,
-                    complete: false,
-                    arrays: current,
-                }),
-            );
+            pages.push(current);
             current = emptyArrays();
-            currentBytes = Object.fromEntries(arrayFields.map((field) => [field, 2]));
-            finalPage = makePage({
+            currentByteBounds = Object.fromEntries(arrayFields.map((field) => [field, 2]));
+            finalByteBound = pageByteLengthBound({
                 index: pages.length,
                 total: assumedTotal,
                 complete: true,
-                arrays: current,
+                arrayByteBounds: currentByteBounds,
             });
-            if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) {
+            if (finalByteBound > MODULE_PAGE_MAX_BYTES) {
                 throw new Error("module transform scalar tail exceeds the 512 KiB page limit");
             }
         }
-        pages.push(finalPage);
-        if (pages.length === assumedTotal) return pages;
+        pages.push(current);
+        if (pages.length === assumedTotal) {
+            return pages.map((arrays, index) =>
+                makePage({
+                    index,
+                    total: pages.length,
+                    complete: index === pages.length - 1,
+                    arrays,
+                }),
+            );
+        }
         assumedTotal = pages.length;
     }
     throw new Error("module transform page count did not stabilize");

@@ -8,7 +8,7 @@ pub enum QuarantineKind {
     Storage,
 }
 
-/// The reason a writer stopped trusting the projection; every later call on that writer returns it unchanged.
+/// Records why a writer no longer trusts the projection; every later call on any of the projection's writers returns it unchanged.
 /// `detail` is unredacted backend error text for the operator and must not be forwarded to untrusted sinks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quarantine {

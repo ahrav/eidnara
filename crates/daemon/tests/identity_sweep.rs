@@ -565,7 +565,7 @@ fn references(data_home: &Path, synapse: &SynapseComponent) -> Vec<Reference> {
                     .zip(episode.as_deref())
                     .is_some_and(|(job, episode)| {
                         !matches!(
-                            synapse.poll_admitted(job, episode, &text),
+                            synapse.poll_admitted(&lane(FINGERPRINT), job, episode, &text),
                             PollOutcome::Restarted
                         )
                     });
@@ -1166,14 +1166,14 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         .unwrap();
     let ready = std::time::Instant::now();
     while !matches!(
-        synapse.poll_admitted(&host_job, &episode, "held text"),
+        synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
         PollOutcome::Page(_)
     ) && ready.elapsed() < Duration::from_secs(5)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(matches!(
-        synapse.poll_admitted(&host_job, &episode, "held text"),
+        synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
         PollOutcome::Page(_)
     ));
     let report = sweep(&projection, &synapse, ten());
@@ -1248,7 +1248,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let mut served = None;
     let ready = std::time::Instant::now();
     while served.is_none() && ready.elapsed() < Duration::from_secs(5) {
-        match synapse.poll_admitted(&host_job, &episode, "lost text") {
+        match synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "lost text") {
             PollOutcome::Page(page) => served = Some(page),
             _ => std::thread::sleep(Duration::from_millis(5)),
         }

@@ -37,6 +37,9 @@ pub enum StoreError {
     /// A backend (database driver) operation failed.
     #[error("storage backend: {0}")]
     Backend(String),
+    /// A bounded write reached its deadline before `BEGIN` ran, so it applied nothing.
+    #[error("storage write lock was not acquired before the deadline")]
+    Deadline,
     /// An io failure preparing the store location.
     #[error("storage io: {0}")]
     Io(#[source] std::io::Error),
@@ -108,12 +111,17 @@ mod sqlite_backend {
         path::{Path, PathBuf},
         sync::{Mutex, MutexGuard},
         thread::{self, ThreadId},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use lease::{FileIdentity, FileLeaseStore, HeldFileLease, protect_file};
     use rusqlite::{Connection, OpenFlags};
     use sha2::{Digest, Sha256};
+
+    /// How long a statement waits on another connection's lock before SQLite reports `SQLITE_BUSY`.
+    const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+    /// `Mutex::lock` has no timeout, so a bounded acquisition polls at this interval.
+    const CONN_ACQUIRE_POLL: Duration = Duration::from_millis(1);
 
     /// `PRAGMA application_id` of every Eidnara-owned SQLite file (`EIDN` in ASCII).
     pub const APPLICATION_ID: u32 = 0x4549_444E;
@@ -193,6 +201,30 @@ mod sqlite_backend {
         /// is released, so a thread that reads its own id in `holder` holds `conn`, and the
         /// check cannot race with another thread taking the lock.
         fn lock_conn(&self) -> Result<ConnGuard<'_>, StoreError> {
+            self.refuse_reentry()?;
+            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(self.guard(conn))
+        }
+
+        /// Acquires the connection by polling until `deadline` rather than blocking past the caller's budget.
+        fn lock_conn_within(&self, deadline: Instant) -> Result<ConnGuard<'_>, StoreError> {
+            self.refuse_reentry()?;
+            loop {
+                match self.conn.try_lock() {
+                    Ok(conn) => return Ok(self.guard(conn)),
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                        return Ok(self.guard(poisoned.into_inner()));
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                }
+                if Instant::now() >= deadline {
+                    return Err(StoreError::Deadline);
+                }
+                thread::sleep(CONN_ACQUIRE_POLL);
+            }
+        }
+
+        fn refuse_reentry(&self) -> Result<(), StoreError> {
             let current = thread::current().id();
             if *self.holder.lock().unwrap_or_else(|p| p.into_inner()) == Some(current) {
                 return Err(StoreError::Backend(
@@ -200,12 +232,15 @@ mod sqlite_backend {
                         .to_string(),
                 ));
             }
-            let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-            *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = Some(current);
-            Ok(ConnGuard {
+            Ok(())
+        }
+
+        fn guard<'a>(&'a self, conn: MutexGuard<'a, Connection>) -> ConnGuard<'a> {
+            *self.holder.lock().unwrap_or_else(|p| p.into_inner()) = Some(thread::current().id());
+            ConnGuard {
                 conn,
                 holder: &self.holder,
-            })
+            }
         }
 
         /// `with_conn` permits read-only queries and connection-local configuration.
@@ -291,15 +326,53 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let mut guard = self.lock_conn()?;
+            let guard = self.lock_conn()?;
+            self.fenced_write(&guard, None, f)
+        }
+
+        /// [`Self::with_conn_fenced`] whose connection and write-lock acquisition end at `deadline`.
+        ///
+        /// The connection is polled rather than awaited, and `BEGIN IMMEDIATE` waits for another
+        /// writer only until `deadline`. Once the transaction is open the write is unbounded, as
+        /// in [`Self::with_conn_fenced`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when the connection or the write lock is still held
+        /// at `deadline`; nothing was written. Every other error is as for [`Self::with_conn_fenced`].
+        pub fn with_conn_fenced_within<T>(
+            &self,
+            deadline: Instant,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            self.fenced_write(&guard, Some(deadline), f)
+        }
+
+        fn fenced_write<T>(
+            &self,
+            conn: &Connection,
+            deadline: Option<Instant>,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
             // A superseded writer must not touch the file at all, and the durability pin
             // rewrites the journal mode. This read-only precheck refuses it before the
             // pragmas run; the claim inside the transaction remains the authoritative check.
-            precheck_fence(&guard, self.epoch)?;
-            pin_fence_durability(&guard)?;
-            let tx = guard
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            let tx = match deadline {
+                None => {
+                    precheck_fence(conn, self.epoch)?;
+                    pin_fence_durability(conn)?;
+                    rusqlite::Transaction::new_unchecked(
+                        conn,
+                        rusqlite::TransactionBehavior::Immediate,
+                    )
+                    .map_err(|e| StoreError::Backend(e.to_string()))?
+                }
+                Some(deadline) => {
+                    prepare_fenced_within(conn, self.epoch, deadline)?;
+                    begin_immediate_within(conn, deadline)?
+                }
+            };
 
             claim_fence(&tx, self.epoch)?;
 
@@ -314,6 +387,66 @@ mod sqlite_backend {
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             Ok(out)
         }
+    }
+
+    /// Opens an IMMEDIATE transaction whose wait for another writer ends at `deadline`.
+    ///
+    /// The busy timeout is connection state, so it is narrowed to the remaining budget for this
+    /// `BEGIN` alone and restored to [`BUSY_TIMEOUT`] before returning, whether or not `BEGIN` ran.
+    fn begin_immediate_within(
+        conn: &Connection,
+        deadline: Instant,
+    ) -> Result<rusqlite::Transaction<'_>, StoreError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(StoreError::Deadline);
+        }
+        conn.busy_timeout(remaining)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let begun =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate);
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        begun.map_err(deadline_on_lock_wait)
+    }
+
+    /// Applies the busy timeout remaining at entry to both fence operations.
+    fn prepare_fenced_within(
+        conn: &Connection,
+        holder_epoch: u64,
+        deadline: Instant,
+    ) -> Result<(), StoreError> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(StoreError::Deadline);
+        }
+        conn.busy_timeout(remaining)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let prepared = precheck_fence_via(conn, holder_epoch, deadline_on_lock_wait)
+            .and_then(|()| pin_fence_durability_via(conn, deadline_on_lock_wait));
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        prepared
+    }
+
+    /// `DatabaseBusy` and `DatabaseLocked` return [`StoreError::Deadline`] after the
+    /// caller's deadline sets the busy timeout.
+    fn deadline_on_lock_wait(e: rusqlite::Error) -> StoreError {
+        match &e {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                StoreError::Deadline
+            }
+            _ => backend_error(e),
+        }
+    }
+
+    fn backend_error(e: rusqlite::Error) -> StoreError {
+        StoreError::Backend(e.to_string())
     }
 
     /// Folds a cleanup result into the callback result without discarding either error.
@@ -904,11 +1037,18 @@ mod sqlite_backend {
     /// journal mode can still be lowered between protected transactions. With WAL and
     /// `synchronous=NORMAL`, power loss can roll back committed transactions.
     fn pin_fence_durability(conn: &Connection) -> Result<(), StoreError> {
+        pin_fence_durability_via(conn, backend_error)
+    }
+
+    fn pin_fence_durability_via(
+        conn: &Connection,
+        map: fn(rusqlite::Error) -> StoreError,
+    ) -> Result<(), StoreError> {
         conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            .map_err(map)?;
         let mode: String = conn
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            .map_err(map)?;
         if !mode.eq_ignore_ascii_case("wal") {
             return Err(StoreError::Backend(format!(
                 "fenced writes require a crash-safe journal, but journal_mode is {mode}"
@@ -1079,7 +1219,7 @@ mod sqlite_backend {
         pin_fence_durability(&conn)?;
         // The busy timeout makes transient locks wait rather than fail, and
         // foreign-key enforcement is enabled.
-        conn.busy_timeout(Duration::from_secs(5))
+        conn.busy_timeout(BUSY_TIMEOUT)
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -1284,6 +1424,13 @@ mod sqlite_backend {
     /// `fence` table exists; only the transaction that initializes a pristine file may see
     /// no row, since the baseline creates the table and the first claim writes the row.
     fn read_fence_epoch_in(conn: &Connection) -> Result<Option<u64>, StoreError> {
+        read_fence_epoch_via(conn, backend_error)
+    }
+
+    fn read_fence_epoch_via(
+        conn: &Connection,
+        map: fn(rusqlite::Error) -> StoreError,
+    ) -> Result<Option<u64>, StoreError> {
         let epoch: Option<i64> = conn
             .query_row(FENCE_EPOCH_SQL, [], |row| row.get(0))
             .map(Some)
@@ -1291,7 +1438,7 @@ mod sqlite_backend {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(other),
             })
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            .map_err(map)?;
         epoch.map(decode_fence_epoch).transpose()
     }
 
@@ -1569,7 +1716,15 @@ mod sqlite_backend {
     /// superseded. This is a filter, not a claim: a concurrent takeover after this read is
     /// caught by `claim_fence` inside the transaction.
     fn precheck_fence(conn: &Connection, holder_epoch: u64) -> Result<(), StoreError> {
-        let db_epoch = read_fence_epoch_in(conn)?.ok_or(StoreError::FenceMissing)?;
+        precheck_fence_via(conn, holder_epoch, backend_error)
+    }
+
+    fn precheck_fence_via(
+        conn: &Connection,
+        holder_epoch: u64,
+        map: fn(rusqlite::Error) -> StoreError,
+    ) -> Result<(), StoreError> {
+        let db_epoch = read_fence_epoch_via(conn, map)?.ok_or(StoreError::FenceMissing)?;
         if db_epoch > holder_epoch {
             return Err(StoreError::Fenced {
                 holder_epoch,
@@ -1684,6 +1839,7 @@ mod tests {
     use super::*;
     use lease::FileIdentity;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn a_read_scope_restores_the_query_only_value_it_found() {
@@ -3895,6 +4051,132 @@ mod tests {
 
     fn user_error(e: StoreError) -> rusqlite::Error {
         rusqlite::Error::UserFunctionError(e.to_string().into())
+    }
+
+    #[test]
+    fn a_bounded_fenced_write_stops_at_its_deadline_and_writes_nothing() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+
+        // Without contention the bounded write behaves as the unbounded one.
+        store
+            .with_conn_fenced_within(Instant::now() + Duration::from_secs(5), |tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('free', '1')", [])
+            })
+            .expect("an uncontended bounded write commits");
+
+        // Another connection holds the database write lock past the deadline.
+        let blocker = rusqlite::Connection::open(sqlite_path(&d)).expect("blocker");
+        blocker.busy_timeout(Duration::ZERO).expect("no wait");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold the write lock");
+        let started = Instant::now();
+        let r = store.with_conn_fenced_within(started + Duration::from_millis(200), |tx| {
+            tx.execute("INSERT INTO kv (k, v) VALUES ('blocked', '1')", [])
+        });
+        assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the write waited {:?}, past its deadline and toward the connection's busy timeout",
+            started.elapsed()
+        );
+        drop(blocker);
+        let rows: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(rows, 1, "the refused write left no row");
+
+        // The connection's busy timeout is restored, so a later unbounded write waits for a lock the bounded write would have given up on.
+        let blocker = rusqlite::Connection::open(sqlite_path(&d)).expect("blocker");
+        blocker.busy_timeout(Duration::ZERO).expect("no wait");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold the write lock");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            blocker.execute_batch("ROLLBACK").expect("release");
+        });
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv (k, v) VALUES ('waited', '1')", []))
+            .expect("the unbounded write outwaits a 400 ms holder");
+        release.join().expect("release thread");
+
+        // A bounded write returns `StoreError::Deadline` when an in-process connection stays held past its deadline.
+        let held = std::sync::Arc::new(store);
+        let (took, release) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::sync::Arc::clone(&held);
+        let thread = std::thread::spawn(move || {
+            holder
+                .with_conn(|_| {
+                    took.send(()).expect("signal");
+                    release_rx.recv().expect("wait");
+                    Ok(())
+                })
+                .expect("held read");
+        });
+        release.recv().expect("the connection is held");
+        let started = Instant::now();
+        let r = held.with_conn_fenced_within(started + Duration::from_millis(200), |tx| {
+            tx.execute("INSERT INTO kv (k, v) VALUES ('held', '1')", [])
+        });
+        assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        release_tx.send(()).expect("release");
+        thread.join().expect("holder thread");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bounded_fenced_write_stops_at_its_deadline_before_begin_runs() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+
+        // Maintenance is unrestricted by contract and can lower the journal mode
+        // between protected transactions; `pin_fence_durability` exists to rewrite it.
+        store
+            .with_conn_unfenced(|conn| {
+                conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                    row.get::<_, String>(0)
+                })
+            })
+            .expect("lower the journal mode");
+
+        // In rollback-journal mode an exclusive holder blocks even the fence
+        // precheck's read, before `BEGIN` would have narrowed the busy timeout.
+        let blocker = rusqlite::Connection::open(sqlite_path(&d)).expect("blocker");
+        blocker.busy_timeout(Duration::ZERO).expect("no wait");
+        blocker
+            .execute_batch("BEGIN EXCLUSIVE")
+            .expect("hold the file exclusively");
+        let started = Instant::now();
+        let r = store.with_conn_fenced_within(started + Duration::from_millis(200), |tx| {
+            tx.execute("INSERT INTO kv (k, v) VALUES ('blocked', '1')", [])
+        });
+        assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the fence precheck waited {:?}, past the deadline and toward the connection's busy timeout",
+            started.elapsed()
+        );
+        blocker.execute_batch("ROLLBACK").expect("release");
+        drop(blocker);
+
+        // The busy timeout is restored and the durability pin re-establishes WAL,
+        // so a later bounded write commits.
+        store
+            .with_conn_fenced_within(Instant::now() + Duration::from_secs(5), |tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('after', '1')", [])
+            })
+            .expect("the store recovers once the holder releases");
+        let mode: String = store
+            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
+            .expect("mode");
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode is {mode}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

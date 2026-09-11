@@ -33,7 +33,7 @@ use storage::GuardedConn;
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
@@ -252,6 +252,8 @@ pub enum ProjectionError {
     BatchOverBound { bound: &'static str, size: usize },
     #[error("vector generation {generation_id} is not registered for this projection")]
     UnknownGeneration { generation_id: String },
+    #[error("vector generation {generation_id} is retired and accepts no new vector")]
+    RetiredGeneration { generation_id: String },
     #[error("no open embedding job exists for occurrence {occurrence_id} under the generation")]
     NoPendingWork { occurrence_id: String },
     #[error("the vector is not the generation's shape: {reason}")]

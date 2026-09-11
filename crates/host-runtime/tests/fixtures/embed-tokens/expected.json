@@ -1,5 +1,5 @@
 {
- "_derivation": "Hand-derived from tokenizer.json: WordLevel vocab [PAD]=0 [UNK]=1 [CLS]=2 [SEP]=3 alpha=4 beta=5 gamma=6 delta=7; WhitespaceSplit pre-tokenizer; TemplateProcessing wraps every single sequence as [CLS] A [SEP]. attention_mask is 1 for every real token. special_tokens_mask is 1 only for the tokens the template supplies; a special token written in the text is matched by the added vocabulary and encodes to its id like any other word, so its mask stays 0. Pinned against tokenizers 0.22.2 (the crate's exact dependency). special_tokens_map.json adds [SEP TOK] at load time exactly as inference does; it is absent from tokenizer.json, so it receives the next id after the vocabulary, 8, and only a counter cloned from the configured inference tokenizer can see it.",
+ "_derivation": "Hand-derived from tokenizer.json: WordLevel vocab [PAD]=0 [UNK]=1 [CLS]=2 [SEP]=3 alpha=4 beta=5 gamma=6 delta=7; WhitespaceSplit pre-tokenizer; TemplateProcessing wraps every single sequence as [CLS] A [SEP]. attention_mask is 1 for every real token. special_tokens_mask is 1 only for the tokens the template supplies; a special token written in the text is matched by the added vocabulary and encodes to its id like any other word, so its mask stays 0. Pinned against tokenizers 0.22.2 (the crate's exact dependency). Inference (fastembed 6.0.0 load_tokenizer) registers a special_tokens_map.json entry only when its value is a string or a complete object; it skips array values such as additional_special_tokens. mask_token [SEP TOK] is a string value absent from tokenizer.json, so inference registers it with the next id after the vocabulary, 8, and only a counter cloned from the configured inference tokenizer can see it; a counter built from tokenizer.json bytes alone would split it into two [UNK] words. [ARRAY TOK] sits in the additional_special_tokens array, so inference never registers it and WhitespaceSplit yields two [UNK] words.",
  "sequences": [
   {
    "label": "two words",
@@ -248,6 +248,34 @@
    ],
    "special_tokens_mask": [
     1,
+    0,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "array-valued map entry is not registered",
+   "text": "alpha [ARRAY TOK] beta",
+   "ids": [
+    2,
+    4,
+    1,
+    1,
+    5,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
     0,
     0,
     0,

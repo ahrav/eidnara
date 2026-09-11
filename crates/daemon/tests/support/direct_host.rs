@@ -42,6 +42,7 @@ fn fixture_binary() -> PathBuf {
             "direct_host_fixture",
             "--features",
             "direct-host-fixture",
+            "--locked",
         ])
         .current_dir(&workspace)
         .output()

@@ -122,14 +122,19 @@ impl From<&InferenceError> for InferenceFailureKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneUnavailableState {
     Starting,
+    /// The platform never serves a lane, so no retry within this process can succeed.
+    Unsupported,
+    /// The lane is disabled for a reason other than platform support.
     Disabled,
     Failing,
 }
 
 impl LaneUnavailableState {
-    pub const fn as_str(self) -> &'static str {
+    /// Display text only; the `synapse_state` health metric uses its own vocabulary.
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
+            Self::Unsupported => "unsupported",
             Self::Disabled => "disabled",
             Self::Failing => "failing",
         }

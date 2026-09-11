@@ -15,7 +15,7 @@ use host_runtime::synapse::{
     InferenceFailureKind, LaneInfo, LaneUnavailableState, SynapseComponent, SynapseLimits,
     SynapseStatus,
 };
-use support::synapse::{DeterministicEngine, ready_component, test_lane};
+use support::synapse::{BUDGET, DeterministicEngine, ready_component, test_lane};
 use tokenizers::{AddedToken, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 fn fixture_dir(name: &str) -> PathBuf {
@@ -46,7 +46,16 @@ fn fixture_counter() -> UntruncatedTokenizer {
     UntruncatedTokenizer::from_tokenizer(inference_shaped(Some(4), PaddingStrategy::BatchLongest))
 }
 
-/// The fixture tokenizer as inference configures it: padded, truncated at `window`, and with every `special_tokens_map.json` entry added after loading, the way the inference engine registers them.
+/// The test oracle bypasses `UntruncatedTokenizer`, so the pinned ids and masks validate its count independently.
+fn cleared_oracle() -> Tokenizer {
+    let mut tokenizer = inference_shaped(None, PaddingStrategy::BatchLongest);
+    tokenizer.with_padding(None);
+    tokenizer
+}
+
+/// The fixture tokenizer as inference configures it: padded, truncated at `window`, and with the `special_tokens_map.json` entries the inference engine registers after loading.
+///
+/// This mirrors fastembed's `load_tokenizer`: a string value is added as a special token; an object value is added only when it carries `content`, `single_word`, `lstrip`, `rstrip`, and `normalized`; every other value, including the `additional_special_tokens` array, is skipped.
 fn inference_shaped(window: Option<usize>, padding: PaddingStrategy) -> Tokenizer {
     let mut tokenizer =
         Tokenizer::from_bytes(read("embed-tokens", "tokenizer.json")).expect("tokenizer");
@@ -67,19 +76,41 @@ fn inference_shaped(window: Option<usize>, padding: PaddingStrategy) -> Tokenize
     let map: serde_json::Value =
         serde_json::from_slice(&read("embed-tokens", "special_tokens_map.json")).unwrap();
     for value in map.as_object().unwrap().values() {
-        let contents: Vec<&str> = match value {
-            serde_json::Value::String(content) => vec![content.as_str()],
-            serde_json::Value::Array(items) => items.iter().map(|i| i.as_str().unwrap()).collect(),
-            serde_json::Value::Object(object) => vec![object["content"].as_str().unwrap()],
-            _ => unreachable!(),
-        };
-        for content in contents {
-            tokenizer.add_special_tokens(&[AddedToken {
-                content: content.to_owned(),
+        let added = match value {
+            serde_json::Value::String(content) => AddedToken {
+                content: content.clone(),
                 special: true,
                 ..Default::default()
-            }]);
-        }
+            },
+            serde_json::Value::Object(object) => {
+                let (
+                    Some(content),
+                    Some(single_word),
+                    Some(lstrip),
+                    Some(rstrip),
+                    Some(normalized),
+                ) = (
+                    object["content"].as_str(),
+                    object["single_word"].as_bool(),
+                    object["lstrip"].as_bool(),
+                    object["rstrip"].as_bool(),
+                    object["normalized"].as_bool(),
+                )
+                else {
+                    continue;
+                };
+                AddedToken {
+                    content: content.to_owned(),
+                    special: true,
+                    single_word,
+                    lstrip,
+                    rstrip,
+                    normalized,
+                }
+            }
+            _ => continue,
+        };
+        tokenizer.add_special_tokens(&[added]);
     }
     tokenizer
 }
@@ -87,36 +118,51 @@ fn inference_shaped(window: Option<usize>, padding: PaddingStrategy) -> Tokenize
 #[test]
 fn pinned_token_sequences_certify_full_counts_special_tokens_and_padding() {
     let counter = fixture_counter();
+    let oracle = cleared_oracle();
     let expected = expected();
     let cases = expected["sequences"].as_array().expect("sequences");
-    assert_eq!(cases.len(), 10, "every pinned sequence is exercised");
+    assert_eq!(cases.len(), 11, "every pinned sequence is exercised");
     for case in cases {
         let label = case["label"].as_str().unwrap();
         let text = case["text"].as_str().unwrap();
-        let sequence = counter
-            .encode(text)
+        let ids = u32s(&case["ids"]);
+        let sequence = oracle
+            .encode(text, true)
             .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(sequence.ids(), u32s(&case["ids"]), "{label}: ids");
+        assert_eq!(sequence.get_ids(), ids.as_slice(), "{label}: ids");
         assert_eq!(
-            sequence.attention_mask(),
-            u32s(&case["attention_mask"]),
+            sequence.get_attention_mask(),
+            u32s(&case["attention_mask"]).as_slice(),
             "{label}: attention"
         );
         assert_eq!(
-            sequence.special_tokens_mask(),
-            u32s(&case["special_tokens_mask"]),
+            sequence.get_special_tokens_mask(),
+            u32s(&case["special_tokens_mask"]).as_slice(),
             "{label}: special tokens"
         );
         assert_eq!(
-            sequence.tokens(),
-            EmbedTokens::new(sequence.ids().len() as u32)
-        );
-        assert_eq!(
             counter.count(text).unwrap(),
-            EmbedTokens::new(u32s(&case["ids"]).len() as u32),
+            EmbedTokens::new(ids.len() as u32),
             "{label}: count is the pinned sequence length"
         );
     }
+
+    // Negative control: the map-registered token is visible only through the inference tokenizer clone.
+    let map_only = cases
+        .iter()
+        .find(|case| case["label"] == "map-only special token")
+        .expect("map-only case");
+    let map_only_text = map_only["text"].as_str().unwrap();
+    let pinned = EmbedTokens::new(u32s(&map_only["ids"]).len() as u32);
+    let bytes_only = UntruncatedTokenizer::from_tokenizer(
+        Tokenizer::from_bytes(read("embed-tokens", "tokenizer.json")).unwrap(),
+    );
+    assert_ne!(
+        bytes_only.count(map_only_text).unwrap(),
+        pinned,
+        "tokenizer.json alone cannot see the map-registered token"
+    );
+    assert_eq!(counter.count(map_only_text).unwrap(), pinned);
 
     // A padded batch pads to its longest member; each count is that text's own length.
     let batch = &expected["padded_batch"];
@@ -464,23 +510,38 @@ fn byte_overflow_missing_identity_empty_input_and_lane_failures_have_exact_dispo
         .unwrap_err();
     assert_eq!(refusal, DenseUnavailable::ZeroTokens { bytes: 3 });
 
-    // No verified identity: a lane that never loaded, and a lane the platform does not support.
     let not_initialized = SynapseComponent::new(None);
+    let disabled = not_initialized
+        .preflight_embedding(limits, "alpha")
+        .unwrap_err();
     assert_eq!(
-        not_initialized.preflight_embedding(limits, "alpha"),
-        Err(DenseUnavailable::LaneUnavailable {
+        disabled,
+        DenseUnavailable::LaneUnavailable {
             state: LaneUnavailableState::Disabled,
-        })
+        }
     );
+    assert_eq!(disabled.to_string(), "embedding lane is disabled");
     let unsupported = SynapseComponent::unsupported("synapse_unsupported");
+    let refused = unsupported
+        .preflight_embedding(limits, "alpha")
+        .unwrap_err();
     assert_eq!(
-        unsupported.preflight_embedding(limits, "alpha"),
+        refused,
+        DenseUnavailable::LaneUnavailable {
+            state: LaneUnavailableState::Unsupported,
+        }
+    );
+    assert_eq!(refused.to_string(), "embedding lane is unsupported");
+    let other_reason = SynapseComponent::unsupported("some other reason");
+    assert_eq!(
+        other_reason.preflight_embedding(limits, "alpha"),
         Err(DenseUnavailable::LaneUnavailable {
             state: LaneUnavailableState::Disabled,
         })
     );
 
-    // A count the lane cannot produce names its failure class, not the text.
+    // A count the lane cannot produce names its failure class, not the text, and the fixed
+    // settled reason keeps the canary out of the lane state too.
     let deterministic = DeterministicEngine::new();
     let component = ready_component(Arc::clone(&deterministic), SynapseLimits::default());
     let deterministic_limits = limits_of(&test_lane());
@@ -495,8 +556,14 @@ fn byte_overflow_missing_identity_empty_input_and_lane_failures_have_exact_dispo
     );
     assert_non_content(&refusal);
     assert_eq!(deterministic.calls.load(Ordering::SeqCst), 0);
+    let SynapseStatus::Disabled { reason } = component.status() else {
+        panic!("a count artifact fault disables the lane");
+    };
+    assert!(!reason.contains(CANARY), "{reason}");
 
     // An invariant failure marks the lane failing; automatic dispatch stops until an operator repairs it.
+    let deterministic = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&deterministic), SynapseLimits::default());
     deterministic.fail_next(InferenceError::Invariant(format!("{CANARY} bad vector")));
     let admitted = component
         .preflight_embedding(deterministic_limits, "alpha beta")
@@ -535,15 +602,38 @@ fn a_held_inference_permit_is_reported_as_busy_not_as_an_artifact_fault() {
             component.embed_admitted(&admitted)
         })
     };
+    // Bounded: a holder that fails before inference surfaces its error instead of spinning this loop forever.
+    let deadline = std::time::Instant::now() + BUDGET;
     while engine.calls.load(Ordering::SeqCst) == 0 {
+        if holder.is_finished() {
+            panic!("the holder failed before inference: {:?}", holder.join());
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the holder did not enter inference within {BUDGET:?}"
+        );
         std::thread::yield_now();
     }
     // Counting does not need the permit, so admission still succeeds while inference is busy.
     let admitted = component
         .preflight_embedding(limits, "gamma delta")
         .expect("counting runs outside the permit");
+    // The probe runs off-thread: synchronous execution would deadlock against the gate this
+    // thread releases, and a regression to waiting on the permit must fail within `BUDGET`.
+    let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+    {
+        let component = Arc::clone(&component);
+        let probe_input = admitted.clone();
+        std::thread::spawn(move || {
+            let _ = probe_tx.send(component.embed_admitted(&probe_input));
+        });
+    }
+    let busy = probe_rx.recv_timeout(BUDGET).unwrap_or_else(|_| {
+        DeterministicEngine::release_calls(&gate);
+        panic!("embed_admitted waited on the held permit instead of reporting busy");
+    });
     assert_eq!(
-        component.embed_admitted(&admitted),
+        busy,
         Err(DenseUnavailable::LaneBusy {
             retry_after_ms: SynapseLimits::default().query_retry_after_ms,
         })
@@ -594,6 +684,77 @@ fn admission_keeps_exact_bytes_and_repeats_identically() {
     assert_eq!(engine.count_calls.load(Ordering::SeqCst), 13);
 }
 
+#[tokio::test]
+async fn a_count_failure_quarantines_an_in_flight_inference_result() {
+    for (error, output_dims, expected_failure) in [
+        (
+            InferenceError::Artifact("tokenizer artifact failed".to_owned()),
+            8,
+            InferenceFailureKind::Artifact,
+        ),
+        (
+            InferenceError::Invariant("tokenizer invariant failed".to_owned()),
+            8,
+            InferenceFailureKind::Artifact,
+        ),
+        (
+            InferenceError::Artifact("tokenizer artifact failed".to_owned()),
+            1,
+            InferenceFailureKind::Invariant,
+        ),
+    ] {
+        let mut engine = DeterministicEngine::new();
+        Arc::get_mut(&mut engine).unwrap().dims = output_dims;
+        let component = Arc::new(ready_component(
+            Arc::clone(&engine),
+            SynapseLimits::default(),
+        ));
+        let gate = engine.block_calls();
+        let running = {
+            let component = Arc::clone(&component);
+            tokio::task::spawn_blocking(move || {
+                let admitted = component
+                    .preflight_embedding(limits_of(&test_lane()), "alpha beta")
+                    .unwrap();
+                component.embed_admitted(&admitted)
+            })
+        };
+        let entered = tokio::time::timeout(BUDGET, async {
+            while engine.calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let kind = InferenceFailureKind::from(&error);
+        *engine.fail_next_count.lock().unwrap() = Some(error);
+        let refused = component.preflight_embedding(limits_of(&test_lane()), "gamma delta");
+        let quarantined = component.status();
+        DeterministicEngine::release_calls(&gate);
+        let completed = tokio::time::timeout(BUDGET, running)
+            .await
+            .expect("inference completes after gate release")
+            .expect("inference does not panic");
+        entered.expect("inference enters before the count failure");
+        assert_eq!(refused, Err(DenseUnavailable::CountUnavailable(kind)));
+        assert!(matches!(
+            quarantined,
+            SynapseStatus::Disabled { .. } | SynapseStatus::Failing { .. }
+        ));
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            completed,
+            Err(DenseUnavailable::Inference(expected_failure)),
+            "a quarantined lane must not return its in-flight vector"
+        );
+        if expected_failure == InferenceFailureKind::Invariant {
+            assert!(
+                matches!(component.status(), SynapseStatus::Failing { .. }),
+                "invalid vectors still escalate artifact disablement"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_admitted_input_embeds_only_under_the_lane_that_admitted_it() {
     let engine = DeterministicEngine::new();
@@ -610,9 +771,10 @@ fn an_admitted_input_embeds_only_under_the_lane_that_admitted_it() {
     let mut other_epoch = test_lane();
     other_epoch.table_epoch += 1;
     for other_lane in [other_fingerprint, other_epoch] {
+        let other_engine = DeterministicEngine::new();
         let other = SynapseComponent::ready_with_engine(
             other_lane,
-            DeterministicEngine::new(),
+            Arc::clone(&other_engine) as Arc<dyn EmbeddingEngine>,
             SynapseLimits::default(),
         )
         .expect("lane");
@@ -620,8 +782,114 @@ fn an_admitted_input_embeds_only_under_the_lane_that_admitted_it() {
             other.embed_admitted(&admitted),
             Err(DenseUnavailable::IdentityChanged)
         );
+        assert_eq!(
+            other_engine.calls.load(Ordering::SeqCst),
+            0,
+            "a mismatched identity never reaches the rejecting lane's inference"
+        );
     }
     assert_eq!(engine.calls.load(Ordering::SeqCst), 0);
     component.embed_admitted(&admitted).unwrap();
     assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+}
+
+/// Two components can serve the same verified bundle identity under different host byte caps,
+/// so the receiving lane must re-judge the admitted bytes against its own cap.
+#[test]
+fn an_admission_reused_across_same_identity_lanes_respects_the_receiving_byte_cap() {
+    let wide_engine = DeterministicEngine::new();
+    let wide = ready_component(Arc::clone(&wide_engine), SynapseLimits::default());
+    let SynapseStatus::Ready(wide_lane) = wide.status() else {
+        panic!("ready lane");
+    };
+    let admitted = wide
+        .preflight_embedding(limits_of(&wide_lane), "alpha")
+        .expect("five bytes fit the wide cap");
+
+    let narrow_engine = DeterministicEngine::new();
+    let narrow = ready_component(
+        Arc::clone(&narrow_engine),
+        SynapseLimits {
+            max_text_bytes: 4,
+            ..SynapseLimits::default()
+        },
+    );
+    assert_eq!(
+        narrow.embed_admitted(&admitted),
+        Err(DenseUnavailable::ByteOverflow {
+            bytes: 5,
+            max_bytes: 4,
+        })
+    );
+    assert_eq!(
+        narrow_engine.calls.load(Ordering::SeqCst),
+        0,
+        "an admission over the receiving lane's byte cap never reaches its inference"
+    );
+
+    // The refusal is the receiving lane's own; the admitting lane still serves the input.
+    wide.embed_admitted(&admitted)
+        .expect("the admitting lane still embeds its own admission");
+}
+
+/// The count consults the same artifact inference serves, so its `Artifact` and `Invariant`
+/// failure classes settle the lane exactly as the inference path settles them.
+#[test]
+fn a_count_failure_settles_the_lane_like_an_inference_failure() {
+    // An artifact fault from counting disables the lane rather than leaving it serving.
+    let engine = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&engine), SynapseLimits::default());
+    let limits = limits_of(&test_lane());
+    *engine.fail_next_count.lock().unwrap() =
+        Some(InferenceError::Artifact("tokenizer lost".to_owned()));
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Artifact
+        ))
+    );
+    assert!(
+        matches!(component.status(), SynapseStatus::Disabled { .. }),
+        "a count artifact fault disables the lane: {:?}",
+        component.status()
+    );
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::LaneUnavailable {
+            state: LaneUnavailableState::Disabled,
+        })
+    );
+
+    // An invariant count fault marks the lane failing.
+    let engine = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&engine), SynapseLimits::default());
+    *engine.fail_next_count.lock().unwrap() =
+        Some(InferenceError::Invariant("count overflowed".to_owned()));
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Invariant
+        ))
+    );
+    assert!(
+        matches!(component.status(), SynapseStatus::Failing { .. }),
+        "a count invariant fault marks the lane failing: {:?}",
+        component.status()
+    );
+
+    // Input-class count failures stay per-text; the lane keeps serving.
+    let engine = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&engine), SynapseLimits::default());
+    *engine.fail_next_count.lock().unwrap() =
+        Some(InferenceError::Input("unencodable text".to_owned()));
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Input
+        ))
+    );
+    assert!(matches!(component.status(), SynapseStatus::Ready(_)));
+    component
+        .preflight_embedding(limits, "alpha beta")
+        .expect("an input-class count failure refuses one text, not the lane");
 }
