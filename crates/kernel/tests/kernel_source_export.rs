@@ -913,7 +913,7 @@ fn dead_holds_and_lost_history_prevent_completion_and_a_reopen_needs_a_new_s() {
 
     let expiring = fixture
         .store
-        .capture_source_hold(&binding, bounds(1))
+        .capture_source_hold(&binding, bounds(HOUR_MS))
         .unwrap();
     assert!(export(&fixture, &expiring, expiring.expires_at - 1).is_ok());
     assert_eq!(

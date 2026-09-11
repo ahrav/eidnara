@@ -143,6 +143,8 @@ pub enum SourceHoldError {
         "source hold does not reference {uncovered} evidence rows cited by descriptors through the commit being acknowledged"
     )]
     ExtensionIncomplete { uncovered: usize },
+    #[error("source hold would reference purged evidence")]
+    PurgedEvidence,
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
     #[error("source hold is not valid: {0:?}")]
@@ -251,11 +253,9 @@ impl Window {
         }
     }
 
-    /// Distinct cited evidence that hold `?3` does not reference yet, with
-    /// its byte length.
     fn unreferenced_evidence_sql(self) -> String {
         format!(
-            "SELECT e.evidence_id,e.byte_length {}
+            "SELECT e.evidence_id,e.byte_length,e.artifact_digest {}
                AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                               WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
              GROUP BY e.evidence_id",
@@ -586,11 +586,34 @@ impl KernelStore {
     /// its bytes is reported as [`SourceHoldError::Invalid`].
     /// Each distinct object is read and hashed, with one object buffer bounded
     /// by [`crate::MAX_PAYLOAD_BYTES`]. Storage failures return [`KernelError::Io`].
+    /// The pin is rechecked after hashing; this check does not synchronize a later publication.
     pub fn source_hold_status(
         &self,
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.source_hold_status_inner(binding, hold_id, now, None)
+    }
+
+    /// Runs `after_snapshot` after releasing the reader and before verifying objects.
+    #[cfg(feature = "test-support")]
+    pub fn source_hold_status_with_hook_for_test(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        mut after_snapshot: impl FnMut(),
+    ) -> Result<SourceHold, SourceHoldError> {
+        self.source_hold_status_inner(binding, hold_id, now, Some(&mut after_snapshot))
+    }
+
+    fn source_hold_status_inner(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        after_snapshot: Option<&mut dyn FnMut()>,
     ) -> Result<SourceHold, SourceHoldError> {
         let mut reader = self.lock_reader()?;
         let tx = reader
@@ -616,6 +639,9 @@ impl KernelStore {
         // The filesystem probes run with no reader connection held.
         drop(tx);
         drop(reader);
+        if let Some(after_snapshot) = after_snapshot {
+            after_snapshot();
+        }
         for digest in &digests {
             let Some(digest) = digest
                 .as_deref()
@@ -639,6 +665,12 @@ impl KernelStore {
                 }
             })?;
         }
+        // A purge can commit degradation while its object is still readable.
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite)?;
+        self.load_valid_pin(&tx, binding, hold_id, now)?;
         Ok(hold)
     }
 
@@ -901,6 +933,9 @@ impl Admitted<'_> {
         if usize::try_from(total).map_err(corrupt)? != self.references {
             return Err(KernelError::CorruptCanonicalRow.into());
         }
+        if current_time_ms() >= self.row.expires_at {
+            return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
+        }
         Ok(())
     }
 }
@@ -940,9 +975,6 @@ pub(crate) fn release_consumer_holds_in_tx(
     Ok(held)
 }
 
-/// Counts the distinct unreferenced evidence in `window`, adds it to the
-/// hold's current totals, and refuses whole when the result exceeds
-/// `admission`. Runs before any reference row is written.
 fn admit_references<'a>(
     tx: &Transaction<'_>,
     row: HoldRow<'a>,
@@ -951,16 +983,21 @@ fn admit_references<'a>(
     admission: SourceHoldAdmission,
     at_admission: Option<&mut dyn FnMut(i64)>,
 ) -> Result<Admitted<'a>, SourceHoldError> {
-    let (added, added_bytes): (i64, Option<i64>) = tx
+    let (added, added_bytes, purged): (i64, Option<i64>, bool) = tx
         .query_row_cached(
             &format!(
-                "SELECT COUNT(*),SUM(byte_length) FROM ({})",
+                "SELECT COUNT(*),SUM(e.byte_length),COUNT(t.artifact_digest)>0
+                 FROM ({}) e
+                 LEFT JOIN artifact_purge_tombstones t ON t.artifact_digest=e.artifact_digest",
                 window.unreferenced_evidence_sql()
             ),
             params![window.through, window.after, row.hold_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(sqlite)?;
+    if purged {
+        return Err(SourceHoldError::PurgedEvidence);
+    }
     let added = usize::try_from(added).map_err(corrupt)?;
     let references = current.0.checked_add(added).ok_or_else(|| corrupt(()))?;
     let encoded_bytes = current
