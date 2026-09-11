@@ -21,7 +21,7 @@ pub struct SweepReport {
     pub jobs_reclaimed: usize,
     /// Candidates whose eligibility no longer held when the delete ran.
     pub survivors: usize,
-    /// The budget ended before selection or before the write; whatever it left is ready for the next sweep.
+    /// The budget ended before selection or before the write; the free candidates it left are deferred, not survivors, and the next sweep selects them again.
     pub budget_exhausted: bool,
 }
 
@@ -116,8 +116,7 @@ impl<'a> IdentitySweeper<'a> {
             return Ok(report);
         }
         if budget.is_exhausted() {
-            // The cursor stays before this page: nothing in it was reclaimed, so the next sweep selects it again.
-            report.survivors = free.len();
+            // The cursor stays before this page: nothing in it was reclaimed, so the next sweep selects it again. No delete ran, so no candidate is a survivor of one.
             report.budget_exhausted = true;
             return Ok(report);
         }
