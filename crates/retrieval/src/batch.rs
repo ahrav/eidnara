@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use kernel::SourceRow;
-use kernel::source_identity::{Occurrence, OccurrenceClass, Span, encode};
+use kernel::source_identity::{Occurrence, OccurrenceClass, Span};
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use storage::GuardedConn;
@@ -245,7 +245,7 @@ pub fn apply_batch(
     bounds: BatchBounds,
     now: i64,
 ) -> Result<BatchOutcome, ProjectionError> {
-    apply_batch_inner(conn, batch, bounds, now, Fault::default())
+    apply_batch_inner(conn, batch, bounds, now, NO_FAULT)
 }
 
 /// A phase after which [`apply_batch_with_fault_for_test`] fails.
@@ -274,12 +274,16 @@ pub fn apply_batch_with_fault_for_test(
 
 #[cfg(feature = "test-support")]
 type Fault = Option<BatchFault>;
+#[cfg(feature = "test-support")]
+const NO_FAULT: Fault = None;
 
 /// A production build has no fault to inject; the phases still run in the
 /// same order.
 #[cfg(not(feature = "test-support"))]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct Fault;
+#[cfg(not(feature = "test-support"))]
+const NO_FAULT: Fault = Fault;
 
 /// Fails when the injected fault names this phase; a production build has no
 /// fault to name.
@@ -307,20 +311,33 @@ macro_rules! phase {
 }
 
 /// Charges judged before any row is written.
-struct Admission {
-    /// Occurrence identifiers of the records, in record order.
+struct Admission<'a> {
     occurrence_ids: Vec<String>,
+    tombstoned: HashSet<&'a str>,
     /// Whether the projection already reaches the batch's end.
     already_applied: bool,
     /// The checkpoint after the batch.
     checkpoint_commit_seq: i64,
 }
 
-fn admit(
+/// Admission and job insertion use this predicate to apply identical
+/// eligibility rules.
+fn queues_work(
     conn: &GuardedConn<'_>,
-    batch: &ProjectionBatch<'_>,
+    class: &str,
+    occurrence_id: &str,
+    tombstoned: &HashSet<&str>,
+) -> Result<bool, ProjectionError> {
+    Ok(dense_eligible(class)
+        && !tombstoned.contains(occurrence_id)
+        && !has_tombstone(conn, occurrence_id)?)
+}
+
+fn admit<'a>(
+    conn: &GuardedConn<'_>,
+    batch: &'a ProjectionBatch<'_>,
     bounds: BatchBounds,
-) -> Result<Admission, ProjectionError> {
+) -> Result<Admission<'a>, ProjectionError> {
     let identity = &batch.identity;
     if identity.through_commit_seq < identity.snapshot_commit_seq
         || identity.snapshot_commit_seq < 0
@@ -351,8 +368,13 @@ fn admit(
     let occurrence_ids = batch
         .records
         .iter()
-        .map(|record| encode(&record.occurrence).map(|encoded| encoded.occurrence_id))
+        .map(|record| crate::encode_record(record).map(|(encoded, _)| encoded.occurrence_id))
         .collect::<Result<Vec<_>, _>>()?;
+    let tombstoned: HashSet<&str> = batch
+        .invalidations
+        .iter()
+        .map(|invalidation| invalidation.occurrence_id.as_str())
+        .collect();
     if let Some(generation) = batch.generation_id {
         let outstanding: i64 = conn.query_row(
             "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
@@ -360,9 +382,20 @@ fn admit(
             |row| row.get(0),
         )?;
         let outstanding = usize::try_from(outstanding).map_err(|_| ProjectionError::CorruptRow)?;
+        // The pending bound excludes queued work invalidated by this batch.
+        let mut obsoleting = 0usize;
+        for occurrence_id in &tombstoned {
+            let queued: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM embedding_jobs
+                 WHERE occurrence_id=?1 AND state IN ('pending','admitted')",
+                [occurrence_id],
+                |row| row.get(0),
+            )?;
+            obsoleting += usize::try_from(queued).map_err(|_| ProjectionError::CorruptRow)?;
+        }
         let mut new_jobs = 0;
         for (record, occurrence_id) in batch.records.iter().zip(&occurrence_ids) {
-            if !dense_eligible(record.occurrence.class) {
+            if !queues_work(conn, record.occurrence.class, occurrence_id, &tombstoned)? {
                 continue;
             }
             let queued: bool = conn.query_row(
@@ -374,7 +407,9 @@ fn admit(
                 new_jobs += 1;
             }
         }
-        let total = outstanding.saturating_add(new_jobs);
+        let total = outstanding
+            .saturating_sub(obsoleting)
+            .saturating_add(new_jobs);
         if total > bounds.max_pending.get() {
             return Err(ProjectionError::BatchOverBound {
                 bound: "pending",
@@ -414,6 +449,7 @@ fn admit(
         });
     Ok(Admission {
         occurrence_ids,
+        tombstoned,
         already_applied: checkpoint_commit_seq > identity.through_commit_seq
             || stored
                 .as_ref()
@@ -449,7 +485,6 @@ fn apply_batch_inner(
     }
     phase!(fault, AfterRows);
 
-    let mut tombstoned: HashSet<&str> = HashSet::new();
     for invalidation in &batch.invalidations {
         if tombstone_occurrence(
             conn,
@@ -459,15 +494,18 @@ fn apply_batch_inner(
         )? {
             outcome.tombstones_recorded += 1;
         }
-        tombstoned.insert(invalidation.occurrence_id.as_str());
     }
     phase!(fault, AfterTombstones);
 
+    let tombstoned = &admission.tombstoned;
     if let Some(generation) = batch.generation_id {
         for (record, row) in batch.records.iter().zip(&persisted) {
-            let live = !tombstoned.contains(row.occurrence_id.as_str())
-                && !has_tombstone(conn, &row.occurrence_id)?;
-            if !dense_eligible(record.occurrence.class) || !live {
+            if !queues_work(
+                conn,
+                record.occurrence.class,
+                &row.occurrence_id,
+                tombstoned,
+            )? {
                 continue;
             }
             let job_id = job_id(&row.occurrence_id, generation);
@@ -482,7 +520,7 @@ fn apply_batch_inner(
     }
     // Work queued for an occurrence that stopped being live is obsolete,
     // whatever generation queued it.
-    for occurrence_id in &tombstoned {
+    for occurrence_id in tombstoned {
         outcome.pending_obsoleted += conn.execute(
             "UPDATE embedding_jobs SET state='obsolete',updated_at=?2
              WHERE occurrence_id=?1 AND state IN ('pending','admitted')",

@@ -374,6 +374,37 @@ struct Prepared<'a> {
     payload_id: String,
 }
 
+/// Whole-buffer spans encode as spanless occurrences so equivalent payload
+/// spellings share one identity. Admission and the writer share this so the
+/// identity admission charges against is the one the row lands under.
+pub(crate) fn encode_record<'a>(
+    record: &OccurrenceRecord<'a>,
+) -> Result<(EncodedOccurrence, &'a [u8]), ProjectionError> {
+    let mut encoded = encode(&record.occurrence)?;
+    let selected: &[u8] = match record.payload {
+        Payload::Whole(buffer) => {
+            validate_span(record.occurrence.span, buffer)?;
+            if covers_whole(encoded.span, buffer) {
+                encoded = encode(&Occurrence {
+                    span: None,
+                    ..record.occurrence
+                })?;
+            }
+            select(record.occurrence.span, buffer)
+        }
+        Payload::Selected(text) => {
+            let span_len = encoded.span.map_or(text.len() as u64, |span| {
+                span.end.saturating_sub(span.start)
+            });
+            if span_len != text.len() as u64 {
+                return Err(OccurrenceRefusal::SpanOutOfRange.into());
+            }
+            text.as_bytes()
+        }
+    };
+    Ok((encoded, selected))
+}
+
 fn persist_with_digests(
     conn: &GuardedConn<'_>,
     records: &[OccurrenceRecord<'_>],
@@ -392,31 +423,7 @@ fn persist_with_digests(
         if record.created_commit_seq <= 0 {
             return Err(ProjectionError::NonPositiveSequence { index });
         }
-        let mut encoded = encode(&record.occurrence)?;
-        let selected: &[u8] = match record.payload {
-            Payload::Whole(buffer) => {
-                validate_span(record.occurrence.span, buffer)?;
-                // A span selecting every byte is the whole-block selection,
-                // as the kernel's publisher normalizes it, so both spellings
-                // are one identity.
-                if covers_whole(encoded.span, buffer) {
-                    encoded = encode(&Occurrence {
-                        span: None,
-                        ..record.occurrence
-                    })?;
-                }
-                select(record.occurrence.span, buffer)
-            }
-            Payload::Selected(text) => {
-                let span_len = encoded.span.map_or(text.len() as u64, |span| {
-                    span.end.saturating_sub(span.start)
-                });
-                if span_len != text.len() as u64 {
-                    return Err(OccurrenceRefusal::SpanOutOfRange.into());
-                }
-                text.as_bytes()
-            }
-        };
+        let (encoded, selected) = encode_record(record)?;
         if encoded.tuple.len() > bounds.max_tuple_bytes.get() {
             return Err(ProjectionError::OverBound {
                 index,

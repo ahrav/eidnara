@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 
 use kernel::Sensitivity;
-use kernel::source_identity::Occurrence;
+use kernel::source_identity::{Occurrence, Span};
 use retrieval::batch::{
     BatchBounds, BatchFault, BatchOutcome, BatchStatus, Invalidation, MutationIdentity,
     ProjectionBatch, VectorGeneration, apply_batch, apply_batch_with_fault_for_test, batch_status,
@@ -1046,6 +1046,209 @@ fn an_oversized_first_commit_or_exhausted_pending_capacity_changes_nothing() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn a_whole_buffer_record_under_a_whole_covering_span_lands_under_the_spanless_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let sources = vec![Source {
+        class: "messages",
+        key: "m1".into(),
+        revision: 1,
+        text: "hello".into(),
+        created: 2,
+    }];
+    let arena = Arena::new(&sources);
+    let borrowed = borrow(&arena);
+    let spanless = records(&sources, &arena, &borrowed);
+    let spanless_id = occurrence_id(&spanless[0]);
+    let spanned: Vec<OccurrenceRecord<'_>> = spanless
+        .iter()
+        .map(|record| OccurrenceRecord {
+            occurrence: Occurrence {
+                span: Some(Span {
+                    start: 0,
+                    end: sources[0].text.len() as u64,
+                }),
+                ..record.occurrence
+            },
+            ..record.clone()
+        })
+        .collect();
+    assert_ne!(
+        occurrence_id(&spanned[0]),
+        spanless_id,
+        "the un-normalized spellings encode differently"
+    );
+    let batch = ProjectionBatch {
+        identity: mutation(2, 2),
+        records: spanned,
+        invalidations: vec![],
+        generation_id: Some(GENERATION),
+    };
+    let outcome = apply(&store, &batch, 1).expect("a whole-covering span is a valid record");
+    assert_eq!((outcome.rows_inserted, outcome.pending_created), (1, 1));
+    store
+        .with_conn(|conn| {
+            let stored = read_occurrence(conn, &spanless_id)
+                .unwrap()
+                .expect("stored under the spanless identity");
+            assert_eq!(stored.span, None);
+            assert_eq!(stored.bytes, b"hello");
+            let state = durable(conn);
+            assert_eq!(state.occurrences.len(), 1);
+            assert_eq!(
+                state.pending.iter().collect::<Vec<_>>(),
+                [&spanless_id],
+                "the job is keyed by the identity the row landed under"
+            );
+            Ok(())
+        })
+        .unwrap();
+    let replay = apply(
+        &store,
+        &ProjectionBatch {
+            records: spanless,
+            ..batch.clone()
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            replay.rows_inserted,
+            replay.rows_replayed,
+            replay.pending_created
+        ),
+        (0, 1, 0),
+        "the spanless spelling replays onto the same row"
+    );
+}
+
+#[test]
+fn the_pending_charge_counts_only_work_the_batch_will_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let at_capacity = BatchBounds {
+        max_pending: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let apply_bounded = |batch: &ProjectionBatch<'_>, now: i64| {
+        let mut outcome = None;
+        let _ = store.with_conn_fenced(|conn| {
+            let result = apply_batch(conn, batch, at_capacity, now);
+            let failed = result.is_err();
+            outcome = Some(result);
+            if failed {
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            } else {
+                Ok(())
+            }
+        });
+        outcome.unwrap()
+    };
+    let sources: Vec<Source> = (0..7)
+        .map(|i| Source {
+            class: "messages",
+            key: format!("m{i}"),
+            revision: 1,
+            text: format!("message number {i}"),
+            created: 2,
+        })
+        .collect();
+    let arena = Arena::new(&sources);
+    let borrowed = borrow(&arena);
+    let all = records(&sources, &arena, &borrowed);
+    let ids: Vec<String> = all.iter().map(|r| occurrence_id(r)).collect();
+    apply_bounded(
+        &ProjectionBatch {
+            identity: mutation(2, 2),
+            records: all[..5].to_vec(),
+            invalidations: vec![],
+            generation_id: Some(GENERATION),
+        },
+        1,
+    )
+    .unwrap();
+    let full = store.with_conn(|conn| Ok(durable(conn))).unwrap();
+    assert_eq!(full.pending.len(), 5, "pending capacity is exactly filled");
+    let born_dead = ProjectionBatch {
+        identity: mutation(2, 3),
+        records: all[5..6].to_vec(),
+        invalidations: vec![Invalidation {
+            occurrence_id: ids[5].clone(),
+            tombstone: Tombstone {
+                invalidated_commit_seq: 3,
+                reason: TombstoneReason::Retired,
+            },
+        }],
+        generation_id: Some(GENERATION),
+    };
+    let outcome =
+        apply_bounded(&born_dead, 2).expect("a row tombstoned in its own batch charges nothing");
+    assert_eq!(
+        (
+            outcome.rows_inserted,
+            outcome.tombstones_recorded,
+            outcome.pending_created
+        ),
+        (1, 1, 0)
+    );
+    store
+        .with_conn(|conn| {
+            assert_eq!(durable(conn).pending, full.pending);
+            Ok(())
+        })
+        .unwrap();
+    let swap = ProjectionBatch {
+        identity: mutation(2, 4),
+        records: all[6..7].to_vec(),
+        invalidations: vec![Invalidation {
+            occurrence_id: ids[0].clone(),
+            tombstone: Tombstone {
+                invalidated_commit_seq: 4,
+                reason: TombstoneReason::Retired,
+            },
+        }],
+        generation_id: Some(GENERATION),
+    };
+    let outcome = apply_bounded(&swap, 3).expect("work the batch obsoletes is credited");
+    assert_eq!((outcome.pending_created, outcome.pending_obsoleted), (1, 1));
+    store
+        .with_conn(|conn| {
+            let state = durable(conn);
+            assert_eq!(state.pending.len(), 5);
+            assert!(!state.pending.contains(&ids[0]));
+            assert!(state.pending.contains(&ids[6]));
+            Ok(())
+        })
+        .unwrap();
+    let over = ProjectionBatch {
+        identity: mutation(2, 5),
+        records: all[5..6]
+            .iter()
+            .map(|record| OccurrenceRecord {
+                occurrence: Occurrence {
+                    revision: "2",
+                    ..record.occurrence
+                },
+                ..record.clone()
+            })
+            .collect(),
+        invalidations: vec![],
+        generation_id: Some(GENERATION),
+    };
+    assert_eq!(
+        apply_bounded(&over, 4),
+        Err(ProjectionError::BatchOverBound {
+            bound: "pending",
+            size: 6
+        }),
+        "a new dense row with nothing obsoleted is still over the bound"
+    );
 }
 
 /// An exported row as the kernel would hand it back, built by hand so the
