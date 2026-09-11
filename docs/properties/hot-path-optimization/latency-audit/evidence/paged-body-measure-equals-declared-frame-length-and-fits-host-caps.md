@@ -346,8 +346,8 @@ candidate was not committed and has no immutable source revision.
 [carrier-encoder]: ../../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
 [growth-bound]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L637-L676
 [snapshot-test]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
-[pager-spy]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1426
-[carrier-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1425
+[pager-spy]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1427
+[carrier-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1435
 [carrier-corpus]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/serialized-transform-corpus.ts
 [writer-test]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L55
 [host-runner]: ../../../../../packages/e2e-tests/scripts/verify-serialized-transform-pages.ts

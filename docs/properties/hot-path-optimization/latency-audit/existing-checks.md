@@ -143,15 +143,15 @@ not whether the focused tests ran.
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [rust-mode-transform.test.ts:381][permission-provisional] | Provisional availability sends `tool_present: false` and `todo_tool_present: false`. | unaudited |
-| [rust-mode-transform.test.ts:444][permission-agent] | An agent `deny` rule through the SDK yields `todo_tool_present: false`; `app.agents` is called once. | unaudited |
-| [rust-mode-transform.test.ts:470][permission-empty-timeout] | A hung `app.agents()` with an empty cache yields `todo_tool_present: false` after about 2 s. | unaudited |
+| [rust-mode-transform.test.ts:384][permission-provisional] | Provisional availability sends `tool_present: false` and `todo_tool_present: false`. | unaudited |
+| [rust-mode-transform.test.ts:447][permission-agent] | An agent `deny` rule through the SDK yields `todo_tool_present: false`; `app.agents` is called once. | unaudited |
+| [rust-mode-transform.test.ts:473][permission-empty-timeout] | A hung `app.agents()` with an empty cache yields `todo_tool_present: false` after about 2 s. | unaudited |
 | [hook-handlers.test.ts:126][permission-capture-timeout] | A hung permission read suppresses capture within the 2 s deadline. | unaudited |
 | [ctx-reduce-availability.test.ts:241][permission-evaluator] | `permissionDisabled` last-match semantics, session overlay after agent rules, wildcard escaping, and distinct active-agent inputs. | unaudited |
 | [hook.test.ts:167][permission-witness] | Rejection and fake-time timeout after a stored deny reach the constant P5 marker for transform and capture; outcome checks require false wire verdicts and no capture. The marker establishes reachability, not a distinct fallback outcome. | unaudited |
-| [hook.test.ts:245][permission-hit] | Transform and capture share fresh hits without another SDK permission read; missing-client cases suppress both. | unaudited |
-| [hook.test.ts:292][permission-lifecycle] | Session update, native compaction, and flush invalidate every agent for one session; deletion clears entries; another session stays fresh. An overlapping capture allow cannot clear a newer transform deny. | unaudited |
-| [hook.test.ts:415][permission-overlap] | Real transform and capture hooks share one fill. Empty host agents normalize to absence: the agent-list API is not called, session allow/deny rules decide, and undefined or empty capture reuses the same key. | unaudited |
+| [hook.test.ts:255][permission-hit] | Transform and capture share fresh hits without another SDK permission read; missing-client cases suppress both. | unaudited |
+| [hook.test.ts:302][permission-lifecycle] | Session update, native compaction, and flush invalidate every agent for one session; deletion clears entries; another session stays fresh. An overlapping capture allow cannot clear a newer transform deny. | unaudited |
+| [hook.test.ts:425][permission-overlap] | Real transform and capture hooks share one fill. Empty host agents normalize to absence: the agent-list API is not called, session allow/deny rules decide, and undefined or empty capture reuses the same key. | unaudited |
 | [ctx-reduce-availability.test.ts:347][permission-lifetime] | Identity isolation, shared pending reads and timeout, 30 s read-start expiry at lookup and settlement, empty/allow/deny failures, missing named agents, malformed/error SDK payloads, invalidation fencing, and settled/pending LRU eviction. | unaudited |
 | [ctx-reduce-availability.test.ts:29-125][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row. | unaudited |
 | [Frozen differential and example states][tmidturn] | Every valid example compares against the frozen base before and after rollback-scoped second-session rows. The reference file is hash-pinned; its shared primitives are live on both sides. Malformed/dynamic values and tuple sentinels remain covered. Approved inconsistent associations have both old-false/new-true and old-true/new-false checks. Equality applies to static snapshots only. | unaudited |
@@ -165,7 +165,7 @@ not whether the focused tests ran.
 | [module-wire.test.ts:1308][t1308] | Unpaged `bytes` equals a later `JSON.stringify` length. | unaudited |
 | [module-wire.test.ts:1371][t1371] | Each paged `bytes` equals a later `JSON.stringify` length. | unaudited |
 | [module-wire.test.ts:1391][t1391] | The pageable array field list matches the daemon's Rust literal. | unaudited |
-| [rust-mode-transform.test.ts:537, 575, 614][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
+| [rust-mode-transform.test.ts:540, 578, 617][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
 | [frame-channel.test.ts:181, 193][t181] | The declared byte length equals written bytes for lone surrogates, including across a segment boundary. | unaudited |
 | [Joint pager and native-writer fake][serialized-writer] | Frozen corpus checks carried UTF-8 bytes against the raw header and captured byte array through the real module transport, client encoder, and writer. Exact first/final lengths and page counts are asserted. | unaudited |
 | [Module transport snapshot][serialized-transport] | A getter changes on a second read, source and inspection values mutate, and a stringify spy rejects any send-time serialization. The public connection factory and channel injection exercise the transport without private-field assignments. | unaudited |
@@ -174,8 +174,8 @@ not whether the focused tests ran.
 | [Pager serialization spy][serialized-pager] | The full input and every emitted envelope serialize once. `toJSON` runs once. Digest and packing serializations remain outside that claim. | unaudited |
 | [Live transform hook][serialized-hook] | The real hook passes a carrier with the matching transform/session discriminator. | unaudited |
 | [Real-host corpus][serialized-host] | A registered Cargo integration test compiles in normal CI and is ignored until a generated corpus is supplied. The one-command wrapper requires one named pass. It verifies byte/hash receipts, twelve complete transforms equal to unpaged controls, nine staged pages, six unchanged surrogate refusals, one pager refusal, exact intermediate/final boundaries, and the 24-byte f64 witness. | unaudited |
-| [rust-mode-transform.test.ts:1446, 1582][tinplace] | In-place mutation of an older message forces a full send; recovery after repeated rejection. | unaudited |
-| [rust-mode-transform.test.ts:248][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog.debug`). | unaudited |
+| [rust-mode-transform.test.ts:1449, 1585][tinplace] | In-place mutation of an older message forces a full send; recovery after repeated rejection. | unaudited |
+| [rust-mode-transform.test.ts:249][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog.debug`). | unaudited |
 | [Baseline logger.test.ts:358][t358] | Control characters are removed; entry size is bounded; no forged fourth line. | unaudited |
 | [Baseline logger.test.ts:381][t381] | The default log is `0600` under `0700` directories; a planted symlink is not followed. | unaudited |
 | [Baseline logger.test.ts:342][t342], [408][t408] | Swallowed-write counter; exit flush without holding the process. | unaudited |
@@ -199,20 +199,20 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [serialized-transport]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
 [serialized-client]: ../../../../packages/opencode-plugin/src/shared/host-client/client.test.ts#L108-L175
 [serialized-unpaged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1509
-[serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1426
-[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1425
+[serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1427
+[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1435
 [serialized-host]: ../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
 [serialized-campaign]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-do-the-unpaged-correction-and-registered-cargo-test-prove
 
-[permission-provisional]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L381
-[permission-agent]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L444
-[permission-empty-timeout]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L470
+[permission-provisional]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L384
+[permission-agent]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L447
+[permission-empty-timeout]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L473
 [permission-capture-timeout]: ../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L126
 [permission-evaluator]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L241
 [permission-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L167
-[permission-hit]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L245
-[permission-lifecycle]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L292
-[permission-overlap]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L415
+[permission-hit]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L255
+[permission-lifecycle]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L302
+[permission-overlap]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L425
 [permission-lifetime]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347
 
 Stage logging and event line counts are exercised by the real transform/event
@@ -425,21 +425,21 @@ not a claim that no related check exists anywhere in the repository.
 [t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15309
 [t-sync]: ../../../../crates/storage/src/lib.rs#L3397
 
-[tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L537
-[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
-[tinplace]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1446
+[tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
+[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
+[tinplace]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1449
 [tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L29-L125
 [tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L892
 [tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1138-L1169
 [tdbpath]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1171-L1239
 [session-db-cache]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/session-db-cache-contract.ts#L1-L392
-[session-db-hook]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1613-L1667
+[session-db-hook]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1616-L1670
 [tordinal]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.test.ts#L173
 [tsqlite]: ../../../../packages/opencode-plugin/src/shared/sqlite.test.ts#L279
 [tbind]: ../../../../packages/opencode-plugin/src/shared/sqlite-bind-style.test.ts#L32
-[t1308]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1309
-[t1371]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1372
-[t1391]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1392
+[t1308]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1310
+[t1371]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1373
+[t1391]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1393
 [t181]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.test.ts#L181
 [t358]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L358
 [t381]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L381

@@ -1165,7 +1165,7 @@ hook with SDK mocks and Bun fake timers; adequacy remains unaudited.
 Impact: P1's fallback clause passes without the window ever opening.
 Open questions: None.
 
-[permission-failure-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L208-L234
+[permission-failure-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L218-L244
 [permission-failure-test]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L167
 
 ## Ring arena and direct frame
@@ -2528,7 +2528,7 @@ evaluation of this area and its disposition are recorded in
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
+[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L223-L231
 [dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L215
