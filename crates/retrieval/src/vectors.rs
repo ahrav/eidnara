@@ -15,6 +15,10 @@ use crate::batch::{VectorGeneration, registered_generation};
 pub struct VectorCompletion<'a> {
     pub occurrence_id: &'a str,
     pub generation: &'a VectorGeneration,
+    /// The canonical object whose descriptor selected the occurrence.
+    pub source_object_id: &'a str,
+    /// The canonical artifact whose bytes produced the payload.
+    pub source_artifact_digest: &'a str,
     /// The payload identity the embedded bytes were selected from.
     pub payload_id: &'a str,
     pub vector: &'a [f32],
@@ -89,12 +93,21 @@ pub fn complete_embedding_observed(
         });
     }
     check_generation(conn, generation)?;
-    let Some((payload_id, tombstoned)) = conn
+    let Some((payload_id, tombstoned, source_object_id, source_artifact_digest)) = conn
         .query_row(
-            "SELECT o.payload_id, EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)
+            "SELECT o.payload_id,
+                    EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id),
+                    o.source_object_id,o.source_artifact_digest
              FROM occurrences o WHERE o.occurrence_id=?1",
             [completion.occurrence_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .optional()?
     else {
@@ -102,6 +115,11 @@ pub fn complete_embedding_observed(
             occurrence_id: completion.occurrence_id.to_owned(),
         });
     };
+    if source_object_id != completion.source_object_id
+        || source_artifact_digest != completion.source_artifact_digest
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
     let job_state: Option<String> = conn
         .query_row(
             "SELECT state FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2",

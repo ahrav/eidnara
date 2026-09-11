@@ -24,7 +24,9 @@ use retrieval::batch::{
     batch_from_rows, read_checkpoint, row_identities,
 };
 
-use crate::search_projection::{SearchProjection, SearchProjectionError};
+use crate::search_projection::{
+    SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
+};
 pub use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The registered consumer, its capture hold, and the projection identity an episode acts under.
@@ -477,8 +479,23 @@ impl<'a> SearchCatchUp<'a> {
             Err(SearchProjectionError::Quarantined(quarantine)) => {
                 Err(CatchUpError::Quarantined(quarantine).into())
             }
+            Err(SearchProjectionError::Connection(error)) => Err(self
+                .enter_quarantine(QuarantineKind::Integrity, &error)
+                .into()),
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Integrity =>
+            {
+                Err(self
+                    .enter_quarantine(QuarantineKind::Integrity, &error)
+                    .into())
+            }
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Superseded =>
+            {
+                Err(Blocked::ProjectionIdentity.into())
+            }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
-            Err(_) => match self.projection.batch_status(&batch) {
+            Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(&batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
                 Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
                 Err(error) => Err(self.quarantine_from(error).into()),
@@ -604,6 +621,12 @@ impl<'a> SearchCatchUp<'a> {
         }
         let kind = match &error {
             SearchProjectionError::Projection(error) if classify(error) == Refusal::Integrity => {
+                QuarantineKind::Integrity
+            }
+            SearchProjectionError::Connection(_) => QuarantineKind::Integrity,
+            SearchProjectionError::Store(error)
+                if classify_store_failure(error) == StoreFailure::Integrity =>
+            {
                 QuarantineKind::Integrity
             }
             _ => QuarantineKind::Storage,

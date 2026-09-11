@@ -52,6 +52,7 @@ pub enum SearchProjectionError {
 pub(crate) enum StoreFailure {
     Deadline,
     Integrity,
+    Superseded,
     Unknown,
 }
 
@@ -62,8 +63,8 @@ pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
         | StoreError::FenceCorrupt { .. }
         | StoreError::FenceMissing
         | StoreError::FenceExhausted { .. } => StoreFailure::Integrity,
-        StoreError::Fenced { .. }
-        | StoreError::Lease(_)
+        StoreError::Fenced { .. } => StoreFailure::Superseded,
+        StoreError::Lease(_)
         | StoreError::UnsupportedBackend(_)
         | StoreError::Backend(_)
         | StoreError::Io(_) => StoreFailure::Unknown,

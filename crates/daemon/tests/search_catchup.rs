@@ -1715,6 +1715,32 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
 }
 
 #[test]
+fn a_missing_projection_fence_quarantines_catch_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    assert_eq!(
+        mutate(&search_path(dir.path()))
+            .execute("DELETE FROM fence", [])
+            .unwrap(),
+        1,
+    );
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("a missing fence row must quarantine catch-up");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
 fn a_quarantine_entered_after_the_local_commit_stops_the_acknowledgement() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

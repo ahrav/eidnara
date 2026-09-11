@@ -60,47 +60,6 @@ fn intent(key: &str) -> CommitIntent {
 }
 
 #[test]
-fn a_committed_projected_obsoletion_is_reconciled_after_a_lost_reply() {
-    let dir = tempfile::tempdir().unwrap();
-    let corpus = Corpus::open(dir.path());
-    corpus.seed();
-    let object = corpus.publish("lost-obsolete", "msg-lost", "1", "lost reply");
-    let generation = generation(8);
-    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
-    let project = ProjectScope::new(PROJECT).unwrap();
-    let vector = unit(8);
-    let row = row_for(&rows, &object);
-    mutate(&search_path(dir.path()))
-        .execute(
-            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
-             VALUES (?1, 99, 'retired', 4)",
-            [&row.detail.occurrence_id],
-        )
-        .unwrap();
-    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
-    let mut events = Vec::new();
-    let settled = publisher.publish_with_fault_for_test(
-        &publication(row, &generation, &vector),
-        eligibility(&project),
-        deadline(),
-        3,
-        &mut |event| events.push(event),
-        PublicationFault::LoseLocalCommitReply,
-    );
-
-    assert_eq!(
-        settled.unwrap(),
-        Publication::Obsolete(ObsoleteCause::ProjectedReconciled),
-    );
-    assert_eq!(
-        durable(dir.path(), &row.detail.occurrence_id),
-        (Some("obsolete".to_string()), None),
-    );
-    assert_eq!(events.last(), Some(&PublicationEvent::Reconciling));
-    assert!(publisher.quarantine().is_none());
-}
-
-#[test]
 fn a_damaged_projection_fence_quarantines_the_completion() {
     for (label, damage) in [
         ("missing", "DELETE FROM fence"),
@@ -138,6 +97,33 @@ fn a_damaged_projection_fence_quarantines_the_completion() {
             "{label}",
         );
     }
+}
+
+#[test]
+fn a_superseded_projection_writer_does_not_reconcile_old_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("superseded", "msg-fence", "1", "superseded fence");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute("UPDATE fence SET epoch=epoch+1 WHERE id=0", [])
+        .unwrap();
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &unit(8)),
+        &project,
+    );
+    assert!(matches!(result, Err(PublicationError::Superseded)));
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
 }
 
 #[test]
@@ -961,6 +947,8 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
                 &VectorCompletion {
                     occurrence_id: &stale_unguarded.expectation.occurrence_id,
                     generation: &generation,
+                    source_object_id: &stale_unguarded.expectation.object_id,
+                    source_artifact_digest: &stale_unguarded.expectation.artifact_digest,
                     payload_id: &stale_unguarded.expectation.payload_id,
                     vector: &vector,
                     input_bytes: 14,
@@ -1218,6 +1206,8 @@ fn f32_fixtures_pin_the_stored_representation_and_invalid_vectors_never_embed() 
                     &VectorCompletion {
                         occurrence_id: &row.detail.occurrence_id,
                         generation: &generation,
+                        source_object_id: &row.object_id,
+                        source_artifact_digest: &row.detail.artifact_digest,
                         payload_id: &row.detail.payload_id,
                         vector: &vector,
                         input_bytes: 1,
@@ -1756,7 +1746,7 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
     let project = ProjectScope::new(PROJECT).unwrap();
     let vector = unit(8);
 
-    // A tombstone the projection already holds refuses completion under the guard; the kernel still judges the input current.
+    // The raw projection operation obsoletes a job whose occurrence is tombstoned.
     let row = row_for(&rows, &tombstoned);
     mutate(&search_path(dir.path()))
         .execute(
@@ -1765,18 +1755,27 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
             [&row.detail.occurrence_id],
         )
         .unwrap();
-    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
-    let (result, events) = publish_once(
-        &mut publisher,
-        &publication(row, &generation, &vector),
-        &project,
-    );
+    let result = projection.write(|conn| {
+        complete_embedding_observed(
+            conn,
+            &VectorCompletion {
+                occurrence_id: &row.detail.occurrence_id,
+                generation: &generation,
+                source_object_id: &row.object_id,
+                source_artifact_digest: &row.detail.artifact_digest,
+                payload_id: &row.detail.payload_id,
+                vector: &vector,
+                input_bytes: 1,
+                input_tokens: 1,
+            },
+            3,
+            &mut |_| {},
+        )
+    });
     assert_eq!(
         result.unwrap(),
-        Publication::Obsolete(ObsoleteCause::Projected(ObsoleteReason::Tombstoned))
+        CompletionOutcome::Obsolete(ObsoleteReason::Tombstoned)
     );
-    assert_eq!(events.last(), Some(&PublicationEvent::GuardReleased));
-    assert!(!events.contains(&PublicationEvent::VectorStaged));
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("obsolete".to_string()), None)
@@ -1784,6 +1783,7 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
     assert_kernel_writable(&corpus, "after-tombstone");
 
     // A tombstone recorded after the job completed reports what the redelivered vector is, not a transition that did not happen: the completed job keeps its state and its vector.
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
     let row = row_for(&rows, &completed);
     let (result, _) = publish_once(
         &mut publisher,
@@ -1834,6 +1834,8 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
                 &VectorCompletion {
                     occurrence_id: &row.detail.occurrence_id,
                     generation: &generation,
+                    source_object_id: &row.object_id,
+                    source_artifact_digest: &row.detail.artifact_digest,
                     payload_id: &payload_digest("other bytes"),
                     vector: &vector,
                     input_bytes: 1,
@@ -1897,6 +1899,73 @@ fn a_completed_job_missing_its_vector_quarantines_instead_of_refusing() {
     );
     assert_eq!(publisher.quarantine(), Some(quarantine));
     assert_kernel_writable(&corpus, "after-vector-loss");
+}
+
+#[test]
+fn projection_only_staleness_quarantines_guarded_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 4)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &unit(8)),
+        &project,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("projection-only staleness must quarantine guarded publication: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn corrupted_projection_provenance_quarantines_guarded_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "UPDATE occurrences SET source_object_id='forged-object' WHERE occurrence_id=?1",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &unit(8)),
+        &project,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("corrupted projection provenance must quarantine publication: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
 }
 
 // ---- Named-boundary process crashes ----------------------------------------

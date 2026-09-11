@@ -13,8 +13,8 @@ use kernel::{
 };
 use retrieval::batch::VectorGeneration;
 use retrieval::vectors::{
-    CompletionOutcome, CompletionPhase, ObsoleteReason, Obsoletion, VectorCompletion,
-    complete_embedding_observed, completion_status, obsolete_embedding,
+    CompletionOutcome, CompletionPhase, Obsoletion, VectorCompletion, complete_embedding_observed,
+    completion_status, obsolete_embedding,
 };
 use retrieval::{ProjectionError, read_identity};
 
@@ -57,10 +57,6 @@ pub enum PublicationEvent {
 pub enum ObsoleteCause {
     /// The kernel's descriptor no longer matches the expectation.
     Canonical(StaleInput),
-    /// The projection's own row disagrees with the vector's identity.
-    Projected(ObsoleteReason),
-    /// The projection reports an obsolete job without an exact cause.
-    ProjectedReconciled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +86,9 @@ pub enum PublicationError {
     /// The search connection or its write lock stayed held past the deadline; nothing was written and the result lease is retained.
     #[error("the search write lock was not acquired before the deadline")]
     SearchDeadline,
+    /// A newer search-projection writer fenced this publisher out.
+    #[error("the search projection writer was superseded")]
+    Superseded,
     /// The search transaction may or may not have committed and the durable rows do not show its effect; the result lease is retained.
     #[error("the local commit outcome is unresolved")]
     LocalCommitUnresolved,
@@ -243,9 +242,8 @@ impl<'a> EmbeddingPublisher<'a> {
                     Ok(status) if status.has_durable_vector(publication.vector) => {
                         Ok(Publication::Embedded)
                     }
-                    Ok(status) if status.job_state.as_deref() == Some("obsolete") => {
-                        Ok(Publication::Obsolete(ObsoleteCause::ProjectedReconciled))
-                    }
+                    Ok(status) if status.job_state.as_deref() == Some("obsolete") => Err(self
+                        .enter_quarantine(QuarantineKind::Integrity, &ProjectionError::CorruptRow)),
                     Ok(_) => Err(PublicationError::LocalCommitUnresolved),
                     Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
                 }
@@ -268,6 +266,8 @@ impl<'a> EmbeddingPublisher<'a> {
         let completion = VectorCompletion {
             occurrence_id: &publication.expectation.occurrence_id,
             generation: publication.generation,
+            source_object_id: &publication.expectation.object_id,
+            source_artifact_digest: &publication.expectation.artifact_digest,
             payload_id: &publication.expectation.payload_id,
             vector: publication.vector,
             input_bytes: publication.input_bytes,
@@ -282,11 +282,16 @@ impl<'a> EmbeddingPublisher<'a> {
                     CompletionPhase::JobEmbedded => PublicationEvent::LocalStaged,
                 })
             })?;
+            let published = match outcome {
+                CompletionOutcome::Embedded => Publication::Embedded,
+                CompletionOutcome::Replayed => Publication::Replayed,
+                CompletionOutcome::Obsolete(_) => return Err(ProjectionError::CorruptRow),
+            };
             if roll_back {
                 // A refusal from the closure rolls the transaction back; the reply is replaced below.
                 return Err(ProjectionError::Sqlite("fault: rolled back".to_owned()));
             }
-            Ok(outcome)
+            Ok(published)
         });
         observer(PublicationEvent::LocalReleased);
         let lost_reply = match self.fault {
@@ -300,11 +305,7 @@ impl<'a> EmbeddingPublisher<'a> {
             )));
         }
         match applied {
-            Ok(CompletionOutcome::Embedded) => Ok(Settled::Published(Publication::Embedded)),
-            Ok(CompletionOutcome::Replayed) => Ok(Settled::Published(Publication::Replayed)),
-            Ok(CompletionOutcome::Obsolete(reason)) => Ok(Settled::Published(
-                Publication::Obsolete(ObsoleteCause::Projected(reason)),
-            )),
+            Ok(published) => Ok(Settled::Published(published)),
             // The store returned before COMMIT, so nothing of the completion is durable.
             Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
                 Refusal::OperatorRepair => match error {
@@ -334,6 +335,7 @@ impl<'a> EmbeddingPublisher<'a> {
                 StoreFailure::Integrity => {
                     Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
                 }
+                StoreFailure::Superseded => Err(PublicationError::Superseded),
                 StoreFailure::Unknown => Ok(Settled::Unresolved),
             },
         }
@@ -404,6 +406,7 @@ impl<'a> EmbeddingPublisher<'a> {
                 StoreFailure::Integrity => {
                     Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
                 }
+                StoreFailure::Superseded => Err(PublicationError::Superseded),
                 StoreFailure::Unknown => unreachable!("unknown store failures reconcile above"),
             },
         }
