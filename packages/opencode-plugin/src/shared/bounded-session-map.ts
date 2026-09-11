@@ -62,6 +62,10 @@ export class BoundedSessionMap<V> {
         this.store.clear();
     }
 
+    entries(): MapIterator<[string, V]> {
+        return this.store.entries();
+    }
+
     get size(): number {
         return this.store.size;
     }

@@ -886,61 +886,58 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Two hung-read tests start with an empty cache and pin
-fail-open; none constructs a cached deny first, and none covers staleness
-across an agent switch.
-Guarantee: A failed or slow SDK read never turns a previously observed deny
-into a present verdict, and a cache never serves a verdict computed for a
-different active agent or an older session permission overlay than the
-pass's own inputs.
-Check: `always` - On every pass whose live permission read rejects or times
-out, `passInputs.todo_tool_present` equals
-`!cachedToolPermissionDenied(sessionId, "todowrite")` when that entry exists,
-so a cached `true` yields `todo_tool_present: false`; and on every pass that
-serves a cached verdict instead of reading, the served value equals
-`permissionDisabled("todowrite", [...agentRules(activeAgentFromMessages(
-messages)), ...sessionRules])` evaluated against the SDK state at the most
-recent invalidation-free read for the same `(sessionId, activeAgent)` inputs.
-`always` because the fallback branch runs on every failed read and a
-diverging cached verdict is wrong on every pass, not only when observed.
-Fault/timing angle: [`resolveCombinedTodowriteVerdict`][combined] seeds from
-the cache ([`:85-96`][combinedseed]) and awaits
-[`resolveToolPermissionDenied`][permdenied], a `Promise.all` over two SDK
-calls raced against [`HOST_SDK_READ_TIMEOUT_MS = 2000`][timeout]; a rejection
-or timeout enters the catch at [`:97-104`][combinedcatch] and the seeded value
-stands. The cache key is `(tool, session)` only ([`permissionCacheKey`][permkey]);
-the active agent ([`activeAgentFromMessages`][activeagent]) is an input to the
-live call but not to the key. The only invalidation is
-[`clearToolPermissionDenied`][clearperm] on `session.deleted`
-([hook.ts][hookclear]); the plugin subscribes to no `permission.*` event.
-Required faults and enabling state: A prior pass or [capture-hook][capture]
-call that stored `true` for `(todowrite, session)`, then a pass whose
-`app.agents()` or `session.get()` rejects or hangs past 2000 ms, with
-`availability.frozen && availability.callable` and `compactionOff` false; two
-consecutive passes whose last user messages carry different `info.agent`
-values with different `todowrite` permissions ([`hook-handlers.ts`][agentset]
-records the agent per message); a session permission edit between passes.
+Exercised: yes - Hook fixtures exercise rejection and timeout after a cached
+deny, missing clients, shared fresh hits, agent and session isolation, all
+declared invalidations, and shared pending capture/transform reads, including
+an empty host agent normalized to absence. Resolver fixtures exercise the TTL
+boundary at lookup
+and settlement, shared timeout, missing named agents, malformed SDK evidence,
+empty-cache and expired-allow failure, late completion fencing, and eviction.
+Guarantee: An unavailable, rejected, timed-out, or invalidated permission read
+reports todowrite absent, and a cache hit uses only the last successful,
+invalidation-free read for the same session and active agent within 30 seconds.
+Check: `always` - Failed reads produce `todo_tool_present: false` and suppress
+capture even with an empty cache or expired allow. A fresh hit performs no SDK
+read and equals the live evaluator at the latest successful read for the same
+`(sessionId, toolName, activeAgent)`, subject to the unchanged frozen tools-map
+and compaction gates. Freshness ends at read-start plus 30,000 monotonic
+milliseconds or invalidation, whichever comes first. The core key distinguishes
+undefined from every string; both host hooks normalize an empty agent to
+undefined and evaluate session rules alone. Overlapping same-key reads share
+one fill while it remains
+valid, so two successful allows cannot invent a deny. A completion after
+invalidation, deletion, eviction, or TTL expiry cannot publish or return an
+allow. These are per-read safety checks, not campaign occurrence checks.
+Fault/timing angle: The [shared resolver][permission-cache-resolver] owns the
+2,000 ms timeout and the cache. Undefined-agent reads require only
+`session.get`; named-agent reads also require `app.agents`.
+The pending promise belongs to one LRU entry;
+followers share its deadline rather than restart it. Entry identity and an
+explicit invalidation flag reject superseded completions. Publication and
+caller return both check read-start expiry, including after event-loop stalls.
+Only a successful, still-valid result can publish. Every `session.updated`,
+`session.compacted`, and `/ctx-flush` expire all agent entries for that session
+without erasing their successful verdicts; `session.deleted` removes them.
+There is no permission-change subscription. A silent edit can remain
+unobserved within the approved 30-second window.
+Required faults and enabling state: A frozen callable tools map and enabled
+compaction; a successful deny followed by expiry or freshness invalidation
+and SDK rejection or timeout; empty-cache and expired-allow failures; distinct
+session and agent identities; each invalidation; delayed completions across
+invalidation, deletion, timeout, TTL expiry, and pending-entry eviction.
 Confidence: high - [Evidence](evidence/cached-todowrite-verdict-never-lifts-a-deny-or-outlives-its-inputs.md).
-The seed, the race, the catch, the key, and the single invalidation are
-source-verified; the host consumes `todo_tool_present` only to choose whether
-a synthetic pair is captured or injected ([injection.rs][injection]), so the
-verdict changes prompt bytes, not authorization.
+The focused Bun campaign passes 170 tests across six files. This establishes
+the constructed cases, not exhaustive interleavings or a latency benefit.
 Existing check: [Plugin checks](existing-checks.md#plugin-pre-send) cover
-provisional availability, an agent deny through the SDK, both hung reads with
-an empty cache, and the evaluator's last-match semantics; all unaudited.
+the hook witnesses, resolver lifetime matrix, unchanged availability and
+evaluation rules, and empty-cache timeout outcomes; adequacy remains unaudited.
 Impact: A denied `todowrite` is reported present, so the host injects a
 synthetic pair the harness cannot execute, or an allowed one is reported
 absent.
-Open questions:
-- When no verdict is cached and the read fails, the pass sends
-  `todo_tool_present: true` (`?? false` at [`:85`][combinedseed]). Is
-  fail-open the intended default, given the comment at
-  [`:1056-1057`][failclosed] says synthesis fails closed when evidence is
-  missing? (needs human input)
-- What staleness is acceptable for a cached verdict, in passes or in time, and
-  which events must invalidate it? (needs human input)
-- Does the OpenCode SDK emit a permission-change event the plugin could
-  subscribe to? Unresolved, needs the SDK event list for the pinned version.
+Open questions: None. User approval provenance for the changed failure default
+and accepted staleness window is appended to the evidence investigation log.
+
+[permission-cache-resolver]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L306-L362
 
 ### mid-turn-read-is-invariant-under-query-collapse-and-statement-caching
 
@@ -1130,24 +1127,31 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: not yet - Both hung-read tests start with an empty cache.
-Guarantee: The fail-closed fallback is reached with a cached deny at least
-once, so P1's first clause is not vacuously satisfied.
+Exercised: yes - The hook fixture constructs both rejection and timeout after
+a stored deny, for transform and capture independently.
+Guarantee: The campaign independently witnesses a cached deny followed by a
+failed live read at least once, regardless of the returned verdict.
 Check: `sometimes` - For some pass, both preconditions hold independently:
-`cachedToolPermissionDenied(sessionId, "todowrite") === true` at entry to
-[`resolveCombinedTodowriteVerdict`][combined], and the live read for that
+`peekToolPermissionDeniedForTest(sessionId, "todowrite", activeAgent) === true` at
+resolver entry, and the live read for that
 same pass rejects or times out. The marker asserts the preconditions, not
-the outcome.
-Fault/timing angle: The two preconditions come from different passes: an
-earlier successful read must have stored `true`, and a later read must fail.
+the outcome. This is a reachability witness, not evidence that cached deny
+changes the outcome relative to the fail-closed empty-cache case.
+Fault/timing angle: An earlier successful read stores `true`; expiry or
+freshness invalidation forces a later live read without erasing that deny.
 Required faults and enabling state: An SDK fake that answers `deny` once and
 then rejects or hangs; a session whose map verdict is frozen and callable.
 Confidence: high - [Evidence](evidence/todowrite-deny-then-read-failure-is-exercised.md).
-The cache write on a successful read and the catch on a failed one are
-source-verified.
-Existing check: none found.
+The [constant hook marker][permission-failure-witness] asserts the entry
+snapshot, SDK invocation, and observed Error or TimeoutError separately from
+the wire-body and capture-suppression assertions. Both variants pass.
+Existing check: [hook.test.ts:167][permission-failure-test] drives the public
+hook with SDK mocks and Bun fake timers; adequacy remains unaudited.
 Impact: P1's fallback clause passes without the window ever opening.
 Open questions: None.
+
+[permission-failure-witness]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L208-L234
+[permission-failure-test]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L167
 
 ## Ring arena and direct frame
 
@@ -2506,23 +2510,11 @@ evaluation of this area and its disposition are recorded in
 [obs-insert]: ../../../../crates/memory-store/src/lib.rs#L13810-L13831
 [idx-order]: ../../../../crates/memory-store/baseline.sql#L531-L535
 
-[combined]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L77-L107
-[combinedseed]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L85-L96
-[combinedcatch]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L97-L104
-[activeagent]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L68-L75
-[failclosed]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1056-L1057
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
-[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
-[clearperm]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L326-L334
-[permdenied]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L277-L308
-[permkey]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L71-L73
-[capture]: ../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L270-L292
-[agentset]: ../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L133-L135
+[t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
-[hookclear]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L375
-[timeout]: ../../../../packages/opencode-plugin/src/shared/with-timeout.ts#L2
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
 [dbexists]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L33-L35
 [dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L37-L67
@@ -2543,7 +2535,6 @@ evaluation of this area and its disposition are recorded in
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[injection]: ../../../../crates/daemon/src/injection.rs#L195-L230
 [hostpage]: ../../../../crates/daemon/src/lib.rs#L735-L736
 [hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9317-L9323
 

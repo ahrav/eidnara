@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import { invalidateToolPermissionDenied } from "./ctx-reduce-availability";
 import type { ContextUsageEntry } from "./event-handler";
 import {
     createChatMessageHook,
@@ -16,7 +17,12 @@ function createForwardingHook(options?: {
     const calls: TodoStateCall[] = [];
     const hook = createToolExecuteAfterHook({
         subagentSessions: options?.subagentSessions ?? new Set(),
-        client: options?.client,
+        client:
+            options?.client ??
+            ({
+                app: { agents: async () => ({ data: [] }) },
+                session: { get: async () => ({ data: {} }) },
+            } as never),
         transformMode: "rust",
         todoStateSet: async (input) => {
             calls.push(input);
@@ -94,6 +100,7 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
 
         // A third-party lookalike is never accepted as a native todowrite capture.
         denied = false;
+        invalidateToolPermissionDenied("ses-denied-capture");
         await hook({
             tool: "mcp_Todowrite",
             sessionID: "ses-denied-capture",
@@ -116,7 +123,7 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         expect(calls[0]?.stateJson).toContain("Capture now");
     });
 
-    test("a permission read that never settles falls back to the cached verdict within the deadline", async () => {
+    test("a permission read that never settles suppresses capture within the deadline", async () => {
         const client = {
             app: { agents: () => new Promise<never>(() => {}) },
             session: { get: async () => ({ data: {} }) },
@@ -128,11 +135,11 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
             tool: "todowrite",
             sessionID: "ses-permission-hung",
             agent: "build",
-            args: { todos: [{ status: "pending", priority: "high", content: "Capture anyway" }] },
+            args: { todos: [{ status: "pending", priority: "high", content: "Must not capture" }] },
         });
         const elapsedMs = performance.now() - startedAt;
 
-        expect(calls).toHaveLength(1);
+        expect(calls).toHaveLength(0);
         expect(elapsedMs).toBeGreaterThanOrEqual(1_500);
         expect(elapsedMs).toBeLessThan(10_000);
     });

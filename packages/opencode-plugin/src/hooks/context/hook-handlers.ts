@@ -3,12 +3,7 @@ import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import type { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
-import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
-import {
-    cachedToolPermissionDenied,
-    resolveTodowriteAvailability,
-    todowritePermissionDenied,
-} from "./ctx-reduce-availability";
+import { resolveTodowriteAvailability, todowritePermissionDenied } from "./ctx-reduce-availability";
 import { type ContextUsageEntry, isOlderThanNewestResponse } from "./event-handler";
 import { getMessageUpdatedAssistantInfo, getSessionProperties } from "./event-payloads";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
@@ -266,31 +261,8 @@ export function createToolExecuteAfterHook(args: {
 
         const todowriteVerdict = resolveTodowriteAvailability(typedInput.sessionID);
         if (todowriteVerdict.frozen && !todowriteVerdict.callable) return;
-        const activeAgent = typedInput.agent;
-        if (args.client) {
-            try {
-                if (
-                    await withTimeout(
-                        todowritePermissionDenied(args.client, typedInput.sessionID, activeAgent),
-                        HOST_SDK_READ_TIMEOUT_MS,
-                        "todowrite permission read timed out",
-                    )
-                ) {
-                    return;
-                }
-            } catch (error) {
-                // The permission check preserves a prior live deny across a transient or slow SDK read.
-                // TODO: Prevent SDK read failures from resuming stale capture.
-                if (cachedToolPermissionDenied(typedInput.sessionID, "todowrite")) {
-                    return;
-                }
-                sessionLog(
-                    typedInput.sessionID,
-                    "todowrite permission read failed during capture (ignored):",
-                    error,
-                );
-            }
-        }
+        const activeAgent = typedInput.agent || undefined;
+        if (await todowritePermissionDenied(args.client, typedInput.sessionID, activeAgent)) return;
         if (args.subagentSessions.has(typedInput.sessionID)) return;
         const todoArgs = typedInput.args as { todos?: unknown } | undefined;
         const todos = todoArgs?.todos;
