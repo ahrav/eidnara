@@ -16,7 +16,8 @@ use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
 use kernel::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, identity_digest, select,
+    EncodedOccurrence, Occurrence, OccurrenceRefusal, Span, derived_lineage_id, encode,
+    identity_digest, select,
 };
 use rusqlite::{CachedStatement, OptionalExtension, params};
 use storage::GuardedConn;
@@ -730,10 +731,15 @@ pub fn read_occurrence(
                     row.get::<_, Option<String>>(17)?,
                 ) {
                     (None, None) => None,
-                    (Some(invalidated_commit_seq), Some(reason)) => Some(Tombstone {
-                        invalidated_commit_seq,
-                        reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
-                    }),
+                    (Some(invalidated_commit_seq), Some(reason)) => {
+                        if invalidated_commit_seq <= row.get::<_, i64>(15)? {
+                            return Err(corrupt());
+                        }
+                        Some(Tombstone {
+                            invalidated_commit_seq,
+                            reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
+                        })
+                    }
                     _ => return Err(corrupt()),
                 };
                 Ok(StoredOccurrence {
@@ -762,11 +768,20 @@ pub fn read_occurrence(
             rusqlite::Error::InvalidQuery => ProjectionError::CorruptRow,
             other => other.into(),
         })?;
-    if let Some(stored) = &stored
-        && (identity_digest(&stored.tuple) != stored.occurrence_id
-            || identity_digest(&stored.bytes) != stored.payload_id)
-    {
-        return Err(ProjectionError::CorruptRow);
+    if let Some(stored) = &stored {
+        let lineage = derived_lineage_id(
+            &stored.tuple,
+            &stored.class,
+            stored.revision,
+            &stored.representation,
+            stored.span.map(|(start, end)| Span { start, end }),
+        );
+        if identity_digest(&stored.tuple) != stored.occurrence_id
+            || identity_digest(&stored.bytes) != stored.payload_id
+            || lineage.as_deref() != Some(stored.lineage_id.as_str())
+        {
+            return Err(ProjectionError::CorruptRow);
+        }
     }
     Ok(stored)
 }

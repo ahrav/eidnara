@@ -1298,3 +1298,132 @@ fn altered_tuple_bytes_are_corruption_not_served_identity() {
         })
         .unwrap();
 }
+
+#[test]
+fn altered_tuple_derived_columns_are_corruption_not_served_identity() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let with_span = Owned::from_json(
+        fixtures["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["id"] == "t_span")
+            .unwrap(),
+    );
+
+    // Each derived column swapped to a schema-valid value that disagrees with
+    // the retained tuple: SQLite's CHECK vocabulary accepts all of them.
+    let damages: &[(&str, &str)] = &[
+        (
+            "class",
+            "UPDATE occurrences SET class='git_commits' WHERE occurrence_id=?1",
+        ),
+        (
+            "revision",
+            "UPDATE occurrences SET revision=9 WHERE occurrence_id=?1",
+        ),
+        (
+            "representation",
+            "UPDATE occurrences SET representation='tool_output' WHERE occurrence_id=?1",
+        ),
+        (
+            "lineage_id",
+            "UPDATE occurrences SET lineage_id='0000000000000000000000000000000000000000000000000000000000000000' WHERE occurrence_id=?1",
+        ),
+        (
+            "span_added",
+            "UPDATE occurrences SET span_start=0, span_end=5 WHERE occurrence_id=?1",
+        ),
+        (
+            "span_removed",
+            "UPDATE occurrences SET span_start=NULL, span_end=NULL WHERE occurrence_id=?1",
+        ),
+        (
+            "span_shifted",
+            "UPDATE occurrences SET span_end=span_end-1 WHERE occurrence_id=?1",
+        ),
+    ];
+    for (damage, sql) in damages {
+        let target = match *damage {
+            "span_removed" | "span_shifted" => &with_span,
+            _ => &record,
+        };
+        let identity = borrowed(&target.identity);
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = {
+            let store = open(dir.path());
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(
+                        persist_occurrences(conn, &[target.record(&identity)], bounds(), 1)
+                            .unwrap()
+                            .remove(0),
+                    )
+                })
+                .unwrap()
+        };
+        {
+            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+            let changed = raw.execute(sql, [&outcome.occurrence_id]).unwrap();
+            assert_eq!(changed, 1, "{damage}");
+        }
+        let store = open(dir.path());
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    read_occurrence(conn, &outcome.occurrence_id),
+                    Err(ProjectionError::CorruptRow),
+                    "{damage}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn stored_tombstone_at_or_before_creation_is_corruption() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let identity = borrowed(&record.identity);
+    // The writer refuses seq <= created_commit_seq (7); both boundary values
+    // must also be refused when found already stored.
+    for planted_seq in [7, 3] {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = {
+            let store = open(dir.path());
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(
+                        persist_occurrences(conn, &[record.record(&identity)], bounds(), 1)
+                            .unwrap()
+                            .remove(0),
+                    )
+                })
+                .unwrap()
+        };
+        {
+            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+            let changed = raw
+                .execute(
+                    "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+                     VALUES (?1,?2,'retired',1)",
+                    rusqlite::params![outcome.occurrence_id, planted_seq],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+        }
+        let store = open(dir.path());
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    read_occurrence(conn, &outcome.occurrence_id),
+                    Err(ProjectionError::CorruptRow),
+                    "seq={planted_seq}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
