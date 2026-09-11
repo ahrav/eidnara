@@ -71,6 +71,7 @@ pub fn wide_admission() -> SourceHoldAdmission {
 pub fn bounds(expiry_ms: u64) -> SourceHoldBounds {
     SourceHoldBounds {
         admission: wide_admission(),
+        max_descriptor_rows: NonZeroUsize::new(1024).unwrap(),
         expiry_ms: NonZeroU64::new(expiry_ms).unwrap(),
     }
 }

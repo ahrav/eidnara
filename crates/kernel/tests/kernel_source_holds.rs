@@ -7,7 +7,7 @@ mod source_fixture;
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -512,6 +512,7 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
     assert_eq!(expected.len(), 10);
     let exact = SourceHoldBounds {
         admission: admission(references, bytes),
+        max_descriptor_rows: NonZeroUsize::new(expected.len()).unwrap(),
         expiry_ms: NonZeroU64::new(HOUR_MS).unwrap(),
     };
     let refs_before = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
@@ -559,16 +560,56 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
         );
         assert_eq!(seen, vec![refs_before], "refused before any reference row");
     }
-    // No pin, no reference, and no narrowed inventory came out of a refusal.
-    assert_eq!(
-        fixture.count("SELECT COUNT(*) FROM capture_pins"),
-        pins_before
-    );
-    assert_eq!(
-        fixture.count("SELECT COUNT(*) FROM capture_pin_refs"),
-        refs_before
-    );
-    assert_eq!(fixture.checkpoint(), 0);
+    for retire_history in [false, true] {
+        if retire_history {
+            fixture.retire(&expected[0].object_id);
+        }
+        let tip = fixture.store.tip().unwrap();
+        for (max_descriptor_rows, error) in [
+            (
+                expected.len() as u64 - 1,
+                SourceHoldError::CaptureWorkLimitReached {
+                    max_descriptor_rows: expected.len() - 1,
+                },
+            ),
+            (i64::MAX as u64, SourceHoldError::InvalidRequest),
+            (u64::MAX, SourceHoldError::InvalidRequest),
+        ] {
+            let Ok(max_descriptor_rows) = usize::try_from(max_descriptor_rows) else {
+                continue;
+            };
+            let mut reached_reference_admission = false;
+            assert_eq!(
+                fixture.store.capture_source_hold_with_hook_for_test(
+                    &fixture.binding(),
+                    SourceHoldBounds {
+                        max_descriptor_rows: NonZeroUsize::new(max_descriptor_rows).unwrap(),
+                        ..exact
+                    },
+                    |_| reached_reference_admission = true,
+                ),
+                Err(error),
+                "descriptor budget {max_descriptor_rows}, retired history {retire_history}"
+            );
+            assert!(!reached_reference_admission);
+        }
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM capture_pins"),
+            pins_before
+        );
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM capture_pin_refs"),
+            refs_before
+        );
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.checkpoint(), 0);
+    }
+    let after_retirement = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), exact)
+        .unwrap();
+    assert_eq!(after_retirement.references, references - 1);
+    assert_hold_matches_ledger(&fixture, &after_retirement, 4);
 }
 
 #[test]

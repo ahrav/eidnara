@@ -394,6 +394,11 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
                 assert_eq!(stored.sensitivity, Sensitivity::Normal);
                 assert_eq!(stored.domain_id, "domain-stable-id");
                 assert_eq!(stored.source_object_id, record.source_id);
+                assert_eq!(stored.source_evidence_id, record.source_id);
+                assert_eq!(
+                    stored.source_artifact_digest,
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                );
                 assert_eq!(stored.created_commit_seq, 7);
                 let expected_text = exact
                     .get(&record.id)
@@ -583,7 +588,10 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
     );
     let collide_tuple = store
         .with_conn_fenced(|conn| {
-            let request = t_err.record(&t_err_identity);
+            let request = OccurrenceRecord {
+                occurrence: t_err.record(&t_err_identity).occurrence,
+                ..m1.record(&m1_identity)
+            };
             let target = m1.expected_occurrence_id.clone().unwrap();
             let result = persist_occurrences_with_digests_for_test(
                 conn,
@@ -591,6 +599,7 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
                 bounds(),
                 2,
                 &|_, selected| {
+                    assert_eq!(selected, m1.payload.as_bytes());
                     (
                         target.clone(),
                         kernel::source_identity::payload_id(selected),
@@ -647,11 +656,15 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
             let target = m1.expected_occurrence_id.clone().unwrap();
             Ok(persist_occurrences_with_digests_for_test(
                 conn,
-                &[one_byte.record(&one_byte_identity)],
+                &[OccurrenceRecord {
+                    occurrence: one_byte.record(&one_byte_identity).occurrence,
+                    ..m1.record(&m1_identity)
+                }],
                 bounds(),
                 2,
                 &|encoded, selected| {
                     assert_eq!(encoded.tuple.len(), m1_tuple_len);
+                    assert_eq!(selected, m1.payload.as_bytes());
                     (
                         target.clone(),
                         kernel::source_identity::payload_id(selected),
@@ -667,12 +680,12 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
         })
     );
 
-    // The same digests with equal values are not collisions: replaying m1
-    // under its own digests is the no-op it always was.
+    // Replaying m1 with equal values and its own digests writes nothing.
     let equal = store
         .with_conn_fenced(|conn| {
             let request = m1.record(&m1_identity);
-            Ok(persist_occurrences_with_digests_for_test(
+            let before: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+            let replay = persist_occurrences_with_digests_for_test(
                 conn,
                 &[request],
                 bounds(),
@@ -684,7 +697,10 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
                     )
                 },
             )
-            .unwrap())
+            .unwrap();
+            let after: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+            assert_eq!(after, before, "equal replay must not mutate rows");
+            Ok(replay)
         })
         .unwrap();
     assert!(!equal[0].inserted && !equal[0].payload_inserted);
@@ -1180,18 +1196,20 @@ fn replay_with_different_immutable_metadata_is_a_collision_not_a_noop() {
     let fixtures = fixtures();
     let record = Owned::from_json(&fixtures["records"][0]);
     let identity = borrowed(&record.identity);
-    let dir = tempfile::tempdir().unwrap();
-    let store = open(dir.path());
-    store
-        .with_conn_fenced(|conn| {
-            Ok(persist_occurrences(conn, &[record.record(&identity)], bounds(), 1).unwrap())
-        })
-        .unwrap();
     let occurrence_id = occurrence_id_of(&record);
+    let original = record.record(&identity);
+    let mut fresh = record.clone();
+    fresh
+        .identity
+        .iter_mut()
+        .find(|(name, _)| name == "message_id")
+        .unwrap()
+        .1 = "msg-fresh".to_string();
+    fresh.payload = "unrelated payload".to_string();
+    let fresh_identity = borrowed(&fresh.identity);
 
-    // The same tuple and payload with each immutable column changed one at a
-    // time: sensitivity, domain, provenance, and creation sequence must each
-    // refuse rather than silently keep the stored value.
+    // The preflight rejects metadata variants that conflict with either a
+    // stored row or an earlier batch record.
     let variants: Vec<OccurrenceRecord<'_>> = vec![
         OccurrenceRecord {
             sensitivity: Sensitivity::Secret,
@@ -1218,30 +1236,60 @@ fn replay_with_different_immutable_metadata_is_a_collision_not_a_noop() {
             ..record.record(&identity)
         },
     ];
-    for variant in variants {
-        let result = store
-            .with_conn_fenced(|conn| Ok(persist_occurrences(conn, &[variant], bounds(), 2)))
+    for stored in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        if stored {
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(
+                        persist_occurrences(conn, std::slice::from_ref(&original), bounds(), 1)
+                            .unwrap(),
+                    )
+                })
+                .unwrap();
+        }
+        let before = store
+            .with_conn(|conn| Ok(read_occurrence(conn, &occurrence_id).unwrap()))
             .unwrap();
-        assert_eq!(
-            result,
-            Err(ProjectionError::OccurrenceCollision {
-                occurrence_id: occurrence_id.clone()
-            })
-        );
+        assert_eq!(before.is_some(), stored);
+        if let Some(row) = &before {
+            assert_eq!(row.sensitivity, Sensitivity::Normal);
+            assert_eq!(row.created_commit_seq, 7);
+        }
+        for (index, variant) in variants.iter().enumerate() {
+            assert_eq!(variant.occurrence, original.occurrence);
+            assert_eq!(variant.buffer, original.buffer);
+            let mut requests = vec![fresh.record(&fresh_identity)];
+            if !stored {
+                requests.push(original.clone());
+            }
+            requests.push(variant.clone());
+            store
+                .with_conn_fenced(|conn| {
+                    let changes_before: i64 =
+                        conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                    let result = persist_occurrences(conn, &requests, bounds(), 2);
+                    let changes_after: i64 =
+                        conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                    assert_eq!(
+                        result,
+                        Err(ProjectionError::OccurrenceCollision {
+                            occurrence_id: occurrence_id.clone()
+                        }),
+                        "metadata variant {index}, stored {stored}"
+                    );
+                    assert_eq!(
+                        changes_after, changes_before,
+                        "preflight must not mutate rows"
+                    );
+                    assert_eq!(read_occurrence(conn, &occurrence_id).unwrap(), before);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(row_counts(&store), (i64::from(stored), i64::from(stored)));
+        }
     }
-    // Refusals wrote nothing, and the stored metadata is unchanged.
-    let (stored_sensitivity, stored_seq): (String, i64) = store
-        .with_conn(|conn| {
-            conn.query_row(
-                "SELECT sensitivity,created_commit_seq FROM occurrences WHERE occurrence_id=?1",
-                [&occurrence_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-        })
-        .unwrap();
-    assert_eq!(stored_sensitivity, "normal");
-    assert_eq!(stored_seq, 7);
-    assert_eq!(row_counts(&store), (1, 1));
 }
 
 #[test]

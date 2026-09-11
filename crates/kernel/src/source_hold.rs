@@ -22,6 +22,18 @@ use super::source_descriptor::SOURCE_DESCRIPTOR_KIND;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 const SOURCE_HOLD_KIND: &str = "source_hold";
+const CAPTURE_DESCRIPTOR_WORK_SQL: &str = "SELECT COUNT(*) FROM (
+         SELECT 1 FROM object_registry INDEXED BY idx_objects_source_descriptor_page
+         WHERE object_id GLOB 'srcdesc:*' LIMIT ?1
+     )";
+// Unit separator (31) and its successor (32) bound one consumer's keys in binary order.
+const ACTIVE_SOURCE_HOLDS_SQL: &str = "SELECT COUNT(*) FROM capture_pins
+    WHERE pin_kind=?1 AND owner_id>=?2 || char(31) AND owner_id<?2 || char(32)
+      AND released_at IS NULL";
+const RELEASABLE_SOURCE_HOLDS_SQL: &str = "SELECT capture_pin_id FROM capture_pins
+    WHERE pin_kind=?1 AND owner_id>=?2 || char(31) AND owner_id<?2 || char(32)
+      AND (?3 IS NULL OR lease_epoch<>?3) AND released_at IS NULL
+    ORDER BY capture_pin_id";
 
 /// Admission bounds each capture; this limit bounds the evidence that repeated
 /// captures by one consumer can pin together.
@@ -58,6 +70,8 @@ pub struct SourceHoldAdmission {
 /// Admission plus the finite lifetime a capture gives the hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceHoldBounds {
+    /// Maximum descriptor registry rows in the capture scan, including invalidated revisions.
+    pub max_descriptor_rows: NonZeroUsize,
     pub admission: SourceHoldAdmission,
     /// Finite lifetime of the hold from capture, in the store's millisecond
     /// clock. An extension never renews it.
@@ -146,6 +160,8 @@ pub enum SourceHoldError {
     ExtensionIncomplete { uncovered: usize },
     #[error("source hold would reference purged evidence")]
     PurgedEvidence,
+    #[error("source hold descriptor scan exceeds {max_descriptor_rows} rows")]
+    CaptureWorkLimitReached { max_descriptor_rows: usize },
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
     #[error("source hold is not valid: {0:?}")]
@@ -162,15 +178,10 @@ fn corrupt<T>(_: T) -> SourceHoldError {
     KernelError::CorruptCanonicalRow.into()
 }
 
-fn owner_prefix(consumer_id: &str) -> String {
-    format!("{consumer_id}{OWNER_SEPARATOR}")
-}
-
 fn owner_id(binding: &SourceHoldBinding) -> String {
     format!(
-        "{}{}",
-        owner_prefix(&binding.consumer_id),
-        binding.source_policy_version
+        "{}{}{}",
+        binding.consumer_id, OWNER_SEPARATOR, binding.source_policy_version
     )
 }
 
@@ -392,6 +403,10 @@ impl KernelStore {
         }
         let expiry =
             i64::try_from(bounds.expiry_ms.get()).map_err(|_| SourceHoldError::InvalidRequest)?;
+        let descriptor_limit = i64::try_from(bounds.max_descriptor_rows.get())
+            .ok()
+            .and_then(|limit| limit.checked_add(1))
+            .ok_or(SourceHoldError::InvalidRequest)?;
         if binding.lease_epoch != self.lease_epoch() {
             return Err(SourceHoldError::IncarnationMismatch);
         }
@@ -412,15 +427,23 @@ impl KernelStore {
         }
         let active: i64 = tx
             .query_row_cached(
-                "SELECT COUNT(*) FROM capture_pins
-                 WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
-                   AND released_at IS NULL",
-                params![SOURCE_HOLD_KIND, owner_prefix(&binding.consumer_id)],
+                ACTIVE_SOURCE_HOLDS_SQL,
+                params![SOURCE_HOLD_KIND, binding.consumer_id],
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
         if usize::try_from(active).map_err(corrupt)? >= MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER {
             return Err(SourceHoldError::HoldLimitReached);
+        }
+        let descriptor_rows: i64 = tx
+            .query_row_cached(CAPTURE_DESCRIPTOR_WORK_SQL, [descriptor_limit], |row| {
+                row.get(0)
+            })
+            .map_err(sqlite)?;
+        if descriptor_rows >= descriptor_limit {
+            return Err(SourceHoldError::CaptureWorkLimitReached {
+                max_descriptor_rows: bounds.max_descriptor_rows.get(),
+            });
         }
         let snapshot: i64 = tx
             .query_row_cached(
@@ -969,18 +992,12 @@ pub(crate) fn release_consumer_holds_in_tx(
 ) -> Result<Vec<String>, KernelError> {
     let held: Vec<String> = {
         let mut statement = tx
-            .prepare_cached(
-                "SELECT capture_pin_id FROM capture_pins
-                 WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
-                   AND (?3 IS NULL OR lease_epoch<>?3) AND released_at IS NULL
-                 ORDER BY capture_pin_id",
-            )
+            .prepare_cached(RELEASABLE_SOURCE_HOLDS_SQL)
             .map_err(map_sqlite)?;
         statement
-            .query_map(
-                params![SOURCE_HOLD_KIND, owner_prefix(consumer_id), keep_epoch],
-                |row| row.get(0),
-            )
+            .query_map(params![SOURCE_HOLD_KIND, consumer_id, keep_epoch], |row| {
+                row.get(0)
+            })
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_sqlite)?
@@ -1163,6 +1180,7 @@ mod tests {
             .capture_source_hold(
                 &binding,
                 SourceHoldBounds {
+                    max_descriptor_rows: NonZeroUsize::new(1).unwrap(),
                     admission: SourceHoldAdmission {
                         max_references: NonZeroUsize::new(1).unwrap(),
                         max_encoded_bytes: NonZeroU64::new(1).unwrap(),
