@@ -143,15 +143,13 @@ fn severity(status: HealthStatus) -> u8 {
     }
 }
 
-/// `ChildPanic` marks a caught child panic. The payload never leaves `catch_child_panic`: it is
-/// destroyed inside `catch_unwind` by `discard_payload`, so a payload whose own `Drop` panics
-/// cannot unwind into the composite.
+/// `ChildPanic` marks an isolated component panic without exposing its payload.
 #[derive(Debug, PartialEq, Eq)]
-struct ChildPanic;
+pub(crate) struct ChildPanic;
 
 /// `discard_payload` drops a caught panic payload inside `catch_unwind`. A payload whose `Drop`
 /// panics is leaked, which bounds the regress at one level.
-fn discard_payload(payload: Box<dyn std::any::Any + Send + 'static>) -> ChildPanic {
+pub(crate) fn discard_payload(payload: Box<dyn std::any::Any + Send + 'static>) -> ChildPanic {
     if let Err(second) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         drop(payload);
     })) {

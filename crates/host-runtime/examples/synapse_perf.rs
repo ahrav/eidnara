@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use host_runtime::synapse::embed_tokens::EmbedTokens;
 use host_runtime::synapse::inference::InferenceError;
 use host_runtime::synapse::jobs::BatchItem;
 use host_runtime::synapse::{
@@ -246,6 +247,10 @@ struct DelayEngine {
 }
 
 impl EmbeddingEngine for DelayEngine {
+    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+        Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
+    }
+
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
         let start = Instant::now();
         std::thread::sleep(self.delay);
