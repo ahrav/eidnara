@@ -12,7 +12,7 @@ use daemon::embedding_dispatch::{Blocked, DispatchBounds, DispatchEvent, Embeddi
 use daemon::embedding_publication::{
     EmbeddingPublisher, Publication, PublicationEvent, PublicationFault, VectorPublication,
 };
-use daemon::identity_sweep::{IdentitySweeper, SweepReport};
+use daemon::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use daemon::search_projection::SearchProjection;
 use host_runtime::synapse::PollOutcome;
 use host_runtime::synapse::inference::InferenceError;
@@ -1432,4 +1432,51 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     drop(projection);
     let _ = SearchProjection::open(dir.path()).unwrap();
     assert_eq!(inventory(dir.path()), expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let gone = corpus.publish("gone", "gone text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    tombstone(&projection, occurrence_of(&rows, &gone), 50);
+    let before = inventory(dir.path());
+    let database = Connection::open(search_path(dir.path())).unwrap();
+    database
+        .execute_batch(
+            "ALTER TABLE embedding_recovery_authorizations
+             RENAME TO embedding_recovery_authorizations_unavailable",
+        )
+        .unwrap();
+
+    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let error = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap_err());
+    let SweepError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        projection.quarantine(),
+        Some(quarantine.clone()),
+        "the projection must share a sweep failure with every writer"
+    );
+
+    database
+        .execute_batch(
+            "ALTER TABLE embedding_recovery_authorizations_unavailable
+             RENAME TO embedding_recovery_authorizations",
+        )
+        .unwrap();
+    let mut fresh = IdentitySweeper::new(&projection, &synapse);
+    let again = tokio::task::block_in_place(|| fresh.run_sweep(ten()).unwrap_err());
+    assert!(matches!(again, SweepError::Quarantined(q) if q == quarantine));
+    assert_eq!(
+        inventory(dir.path()),
+        before,
+        "a quarantined writer does no work"
+    );
 }

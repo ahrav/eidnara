@@ -1,6 +1,6 @@
 //! Runs one bounded identity sweep over the search projection: selects finished, unreferenced embedding identities, asks the in-process Synapse host whether it still holds any of them, and reclaims the rest inside one fenced write transaction that rechecks eligibility row by row.
 //!
-//! A live native lease, component-table entry, or served result page prevents row reclamation. A holder check taken before the write transaction cannot go stale in the deleting direction: only pending rows are admitted, so an `obsolete` row never gains a holder again, and the dispatcher obtains the page it holds across publication before the row finishes, so a finished row's protecting page exists at check time. A job issued by another incarnation has no holder left. Lost COMMIT replies reconcile from stored rows, and repeated deletion is idempotent. Integrity or storage failures quarantine the sweeper and preserve cleanup obligations.
+//! A live native lease, component-table entry, or served result page prevents row reclamation. A holder check taken before the write transaction cannot go stale in the deleting direction: only pending rows are admitted, so an `obsolete` row never gains a holder again, and the dispatcher obtains the page it holds across publication before the row finishes, so a finished row's protecting page exists at check time. A job issued by another incarnation has no holder left. Lost COMMIT replies reconcile from stored rows, and repeated deletion is idempotent. Integrity or storage failures quarantine the projection and preserve cleanup obligations.
 
 use std::num::NonZeroUsize;
 
@@ -35,7 +35,6 @@ pub enum SweepError {
 pub struct IdentitySweeper<'a> {
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
-    quarantine: Option<Quarantine>,
     cursor: Option<String>,
     lose_reclaim_reply: bool,
 }
@@ -45,7 +44,6 @@ impl<'a> IdentitySweeper<'a> {
         Self {
             projection,
             synapse,
-            quarantine: None,
             cursor: None,
             lose_reclaim_reply: false,
         }
@@ -61,10 +59,10 @@ impl<'a> IdentitySweeper<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused or its outcome cannot be reconciled, and on every later call of this sweeper.
+    /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
     pub fn run_sweep(&mut self, max_candidates: NonZeroUsize) -> Result<SweepReport, SweepError> {
-        if let Some(quarantine) = &self.quarantine {
-            return Err(SweepError::Quarantined(quarantine.clone()));
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(SweepError::Quarantined(quarantine));
         }
         let mut report = SweepReport::default();
         let page = self
@@ -140,13 +138,7 @@ impl<'a> IdentitySweeper<'a> {
         }
     }
 
-    fn enter_quarantine(
-        &mut self,
-        kind: QuarantineKind,
-        error: &dyn std::fmt::Display,
-    ) -> SweepError {
-        let quarantine = Quarantine::new(kind, error);
-        self.quarantine = Some(quarantine.clone());
-        SweepError::Quarantined(quarantine)
+    fn enter_quarantine(&self, kind: QuarantineKind, error: &dyn std::fmt::Display) -> SweepError {
+        SweepError::Quarantined(self.projection.enter_quarantine(kind, error))
     }
 }
