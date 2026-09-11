@@ -205,7 +205,7 @@ fn verification_time_upper_bound(now: i64, elapsed: Duration) -> i64 {
 
 /// Which descriptors in a commit window cite evidence a hold protects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Descriptors {
+pub(crate) enum Descriptors {
     /// Descriptors live at the window's end: a capture over `(0, S]` drops
     /// descriptors invalidated at or before S, because the projection at S
     /// never sees them.
@@ -214,6 +214,51 @@ enum Descriptors {
     /// inside it, because a consumer replaying the window still meets its
     /// creation.
     CreatedInWindow,
+}
+
+impl Descriptors {
+    /// `end` and `start` are inserted verbatim into the SQL predicate.
+    pub(crate) fn predicate(self, end: &str, start: &str) -> String {
+        // Registry timestamps keep corrupt observation timestamps from hiding source rows.
+        let descriptor_liveness = match self {
+            Self::LiveAtEnd => {
+                format!("AND (o.invalidated_commit_seq IS NULL OR o.invalidated_commit_seq>{end})")
+            }
+            Self::CreatedInWindow => String::new(),
+        };
+        format!(
+            "o.created_commit_seq>{start} AND o.created_commit_seq<={end}
+             {descriptor_liveness}
+             AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>{end})"
+        )
+    }
+
+    /// Evidence cited by the window's descriptors, with `?1` the window's end
+    /// and `?2` its start. Shared by every count, insert, and page so they
+    /// cannot disagree.
+    pub(crate) fn cited_evidence_sql(self) -> String {
+        let index = match self {
+            Self::LiveAtEnd => "idx_objects_source_descriptor_page",
+            Self::CreatedInWindow => "idx_objects_known_as_of",
+        };
+        format!(
+            "{} AND {}",
+            descriptor_rows_sql(index),
+            self.predicate("?1", "?2")
+        )
+    }
+}
+
+/// Callers select `index` from fixed registry index names, never from user input.
+/// Identity order bounds keyset pages; creation order skips unrelated catch-up history.
+pub(crate) fn descriptor_rows_sql(index: &str) -> String {
+    format!(
+        "FROM object_registry o INDEXED BY {index}
+         CROSS JOIN observations b ON b.object_id=o.object_id
+         CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
+         WHERE o.object_id GLOB 'srcdesc:*'
+           AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'"
+    )
 }
 
 /// One commit window `(after, through]` of descriptor creations.
@@ -241,58 +286,93 @@ impl Window {
         }
     }
 
-    /// Evidence cited by the window's descriptors whose evidence row is not
-    /// invalidated at or before `?1`, the window's end; `?2` is its start. A
-    /// logical delete or a purge invalidates the evidence row, so a descriptor
-    /// over deleted bytes is not a candidate rather than a held reference that
-    /// can never be read. Shared by every count, insert, and page so they
-    /// cannot disagree.
-    fn cited_evidence_sql(self) -> String {
-        let (descriptor_scan, descriptor_liveness) = match self.descriptors {
-            // Identity order lets keyset pages stop at LIMIT without sorting.
-            Descriptors::LiveAtEnd => (
-                "FROM object_registry o INDEXED BY idx_objects_source_descriptor_page
-                 CROSS JOIN observations b ON b.object_id=o.object_id",
-                "AND (b.invalidated_commit_seq IS NULL OR b.invalidated_commit_seq>?1)",
-            ),
-            // Creation order skips observations outside the catch-up window.
-            Descriptors::CreatedInWindow => (
-                "FROM observations b INDEXED BY idx_observations_known_as_of
-                 CROSS JOIN object_registry o ON o.object_id=b.object_id",
-                "",
-            ),
-        };
-        format!(
-            "{descriptor_scan}
-             CROSS JOIN evidence_meta e ON e.evidence_id=b.evidence_id
-             WHERE o.object_id GLOB 'srcdesc:*'
-               AND b.observation_kind='{SOURCE_DESCRIPTOR_KIND}'
-               AND b.created_commit_seq>?2 AND b.created_commit_seq<=?1
-               {descriptor_liveness}
-               AND (e.invalidated_commit_seq IS NULL OR e.invalidated_commit_seq>?1)"
-        )
-    }
-
     fn unreferenced_evidence_sql(self) -> String {
         format!(
             "SELECT e.evidence_id,e.byte_length,e.artifact_digest {}
                AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                               WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
              GROUP BY e.evidence_id",
-            self.cited_evidence_sql()
+            self.descriptors.cited_evidence_sql()
         )
     }
 
     fn held_descriptors_sql(self) -> String {
+        Keyset::sql(
+            "o.source_kind,o.object_id,o.source_revision,e.evidence_id,
+             e.artifact_digest,e.byte_length,o.invalidated_commit_seq",
+            &self.descriptors.cited_evidence_sql(),
+        )
+    }
+}
+
+/// One keyset page request over rows keyed `(class, object_id, revision)`:
+/// the exclusive lower bound and one row more than the page can hold, so
+/// the extra row says whether the inventory continues. Binds `?3`..`?6`
+/// after a window's `?1`/`?2`.
+pub(crate) struct Keyset<'a> {
+    class: &'a str,
+    object_id: &'a str,
+    revision: i64,
+    limit: usize,
+}
+
+impl<'a> Keyset<'a> {
+    pub(crate) fn after(cursor: Option<&'a HeldCursor>, limit: NonZeroUsize) -> Self {
+        let (class, object_id, revision) = match cursor {
+            Some(cursor) => (
+                cursor.class.as_str(),
+                cursor.object_id.as_str(),
+                cursor.revision,
+            ),
+            None => ("", "", -1),
+        };
+        Self {
+            class,
+            object_id,
+            revision,
+            limit: limit.get(),
+        }
+    }
+
+    /// `select_list` over `body`, which must end in a `WHERE` clause that
+    /// binds `?1` and `?2`, ordered and bounded by this keyset.
+    pub(crate) fn sql(select_list: &str, body: &str) -> String {
         format!(
-            "SELECT o.source_kind,o.object_id,o.source_revision,e.evidence_id,
-                    e.artifact_digest,e.byte_length,b.invalidated_commit_seq
-             {}
+            "SELECT {select_list} {body}
                AND (o.source_kind,o.object_id,o.source_revision)>(?3,?4,?5)
              ORDER BY o.source_kind,o.object_id,o.source_revision
-             LIMIT ?6",
-            self.cited_evidence_sql()
+             LIMIT ?6"
         )
+    }
+
+    /// Parameters `?1`..`?6` for [`Self::sql`] over the window `(start, end]`.
+    pub(crate) fn params(&self, end: i64, start: i64) -> [rusqlite::types::Value; 6] {
+        use rusqlite::types::Value;
+        [
+            Value::Integer(end),
+            Value::Integer(start),
+            Value::Text(self.class.to_string()),
+            Value::Text(self.object_id.to_string()),
+            Value::Integer(self.revision),
+            Value::Integer(i64::try_from(self.limit.saturating_add(1)).unwrap_or(i64::MAX)),
+        ]
+    }
+
+    /// Whether the fetched rows include the lookahead row past the page.
+    pub(crate) fn overflows<T>(&self, rows: &[T]) -> bool {
+        rows.len() > self.limit
+    }
+
+    /// Cuts `rows` to the page and names where the next page starts when
+    /// the inventory `continues`, or `None` when it ended inside this page.
+    pub(crate) fn finish<T>(
+        &self,
+        rows: &mut Vec<T>,
+        continues: bool,
+        key: impl Fn(&T) -> HeldCursor,
+    ) -> Option<HeldCursor> {
+        rows.truncate(self.limit);
+        continues.then(|| rows.last().map(key)).flatten()
     }
 }
 
@@ -539,21 +619,7 @@ impl KernelStore {
         check_fence(&tx, self.lease_epoch())?;
         let pin = self.load_valid_pin(&tx, binding, hold_id, current_time_ms())?;
         check_window(&tx, pin.snapshot, through)?;
-        let uncovered: i64 = tx
-            .query_row_cached(
-                &format!(
-                    "SELECT COUNT(*) FROM ({})",
-                    Window::catch_up(pin.snapshot, through).unreferenced_evidence_sql()
-                ),
-                params![through, pin.snapshot, hold_id],
-                |row| row.get(0),
-            )
-            .map_err(sqlite)?;
-        if uncovered != 0 {
-            return Err(SourceHoldError::ExtensionIncomplete {
-                uncovered: usize::try_from(uncovered).map_err(corrupt)?,
-            });
-        }
+        check_coverage(&tx, pin.snapshot, hold_id, through)?;
         if current_time_ms() >= pin.expires_at {
             return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
         }
@@ -653,12 +719,7 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
-        self.load_valid_pin(
-            &tx,
-            binding,
-            hold_id,
-            verification_time_upper_bound(now, started.elapsed()),
-        )?;
+        self.recheck_source_hold_after_read(&tx, binding, hold_id, now, started)?;
         if self.restore_generation.load(Ordering::SeqCst) != restore_generation {
             return Err(SourceHoldError::VerificationChanged);
         }
@@ -674,6 +735,23 @@ impl KernelStore {
             return Err(SourceHoldError::VerificationChanged);
         }
         Ok(hold)
+    }
+
+    pub(crate) fn recheck_source_hold_after_read(
+        &self,
+        tx: &Transaction<'_>,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        started: Instant,
+    ) -> Result<(), SourceHoldError> {
+        self.load_valid_pin(
+            tx,
+            binding,
+            hold_id,
+            verification_time_upper_bound(now, started.elapsed()),
+        )?;
+        Ok(())
     }
 
     /// One page of the descriptors the hold captured, in `(class, object_id,
@@ -694,29 +772,14 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
         let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
-        let (class, object_id, revision) = match cursor {
-            Some(cursor) => (
-                cursor.class.as_str(),
-                cursor.object_id.as_str(),
-                cursor.revision,
-            ),
-            None => ("", "", -1),
-        };
-        let fetch = i64::try_from(limit.get().saturating_add(1)).unwrap_or(i64::MAX);
+        let keyset = Keyset::after(cursor, limit);
         let window = Window::at_snapshot(pin.snapshot);
         let mut statement = tx
             .prepare_cached(&window.held_descriptors_sql())
             .map_err(sqlite)?;
         let mut rows = statement
             .query_map(
-                params![
-                    window.through,
-                    window.after,
-                    class,
-                    object_id,
-                    revision,
-                    fetch
-                ],
+                rusqlite::params_from_iter(keyset.params(window.through, window.after)),
                 |row| {
                     Ok((
                         HeldDescriptor {
@@ -739,16 +802,12 @@ impl KernelStore {
                 Ok(descriptor)
             })
             .collect::<Result<Vec<_>, SourceHoldError>>()?;
-        let next = if rows.len() > limit.get() {
-            rows.truncate(limit.get());
-            rows.last().map(|last| HeldCursor {
-                class: last.class.clone(),
-                object_id: last.object_id.clone(),
-                revision: last.revision,
-            })
-        } else {
-            None
-        };
+        let continues = keyset.overflows(&rows);
+        let next = keyset.finish(&mut rows, continues, |last| HeldCursor {
+            class: last.class.clone(),
+            object_id: last.object_id.clone(),
+            revision: last.revision,
+        });
         Ok(HeldPage {
             descriptors: rows,
             next,
@@ -852,7 +911,7 @@ impl KernelStore {
         }))
     }
 
-    fn load_valid_pin(
+    pub(crate) fn load_valid_pin(
         &self,
         tx: &Transaction<'_>,
         binding: &SourceHoldBinding,
@@ -1044,9 +1103,39 @@ fn admit_references<'a>(
     })
 }
 
+/// The hold must already reference every byte a replay of `(S, through]`
+/// needs; otherwise the count of uncovered evidence rows is reported.
+pub(crate) fn check_coverage(
+    tx: &Transaction<'_>,
+    snapshot: i64,
+    hold_id: &str,
+    through: i64,
+) -> Result<(), SourceHoldError> {
+    let uncovered: i64 = tx
+        .query_row_cached(
+            &format!(
+                "SELECT COUNT(*) FROM ({})",
+                Window::catch_up(snapshot, through).unreferenced_evidence_sql()
+            ),
+            params![through, snapshot, hold_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite)?;
+    if uncovered != 0 {
+        return Err(SourceHoldError::ExtensionIncomplete {
+            uncovered: usize::try_from(uncovered).map_err(corrupt)?,
+        });
+    }
+    Ok(())
+}
+
 /// `through` must lie in `[S, tip]`: an extension or acknowledgement can
 /// neither move before S nor name a commit that does not exist yet.
-fn check_window(tx: &Transaction<'_>, snapshot: i64, through: i64) -> Result<(), SourceHoldError> {
+pub(crate) fn check_window(
+    tx: &Transaction<'_>,
+    snapshot: i64,
+    through: i64,
+) -> Result<(), SourceHoldError> {
     let tip: i64 = tx
         .query_row_cached(
             "SELECT COALESCE(MAX(commit_seq),0) FROM commit_log",
@@ -1071,8 +1160,8 @@ struct PinRow {
     purge_degraded_at: Option<i64>,
 }
 
-struct StoredPin {
-    snapshot: i64,
+pub(crate) struct StoredPin {
+    pub(crate) snapshot: i64,
     captured_at: i64,
     expires_at: i64,
     released: bool,

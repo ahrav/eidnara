@@ -231,7 +231,11 @@ pub fn select(span: Option<Span>, buffer: &str) -> &[u8] {
 /// Returns `None` when `span` covers all of `buffer`, so whole-buffer
 /// selections share one identifier however the producer spelled them.
 pub fn normalize_span(span: Option<Span>, buffer: &str) -> Option<Span> {
-    span.filter(|span| !(span.start == 0 && span.end == buffer.len() as u64))
+    normalize_span_for_length(span, buffer.len() as u64)
+}
+
+fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option<Span> {
+    span.filter(|span| !(span.start == 0 && span.end == byte_length))
 }
 
 pub(crate) fn well_formed_value(value: &str) -> bool {
@@ -271,6 +275,16 @@ fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<Span>) -> Vec<u8>
 pub fn encode(
     occurrence: &Occurrence<'_>,
     buffer: &str,
+) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+    let encoded = encode_metadata(occurrence, buffer.len() as u64)?;
+    validate_span(occurrence.span, buffer)?;
+    Ok(encoded)
+}
+
+/// Callers validate span bounds and, when bytes are available, UTF-8 alignment.
+pub(crate) fn encode_metadata(
+    occurrence: &Occurrence<'_>,
+    byte_length: u64,
 ) -> Result<EncodedOccurrence, OccurrenceRefusal> {
     let class =
         OccurrenceClass::from_code(occurrence.class).ok_or(OccurrenceRefusal::UnknownClass)?;
@@ -321,8 +335,7 @@ pub fn encode(
     if !class.representations().contains(&occurrence.representation) {
         return Err(OccurrenceRefusal::UnknownRepresentation);
     }
-    validate_span(occurrence.span, buffer)?;
-    let span = normalize_span(occurrence.span, buffer);
+    let span = normalize_span_for_length(occurrence.span, byte_length);
 
     let mut prefix = Vec::new();
     push_str(&mut prefix, class.code());

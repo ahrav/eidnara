@@ -39,6 +39,20 @@ pub enum SourceDescriptorPolicy {
     Git { version: String },
 }
 
+impl SourceDescriptorPolicy {
+    pub(crate) fn validate_for(&self, class: OccurrenceClass) -> Result<(), SourceDescriptorError> {
+        match (self, class) {
+            (Self::Git { version }, OccurrenceClass::GitCommits)
+                if well_formed_value(version) && identity(version).is_ok() =>
+            {
+                Ok(())
+            }
+            (Self::Native, class) if class != OccurrenceClass::GitCommits => Ok(()),
+            _ => Err(SourceDescriptorError::SourcePolicyRefused),
+        }
+    }
+}
+
 /// What a producer asks the kernel to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDescriptorRequest<'a> {
@@ -305,12 +319,7 @@ impl Envelope<'_> {
         request: &SourceDescriptorRequest<'_>,
         encoded: EncodedOccurrence,
     ) -> Result<SourceDescriptorOutcome, SourceDescriptorError> {
-        match (&request.source_policy, encoded.class) {
-            (SourceDescriptorPolicy::Git { version }, OccurrenceClass::GitCommits)
-                if well_formed_value(version) && identity(version).is_ok() => {}
-            (SourceDescriptorPolicy::Native, class) if class != OccurrenceClass::GitCommits => {}
-            _ => return Err(SourceDescriptorError::SourcePolicyRefused),
-        }
+        request.source_policy.validate_for(encoded.class)?;
         // Each identity value is checked on its own with the non-aliasing
         // identity rule, then the whole detail once more: a value the
         // redactor would rewrite is content, and a rewritten detail would no
