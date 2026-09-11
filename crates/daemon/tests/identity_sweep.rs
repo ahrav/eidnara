@@ -22,11 +22,10 @@ use kernel::{CurrentInputExpectation, ProjectScope};
 use retrieval::batch::{VectorGeneration, register_generation};
 use retrieval::identity_sweep::{Candidate, candidates, reclaim};
 use retrieval::vectors::encode;
-use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use rusqlite::{Connection, OpenFlags};
 use support::embedding_fixtures::{
     Corpus, DAY_MS, FINGERPRINT, GENERATION, GateGuard, NOW, PROJECT, TestEngine, bounds, budget,
-    component, eligibility, generation, inspect, lane, occurrence_of, search_path,
+    component, eligibility, generation, inspect, lane, occurrence_of, search_path, tombstone,
 };
 
 /// The retired generation the sweep may reclaim from.
@@ -281,28 +280,6 @@ fn plant_retired_generation(
                     ],
                 )?;
             }
-            Ok(())
-        })
-        .unwrap();
-}
-
-fn tombstone(projection: &SearchProjection, occurrence: &str, commit_seq: i64) {
-    projection
-        .write(|conn| {
-            tombstone_occurrence(
-                conn,
-                occurrence,
-                Tombstone {
-                    invalidated_commit_seq: commit_seq,
-                    reason: TombstoneReason::Retired,
-                },
-                NOW,
-            )?;
-            // The batch applier obsoletes open work for an occurrence that stopped being live; the same transition is applied here.
-            conn.execute(
-                "UPDATE embedding_jobs SET state='obsolete',updated_at=?2 WHERE occurrence_id=?1 AND state IN ('pending','admitted')",
-                rusqlite::params![occurrence, NOW],
-            )?;
             Ok(())
         })
         .unwrap();

@@ -44,12 +44,26 @@ pub struct IdentitySweeper<'a> {
 
 impl<'a> IdentitySweeper<'a> {
     pub fn new(projection: &'a SearchProjection, synapse: &'a SynapseComponent) -> Self {
+        Self::resuming(projection, synapse, None)
+    }
+
+    /// A sweeper whose first selection starts after `cursor`, the job identifier a previous sweeper's [`Self::cursor`] handed back; `None` starts at the first identity.
+    pub fn resuming(
+        projection: &'a SearchProjection,
+        synapse: &'a SynapseComponent,
+        cursor: Option<String>,
+    ) -> Self {
         Self {
             projection,
             synapse,
-            cursor: None,
+            cursor,
             lose_reclaim_reply: false,
         }
+    }
+
+    /// Where the next selection resumes: the job identifier the last full page ended at, or `None` once a pass over the table is complete. A caller that builds a sweeper per sweep threads this through [`Self::resuming`] so held identities at the head cannot starve those behind them.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
     }
 
     /// Makes the next reclamation return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.

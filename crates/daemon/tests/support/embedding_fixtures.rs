@@ -27,7 +27,10 @@ use retrieval::batch::{
     row_identities,
 };
 use retrieval::dispatch::EpisodeGrant;
-use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
+use retrieval::{
+    PersistBounds, ProjectionIdentity, Tombstone, TombstoneReason, install_identity,
+    tombstone_occurrence,
+};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
@@ -502,4 +505,26 @@ pub fn search_path(data_home: &Path) -> PathBuf {
 
 pub fn inspect(data_home: &Path) -> Connection {
     Connection::open_with_flags(search_path(data_home), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+}
+
+/// Retires `occurrence` at `commit_seq` and obsoletes its open embedding work, as the batch applier does for an occurrence that stopped being live.
+pub fn tombstone(projection: &SearchProjection, occurrence: &str, commit_seq: i64) {
+    projection
+        .write(|conn| {
+            tombstone_occurrence(
+                conn,
+                occurrence,
+                Tombstone {
+                    invalidated_commit_seq: commit_seq,
+                    reason: TombstoneReason::Retired,
+                },
+                NOW,
+            )?;
+            conn.execute(
+                "UPDATE embedding_jobs SET state='obsolete',updated_at=?2 WHERE occurrence_id=?1 AND state IN ('pending','admitted')",
+                rusqlite::params![occurrence, NOW],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 }

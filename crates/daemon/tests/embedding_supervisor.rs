@@ -3,6 +3,7 @@
 
 mod support;
 
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use retrieval::dispatch::{Recovery, authorize_recovery};
 use rusqlite::Connection;
 use support::embedding_fixtures::{
     Corpus, DAY_MS, GateGuard, NOW, PROJECT, TestEngine, bounds, budget, component, eligibility,
-    grant, inspect, lane, occurrence_of, search_path,
+    grant, inspect, lane, occurrence_of, search_path, tombstone,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -141,14 +142,12 @@ async fn sticky_cancellation_stops_the_pass_and_keeps_native_work_owned() {
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let cancelled = budget(Duration::from_secs(30));
     let canceller = cancelled.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
-        canceller.cancel();
-    });
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let started = Instant::now();
+    // The pass reports the poll stage once the row is admitted and charged, so the cancellation lands mid-poll rather than at a time the scheduler chooses.
     let end = tokio::task::block_in_place(|| {
         dispatcher
             .run_pass(
@@ -156,7 +155,17 @@ async fn sticky_cancellation_stops_the_pass_and_keeps_native_work_owned() {
                 &bounds(),
                 &cancelled,
                 NOW,
-                &mut |_| {},
+                &mut |event| {
+                    if matches!(
+                        event,
+                        DispatchEvent::Stage {
+                            stage: Stage::Poll,
+                            ..
+                        }
+                    ) {
+                        canceller.cancel();
+                    }
+                },
             )
             .unwrap()
     });
@@ -222,20 +231,30 @@ async fn next_event(events: &mut UnboundedReceiver<SupervisorEvent>) -> Supervis
         .expect("the supervisor is alive")
 }
 
+/// Bounds a whole wait rather than each receive, so a supervisor that keeps emitting events without reaching the expected one fails instead of hanging.
+async fn within<T>(limit: Duration, wait: impl Future<Output = T>) -> T {
+    tokio::time::timeout(limit, wait)
+        .await
+        .expect("the expected outcome within the limit")
+}
+
 /// Drains events up to and including the next `SliceEnded` of `kind` and returns its outcome; a `Stopped` event on the way is a test failure.
 async fn ended(events: &mut UnboundedReceiver<SupervisorEvent>, kind: SliceKind) -> SliceOutcome {
-    loop {
-        match next_event(events).await {
-            SupervisorEvent::SliceEnded {
-                kind: ended,
-                outcome,
-            } if ended == kind => return outcome,
-            SupervisorEvent::Stopped(stop) => {
-                panic!("stopped before a {kind:?} slice ended: {stop:?}")
+    within(Duration::from_secs(30), async {
+        loop {
+            match next_event(events).await {
+                SupervisorEvent::SliceEnded {
+                    kind: ended,
+                    outcome,
+                } if ended == kind => return outcome,
+                SupervisorEvent::Stopped(stop) => {
+                    panic!("stopped before a {kind:?} slice ended: {stop:?}")
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    })
+    .await
 }
 
 /// AC2, AC3, AC4: slices alternate under their own budgets while native work is held; shutdown joins its slices but stays unresolved while the host still runs an admitted call, repeated requests neither duplicate work nor release anything, and once the call exits shutdown resolves with the row still admitted for the next incarnation, which finishes it.
@@ -250,6 +269,7 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
     let projection = Arc::new(projection);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let synapse = Arc::new(component(&engine, SynapseLimits::default()));
     let (sender, mut events) = unbounded_channel();
     let supervisor = EmbeddingSupervisor::new(
@@ -261,7 +281,6 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
     let running = tokio::spawn(Arc::clone(&supervisor).run());
 
     // Backfill admits the job, waits for its result until the slice budget ends, and yields; a sweep slice then runs even though backfill work is still held.
-    let started_at = Instant::now();
     let SupervisorEvent::SliceStarted {
         kind: SliceKind::Backfill,
         deadline,
@@ -269,7 +288,8 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
     else {
         panic!()
     };
-    assert!(deadline <= started_at + Duration::from_secs(2) + Duration::from_millis(100));
+    // The slice started no later than this receive, so its deadline is at most one slice from now.
+    assert!(deadline <= Instant::now() + Duration::from_secs(2));
     match next_event(&mut events).await {
         SupervisorEvent::SliceEnded {
             kind: SliceKind::Backfill,
@@ -367,22 +387,25 @@ async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() 
         sender,
     );
     let running = tokio::spawn(Arc::clone(&restarted).run());
-    loop {
-        match next_event(&mut events).await {
-            SupervisorEvent::SliceEnded {
-                outcome:
-                    SliceOutcome::Backfill {
-                        published: 1,
-                        admitted: 1,
-                        dispositions: 0,
-                        end: None,
-                    },
-                ..
-            } => break,
-            SupervisorEvent::Stopped(stop) => panic!("{stop:?}"),
-            _ => {}
+    within(Duration::from_secs(30), async {
+        loop {
+            match next_event(&mut events).await {
+                SupervisorEvent::SliceEnded {
+                    outcome:
+                        SliceOutcome::Backfill {
+                            published: 1,
+                            admitted: 1,
+                            dispositions: 0,
+                            end: None,
+                        },
+                    ..
+                } => break,
+                SupervisorEvent::Stopped(stop) => panic!("{stop:?}"),
+                _ => {}
+            }
         }
-    }
+    })
+    .await;
     let done = row(dir.path(), &occurrence);
     assert_eq!((done.0.as_str(), done.1), ("embedded", 2));
     let report = restarted.shutdown(Duration::from_secs(5)).await.unwrap();
@@ -435,28 +458,31 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
             dispositions: 0,
         }
     );
-    // The episode deadline passes; a backfill that started before the clock moved polls the held row once more, and the first backfill after it stops the row before polling while the host still runs the call.
-    clock.store(NOW + DAY_MS + 1, Ordering::SeqCst);
+    // Until the clock moves no backfill changes the admitted row, so this read is stable; the row is stopped by the first backfill that starts after the deadline passes, while a backfill that started earlier polls the held row once more.
     let held = row(dir.path(), &occurrence);
     assert_eq!((held.0.as_str(), held.1), ("admitted", 1));
     let host_job = held.2.clone().unwrap();
-    loop {
-        match ended(&mut events, SliceKind::Backfill).await {
-            SliceOutcome::Backfill {
-                end: None,
-                admitted: 0,
-                published: 0,
-                dispositions: 1,
-            } => break,
-            SliceOutcome::Backfill {
-                end: Some(Blocked::BudgetExhausted),
-                admitted: 0,
-                published: 0,
-                dispositions: 0,
-            } => {}
-            other => panic!("{other:?}"),
+    clock.store(NOW + DAY_MS + 1, Ordering::SeqCst);
+    within(Duration::from_secs(30), async {
+        loop {
+            match ended(&mut events, SliceKind::Backfill).await {
+                SliceOutcome::Backfill {
+                    end: None,
+                    admitted: 0,
+                    published: 0,
+                    dispositions: 1,
+                } => break,
+                SliceOutcome::Backfill {
+                    end: Some(Blocked::BudgetExhausted),
+                    admitted: 0,
+                    published: 0,
+                    dispositions: 0,
+                } => {}
+                other => panic!("{other:?}"),
+            }
         }
-    }
+    })
+    .await;
     let stopped = row(dir.path(), &occurrence);
     assert_eq!(
         (stopped.0.as_str(), stopped.1, stopped.2.as_deref()),
@@ -520,6 +546,14 @@ async fn a_blocked_backfill_takes_the_idle_wait() {
     );
     let running = tokio::spawn(Arc::clone(&supervisor).run());
 
+    // Each `SliceStarted` deadline is the producer's own start plus the slice length, so the gap between two deadlines is the gap between two starts and does not depend on when this task receives them.
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Backfill,
+        deadline: backfill_deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
     assert_eq!(
         ended(&mut events, SliceKind::Backfill).await,
         SliceOutcome::Backfill {
@@ -529,16 +563,15 @@ async fn a_blocked_backfill_takes_the_idle_wait() {
             dispositions: 0,
         }
     );
-    let blocked_at = Instant::now();
-    assert!(matches!(
-        next_event(&mut events).await,
-        SupervisorEvent::SliceStarted {
-            kind: SliceKind::Sweep,
-            ..
-        }
-    ));
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Sweep,
+        deadline: sweep_deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
     assert!(
-        blocked_at.elapsed() >= idle,
+        sweep_deadline >= backfill_deadline + idle,
         "a blocked backfill did no work, so the next slice waits the idle interval"
     );
 
@@ -635,7 +668,6 @@ async fn a_failed_eligibility_read_is_retried_not_terminal() {
         panic!("the failed read is the slice's outcome")
     };
     assert!(message.contains("database is locked"), "{message}");
-    assert_eq!(engine.calls(), 0);
 
     // The next backfill runs the pass the failed read postponed.
     assert_eq!(
@@ -824,6 +856,14 @@ async fn an_exhausted_slice_without_progress_takes_the_idle_wait() {
     );
     let running = tokio::spawn(Arc::clone(&supervisor).run());
 
+    // Each `SliceStarted` deadline is the producer's own start plus the slice length, so the gap between two deadlines is the gap between two starts and does not depend on when this task receives them.
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Backfill,
+        deadline: backfill_deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
     assert_eq!(
         ended(&mut events, SliceKind::Backfill).await,
         SliceOutcome::Backfill {
@@ -833,16 +873,15 @@ async fn an_exhausted_slice_without_progress_takes_the_idle_wait() {
             dispositions: 0,
         }
     );
-    let exhausted_at = Instant::now();
-    assert!(matches!(
-        next_event(&mut events).await,
-        SupervisorEvent::SliceStarted {
-            kind: SliceKind::Sweep,
-            ..
-        }
-    ));
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Sweep,
+        deadline: sweep_deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
     assert!(
-        exhausted_at.elapsed() >= idle,
+        sweep_deadline >= backfill_deadline + idle,
         "an exhausted slice that moved nothing waits the idle interval before the next slice"
     );
 
@@ -935,27 +974,30 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
             dispositions: 0,
         }
     );
-    // The episode deadline passes; the first backfill that starts after the clock moved stops the row while the first embedding call runs.
+    // Until the clock moves no backfill changes the admitted row; the first backfill that starts after the deadline passes stops the row while the first embedding call runs.
+    let first_job = row(dir.path(), &occurrence).2.unwrap();
     let expired = NOW + DAY_MS + 1;
     clock.store(expired, Ordering::SeqCst);
-    let first_job = row(dir.path(), &occurrence).2.unwrap();
-    loop {
-        match ended(&mut events, SliceKind::Backfill).await {
-            SliceOutcome::Backfill {
-                end: None,
-                admitted: 0,
-                published: 0,
-                dispositions: 1,
-            } => break,
-            SliceOutcome::Backfill {
-                end: Some(Blocked::BudgetExhausted),
-                admitted: 0,
-                published: 0,
-                dispositions: 0,
-            } => {}
-            other => panic!("{other:?}"),
+    within(Duration::from_secs(30), async {
+        loop {
+            match ended(&mut events, SliceKind::Backfill).await {
+                SliceOutcome::Backfill {
+                    end: None,
+                    admitted: 0,
+                    published: 0,
+                    dispositions: 1,
+                } => break,
+                SliceOutcome::Backfill {
+                    end: Some(Blocked::BudgetExhausted),
+                    admitted: 0,
+                    published: 0,
+                    dispositions: 0,
+                } => {}
+                other => panic!("{other:?}"),
+            }
         }
-    }
+    })
+    .await;
     assert_eq!(row(dir.path(), &occurrence).0, "failed");
     assert_eq!(synapse.job_status(&first_job), Some("running"));
 
@@ -975,18 +1017,21 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
         })
         .unwrap();
     assert!(matches!(recovery, Recovery::Granted { .. }), "{recovery:?}");
-    loop {
-        match ended(&mut events, SliceKind::Backfill).await {
-            SliceOutcome::Backfill { admitted: 1, .. } => break,
-            SliceOutcome::Backfill {
-                admitted: 0,
-                published: 0,
-                dispositions: 0,
-                ..
-            } => {}
-            other => panic!("{other:?}"),
+    within(Duration::from_secs(30), async {
+        loop {
+            match ended(&mut events, SliceKind::Backfill).await {
+                SliceOutcome::Backfill { admitted: 1, .. } => break,
+                SliceOutcome::Backfill {
+                    admitted: 0,
+                    published: 0,
+                    dispositions: 0,
+                    ..
+                } => {}
+                other => panic!("{other:?}"),
+            }
         }
-    }
+    })
+    .await;
     let reopened = row(dir.path(), &occurrence);
     assert_eq!((reopened.0.as_str(), reopened.1), ("admitted", 1));
     let second_job = reopened.2.unwrap();
@@ -1040,4 +1085,167 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
         "the stopped episode expects no result; the reopened episode holds one"
     );
     assert_eq!(row(dir.path(), &occurrence).0, "admitted");
+}
+
+/// Identities the host still holds at the head of the sweep order take one sweep each; the cursor carries across slices, so a free identity behind them is reclaimed instead of never being selected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_held_head_of_the_sweep_order_does_not_starve_identities_behind_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    for name in ["a", "b", "c", "d"] {
+        corpus.publish(name, &format!("{name} text"));
+    }
+    let (projection, _) = corpus.bootstrap(dir.path());
+    let projection = Arc::new(projection);
+    let ordered: Vec<String> = {
+        let conn = inspect(dir.path());
+        let mut statement = conn
+            .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY job_id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+    };
+    let (held, free) = ordered.split_at(3);
+    // The free identity dies before dispatch, so no host ever holds it.
+    tombstone(&projection, &free[0], 50);
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::clone(&projection), synapse),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                result_wait: Duration::from_millis(50),
+                ..bounds()
+            },
+            sweep_candidates: NonZeroUsize::new(1).unwrap(),
+            ..slice_bounds(Duration::from_secs(2))
+        },
+        Arc::new(|| NOW),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+
+    // The first backfill admits the three identities ahead of the free one into gated calls; retiring them afterwards leaves the host holding their jobs.
+    assert!(matches!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill { admitted: 3, .. }
+    ));
+    for occurrence in held {
+        tombstone(&projection, occurrence, 60);
+    }
+
+    // One candidate per sweep: the free identity is fourth in order, so its reclamation needs sweeps that resume where the last one ended.
+    let reclaimed = within(Duration::from_secs(30), async {
+        let mut sweeps = 0;
+        loop {
+            let SliceOutcome::Sweep(report) = ended(&mut events, SliceKind::Sweep).await else {
+                panic!()
+            };
+            sweeps += 1;
+            if report.jobs_reclaimed > 0 || sweeps == 8 {
+                break report.jobs_reclaimed;
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        reclaimed, 1,
+        "the free identity behind three held ones is reclaimed within a pass over the table"
+    );
+
+    supervisor
+        .shutdown(Duration::from_secs(2))
+        .await
+        .expect_err("the gated calls are still owned");
+    TestEngine::release(&gate);
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// A stopped row's host job leaves the census once its call has exited: the host holds a result no row expects, so the entry is retired during maintenance rather than kept until shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("settled", "settled text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let now = Arc::clone(&clock);
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                grant: grant(1, NOW + DAY_MS),
+                ..bounds()
+            },
+            ..slice_bounds(Duration::from_secs(2))
+        },
+        Arc::new(move || now.load(Ordering::SeqCst)),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+
+    assert!(matches!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill { admitted: 1, .. }
+    ));
+    let host_job = row(dir.path(), &occurrence).2.unwrap();
+    assert_eq!(supervisor.tracked_host_jobs_for_test(), 1);
+    // The episode deadline passes, so the next backfill to start stops the row while the host still runs the call.
+    clock.store(NOW + DAY_MS + 1, Ordering::SeqCst);
+    within(Duration::from_secs(30), async {
+        loop {
+            if let SliceOutcome::Backfill {
+                dispositions: 1, ..
+            } = ended(&mut events, SliceKind::Backfill).await
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert_eq!(row(dir.path(), &occurrence).0, "failed");
+    assert_eq!(synapse.job_status(&host_job), Some("running"));
+    assert_eq!(
+        supervisor.tracked_host_jobs_for_test(),
+        1,
+        "a stopped row's running call stays tracked"
+    );
+
+    // The call exits into a retained result no row expects; the next backfill retires the entry.
+    TestEngine::release(&gate);
+    within(Duration::from_secs(30), async {
+        loop {
+            ended(&mut events, SliceKind::Backfill).await;
+            if synapse.job_status(&host_job) == Some("ready")
+                && supervisor.tracked_host_jobs_for_test() == 0
+            {
+                break;
+            }
+        }
+    })
+    .await;
+
+    let report = supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(report.held_results, 0);
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
 }

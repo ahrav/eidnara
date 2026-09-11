@@ -120,6 +120,8 @@ pub struct EmbeddingSupervisor {
     stop: Mutex<Option<Stop>>,
     /// Host jobs this supervisor submitted and has not seen published, by host job identifier. An entry outlives its row's disposition: the host runs the call to completion whatever the row says, and a row reopened under a new episode submits a second host job beside the first.
     admitted: Mutex<BTreeMap<String, HostJob>>,
+    /// Where the next identity sweep resumes its selection; `None` starts a pass over the table.
+    sweep_cursor: Mutex<Option<String>>,
     panic_next_slice: AtomicBool,
     fail_next_read: AtomicBool,
 }
@@ -141,6 +143,7 @@ impl EmbeddingSupervisor {
             slices: AtomicUsize::new(0),
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
+            sweep_cursor: Mutex::new(None),
             panic_next_slice: AtomicBool::new(false),
             fail_next_read: AtomicBool::new(false),
         })
@@ -293,6 +296,8 @@ impl EmbeddingSupervisor {
                         _ => {}
                     },
                 );
+                // Host jobs the host has settled and no row expects leave the census here, so it holds only live obligations rather than every job ever submitted.
+                self.native_census();
                 match end {
                     Ok(end) => Ok(SliceOutcome::Backfill {
                         end,
@@ -311,8 +316,12 @@ impl EmbeddingSupervisor {
                 }
             }
             SliceKind::Sweep => {
-                let mut sweeper = IdentitySweeper::new(&m.projection, &m.synapse);
-                match sweeper.run_sweep(self.bounds.sweep_candidates, budget) {
+                // The cursor outlives the sweeper: each sweep resumes where the last one ended, so identities held at the head of the table do not consume every sweep.
+                let cursor = self.lock_sweep_cursor().take();
+                let mut sweeper = IdentitySweeper::resuming(&m.projection, &m.synapse, cursor);
+                let swept = sweeper.run_sweep(self.bounds.sweep_candidates, budget);
+                *self.lock_sweep_cursor() = sweeper.cursor().map(str::to_owned);
+                match swept {
                     Ok(report) => Ok(SliceOutcome::Sweep(report)),
                     Err(SweepError::Read(error)) => Ok(SliceOutcome::ReadFailed(error.to_string())),
                     Err(SweepError::Quarantined(quarantine)) => Err(Stop::Quarantined(quarantine)),
@@ -368,23 +377,42 @@ impl EmbeddingSupervisor {
         })
     }
 
-    /// `(running, held)` counts over the host jobs this supervisor submitted and has not seen published: calls the host still owns, and settled results an admitted row still expects.
+    /// `(running, held)` counts over the host jobs this supervisor submitted and has not seen published: calls the host still owns, and settled results an admitted row still expects. A job the host no longer holds, a failed job, and a result no row expects carry no obligation and are dropped as they are counted.
     fn native_census(&self) -> (usize, usize) {
-        let admitted = self.lock_admitted();
-        admitted
-            .iter()
-            .fold((0, 0), |(running, held), (host_job_id, job)| {
-                // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
-                match self.maintained.synapse.job_status(host_job_id) {
-                    None | Some("failed") => (running, held),
-                    Some("ready") => (running, held + usize::from(job.result_expected)),
-                    Some(_) => (running + 1, held),
+        let mut admitted = self.lock_admitted();
+        let (mut running, mut held) = (0, 0);
+        admitted.retain(|host_job_id, job| {
+            // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
+            match self.maintained.synapse.job_status(host_job_id) {
+                None | Some("failed") => false,
+                Some("ready") if job.result_expected => {
+                    held += 1;
+                    true
                 }
-            })
+                Some("ready") => false,
+                Some(_) => {
+                    running += 1;
+                    true
+                }
+            }
+        });
+        (running, held)
+    }
+
+    /// Host jobs the census still tracks.
+    #[cfg(feature = "test-support")]
+    pub fn tracked_host_jobs_for_test(&self) -> usize {
+        self.lock_admitted().len()
     }
 
     fn lock_admitted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, HostJob>> {
         self.admitted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_sweep_cursor(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.sweep_cursor
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
