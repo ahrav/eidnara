@@ -95,4 +95,4 @@ are the only existing coverage and none is a handler-level witness.
 [try-charge]: ../../../../../crates/host-runtime/src/wire.rs#L430-L442
 [t-budget]: ../../../../../crates/host-runtime/src/wire.rs#L825-L865
 [t-pools]: ../../../../../crates/host-runtime/src/config.rs#L480-L503
-[paging]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
+[paging]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640

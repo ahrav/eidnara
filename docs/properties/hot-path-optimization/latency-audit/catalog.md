@@ -1026,51 +1026,56 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Unpaged and paged `bytes` equal a later stringify; lone
-surrogates are covered at the frame writer; none runs a lone-surrogate body
-through paging and the writer together, and none constructs a body at the
-512 KiB boundary under both measures.
+Exercised: partial - The [carrier campaign][carrier-campaign] joins the pager,
+module transport, body encoder, header encoding, and UTF-8 writer at an
+injected native-writer fake. The live hook sends the carrier. A separate real
+host run completes twelve transforms, stages nine pages, and preserves six
+lone-surrogate refusals; one oversized scalar body is refused by the
+pager. Actual TypeScript native attachment is unavailable on this host.
 Guarantee: The length the plugin measures for paging is the length the frame
-writer declares and emits for the same object, and the plugin's paging
-decision is never less strict than the host's page check.
+writer declares and emits for the same serialized snapshot, and pages with
+Rust-valid strings fit the host's page cap while lone surrogates retain their
+encoded bytes and existing host refusal.
 Check: `always` - For every `{ page, bytes }` emitted by
 [`buildPagedModuleTransformPayloads`][paged], `bytes` equals
-`utf8FrameBody(JSON.stringify(page)).byteLength` and equals the byte count
-[`writeUtf8`][utf8body] emits for that body; an unpaged transform body is at
-most [`MODULE_PAGE_MAX_BYTES`][pagemax] (512 KiB) by the plugin's measure and
-therefore under the host's 1 MiB facade cap and 32 MiB transform cap
-([`enforce_request_byte_cap`][bytecap]); and every paged page satisfies
-`serde_json::to_vec(&request).len() <= TRANSFORM_PAGE_MAX_BYTES`
-([constant][hostpage], [check][hostpagecheck]). `always` because
-[`ModuleTransformWirePage.bytes`][pagecontract] is documented as the exact
-UTF-8 length, `writeUtf8` throws `RangeError` on any mismatch, and a page
-rejected for size fails the whole series.
-Fault/timing angle: The two measurements are separate `JSON.stringify` calls
-on the same object; a serialize-once change must hand the frame channel the
-text it measured. `utf8ByteLength` replaces lone surrogates before
-`Buffer.byteLength` and `JSON.stringify` escapes them, so both measures agree
-for any JSON-serialized body; a body mutated between measure and send breaks
-the equality. The host measures the `serde_json` re-serialization of the
-parsed page, and number formatting differs between the two for some `f64`
-values ([module-wire.ts][numbers]), so a page at the boundary can measure
-differently on each side.
-Required faults and enabling state: A body containing a lone surrogate in a
-string field; a body above 512 KiB; an ordinary unpaged body; a body whose
-`JSON.stringify` length is within a few bytes of 512 KiB and whose numeric
-fields render longer under `serde_json`.
+the carried text's UTF-8 length, the decoded header length, and the captured
+byte-array length, with byte-for-byte equality to that text. For Rust-valid
+JSON carrying `transform_page_index`, require
+`serde_json::to_vec(&request).len() <= 524288` and actual host page admission
+without a size refusal. The unpaged fast path retains only its original
+`wireBytes <= 524288` paging threshold; the host applies its 32 MiB raw
+transform limit, not the reserialized page cap, to that request. For the
+lone-surrogate corpus, require unchanged bytes and
+`host.unrecognized_request_shape`, not acceptance. This scope is the owner's
+approved disposition of the [original counterexamples][page-admission-probe].
+`always` applies to each admitted snapshot, not to a sum across pages.
+Fault/timing angle: Source getters and `toJSON` run before snapshot creation;
+mutation after measurement cannot alter the stored text. Ordinary object
+fields cannot impersonate the private symbol identity. Numeric tokens parsed
+as f64 can expand on the host, so paged packing charges a separate conservative
+growth bound and never adds that allowance to exact wire telemetry.
+Invalid strings retain byte-only packing to preserve their parse refusal.
+Required faults and enabling state: Unicode and escaped control characters;
+high and low lone surrogates; unpaged, intermediate, final, and continuation
+pages; exact-cap and over-cap scalar bodies; f64 growth near the cap; source
+getters, `toJSON`, post-measurement mutation, and ordinary-field collisions.
 Confidence: medium - [Evidence](evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md).
-The measure, [`encodeBody`][encodebody], the frame writer, and both host caps
-are source-verified; whether any real body can cross the boundary is
-unresolved.
+The scoped corpus passes at the writer-fake and real-host seams. The numeric
+bound uses the existing integer-token classifier and the locked serializer's
+24-byte f64 bound, not a second approximate number renderer. This is not an
+end-to-end TypeScript native-attachment or performance result.
 Existing check: [Plugin checks](existing-checks.md#plugin-pre-send) cover
-the two stringify equalities, the lone-surrogate writer, and the pageable
-field list against the Rust literal; all unaudited.
+the joint writer, snapshot mutation, stringify spies, plain objects, live
+hook, and real-host corpus; all unaudited.
 Impact: A frame declares a length it does not emit, or a page the plugin
 accepted is refused by the host with `buffer_overflow`.
 Open questions:
-- Can any body pass the plugin's `JSON.stringify` measure at 512 KiB and fail
-  the host's `serde_json` measure? Unresolved, needs a boundary construction
-  with `f64` fields.
+- Which supported runtime can execute the TypeScript path through an actual
+  native channel on this host? The tested Bun and Node capability probes
+  refuse startup.
+
+[page-admission-probe]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-does-the-real-host-admission-probe-establish
+[carrier-campaign]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-do-the-unpaged-correction-and-registered-cargo-test-prove
 
 ### log-lines-keep-sanitizer-and-file-hardening-guarantees
 
@@ -2380,7 +2385,7 @@ evaluation of this area and its disposition are recorded in
 [outcome]: ../../../../crates/host-runtime/src/handler.rs#L230-L235
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
 [scratchconst]: ../../../../crates/host-runtime/src/config.rs#L21-L31
-[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
+[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
@@ -2517,12 +2522,12 @@ evaluation of this area and its disposition are recorded in
 [midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L280
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L293-L331
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
-[paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
-[pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L9-L10
-[pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L629-L633
-[numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L57-L109
+[paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
+[pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
+[pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
+[numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
 [bodyvalid]: ../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L494-L501
-[encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1515-L1520
+[encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
 [utf8body]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
 [sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L200
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34

@@ -147,7 +147,7 @@ because the decoded type exposes no copy count.
 [pools]: ../../../../../crates/host-runtime/src/runtime.rs#L814-L822
 [scratchconst]: ../../../../../crates/host-runtime/src/config.rs#L21-L31
 [try-charge]: ../../../../../crates/host-runtime/src/wire.rs#L430-L442
-[paging]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
+[paging]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
 [fixture]: ../../../../../crates/daemon/tests/direct_host.rs#L285-L290
 [wire63]: ../../../../host-wire-protocol.md#L308
