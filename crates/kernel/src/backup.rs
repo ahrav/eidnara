@@ -376,6 +376,7 @@ impl KernelStore {
     }
 
     /// Expires due capture pins and prunes references past the reclaim grace period.
+    /// Expiry starts the grace period even when maintenance runs later.
     pub fn run_capture_pin_maintenance(&self, now_ms: i64) -> Result<(), KernelError> {
         let mut writer = self.lock_writer()?;
         let tx = writer
@@ -383,7 +384,7 @@ impl KernelStore {
             .map_err(|_| KernelError::Io)?;
         check_fence(&tx, self.lease_epoch())?;
         tx.execute(
-            "UPDATE capture_pins SET released_at=?1
+            "UPDATE capture_pins SET released_at=expires_at
              WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?1",
             [now_ms],
         )
