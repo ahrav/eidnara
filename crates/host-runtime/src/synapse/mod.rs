@@ -332,6 +332,26 @@ impl SynapseComponent {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns `bundle::BundleError` when the replacement identity or serving limits are invalid.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replace_ready_with_engine_for_test(
+        &self,
+        mut lane: LaneInfo,
+        engine: Arc<dyn EmbeddingEngine>,
+    ) -> Result<(), bundle::BundleError> {
+        bundle::validate_lane_identity(&lane)?;
+        bundle::validate_serving_limits(
+            lane.dims,
+            lane.recommended_rows as usize,
+            &self.inner.limits,
+        )?;
+        lane.max_text_bytes = self.inner.limits.max_text_bytes;
+        *self.inner.lock_state() = LaneState::Ready(Arc::new(ReadyLane::new(engine, lane)));
+        Ok(())
+    }
+
     pub fn status(&self) -> SynapseStatus {
         match &*self.inner.lock_state() {
             LaneState::Ready(lane) => SynapseStatus::Ready(lane.lane.clone()),
@@ -367,6 +387,28 @@ impl SynapseComponent {
         preflight::admit(&lane.lane, &*lane.backend, limits, text)
     }
 
+    /// Identity checking precedes input validation so a replacement's limits or tokenizer cannot misclassify the expected lane's input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable::IdentityChanged`] when the ready lane differs from `expected`; otherwise propagates errors from `ready_or_unavailable` and `preflight::admit`.
+    pub fn preflight_embedding_for_lane<'t>(
+        &self,
+        expected: &LaneInfo,
+        text: &'t str,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        if !EmbeddingIdentity::of_lane(expected).matches(&lane.lane) {
+            return Err(DenseUnavailable::IdentityChanged);
+        }
+        preflight::admit(
+            &lane.lane,
+            &*lane.backend,
+            EmbeddingInputLimits::of_lane(expected),
+            text,
+        )
+    }
+
     /// Embeds one admitted text, byte for byte as admitted, under the lane it was admitted for.
     ///
     /// # Errors
@@ -398,7 +440,7 @@ impl SynapseComponent {
     }
 
     /// Admits one preflighted text into the job table as a single-item batch keyed by `item_id`, under the lane it was admitted for.
-    /// The request key is derived from the item identity and the text alone, so the same input under the same item always names the same job, a resubmission while the job is retained returns that job, and the job stays pollable after the lane that admitted it fails.
+    /// The canonical request key binds the item and text to the admitting model, fingerprint, and epoch. A retained job is reused only under that identity.
     /// Admission charges no wire budget: the caller's text is already bounded by preflight. Requires a Tokio runtime context, because an admitted job starts its inference worker.
     ///
     /// # Errors
@@ -418,7 +460,7 @@ impl SynapseComponent {
             return Ok(SubmitOutcome::Refused("unsupported_shape"));
         }
         let item = local_item(item_id, admitted.text());
-        let key = local_key(&item);
+        let key = local_key(&lane.lane, &item);
         let dims = lane.lane.dims;
         Ok(
             match self.inner.jobs.admit_charged(
@@ -446,11 +488,17 @@ impl SynapseComponent {
         )
     }
 
-    /// Polls the job `submit_admitted` issued for `item_id` and `text`, recomputing the request key from them so the caller persists only the job identifier.
+    /// Polls using the frozen admitting lane, item identity, and text, so a replacement lane cannot retrieve another lane's result.
     /// A single-item job returns its whole result in one page; the page's lease keeps the result bytes counted while the caller holds the vector.
     /// A job identifier from another incarnation or an evicted job polls as [`PollOutcome::Restarted`]; a failed lane still answers for the jobs it settled.
-    pub fn poll_admitted(&self, job_id: &str, item_id: &str, text: &str) -> PollOutcome {
-        let key = local_key(&local_item(item_id, text));
+    pub fn poll_admitted(
+        &self,
+        lane: &LaneInfo,
+        job_id: &str,
+        item_id: &str,
+        text: &str,
+    ) -> PollOutcome {
+        let key = local_key(lane, &local_item(item_id, text));
         self.inner.jobs.poll(job_id, &key, None)
     }
 
@@ -584,9 +632,10 @@ pub enum SubmitOutcome {
     Closing,
 }
 
-/// The in-process request key: the item identity and content digest, hashed like a wire key so the table's digest and conflict rules apply unchanged.
-fn local_key(item: &jobs::BatchItem) -> String {
-    protocol::sha256_hex(format!("local\u{1f}{}\u{1f}{}", item.id, item.content_sha256).as_bytes())
+// Wire and in-process requests share a job table; the prefix keeps their idempotency namespaces separate.
+fn local_key(lane: &LaneInfo, item: &jobs::BatchItem) -> String {
+    let canonical = protocol::canonical_request_key(lane, std::slice::from_ref(item));
+    protocol::sha256_hex(format!("local\u{1f}{canonical}").as_bytes())
 }
 
 fn local_item(item_id: &str, text: &str) -> jobs::BatchItem {
@@ -1423,11 +1472,11 @@ fn lane_state_after_load(loaded: Result<ReadyLane, InferenceError>) -> LaneState
 mod tests {
     use super::*;
 
-    struct NoopEngine;
+    struct NoopEngine(f32);
 
     impl EmbeddingEngine for NoopEngine {
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-            Ok(texts.iter().map(|_| vec![1.0]).collect())
+            Ok(texts.iter().map(|_| vec![self.0]).collect())
         }
 
         fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
@@ -1463,7 +1512,7 @@ mod tests {
                 .query_admission_permits()
                 .expect("default-shaped limits have a permit count");
             let component =
-                SynapseComponent::ready_with_engine(lane(), Arc::new(NoopEngine), limits)
+                SynapseComponent::ready_with_engine(lane(), Arc::new(NoopEngine(1.0)), limits)
                     .expect("limits validate");
             assert_eq!(
                 component.resources().general_task_hold_bound,
@@ -1491,7 +1540,7 @@ mod tests {
     fn embed_blocking_shares_the_cpu_permit_and_reports_a_held_lane() {
         let component = SynapseComponent::ready_with_engine(
             lane(),
-            Arc::new(NoopEngine),
+            Arc::new(NoopEngine(1.0)),
             SynapseLimits {
                 max_queued_request_bytes: 8 * 1024 * 1024,
                 ..SynapseLimits::default()
@@ -1521,7 +1570,7 @@ mod tests {
     async fn shutdown_disables_the_lane_for_late_callers() {
         let component = SynapseComponent::ready_with_engine(
             lane(),
-            Arc::new(NoopEngine),
+            Arc::new(NoopEngine(1.0)),
             SynapseLimits {
                 max_queued_request_bytes: 8 * 1024 * 1024,
                 ..SynapseLimits::default()
@@ -1561,6 +1610,111 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn local_jobs_are_keyed_by_the_admitting_lane() {
+        let lane_a = lane();
+        let mut lane_b = lane_a.clone();
+        lane_b.model = "replacement".to_owned();
+        lane_b.fingerprint = "b2".repeat(32);
+        lane_b.table_epoch += 1;
+        let component = SynapseComponent::ready_with_engine(
+            lane_a.clone(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits::default(),
+        )
+        .unwrap();
+        let permit = component.inner.cpu.acquire().await.unwrap();
+        let mut jobs = Vec::new();
+        for identity in [&lane_a, &lane_b] {
+            let admitted = component
+                .preflight_embedding(EmbeddingInputLimits::of_lane(identity), "same text")
+                .unwrap();
+            let submitted = component.submit_admitted(&admitted, "same-item").unwrap();
+            assert_eq!(
+                component.submit_admitted(&admitted, "same-item").unwrap(),
+                submitted,
+                "a retained job is idempotent within its lane"
+            );
+            let SubmitOutcome::Queued { job_id } = submitted else {
+                panic!("submission must queue")
+            };
+            jobs.push(job_id);
+            component
+                .replace_ready_with_engine_for_test(lane_b.clone(), Arc::new(NoopEngine(-1.0)))
+                .unwrap();
+        }
+        assert_ne!(
+            jobs[0], jobs[1],
+            "a replacement lane must get a distinct job"
+        );
+        drop(permit);
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        mark_failing(&component.inner, "test failure".to_owned());
+        for ((identity, job), expected) in
+            [&lane_a, &lane_b].into_iter().zip(&jobs).zip([1.0, -1.0])
+        {
+            let PollOutcome::Page(page) =
+                component.poll_admitted(identity, job, "same-item", "same text")
+            else {
+                panic!("settled jobs must remain pollable under their admitted lane")
+            };
+            assert_eq!(
+                page.vectors[0].2.as_ref(),
+                &[expected],
+                "worker must retain its engine"
+            );
+            let other_job = if job == &jobs[0] { &jobs[1] } else { &jobs[0] };
+            assert!(matches!(
+                component.poll_admitted(identity, other_job, "same-item", "same text"),
+                PollOutcome::KeyMismatch
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_key_cannot_poll_local_job() {
+        let identity = lane();
+        let component = SynapseComponent::ready_with_engine(
+            identity.clone(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits::default(),
+        )
+        .unwrap();
+        let admitted = component
+            .preflight_embedding(EmbeddingInputLimits::of_lane(&identity), "text")
+            .unwrap();
+        let SubmitOutcome::Queued { job_id } =
+            component.submit_admitted(&admitted, "item").unwrap()
+        else {
+            panic!("submission must queue")
+        };
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            component.poll_admitted(&identity, &job_id, "item", "text"),
+            PollOutcome::Page(_)
+        ));
+        let wire_key = protocol::canonical_request_key(&identity, &[local_item("item", "text")]);
+        assert!(
+            matches!(
+                component.inner.jobs.poll(&job_id, &wire_key, None),
+                PollOutcome::KeyMismatch
+            ),
+            "a wire canonical key must not poll a local job"
+        );
+    }
+
     #[test]
     fn load_failures_route_invariants_to_failing_and_artifacts_to_disabled() {
         match lane_state_after_load(Err(InferenceError::Invariant("bad norm".to_owned()))) {
@@ -1572,8 +1726,52 @@ mod tests {
             _ => panic!("an artifact failure must disable the lane"),
         }
         assert!(matches!(
-            lane_state_after_load(Ok(ReadyLane::new(Arc::new(NoopEngine), lane()))),
+            lane_state_after_load(Ok(ReadyLane::new(Arc::new(NoopEngine(1.0)), lane()))),
             LaneState::Ready(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn local_poll_uses_frozen_identity_even_when_the_lane_fails() {
+        let identity = lane();
+        let component = SynapseComponent::ready_with_engine(
+            identity.clone(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits::default(),
+        )
+        .unwrap();
+        let admitted = component
+            .preflight_embedding(EmbeddingInputLimits::of_lane(&identity), "text")
+            .unwrap();
+        let SubmitOutcome::Queued { job_id } =
+            component.submit_admitted(&admitted, "item").unwrap()
+        else {
+            panic!("submission must queue")
+        };
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        mark_failing(&component.inner, "test failure".to_owned());
+        let PollOutcome::Page(page) = component.poll_admitted(&identity, &job_id, "item", "text")
+        else {
+            panic!("settled result must not depend on lane availability")
+        };
+        assert_eq!(page.vectors[0].2.as_ref(), &[1.0]);
+        let mut wrong_lane = identity.clone();
+        wrong_lane.table_epoch += 1;
+        for (lane, item, text) in [
+            (&wrong_lane, "item", "text"),
+            (&identity, "other", "text"),
+            (&identity, "item", "other"),
+        ] {
+            assert!(matches!(
+                component.poll_admitted(lane, &job_id, item, text),
+                PollOutcome::KeyMismatch
+            ));
+        }
     }
 }

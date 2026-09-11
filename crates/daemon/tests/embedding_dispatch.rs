@@ -652,7 +652,99 @@ fn reopen(
     (projection, after)
 }
 
-/// AC1, AC4: the real pending → job table → leased result → guarded completion path; the durable ledger matches the admissions, and the stored binding matches the verified lane and the serving host.
+fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("lane-swap", "frozen lane input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine_a = TestEngine::new();
+    let engine_b = TestEngine::new();
+    let gate = engine_a.block_calls();
+    let synapse = component(&engine_a, SynapseLimits::default());
+    let before = ledger(dir.path(), occurrence);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut events = Vec::new();
+    let mut at_swap = None;
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let end = dispatcher
+        .run_pass(
+            eligibility(&project),
+            &bounds(Duration::from_secs(5)),
+            NOW,
+            &mut |event| {
+                if (matches!(event, DispatchEvent::Bound(_)) && !after_admission)
+                    || (matches!(event, DispatchEvent::Admitted { .. }) && after_admission)
+                {
+                    let mut replacement = lane(&"b2".repeat(32));
+                    replacement.model = "replacement-model".to_owned();
+                    replacement.table_epoch = 2;
+                    replacement.max_tokens = replacement_max_tokens;
+                    at_swap = Some(ledger(dir.path(), occurrence));
+                    synapse
+                        .replace_ready_with_engine_for_test(
+                            replacement,
+                            Arc::clone(&engine_b) as Arc<dyn EmbeddingEngine>,
+                        )
+                        .unwrap();
+                    TestEngine::release(&gate);
+                }
+                events.push(event);
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        end,
+        Some(Blocked::IdentityChanged),
+        "a pass cannot use a replacement lane"
+    );
+    assert_eq!(
+        ledger(dir.path(), occurrence),
+        at_swap.unwrap(),
+        "identity refusal changes no ledger"
+    );
+    assert_eq!(engine_b.calls(), 0, "replacement engine must not run");
+    assert_eq!(
+        engine_b.count_calls(),
+        0,
+        "identity mismatch must refuse before the replacement tokenizer runs"
+    );
+    assert!(published(&events).is_empty());
+    if after_admission {
+        let job = ledger(dir.path(), occurrence);
+        assert_eq!(events.len(), 2);
+        assert_eq!(admitted(&events), vec![(job.job_id.clone(), 1)]);
+        assert_eq!((job.state.as_str(), job.attempts), ("admitted", 1));
+        assert!(job.host_job_id.is_some());
+        assert!(job.vector.is_none());
+        assert_eq!(engine_a.calls(), 1, "the admitted worker retains engine A");
+        assert_eq!(engine_a.count_calls(), 1);
+    } else {
+        assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
+        assert_eq!(ledger(dir.path(), occurrence), before);
+        assert_eq!((before.state.as_str(), before.attempts), ("pending", 0));
+        assert!(before.host_job_id.is_none());
+        assert!(before.vector.is_none());
+        assert_eq!(engine_a.calls(), 0);
+        assert_eq!(engine_a.count_calls(), 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_swap_after_binding_blocks_before_admission() {
+    for max_tokens in [1, 512] {
+        assert_lane_swap_blocked(false, max_tokens);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_swap_after_admission_blocks_completion() {
+    for max_tokens in [1, 512] {
+        assert_lane_swap_blocked(true, max_tokens);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_rows_reach_guarded_completion_through_one_job_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -874,6 +966,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let second = component(&engine, SynapseLimits::default());
     assert!(matches!(
         second.poll_admitted(
+            &lane(FINGERPRINT),
             held.host_job_id.as_deref().unwrap(),
             held.episode.as_deref().unwrap(),
             "message across restart"
@@ -1868,7 +1961,12 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         if matches!(
-            synapse.poll_admitted(&evicted_host_job, &item, "evicted before polled"),
+            synapse.poll_admitted(
+                &lane(FINGERPRINT),
+                &evicted_host_job,
+                &item,
+                "evicted before polled"
+            ),
             PollOutcome::Restarted
         ) {
             break;

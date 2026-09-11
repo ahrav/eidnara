@@ -135,7 +135,7 @@ fn authorized_episode_id(job_id: &str, authorization_ref: &str) -> String {
 
 /// A job row the dispatcher may act on, with the input it embeds and the
 /// current-input identity the completion is guarded by.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DispatchJob {
     pub job_id: String,
     pub occurrence_id: String,
@@ -150,6 +150,25 @@ pub struct DispatchJob {
     /// A row has no open episode until its first admission.
     pub episode: Option<Episode>,
     pub host_job_id: Option<String>,
+}
+
+impl std::fmt::Debug for DispatchJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchJob")
+            .field("job_id", &self.job_id)
+            .field("occurrence_id", &self.occurrence_id)
+            .field("generation", &self.generation)
+            .field("payload_id", &self.payload_id)
+            .field("source_object_id", &self.source_object_id)
+            .field("revision", &self.revision)
+            .field("source_artifact_digest", &self.source_artifact_digest)
+            .field("text_bytes", &self.text.len())
+            .field("state", &self.state)
+            .field("attempts", &self.attempts)
+            .field("episode", &self.episode)
+            .field("host_job_id", &self.host_job_id)
+            .finish()
+    }
 }
 
 impl DispatchJob {
@@ -421,7 +440,7 @@ fn valid_authorization_ref(authorization_ref: &str) -> bool {
 pub enum Recovery {
     /// A new episode is open under `authorization_ref`.
     Granted { episode_id: String },
-    /// The same authorization already opened its episode; nothing changed.
+    /// This reference is already consumed for this job; it grants nothing regardless of the current episode or state.
     Replayed,
     /// The row is not stopped.
     NotStopped,
@@ -442,16 +461,25 @@ pub fn authorize_recovery(
     if !valid_authorization_ref(authorization_ref) {
         return Ok(Recovery::InvalidReference);
     }
+    let consumed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM embedding_recovery_authorizations WHERE job_id=?1 AND authorization_ref=?2)",
+        params![job_id, authorization_ref],
+        |row| row.get(0),
+    )?;
+    if consumed {
+        return Ok(Recovery::Replayed);
+    }
     let Some(ledger) = job_ledger(conn, job_id)? else {
         return Ok(Recovery::NotStopped);
     };
-    if ledger.authorization_ref.as_deref() == Some(authorization_ref) {
-        return Ok(Recovery::Replayed);
-    }
     if ledger.state != "failed" {
         return Ok(Recovery::NotStopped);
     }
     let episode_id = authorized_episode_id(job_id, authorization_ref);
+    conn.execute(
+        "INSERT INTO embedding_recovery_authorizations(job_id,authorization_ref) VALUES(?1,?2)",
+        params![job_id, authorization_ref],
+    )?;
     conn.execute(
         "UPDATE embedding_jobs SET state='pending',attempts=0,episode_id=?2,episode_allowance=?3,episode_deadline=?4,
                 authorization_ref=?5,stop_reason=NULL,last_failure_kind=NULL,next_attempt_at=NULL,host_job_id=NULL,host_incarnation=NULL,updated_at=?6

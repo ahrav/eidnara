@@ -1,15 +1,15 @@
 //! Drives durable pending embedding work through the in-process Synapse job table to guarded completion.
 //!
 //! One pass binds the projection to the verified lane, then for each eligible job runs exact preflight on the stored input, admits its stable identity to the job table, charges one attempt, polls the result lease, and publishes the vector under the kernel's current-input guard.
-//! The projection rows are the only queue: a job identifier is the SHA-256 of its occurrence and generation, and the job-table key is the canonical key of that identifier and text, so duplicate admission and duplicate polling name the same work.
+//! The projection rows are the only queue. The job-table key binds the episode and text to the frozen lane identity, so duplicate admission and polling within that lane name the same work.
 //! A host restart makes every admitted job unreachable; rebinding returns them to pending with their attempts kept. Every non-success records a disposition on the row before the pass moves on; a disposition that cannot be recorded quarantines the dispatcher, because uncertain accounting must stop dispatch.
 
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use host_runtime::synapse::{
-    DenseUnavailable, EmbeddingInputLimits, InferenceFailureKind, LaneInfo, LaneUnavailableState,
-    PollOutcome, SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
+    DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState, PollOutcome,
+    SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
 };
 use kernel::{CurrentInputExpectation, EligibilityBinding, KernelError, KernelStore};
 use retrieval::ProjectionError;
@@ -261,7 +261,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         loop {
             match self
                 .synapse
-                .poll_admitted(&host_job_id, &item_id, &job.text)
+                .poll_admitted(pass.lane, &host_job_id, &item_id, &job.text)
             {
                 PollOutcome::Pending { .. } if started.elapsed() < pass.bounds.result_wait => {
                     std::thread::sleep(POLL_INTERVAL);
@@ -277,7 +277,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                     // The stored input is judged again before its result is trusted: the exact count is what the completion is charged, and a lane that no longer admits the input cannot complete it.
                     let admitted = match self
                         .synapse
-                        .preflight_embedding(EmbeddingInputLimits::of_lane(pass.lane), &job.text)
+                        .preflight_embedding_for_lane(pass.lane, &job.text)
                     {
                         Ok(admitted) => admitted,
                         Err(refusal) => {
@@ -335,7 +335,7 @@ impl<'a> EmbeddingDispatcher<'a> {
     ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
         let admitted = match self
             .synapse
-            .preflight_embedding(EmbeddingInputLimits::of_lane(pass.lane), &job.text)
+            .preflight_embedding_for_lane(pass.lane, &job.text)
         {
             Ok(admitted) => admitted,
             Err(refusal) => {

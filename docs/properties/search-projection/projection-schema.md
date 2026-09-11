@@ -196,6 +196,25 @@ Indexes:
 - `idx_embedding_jobs_dispatch` on `(state,next_attempt_at,job_id)`
 - `idx_embedding_jobs_generation` on `(generation_id,job_id)`
 
+## `embedding_recovery_authorizations`
+
+Each row records a consumed authorization for one embedding job. Inserting the
+receipt and opening its episode share the caller's transaction. Receipts have no
+expiry: replaying any consumed reference grants no new attempts, even after
+another reference opens an episode. The job's `authorization_ref` column records
+the most recent grant; this table determines whether a reference is a replay.
+These receipts record local consumption, not external authority to recover or
+rebuild the projection.
+
+| Column | Type | Not null | Primary key | Column constraints |
+| --- | --- | --- | --- | --- |
+| `job_id` | TEXT | yes | yes | `REFERENCES embedding_jobs(job_id) ON DELETE RESTRICT` |
+| `authorization_ref` | TEXT | yes | yes |  |
+
+Table constraints:
+
+- `PRIMARY KEY(job_id,authorization_ref)`
+
 ## `retirement_receipts`
 
 Local receipts of a generation's retirement so its files are reclaimed once and the reclamation can be audited.
