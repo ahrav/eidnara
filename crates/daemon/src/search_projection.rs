@@ -147,10 +147,21 @@ impl SearchProjection {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> Quarantine {
+        let quarantine = self.publish_quarantine_intent(kind, error);
+        self.synchronize_quarantine(quarantine)
+    }
+
+    pub(crate) fn publish_quarantine_intent(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
         let quarantine = self.record_quarantine(kind, error);
-        // `quarantined` stays false while an acknowledgement holds an empty gate.
-        // Kernel-to-projection writers therefore skip the gate mutex.
         self.quarantined.store(true, Ordering::Release);
+        quarantine
+    }
+
+    pub(crate) fn synchronize_quarantine(&self, quarantine: Quarantine) -> Quarantine {
         // Wait for active transactions so their final quarantine checks can roll back their writes.
         let _ = self.store.with_conn_unfenced(|_| Ok(()));
         quarantine
@@ -164,16 +175,8 @@ impl SearchProjection {
             .clone()
     }
 
-    /// Serializes an external mutation with quarantine entry without taking the projection connection and inverting the kernel-to-projection lock order.
-    pub(crate) fn with_quarantine_gate<T>(&self, f: impl FnOnce() -> T) -> Result<T, Quarantine> {
-        let quarantine = self
-            .quarantine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match quarantine.as_ref() {
-            Some(quarantine) => Err(quarantine.clone()),
-            None => Ok(f()),
-        }
+    pub(crate) fn allows_acknowledgement(&self) -> bool {
+        !self.quarantined.load(Ordering::Acquire)
     }
 
     /// Forces quarantine without constructing a storage failure, so tests can
@@ -366,46 +369,4 @@ enum Access {
     Write,
     WriteWithin(Instant),
     Read,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::SearchProjection;
-
-    #[test]
-    fn an_unquarantined_write_does_not_wait_on_the_external_gate() {
-        let root = tempfile::tempdir().unwrap();
-        let projection = SearchProjection::open(root.path()).unwrap();
-        std::thread::scope(|scope| {
-            let (gate_entered, gate_is_entered) = std::sync::mpsc::channel();
-            let (release_gate, gate_is_released) = std::sync::mpsc::channel();
-            let projection_ref = &projection;
-            let gate = scope.spawn(move || {
-                projection_ref
-                    .with_quarantine_gate(|| {
-                        gate_entered.send(()).unwrap();
-                        gate_is_released.recv().unwrap();
-                    })
-                    .unwrap();
-            });
-            gate_is_entered.recv().unwrap();
-
-            let (write_entered, write_is_entered) = std::sync::mpsc::channel();
-            let projection_ref = &projection;
-            let writer = scope.spawn(move || {
-                projection_ref.write(|conn| {
-                    write_entered.send(()).unwrap();
-                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
-                    Ok(())
-                })
-            });
-            let entered = write_is_entered.recv_timeout(Duration::from_millis(500));
-            release_gate.send(()).unwrap();
-            gate.join().unwrap();
-            writer.join().unwrap().unwrap();
-            assert!(entered.is_ok(), "the projection write waited on the gate");
-        });
-    }
 }

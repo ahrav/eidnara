@@ -587,22 +587,27 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), Stop> {
         self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
-        let mut acknowledged = match self.projection.with_quarantine_gate(|| {
-            self.kernel.acknowledge_through_source_hold(
-                &consumer.binding,
-                &consumer.hold_id,
-                through,
-                now,
-            )
-        }) {
-            Ok(acknowledged) => acknowledged,
-            Err(quarantine) => return Err(CatchUpError::Quarantined(quarantine).into()),
-        };
-        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply) && acknowledged.is_ok() {
+        let mut acknowledged = self.kernel.acknowledge_through_source_hold_if(
+            &consumer.binding,
+            &consumer.hold_id,
+            through,
+            now,
+            || self.projection.allows_acknowledgement(),
+        );
+        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply)
+            && matches!(acknowledged, Ok(true))
+        {
             acknowledged = Err(SourceHoldError::Kernel(KernelError::Io));
         }
         match acknowledged {
-            Ok(()) => {}
+            Ok(true) => {}
+            Ok(false) => {
+                let quarantine = self
+                    .projection
+                    .quarantine()
+                    .expect("quarantine intent must record its cause before publication");
+                return Err(CatchUpError::Quarantined(quarantine).into());
+            }
             Err(SourceHoldError::Kernel(error)) if outcome_unknown(error) => {
                 let kernel_checkpoint = self
                     .kernel

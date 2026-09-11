@@ -1998,6 +1998,51 @@ fn projection_only_staleness_obsoletes_guarded_publication() {
 }
 
 #[test]
+fn guarded_payload_disagreement_publishes_quarantine_before_releasing_the_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let other = corpus.publish("b", "msg-b", "1", "second message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let other_payload = &row_for(&rows, &other).detail.payload_id;
+    mutate(&search_path(dir.path()))
+        .execute(
+            "UPDATE occurrences SET payload_id=?2 WHERE occurrence_id=?1",
+            rusqlite::params![&row.detail.occurrence_id, other_payload],
+        )
+        .unwrap();
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let mut intent_visible = false;
+
+    let result = publisher.publish(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            if event == PublicationEvent::GuardReleased {
+                intent_visible = projection.quarantine().is_some();
+            }
+        },
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("guarded payload disagreement must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert!(intent_visible, "guard release preceded quarantine intent");
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
 fn a_committed_projected_obsoletion_is_reconciled_after_a_lost_reply() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

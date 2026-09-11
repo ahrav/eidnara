@@ -237,11 +237,22 @@ impl<'a> EmbeddingPublisher<'a> {
             };
         observer(PublicationEvent::GuardAcquired);
         let outcome = self.commit(publication, &guard, deadline, now, observer);
+        let quarantine = match &outcome {
+            Ok(Settled::Quarantine { kind, detail }) => {
+                Some(self.projection.publish_quarantine_intent(*kind, detail))
+            }
+            _ => None,
+        };
         drop(guard);
         observer(PublicationEvent::GuardReleased);
         match outcome {
             Ok(Settled::Published(publication)) => Ok(publication),
-            Ok(Settled::Quarantine { kind, detail }) => Err(self.enter_quarantine(kind, &detail)),
+            Ok(Settled::Quarantine { .. }) => Err(PublicationError::Quarantined(
+                self.projection.synchronize_quarantine(
+                    quarantine
+                        .expect("quarantine outcome must publish intent before guard release"),
+                ),
+            )),
             // The store failed between BEGIN and COMMIT; the durable vector, not the error, says whether COMMIT took effect, and reading it needs no guard.
             Ok(Settled::Unresolved) => {
                 observer(PublicationEvent::Reconciling);
@@ -297,8 +308,11 @@ impl<'a> EmbeddingPublisher<'a> {
             let published = match outcome {
                 CompletionOutcome::Embedded => Publication::Embedded,
                 CompletionOutcome::Replayed => Publication::Replayed,
-                CompletionOutcome::Obsolete(reason) => {
-                    Publication::Obsolete(ObsoleteCause::Projected(reason))
+                CompletionOutcome::Obsolete(ObsoleteReason::Tombstoned) => {
+                    Publication::Obsolete(ObsoleteCause::Projected(ObsoleteReason::Tombstoned))
+                }
+                CompletionOutcome::Obsolete(ObsoleteReason::PayloadChanged) => {
+                    return Err(ProjectionError::CorruptRow);
                 }
             };
             if roll_back {
