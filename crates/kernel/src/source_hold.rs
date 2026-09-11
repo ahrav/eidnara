@@ -22,6 +22,14 @@ const CAPTURE_DESCRIPTOR_WORK_SQL: &str = "SELECT COUNT(*) FROM (
          SELECT 1 FROM object_registry INDEXED BY idx_objects_source_descriptor_page
          WHERE object_id GLOB 'srcdesc:*' LIMIT ?1
      )";
+// Unit separator (31) and its successor (32) bound one consumer's keys in binary order.
+const ACTIVE_SOURCE_HOLDS_SQL: &str = "SELECT COUNT(*) FROM capture_pins
+    WHERE pin_kind=?1 AND owner_id>=?2 || char(31) AND owner_id<?2 || char(32)
+      AND released_at IS NULL";
+const RELEASABLE_SOURCE_HOLDS_SQL: &str = "SELECT capture_pin_id FROM capture_pins
+    WHERE pin_kind=?1 AND owner_id>=?2 || char(31) AND owner_id<?2 || char(32)
+      AND (?3 IS NULL OR lease_epoch<>?3) AND released_at IS NULL
+    ORDER BY capture_pin_id";
 
 /// Admission bounds each capture; this limit bounds the evidence that repeated
 /// captures by one consumer can pin together.
@@ -115,6 +123,13 @@ pub struct HeldPage {
     pub next: Option<HeldCursor>,
 }
 
+/// Test interleavings run only after the reader transaction is released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceHoldCheckPhase {
+    AfterSnapshot,
+    BeforeObjectRead,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SourceHoldError {
     #[error("source hold request is malformed")]
@@ -152,15 +167,10 @@ fn corrupt<T>(_: T) -> SourceHoldError {
     KernelError::CorruptCanonicalRow.into()
 }
 
-fn owner_prefix(consumer_id: &str) -> String {
-    format!("{consumer_id}{OWNER_SEPARATOR}")
-}
-
 fn owner_id(binding: &SourceHoldBinding) -> String {
     format!(
-        "{}{}",
-        owner_prefix(&binding.consumer_id),
-        binding.source_policy_version
+        "{}{}{}",
+        binding.consumer_id, OWNER_SEPARATOR, binding.source_policy_version
     )
 }
 
@@ -267,10 +277,8 @@ impl KernelStore {
         }
         let active: i64 = tx
             .query_row_cached(
-                "SELECT COUNT(*) FROM capture_pins
-                 WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
-                   AND released_at IS NULL",
-                params![SOURCE_HOLD_KIND, owner_prefix(&binding.consumer_id)],
+                ACTIVE_SOURCE_HOLDS_SQL,
+                params![SOURCE_HOLD_KIND, binding.consumer_id],
                 |row| row.get(0),
             )
             .map_err(sqlite)?;
@@ -398,16 +406,16 @@ impl KernelStore {
         self.source_hold_status_inner(binding, hold_id, now, None)
     }
 
-    /// Runs `after_snapshot` after releasing the reader and before verifying objects.
+    /// Runs `hook` at snapshot and object-read boundaries without holding a reader transaction.
     #[cfg(feature = "test-support")]
     pub fn source_hold_status_with_hook_for_test(
         &self,
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
-        mut after_snapshot: impl FnMut(),
+        mut hook: impl FnMut(SourceHoldCheckPhase),
     ) -> Result<SourceHold, SourceHoldError> {
-        self.source_hold_status_inner(binding, hold_id, now, Some(&mut after_snapshot))
+        self.source_hold_status_inner(binding, hold_id, now, Some(&mut hook))
     }
 
     fn source_hold_status_inner(
@@ -415,7 +423,7 @@ impl KernelStore {
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
-        after_snapshot: Option<&mut dyn FnMut()>,
+        mut hook: Option<&mut dyn FnMut(SourceHoldCheckPhase)>,
     ) -> Result<SourceHold, SourceHoldError> {
         let started = Instant::now();
         let mut reader = self.lock_reader()?;
@@ -442,8 +450,8 @@ impl KernelStore {
         // The filesystem probes run with no reader connection held.
         drop(tx);
         drop(reader);
-        if let Some(after_snapshot) = after_snapshot {
-            after_snapshot();
+        if let Some(hook) = hook.as_mut() {
+            hook(SourceHoldCheckPhase::AfterSnapshot);
         }
         for digest in &digests {
             let Some(digest) = digest
@@ -452,16 +460,14 @@ impl KernelStore {
             else {
                 return Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes));
             };
-            match self.artifact_object_presence(digest) {
-                ObjectPresence::Present => {}
-                ObjectPresence::Absent => {
-                    return Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes));
-                }
-                // The probe failed, not the bytes; the hold still protects them.
-                ObjectPresence::Unreadable => return Err(KernelError::Io.into()),
+            if let Some(hook) = hook.as_mut() {
+                hook(SourceHoldCheckPhase::BeforeObjectRead);
             }
             self.read_verified_object(digest).map_err(|error| {
-                if error.kind() == ArtifactErrorKind::CorruptObject {
+                if error.kind() == ArtifactErrorKind::CorruptObject
+                    || (error.kind() == ArtifactErrorKind::MissingObject
+                        && self.artifact_object_presence(digest) == ObjectPresence::Absent)
+                {
                     SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes)
                 } else {
                     SourceHoldError::Kernel(KernelError::Io)
@@ -708,18 +714,12 @@ pub(crate) fn release_consumer_holds_in_tx(
 ) -> Result<Vec<String>, KernelError> {
     let held: Vec<String> = {
         let mut statement = tx
-            .prepare_cached(
-                "SELECT capture_pin_id FROM capture_pins
-                 WHERE pin_kind=?1 AND substr(owner_id,1,length(?2))=?2
-                   AND (?3 IS NULL OR lease_epoch<>?3) AND released_at IS NULL
-                 ORDER BY capture_pin_id",
-            )
+            .prepare_cached(RELEASABLE_SOURCE_HOLDS_SQL)
             .map_err(map_sqlite)?;
         statement
-            .query_map(
-                params![SOURCE_HOLD_KIND, owner_prefix(consumer_id), keep_epoch],
-                |row| row.get(0),
-            )
+            .query_map(params![SOURCE_HOLD_KIND, consumer_id, keep_epoch], |row| {
+                row.get(0)
+            })
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_sqlite)?
@@ -755,8 +755,117 @@ struct StoredPin {
 mod tests {
     use rusqlite::{Connection, StatementStatus, params};
 
-    use super::{CAPTURE_DESCRIPTOR_WORK_SQL, held_descriptors_sql};
+    use super::{
+        ACTIVE_SOURCE_HOLDS_SQL, CAPTURE_DESCRIPTOR_WORK_SQL, RELEASABLE_SOURCE_HOLDS_SQL,
+        SOURCE_HOLD_KIND, SourceHoldBinding, held_descriptors_sql, owner_id,
+    };
     use crate::schema::apply_kernel_schema;
+
+    #[test]
+    fn consumer_hold_queries_do_not_scan_other_consumers() {
+        let mut baseline = None;
+        for other_count in [8, 512] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            apply_kernel_schema(&mut conn, "00000000000000000000000000000000", 0).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch("INSERT INTO commit_log VALUES (1,'owners',1,'test','seed','digest',0,'test','test');").unwrap();
+            {
+                let mut insert = tx
+                    .prepare(
+                        "INSERT INTO capture_pins(capture_pin_id,pin_kind,owner_id,commit_seq,
+                         lease_epoch,writer_epoch,created_at,released_at)
+                     VALUES (?1,?2,?3,1,?4,?4,0,?5)",
+                    )
+                    .unwrap();
+                let consumers = (0..other_count).map(|i| format!("other-{i}")).chain(
+                    ["target", "target", "target-more", "Target", "target_"].map(str::to_string),
+                );
+                for (index, consumer_id) in consumers.enumerate() {
+                    let epoch = if index == other_count + 1 { 2 } else { 1 };
+                    let binding = SourceHoldBinding {
+                        consumer_id,
+                        lease_epoch: epoch,
+                        source_policy_version: format!("policy-{index}"),
+                    };
+                    insert
+                        .execute(params![
+                            format!("pin-{index}"),
+                            SOURCE_HOLD_KIND,
+                            owner_id(&binding),
+                            i64::try_from(epoch).unwrap(),
+                            Option::<i64>::None
+                        ])
+                        .unwrap();
+                }
+                let binding = SourceHoldBinding {
+                    consumer_id: "target".to_string(),
+                    lease_epoch: 1,
+                    source_policy_version: "control".to_string(),
+                };
+                insert
+                    .execute(params![
+                        "released",
+                        SOURCE_HOLD_KIND,
+                        owner_id(&binding),
+                        1,
+                        Some(1)
+                    ])
+                    .unwrap();
+                insert
+                    .execute(params![
+                        "backup",
+                        "backup",
+                        owner_id(&binding),
+                        1,
+                        Option::<i64>::None
+                    ])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+            let mut count = conn.prepare(ACTIVE_SOURCE_HOLDS_SQL).unwrap();
+            let active: i64 = count
+                .query_row([SOURCE_HOLD_KIND, "target"], |row| row.get(0))
+                .unwrap();
+            assert_eq!(active, 2);
+            let count_steps = count.get_status(StatementStatus::VmStep);
+            let mut release = conn.prepare(RELEASABLE_SOURCE_HOLDS_SQL).unwrap();
+            let ids = release
+                .query_map(params![SOURCE_HOLD_KIND, "target", Some(2)], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(ids, [format!("pin-{other_count}")]);
+            let release_steps = release.get_status(StatementStatus::VmStep);
+            for consumer in [
+                "target*",
+                "target?",
+                "target[",
+                "target\u{1f}v",
+                "target\0x",
+                "café",
+            ] {
+                let active: i64 = count
+                    .query_row([SOURCE_HOLD_KIND, consumer], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(active, 0, "consumer={consumer:?}");
+            }
+            eprintln!(
+                "other consumers={other_count}, count steps={count_steps}, release steps={release_steps}"
+            );
+            let (base_count, base_release) = *baseline.get_or_insert((count_steps, release_steps));
+            assert!(
+                count_steps <= base_count * 2,
+                "owner count scanned other consumers: {base_count} -> {count_steps}"
+            );
+            assert!(
+                release_steps <= base_release * 2,
+                "owner release scanned other consumers: {base_release} -> {release_steps}"
+            );
+        }
+    }
 
     #[test]
     fn held_pages_seek_without_sorting_the_inventory() {

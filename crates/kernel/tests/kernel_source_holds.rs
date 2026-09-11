@@ -481,13 +481,16 @@ impl Fixture {
             .unwrap()
     }
 
-    fn object_present(&self, digest: &str) -> bool {
+    fn object_path(&self, digest: &str) -> std::path::PathBuf {
         self.root
             .path()
             .join("artifacts/objects")
             .join(&digest[..2])
             .join(&digest[2..])
-            .is_file()
+    }
+
+    fn object_present(&self, digest: &str) -> bool {
+        self.object_path(digest).is_file()
     }
 
     fn seed_five_classes(&mut self) {
@@ -952,6 +955,127 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn delayed_maintenance_reclaims_from_the_stored_hold_deadline() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(1))
+        .unwrap();
+    let victim = fixture.held_all(&hold, 64)[0].clone();
+    fixture.delete_evidence(
+        &victim.evidence_id,
+        ArtifactDeletionKind::Delete,
+        hold.captured_at,
+    );
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, fixture.store.tip().unwrap(), hold.captured_at)
+        .unwrap();
+    fixture
+        .store
+        .run_staging_maintenance(hold.expires_at + i64::try_from(15 * DAY_MS).unwrap())
+        .unwrap();
+    let released_at: i64 = fixture
+        .inspect()
+        .query_row(
+            "SELECT released_at FROM capture_pins WHERE capture_pin_id=?1",
+            [&hold.hold_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(released_at, hold.expires_at);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert!(!fixture.object_present(&victim.artifact_digest));
+}
+
+#[test]
+fn a_disappearing_object_is_missing_rather_than_an_io_failure() {
+    let mut fixture = Fixture::open();
+    fixture.publish("messages", "vanishing", 1, "a single held object");
+    let binding = fixture.binding();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    let digest = fixture.held_all(&hold, 1)[0].artifact_digest.clone();
+    assert!(fixture.object_present(&digest));
+    assert_eq!(
+        fixture.store.source_hold_status_with_hook_for_test(
+            &binding,
+            &hold.hold_id,
+            hold.captured_at,
+            |phase| {
+                if phase == kernel::SourceHoldCheckPhase::BeforeObjectRead {
+                    fs::remove_file(fixture.object_path(&digest)).unwrap();
+                }
+            },
+        ),
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+    );
+}
+
+#[test]
+fn restored_hold_with_missing_history_fails_verification() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+        .unwrap();
+    let victim = fixture.held_all(&hold, 64)[0].clone();
+    fixture.delete_evidence(
+        &victim.evidence_id,
+        ArtifactDeletionKind::Delete,
+        hold.captured_at,
+    );
+    let destination = tempfile::tempdir().unwrap();
+    fs::set_permissions(destination.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let backup = fixture
+        .store
+        .backup(kernel::BackupRequest {
+            destination_directory: destination.path().to_path_buf(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    assert!(!backup.evidence_refs.contains(&victim.evidence_id));
+    assert!(
+        fixture
+            .pin_refs(&hold.hold_id)
+            .contains(&victim.evidence_id)
+    );
+    assert!(fixture.object_present(&victim.artifact_digest));
+    fixture
+        .store
+        .release_source_hold(&binding, &hold.hold_id, hold.captured_at)
+        .unwrap();
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, fixture.store.tip().unwrap(), hold.captured_at)
+        .unwrap();
+    fixture
+        .store
+        .run_staging_maintenance(hold.captured_at + i64::try_from(15 * DAY_MS).unwrap())
+        .unwrap();
+    assert!(!fixture.object_present(&victim.artifact_digest));
+    assert_eq!(
+        fixture.store.restore(&backup.destination_path).unwrap(),
+        backup.captured_commit_seq
+    );
+    assert!(
+        fixture
+            .pin_refs(&hold.hold_id)
+            .contains(&victim.evidence_id)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes))
+    );
+}
+
+#[test]
 fn capture_work_is_bounded_independently_of_shared_evidence() {
     let mut fixture = Fixture::open();
     let text = "one shared source buffer";
@@ -1055,7 +1179,11 @@ fn hold_status_expires_while_verifying_objects() {
             &binding,
             &hold.hold_id,
             hold.expires_at - 1,
-            || std::thread::sleep(std::time::Duration::from_millis(2)),
+            |phase| {
+                if phase == kernel::SourceHoldCheckPhase::AfterSnapshot {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            },
         ),
         Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
     );
@@ -1078,7 +1206,10 @@ fn hold_status_observes_invalidation_during_object_verification() {
             &binding,
             &hold.hold_id,
             hold.captured_at,
-            || {
+            |phase| {
+                if phase != kernel::SourceHoldCheckPhase::AfterSnapshot {
+                    return;
+                }
                 if purge {
                     let error = fixture
                         .store
@@ -1096,15 +1227,7 @@ fn hold_status_observes_invalidation_during_object_verification() {
                         )
                         .unwrap_err();
                     assert_eq!(error.kind(), kernel::ArtifactErrorKind::PurgeUnlinkPending);
-                    assert!(
-                        fixture
-                            .root
-                            .path()
-                            .join("artifacts/objects")
-                            .join(&digest[..2])
-                            .join(&digest[2..])
-                            .is_file()
-                    );
+                    assert!(fixture.object_present(&digest));
                 } else {
                     fixture
                         .store
@@ -1347,12 +1470,7 @@ fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the
         Ok(after_purge.clone())
     );
     let gone = fixture.held_all(&after_purge, 64)[0].clone();
-    let gone_path = fixture
-        .root
-        .path()
-        .join("artifacts/objects")
-        .join(&gone.artifact_digest[..2])
-        .join(&gone.artifact_digest[2..]);
+    let gone_path = fixture.object_path(&gone.artifact_digest);
     // A shard that cannot be probed is an I/O failure, not `MissingBytes`: the
     // hold still protects its bytes.
     let shard = gone_path.parent().unwrap();
@@ -1557,15 +1675,7 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
     for descriptor in &old_inventory {
         let entry = fixture.entry_by_evidence(&descriptor.evidence_id);
         assert_eq!(
-            fs::read(
-                fixture
-                    .root
-                    .path()
-                    .join("artifacts/objects")
-                    .join(&descriptor.artifact_digest[..2])
-                    .join(&descriptor.artifact_digest[2..])
-            )
-            .unwrap(),
+            fs::read(fixture.object_path(&descriptor.artifact_digest)).unwrap(),
             entry.text.as_bytes()
         );
     }
