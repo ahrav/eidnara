@@ -20,8 +20,8 @@ use kernel::{
 };
 use retrieval::ProjectionError;
 use retrieval::batch::{
-    BatchBounds, BatchStatus, MutationIdentity, ProjectionBatch, batch_from_rows, read_checkpoint,
-    row_identities,
+    BatchBounds, BatchStatus, MutationIdentity, ProjectionBatch, ProjectionCheckpoint,
+    batch_from_rows, read_checkpoint, row_identities,
 };
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
@@ -78,6 +78,11 @@ pub enum EpisodeEvent {
 /// Nothing durable moved for the window that was refused; the next episode starts from the same prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blocked {
+    /// The kernel rejects negative episode times at acknowledgement, so the
+    /// episode refuses them before persisting an unacknowledgeable window.
+    NegativeTime {
+        now: i64,
+    },
     /// No batch has ever committed, so there is no prefix to extend.
     NoLocalBaseline,
     /// The projection's checkpoint names another hold.
@@ -324,11 +329,15 @@ impl<'a> SearchCatchUp<'a> {
         incarnation: kernel::CommitReadIncarnation,
         report: &mut EpisodeReport,
     ) -> Result<(), Stop> {
+        if now < 0 {
+            return Err(Blocked::NegativeTime { now }.into());
+        }
         report.acknowledged_through = self
             .kernel
             .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?
             .ok_or(Blocked::Read(CommitReadError::UnknownConsumer))?;
-        let local = self.local_prefix(consumer)?;
+        let checkpoint = self.local_prefix(consumer)?;
+        let local = checkpoint.checkpoint_commit_seq;
         if report.acknowledged_through > local {
             return Err(Blocked::AcknowledgedBeyondLocalPrefix {
                 local,
@@ -338,6 +347,32 @@ impl<'a> SearchCatchUp<'a> {
         }
         // A durable local prefix the kernel has not acknowledged is a lost reply from an earlier episode; the same prefix is acknowledged again.
         if report.acknowledged_through < local {
+            observer(EpisodeEvent::HoldExtensionRequested { through: local });
+            let hold = self
+                .kernel
+                .extend_source_hold(
+                    &consumer.binding,
+                    &consumer.hold_id,
+                    local,
+                    bounds.hold_admission,
+                )
+                .map_err(|error| match error {
+                    SourceHoldError::Kernel(error) => Stop::from(error),
+                    error => Blocked::HoldExtension(error).into(),
+                })?;
+            if hold.snapshot != checkpoint.snapshot_commit_seq {
+                return Err(self
+                    .enter_quarantine(
+                        QuarantineKind::Integrity,
+                        &format!(
+                            "the projection checkpoint claims baseline {}, but hold {} was \
+                             captured at {}; acknowledging that claim would let kernel pruning \
+                             advance over commits the projection never applied",
+                            checkpoint.snapshot_commit_seq, consumer.hold_id, hold.snapshot
+                        ),
+                    )
+                    .into());
+            }
             self.acknowledge(consumer, local, now, observer)?;
             report.acknowledged_through = local;
         }
@@ -400,8 +435,8 @@ impl<'a> SearchCatchUp<'a> {
         Ok(())
     }
 
-    /// The last complete commit the projection durably holds under this consumer's hold.
-    fn local_prefix(&mut self, consumer: &CatchUpConsumer) -> Result<i64, Stop> {
+    /// Reads the projection's checkpoint; the checkpoint's hold id must match `consumer.hold_id`.
+    fn local_prefix(&mut self, consumer: &CatchUpConsumer) -> Result<ProjectionCheckpoint, Stop> {
         let read = self
             .projection
             .read(|conn| read_checkpoint(conn, &consumer.kernel_incarnation_id));
@@ -420,7 +455,7 @@ impl<'a> SearchCatchUp<'a> {
             }
             .into());
         }
-        Ok(checkpoint.checkpoint_commit_seq)
+        Ok(checkpoint)
     }
 
     /// Extends the hold through `through`, exports the window's delta, and commits it as one batch.
@@ -660,13 +695,14 @@ fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::NonPositiveSequence { .. }
         | ProjectionError::NonPositiveTombstoneSequence { .. }
         | ProjectionError::TombstoneNotAfterCreation { .. }
-        | ProjectionError::UnknownOccurrence { .. }
         | ProjectionError::MutationConflict
         | ProjectionError::MalformedBatch
         | ProjectionError::BatchOverBound { .. }
         | ProjectionError::UnknownGeneration { .. } => Refusal::Admission,
         ProjectionError::IdentityMismatch => Refusal::Identity,
-        ProjectionError::OccurrenceCollision { .. }
+        // An admitted invalidation names an occurrence at or below the durable checkpoint; a missing row contradicts the applied prefix.
+        ProjectionError::UnknownOccurrence { .. }
+        | ProjectionError::OccurrenceCollision { .. }
         | ProjectionError::PayloadCollision { .. }
         | ProjectionError::TombstoneCollision { .. }
         | ProjectionError::CorruptRow => Refusal::Integrity,

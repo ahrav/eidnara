@@ -1533,6 +1533,105 @@ fn corruption_and_storage_failures_quarantine_the_driver_without_acknowledgement
     assert_eq!(other_corpus.kernel_checkpoint(), hold.snapshot);
 }
 
+#[test]
+fn a_negative_episode_clock_is_refused_before_anything_durable_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let before = durable(dir.path());
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let report = driver
+        .run_episode(&consumer, &bounds(), -1, &mut |_| panic!("no window runs"))
+        .unwrap();
+    assert_eq!(*blocked(&report), Blocked::NegativeTime { now: -1 });
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert_eq!(durable(dir.path()), before);
+    assert!(driver.quarantine().is_none());
+}
+
+#[test]
+fn a_missing_occurrence_behind_the_checkpoint_quarantines_the_driver() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    // Deleting `msg-a`'s occurrence leaves the supersession below without an
+    // invalidation target.
+    let corruptor = mutate(&search_path(dir.path()));
+    corruptor
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let deleted = corruptor.execute("DELETE FROM occurrences", []).unwrap();
+    assert!(deleted >= 1);
+    corpus.publish("revise", &[("msg-a", "2", "first message, revised")]);
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        corpus.kernel_checkpoint(),
+        hold.snapshot,
+        "no acknowledgement"
+    );
+    let again = driver
+        .run_episode(&consumer, &bounds(), 4, &mut |_| panic!("no work runs"))
+        .unwrap_err();
+    assert!(matches!(again, CatchUpError::Quarantined(q) if q == quarantine));
+}
+
+#[test]
+fn a_checkpoint_that_contradicts_the_hold_snapshot_quarantines_instead_of_acknowledging() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let target = corpus.tip();
+    // The extension makes the hold cover `(S, target]`. A crash between the
+    // local commit and the acknowledgement leaves this same coverage.
+    corpus
+        .kernel
+        .extend_source_hold(
+            &consumer.binding,
+            &consumer.hold_id,
+            target,
+            hold_admission(),
+        )
+        .unwrap();
+    // The corrupted checkpoint keeps the hold id, names a baseline other than
+    // the hold's snapshot, and names a prefix above the kernel's checkpoint.
+    let changed = mutate(&search_path(dir.path()))
+        .execute(
+            "UPDATE projection_checkpoint SET snapshot_commit_seq=?1, checkpoint_commit_seq=?2
+             WHERE singleton=1",
+            rusqlite::params![hold.snapshot + 1, target],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        corpus.kernel_checkpoint(),
+        hold.snapshot,
+        "no acknowledgement"
+    );
+}
+
 // ---- Named-boundary process crashes ----------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1740,7 +1839,7 @@ fn crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_earl
                 ),
                 Cut::Released => assert_eq!(
                     *blocked(&report),
-                    Blocked::Acknowledgement(SourceHoldError::BindingMismatch),
+                    Blocked::HoldExtension(SourceHoldError::BindingMismatch),
                     "{report:?}"
                 ),
                 Cut::Acknowledged => {
