@@ -246,6 +246,9 @@ pub fn install_identity(
     identity: &ProjectionIdentity,
     installed_at: i64,
 ) -> Result<(), ProjectionError> {
+    if identity.schema_version != SCHEMA_VERSION {
+        return Err(ProjectionError::IdentityMismatch);
+    }
     if let Some(stored) = read_identity(conn)? {
         return if stored == *identity {
             Ok(())
@@ -496,8 +499,6 @@ fn persist_with_digests<'c>(
         }
         let mut encoded = encode(&record.occurrence)?;
         validate_span(record.occurrence.span, record.buffer)?;
-        // A span selecting every byte is the whole-block selection, as the
-        // kernel's publisher normalizes it, so both spellings are one identity.
         if covers_whole(encoded.span, record.buffer) {
             encoded = encode(&Occurrence {
                 span: None,

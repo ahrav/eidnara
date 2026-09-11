@@ -984,6 +984,16 @@ fn a_different_identity_cannot_be_installed_over_an_existing_projection() {
     let store = open(dir.path());
     store
         .with_conn_fenced(|conn| {
+            for schema_version in [retrieval::SCHEMA_VERSION + 1, 0, u32::MAX] {
+                let mut wrong_version = identity();
+                wrong_version.schema_version = schema_version;
+                assert_eq!(
+                    install_identity(conn, &wrong_version, 1),
+                    Err(ProjectionError::IdentityMismatch),
+                    "an empty projection must reject schema version {schema_version}"
+                );
+                assert_eq!(read_identity(conn).unwrap(), None);
+            }
             install_identity(conn, &identity(), 1).unwrap();
             install_identity(conn, &identity(), 2).unwrap();
             let mut other = identity();

@@ -228,8 +228,6 @@ pub fn select(span: Option<Span>, buffer: &str) -> &[u8] {
     }
 }
 
-/// Whether `span` selects every byte of `buffer`, in which case it is the
-/// same occurrence as the whole-buffer selection and is normalized to `None`.
 pub fn covers_whole(span: Option<Span>, buffer: &str) -> bool {
     span.is_some_and(|span| span.start == 0 && span.end == buffer.len() as u64)
 }
@@ -266,9 +264,8 @@ fn finish(prefix: &[u8], role: u8, tail: &[&str], span: Option<Span>) -> Vec<u8>
     out
 }
 
-/// Encodes an occurrence after checking every identity rule. The span is
-/// checked for shape here and against its buffer by [`validate_span`], which
-/// the caller runs once it holds the bytes.
+/// Callers must run [`validate_span`] against the source buffer before selecting
+/// bytes; identity encoding alone cannot establish bounds or UTF-8 alignment.
 pub fn encode(occurrence: &Occurrence<'_>) -> Result<EncodedOccurrence, OccurrenceRefusal> {
     let class =
         OccurrenceClass::from_code(occurrence.class).ok_or(OccurrenceRefusal::UnknownClass)?;
