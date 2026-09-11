@@ -12,6 +12,57 @@ only defense on this path against log forgery and symlink redirection.
 
 ## Evidence trail
 
+### Current contract and proof
+
+The [shared gate][gate] reads only `EIDNARA_LOG_LEVEL`, on each call. Its
+frozen ordered values are `debug`, `info`, `warn`, `error`, and `off`. Unset,
+empty, or invalid values use debug without logging the supplied value. Plain `log`
+and `sessionLog` calls use info and retain their signatures and output
+prefixes. Their `.debug`, `.info`, `.warn`, and `.error` methods all enter
+the same writer. Each method is a separate function; the writer's level type
+excludes off. Session prefix conversion follows the gate.
+
+Operator floor: untagged calls remain info regardless of message wording.
+Warn and error thresholds retain only explicitly classified paths, not every
+failure diagnostic in the plugin. Use info to retain untagged diagnostic
+errors while filtering debug stage, transform, and event lines. The gate
+skips shared formatting, sanitization, and serialization, not argument
+construction at the call site.
+
+The [production-mode checks][gate-tests] establish:
+
+- Rejected calls do not inspect message/session coercion hooks, data getters,
+  or `toJSON`. Spies observe zero sanitizer string iterations, stringify
+  calls, Date constructions, timer scheduling, directory creation, file
+  opens, and writes, including a batch-sized burst.
+- The existing hardening scenarios pass both with the default and with info
+  filtering active. The ASCII truncation fixture checks 2048 retained
+  characters plus an ellipsis in each field. File and directory symlinks
+  cannot redirect a write.
+  A stat seam supplies a foreign uid to exercise ownership refusal without
+  requiring another account. The captured failures must identify a non-plain
+  directory and foreign ownership, respectively. Failed flush batches
+  increment the counter once. Serialization failures retain their marker
+  behavior.
+- [Explicit and exit flush][flush-tests] drain admitted entries even after
+  the level becomes off; repeated empty flushes do not increment diagnostics.
+- The [real transform/event fixture][hook-test] runs successful and failing
+  transforms with a controlled module response, then a no-usage assistant
+  event. Debug admits two pass lines, stage diagnostics, two event lines,
+  and the fallback warning. Warn retains only the warning. Off writes
+  nothing. Serialized served and fallback messages remain byte-identical
+  across all three levels and match independent fixture values.
+
+Proof status: 20 logger checks pass on Bun 1.3.14/Linux. The early-gate guard
+fails against the implementation base `f6692059` before the gate is added.
+The original inspection below is pinned to its immutable discovery base.
+No latency or zero-allocation claim follows from these checks. Argument
+construction at call sites still runs. No cache is added or resized; the
+level table and method functions have fixed size. Secret redaction policy
+is unchanged.
+
+### Baseline inspection
+
 - [`sanitizeField`][sanitize] flattens `\n`, `\r`, and `\t` to spaces, drops
   code points where [`isControlChar`][sanitize] holds (`0x00-0x08`,
   `0x0b-0x1f`, `0x7f`), and truncates at `MAX_FIELD_CHARS = 2048` with a
@@ -30,14 +81,14 @@ only defense on this path against log forgery and symlink redirection.
 - [`ensureLogDir`][ensuredir] creates the directory at
   [`PRIVATE_DIR_MODE = 0o700`][modes] when it lies inside the managed root
   ([`managedDirChain`][chain]) and runs [`assertPrivateDir`][assertdir] on
-  each link, which rejects symlinks, non-directories, another uid, and
-  group-or-other bits.
+  each link, which rejects symlinks, non-directories, and another uid, and
+  tightens group-or-other mode bits.
 - [`appendPrivate`][appendpriv] opens with
   `O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW|O_NONBLOCK` at
   [`PRIVATE_FILE_MODE = 0o600`][modes], rejects a non-regular file, tightens
   an existing managed file's mode, and writes through the descriptor.
 - On the transform path, [`logTransformTiming`][stagelog] and the pass logs
-  call `sessionLog`; [rust-mode-transform.test.ts:248][t244] spies on
+  call `sessionLog`; [rust-mode-transform.test.ts:244-264][t244] spies on
   `logger.sessionLog` and asserts the `rust pass:` and `rust module stages:`
   lines per pass.
 - No secret redaction runs here. [`shared/redaction.ts`][redaction] is
@@ -74,7 +125,9 @@ uid; and an assertion that every written line matches
 `^\[<ISO-8601>\] ` with no control code point and each field at most 2048
 characters plus the ellipsis. The
 [plugin checks](../existing-checks.md#plugin-pre-send) cover the sanitizer
-and hardening once each; none asserts line counts per pass or event.
+and hardening once each. The [real transform/event fixture][hook-test]
+asserts the exact pass and event line counts at debug, a single warning line
+at warn, and no writes at off.
 
 ## Investigation log
 
@@ -90,25 +143,29 @@ and hardening once each; none asserts line counts per pass or event.
 - Missing evidence: A stated policy on which layer owns redaction.
 - Conclusion: needs human input.
 
-[sanitize]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
-[constants]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L10-L12
-[testenv]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L6
-[swallow]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L46-L54
-[modes]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L56-L58
-[chain]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L64-L76
-[assertdir]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L82-L96
-[ensuredir]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L98-L109
-[appendpriv]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
-[flush]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
-[serialize]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L169-L181
-[sessionlog]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L200
-[stagelog]: ../../../../../packages/opencode-plugin/src/hooks/context/transform-stage-logger.ts#L3-L12
-[evlog]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
-[redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[cliredact]: ../../../../../packages/cli/src/lib/redaction.ts#L1
-[e2eredact]: ../../../../../packages/e2e-tests/src/opencode-runner/spawn.ts#L11
-[t244]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
-[t358]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L358
-[t381]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L381
-[t342]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L342
-[t408]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L408
+[gate]: ../../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
+[gate-tests]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377
+[flush-tests]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L492
+[hook-test]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L519
+[sanitize]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L14-L34
+[constants]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L10-L12
+[testenv]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L6
+[swallow]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L46-L54
+[modes]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L56-L58
+[chain]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L64-L76
+[assertdir]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L82-L96
+[ensuredir]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L98-L109
+[appendpriv]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L117-L134
+[flush]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L136-L162
+[serialize]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L169-L181
+[sessionlog]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.ts#L183-L200
+[stagelog]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/transform-stage-logger.ts#L3-L12
+[evlog]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
+[redaction]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/redaction.ts#L1-L20
+[cliredact]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/cli/src/lib/redaction.ts#L1
+[e2eredact]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/e2e-tests/src/opencode-runner/spawn.ts#L11
+[t244]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244-L264
+[t358]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L358
+[t381]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L381
+[t342]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L342
+[t408]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L408

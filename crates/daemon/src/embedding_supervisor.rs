@@ -245,7 +245,9 @@ impl EmbeddingSupervisor {
                 let mut dispatcher = EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.synapse);
                 if self.fail_next_read.swap(false, Ordering::SeqCst) {
                     #[cfg(feature = "test-support")]
-                    dispatcher.fail_next_read_for_test();
+                    dispatcher.inject_fault_for_test(
+                        crate::embedding_dispatch::DispatchFault::RefuseEligibilityRead,
+                    );
                 }
                 let (mut admitted, mut published, mut dispositions) = (0, 0, 0);
                 let end = dispatcher.run_pass(
@@ -293,8 +295,8 @@ impl EmbeddingSupervisor {
                         published,
                         dispositions,
                     }),
-                    // A failed read decided nothing, so the pass simply runs again; only quarantine and the kernel are terminal.
-                    Err(DispatchError::Read(error)) => {
+                    // A store refusal before any disposition left the ledger certain, so the next slice of this kind runs the pass again.
+                    Err(DispatchError::Retryable(error)) => {
                         Ok(SliceOutcome::ReadFailed(error.to_string()))
                     }
                     Err(DispatchError::Quarantined(quarantine)) => {

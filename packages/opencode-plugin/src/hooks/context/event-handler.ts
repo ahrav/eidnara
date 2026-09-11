@@ -82,7 +82,7 @@ function invalidateOnOverflow(
     if (!detection.isOverflow) {
         return;
     }
-    sessionLog(
+    sessionLog.warn(
         sessionId,
         `overflow detected via ${via}: reportedLimit=${detection.reportedLimit ?? "unknown"} provenance=${detection.reportedLimitProvenance ?? "n/a"} pattern=${detection.matchedPattern ?? "n/a"}`,
     );
@@ -107,7 +107,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
             // Transform and system-prompt hooks exempt hidden `eidnara-` children; the sets are in memory only, and the session-directory read re-derives them after a restart.
             if (recordChildSession(deps, info.id, info).internalChild) {
-                sessionLog(
+                sessionLog.debug(
                     info.id,
                     `marked internal eidnara child (title="${info.title}") — exempt from transform + injection`,
                 );
@@ -123,7 +123,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             try {
                 invalidateOnOverflow(deps, errInfo.sessionID, errInfo.error, "session.error");
             } catch (error) {
-                sessionLog(errInfo.sessionID, "event session.error handling failed:", error);
+                sessionLog.warn(errInfo.sessionID, "event session.error handling failed:", error);
             }
             return;
         }
@@ -133,12 +133,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (!updated) {
                 const sessionId = properties ? resolveSessionId(properties) : null;
                 if (sessionId) {
-                    sessionLog(
+                    sessionLog.debug(
                         sessionId,
                         "event message.updated: no message info extracted from event",
                     );
                 } else {
-                    log("[eidnara] event message.updated: no message info extracted from event");
+                    log.debug(
+                        "[eidnara] event message.updated: no message info extracted from event",
+                    );
                 }
                 return;
             }
@@ -161,7 +163,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 try {
                     invalidateOnOverflow(deps, info.sessionID, info.error, "message.updated");
                 } catch (error) {
-                    sessionLog(
+                    sessionLog.warn(
                         info.sessionID,
                         "event message.updated overflow handling failed:",
                         error,
@@ -181,7 +183,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 (value) => typeof value === "number" && value > 0,
             );
 
-            sessionLog(
+            sessionLog.debug(
                 info.sessionID,
                 `event message.updated: provider=${info.providerID} model=${info.modelID} hasUsageTokens=${hasUsageTokens} tokens.input=${info.tokens?.input} cache.read=${info.tokens?.cache?.read} cache.write=${info.tokens?.cache?.write}`,
             );
@@ -196,7 +198,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 ) {
                     entry.newestResponseID = info.messageID;
                 }
-                sessionLog(info.sessionID, "event message.updated: skipping — no usage tokens");
+                sessionLog.debug(
+                    info.sessionID,
+                    "event message.updated: skipping — no usage tokens",
+                );
                 return;
             }
 
@@ -205,7 +210,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 if (
                     isOlderThanNewestResponse(deps.contextUsageMap, info.sessionID, info.messageID)
                 ) {
-                    sessionLog(
+                    sessionLog.debug(
                         info.sessionID,
                         `event message.updated: skipping — ${info.messageID} is older than the newest response`,
                     );
@@ -224,7 +229,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 const contextLimit = resolveContextLimit(info.providerID, info.modelID);
                 const percentage = contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
 
-                sessionLog(
+                sessionLog.debug(
                     info.sessionID,
                     `event message.updated: totalInputTokens=${totalInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
                 );
@@ -244,7 +249,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     messageID: info.messageID,
                 });
             } catch (error) {
-                sessionLog(info.sessionID, "event message.updated usage tracking failed:", error);
+                sessionLog.warn(
+                    info.sessionID,
+                    "event message.updated usage tracking failed:",
+                    error,
+                );
             }
             return;
         }
@@ -254,12 +263,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (!info) {
                 const sessionId = properties ? resolveSessionId(properties) : null;
                 if (sessionId) {
-                    sessionLog(
+                    sessionLog.debug(
                         sessionId,
                         "event message.removed: no message removal info extracted from event",
                     );
                 } else {
-                    log(
+                    log.debug(
                         "[eidnara] event message.removed: no message removal info extracted from event",
                     );
                 }
@@ -267,7 +276,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             deps.onRustWireInvalidated?.(info.sessionID);
-            sessionLog(
+            sessionLog.debug(
                 info.sessionID,
                 `event message.removed: invalidating state for message ${info.messageID}`,
             );
@@ -309,12 +318,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 }
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
-                sessionLog(
+                sessionLog.debug(
                     info.sessionID,
                     "event message.removed: cleared session injection cache",
                 );
             } catch (error) {
-                sessionLog(info.sessionID, "event message.removed cleanup failed:", error);
+                sessionLog.warn(info.sessionID, "event message.removed cleanup failed:", error);
             }
             return;
         }
@@ -331,7 +340,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             try {
                 removeCompactionMarkerForSession(sessionId);
             } catch (error) {
-                sessionLog(sessionId, "event session.compacted marker cleanup failed:", error);
+                sessionLog.warn(sessionId, "event session.compacted marker cleanup failed:", error);
             }
             invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
             // Compaction replaces the context the live usage measured, so the pre-compaction count must not carry over.
@@ -359,7 +368,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             try {
                 removeCompactionMarkerForSession(sessionId);
             } catch (error) {
-                sessionLog(sessionId, "event session.deleted marker cleanup failed:", error);
+                sessionLog.warn(sessionId, "event session.deleted marker cleanup failed:", error);
             }
             deps.onSessionCacheInvalidated?.(sessionId);
             deps.onSessionDeleted?.(sessionId, eventDirectory);

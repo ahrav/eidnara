@@ -1,6 +1,6 @@
 //! Runs one bounded identity sweep over the search projection: selects finished, unreferenced embedding identities, asks the in-process Synapse host whether it still holds any of them, and reclaims the rest inside one fenced write transaction that rechecks eligibility row by row.
 //!
-//! A host job is a physical holder: while this component's table still holds it, its native input or result lease is alive, so a row cut short while the job ran stays whatever its logical state says. A job issued by another incarnation has no holder left. An `obsolete` row never gains a holder again, because only pending rows are admitted, so a holder check taken before the write transaction cannot go stale in the deleting direction. A reclamation whose COMMIT reply is lost is reconciled from the rows themselves; deleting the same identity twice has no second effect. Integrity and storage failures quarantine the sweeper and retain every cleanup obligation.
+//! A live native lease, component-table entry, or served result page prevents row reclamation. A holder check taken before the write transaction cannot go stale in the deleting direction: only pending rows are admitted, so an `obsolete` row never gains a holder again, and the dispatcher obtains the page it holds across publication before the row finishes, so a finished row's protecting page exists at check time. A job issued by another incarnation has no holder left. Lost COMMIT replies reconcile from stored rows, and repeated deletion is idempotent. Integrity or storage failures quarantine the projection and preserve cleanup obligations.
 
 use std::num::NonZeroUsize;
 
@@ -38,7 +38,7 @@ pub enum SweepError {
 pub struct IdentitySweeper<'a> {
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
-    quarantine: Option<Quarantine>,
+    cursor: Option<String>,
     lose_reclaim_reply: bool,
 }
 
@@ -47,7 +47,7 @@ impl<'a> IdentitySweeper<'a> {
         Self {
             projection,
             synapse,
-            quarantine: None,
+            cursor: None,
             lose_reclaim_reply: false,
         }
     }
@@ -58,18 +58,18 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Selects at most `max_candidates` identities and reclaims those no holder protects. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves every free candidate as a survivor for the next sweep, and the report says the budget ended it.
+    /// Inspects at most `max_candidates` finished, unreferenced identities and reclaims those no holder protects. Selection resumes across calls, so held rows consume this call's bound without starving later identities. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves the selected page for the next sweep to select again, and the report says the budget ended it.
     ///
     /// # Errors
     ///
-    /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused or its outcome cannot be reconciled, and on every later call of this sweeper.
+    /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
     pub fn run_sweep(
         &mut self,
         max_candidates: NonZeroUsize,
         budget: &EvalBudget,
     ) -> Result<SweepReport, SweepError> {
-        if let Some(quarantine) = &self.quarantine {
-            return Err(SweepError::Quarantined(quarantine.clone()));
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(SweepError::Quarantined(quarantine));
         }
         if budget.is_exhausted() {
             return Ok(SweepReport {
@@ -77,26 +77,37 @@ impl<'a> IdentitySweeper<'a> {
                 ..SweepReport::default()
             });
         }
-        let selected = self
+        let mut report = SweepReport::default();
+        let page = self
             .projection
-            .read(|conn| candidates(conn, max_candidates))
+            .read(|conn| candidates(conn, max_candidates, self.cursor.as_deref()))
             .map_err(SweepError::Read)?;
-        let mut report = SweepReport {
-            candidates: selected.len(),
-            ..SweepReport::default()
+        report.candidates = page.len();
+        // A short page ends one pass over the table; a full page resumes after its last row once this call has judged it.
+        let next_cursor = if page.len() < max_candidates.get() {
+            None
+        } else {
+            page.last().map(|candidate| candidate.job_id.clone())
         };
-        let (held, free): (Vec<Candidate>, Vec<Candidate>) = selected
-            .into_iter()
-            .partition(|candidate| self.holds(candidate));
-        report.held = held;
+        let mut free = Vec::with_capacity(page.len());
+        for candidate in page {
+            if self.holds(&candidate) {
+                report.held.push(candidate);
+            } else {
+                free.push(candidate);
+            }
+        }
         if free.is_empty() {
+            self.cursor = next_cursor;
             return Ok(report);
         }
         if budget.is_exhausted() {
+            // The cursor stays before this page: nothing in it was reclaimed, so the next sweep selects it again.
             report.survivors = free.len();
             report.budget_exhausted = true;
             return Ok(report);
         }
+        self.cursor = next_cursor;
         let reclaimed = self.projection.write(|conn| reclaim(conn, &free));
         let reclaimed = if std::mem::take(&mut self.lose_reclaim_reply) && reclaimed.is_ok() {
             Err(SearchProjectionError::Store(storage::StoreError::Backend(
@@ -137,22 +148,19 @@ impl<'a> IdentitySweeper<'a> {
         Ok(report)
     }
 
-    /// Whether this host still holds the candidate's job. A consumed result (`embedded`, `published`) has no holder left that matters; an `obsolete` row was cut short, and its job is held while this component's table still answers for it. A job another incarnation issued is never held.
+    /// Whether this host still holds the candidate's job. An `obsolete` row is held while the component's table answers for its job or a served page keeps its result alive. Any other finished row is held only while a served result page for its job is alive. A job another incarnation issued is never held.
     fn holds(&self, candidate: &Candidate) -> bool {
-        candidate.state == "obsolete"
-            && candidate
-                .host_job_id
-                .as_deref()
-                .is_some_and(|job_id| self.synapse.holds_job(job_id))
+        let Some(job_id) = candidate.host_job_id.as_deref() else {
+            return false;
+        };
+        if candidate.state == "obsolete" {
+            self.synapse.holds_job(job_id)
+        } else {
+            self.synapse.holds_result_page(job_id)
+        }
     }
 
-    fn enter_quarantine(
-        &mut self,
-        kind: QuarantineKind,
-        error: &dyn std::fmt::Display,
-    ) -> SweepError {
-        let quarantine = Quarantine::new(kind, error);
-        self.quarantine = Some(quarantine.clone());
-        SweepError::Quarantined(quarantine)
+    fn enter_quarantine(&self, kind: QuarantineKind, error: &dyn std::fmt::Display) -> SweepError {
+        SweepError::Quarantined(self.projection.enter_quarantine(kind, error))
     }
 }

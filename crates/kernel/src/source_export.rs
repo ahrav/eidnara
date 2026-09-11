@@ -19,14 +19,13 @@ use super::cas::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
 use super::slice::ObservationPayload;
 use super::source_descriptor::{
     SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescriptorDetail, descriptor_object_id,
+    reencoded_identity,
 };
 use super::source_hold::{
     Descriptors, HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, check_coverage,
     check_window, descriptor_rows_sql,
 };
-use super::source_identity::{
-    Occurrence, Span, encode_metadata, payload_id, select, validate_span,
-};
+use super::source_identity::{Span, normalize_span_for_length, payload_id, select, validate_span};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 
 #[cfg(feature = "test-support")]
@@ -44,7 +43,8 @@ pub enum ExportWindow {
     /// descriptors live at S that were invalidated in the window, without text.
     CatchUp { through: i64 },
     /// One step of catch-up: descriptors created in `(after, through]`, each with its text, and descriptors live at `after` that were invalidated in the window, without text.
-    /// `after` is a complete commit at or after S that an earlier window already delivered, so the hold must cover `(S, through]`.
+    /// `after` is a complete commit at or after S that an earlier window already delivered.
+    /// The first page proves coverage of `(after, through]` only; acknowledgement proves `(S, through]`.
     Delta { after: i64, through: i64 },
 }
 
@@ -225,7 +225,8 @@ impl KernelStore {
     /// One admitted page of `window` after `cursor`, read at the hold's S in
     /// one short transaction and materialized from the object store after
     /// that transaction closes. The hold must be valid at `now`. A catch-up
-    /// window's first page also proves the hold is extended through its end;
+    /// window's first page also proves the hold is extended through its end,
+    /// and a delta step's first page proves the hold covers the step;
     /// coverage remains valid while `through` is fixed and the hold remains
     /// valid, so a page continued from a cursor does not repeat that proof.
     /// A cursor from another hold or window is rejected before reading the store.
@@ -264,8 +265,9 @@ impl KernelStore {
                     if after < pin.snapshot || after > through {
                         return Err(SourceHoldError::InvalidRequest.into());
                     }
+                    // The coverage check starts at `after` because only descriptors created in `(after, through]` read bytes; starting at `pin.snapshot` would rescan every earlier step.
                     if cursor.is_none() {
-                        check_coverage(&tx, pin.snapshot, hold_id, through)?;
+                        check_coverage(&tx, after, hold_id, through)?;
                     }
                     (catch_up_body(), through, after)
                 }
@@ -381,6 +383,8 @@ const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence
 /// `start` that were invalidated inside the window, which carry the
 /// invalidation fact and export no text. `?1` is `through` and `?2` is the
 /// window's start, S for a whole catch-up and `after` for one delta.
+/// `idx_objects_source_descriptor_page` has no commit column, so catch-up scans
+/// every descriptor row; its cost follows the corpus, not the window.
 fn catch_up_body() -> String {
     format!(
         "{rows} AND (({created}) OR ({live_at_s}
@@ -497,27 +501,8 @@ fn preflight(
         return Err(malformed(&object_id));
     }
     let span = detail.span.map(|(start, end)| Span { start, end });
-    let identity: Vec<_> = detail
-        .identity
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
-    let encoded = encode_metadata(
-        &Occurrence {
-            class: &detail.class,
-            identity: &identity,
-            revision: &detail.revision,
-            representation: &detail.representation,
-            span,
-        },
-        byte_length,
-    )
-    .map_err(|_| malformed(&object_id))?;
-    if encoded.occurrence_id != detail.occurrence_id
-        || encoded.lineage_id != detail.lineage_id
-        || encoded.tuple != detail.occurrence_tuple
-        || encoded.span != span
-        || !is_artifact_digest(&detail.payload_id)
+    let encoded = reencoded_identity(&detail).ok_or_else(|| malformed(&object_id))?;
+    if encoded.span != normalize_span_for_length(span, byte_length)
         || (span.is_none() && detail.payload_id != raw.digest)
     {
         return Err(malformed(&object_id));

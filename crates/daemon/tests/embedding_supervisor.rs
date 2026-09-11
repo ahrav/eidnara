@@ -6,7 +6,7 @@ mod support;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use daemon::embedding_dispatch::{
@@ -407,7 +407,9 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
     let _release = GateGuard(Arc::clone(&gate));
     let synapse = Arc::new(component(&engine, SynapseLimits::default()));
     let (sender, mut events) = unbounded_channel();
-    // One attempt is the whole allowance, so the row admitted here is exhausted the moment its result is not in hand.
+    // The clock is advanced past the episode deadline once the row is admitted, so a later pass stops the row while its call runs.
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let now = Arc::clone(&clock);
     let supervisor = EmbeddingSupervisor::new(
         maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
         SliceBounds {
@@ -417,7 +419,7 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
             },
             ..slice_bounds(Duration::from_secs(2))
         },
-        Arc::new(|| NOW),
+        Arc::new(move || now.load(Ordering::SeqCst)),
         sender,
     );
     let running = tokio::spawn(Arc::clone(&supervisor).run());
@@ -432,20 +434,28 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
             dispositions: 0,
         }
     );
+    // The episode deadline passes; a backfill that started before the clock moved polls the held row once more, and the first backfill after it stops the row before polling while the host still runs the call.
+    clock.store(NOW + DAY_MS + 1, Ordering::SeqCst);
     let held = row(dir.path(), &occurrence);
     assert_eq!((held.0.as_str(), held.1), ("admitted", 1));
     let host_job = held.2.clone().unwrap();
-
-    // The next backfill judges the episode exhausted before it polls, so the row is stopped while the host still runs the call.
-    assert_eq!(
-        ended(&mut events, SliceKind::Backfill).await,
-        SliceOutcome::Backfill {
-            end: None,
-            admitted: 0,
-            published: 0,
-            dispositions: 1,
+    loop {
+        match ended(&mut events, SliceKind::Backfill).await {
+            SliceOutcome::Backfill {
+                end: None,
+                admitted: 0,
+                published: 0,
+                dispositions: 1,
+            } => break,
+            SliceOutcome::Backfill {
+                end: Some(Blocked::BudgetExhausted),
+                admitted: 0,
+                published: 0,
+                dispositions: 0,
+            } => {}
+            other => panic!("{other:?}"),
         }
-    );
+    }
     let stopped = row(dir.path(), &occurrence);
     assert_eq!(
         (stopped.0.as_str(), stopped.1, stopped.2.as_deref()),

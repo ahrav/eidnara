@@ -10,20 +10,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use daemon::embedding_dispatch::{Blocked, DispatchBounds, DispatchEvent, EmbeddingDispatcher};
-use daemon::identity_sweep::{IdentitySweeper, SweepReport};
+use daemon::embedding_publication::{
+    EmbeddingPublisher, Publication, PublicationEvent, PublicationFault, VectorPublication,
+};
+use daemon::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use daemon::search_projection::SearchProjection;
 use host_runtime::synapse::PollOutcome;
 use host_runtime::synapse::{SynapseComponent, SynapseLimits};
-use kernel::ProjectScope;
 use kernel::applicability::EvalBudget;
+use kernel::{CurrentInputExpectation, ProjectScope};
 use retrieval::batch::{VectorGeneration, register_generation};
 use retrieval::identity_sweep::{Candidate, candidates, reclaim};
 use retrieval::vectors::encode;
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use rusqlite::{Connection, OpenFlags};
 use support::embedding_fixtures::{
-    Corpus, DAY_MS, GENERATION, NOW, PROJECT, TestEngine, bounds, budget, component, eligibility,
-    generation, inspect, occurrence_of, search_path,
+    Corpus, DAY_MS, FINGERPRINT, GENERATION, GateGuard, NOW, PROJECT, TestEngine, bounds, budget,
+    component, eligibility, generation, inspect, lane, occurrence_of, search_path,
 };
 
 /// The retired generation the sweep may reclaim from.
@@ -147,7 +150,7 @@ fn references(data_home: &Path, synapse: &SynapseComponent) -> Vec<Reference> {
                     .zip(episode.as_deref())
                     .is_some_and(|(job, episode)| {
                         !matches!(
-                            synapse.poll_admitted(job, episode, &text),
+                            synapse.poll_admitted(&lane(FINGERPRINT), job, episode, &text),
                             PollOutcome::Restarted
                         )
                     });
@@ -613,7 +616,9 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
     plant_retired_generation(&projection, &[(occ[2], texts[2])], &[]);
 
     // Selection observes two candidates: old under the current generation, late under the retired one.
-    let selected = projection.read(|conn| candidates(conn, ten())).unwrap();
+    let selected = projection
+        .read(|conn| candidates(conn, ten(), None))
+        .unwrap();
     let mut pairs: Vec<(&str, &str)> = selected
         .iter()
         .map(|candidate| {
@@ -726,14 +731,26 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     let object = corpus.publish("held", "held text");
+    let evict_object = corpus.publish("evict", "evict text");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
+    let evict_occurrence = occurrence_of(&rows, &evict_object);
+    // The second occurrence evicts the first job without relying on a clock.
+    projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE embedding_jobs SET next_attempt_at=?2 WHERE occurrence_id=?1",
+                rusqlite::params![evict_occurrence, NOW + DAY_MS],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let synapse = component(
         &engine,
         SynapseLimits {
-            retention: Duration::from_millis(200),
+            max_retained_jobs: 1,
             ..SynapseLimits::default()
         },
     );
@@ -769,7 +786,7 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 1, 0)
     );
-    assert_eq!(inventory(dir.path()).len(), 1);
+    assert_eq!(inventory(dir.path()).len(), 2);
     assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
 
     // Native exit with the result leased in the table: still held, and the host proves the result is ready.
@@ -787,14 +804,14 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         .unwrap();
     let ready = std::time::Instant::now();
     while !matches!(
-        synapse.poll_admitted(&host_job, &episode, "held text"),
+        synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
         PollOutcome::Page(_)
     ) && ready.elapsed() < Duration::from_secs(5)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(matches!(
-        synapse.poll_admitted(&host_job, &episode, "held text"),
+        synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "held text"),
         PollOutcome::Page(_)
     ));
     let report = sweep(&projection, &synapse, ten());
@@ -804,15 +821,208 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     );
     assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
 
-    // Once the table forgets the job, nothing holds the identity.
-    std::thread::sleep(Duration::from_millis(400));
+    // Retaining the second result evicts the first job, releasing its identity.
+    projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE embedding_jobs SET next_attempt_at=NULL WHERE occurrence_id=?1",
+                [evict_occurrence],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    assert!(
+        !synapse.holds_job(&host_job),
+        "retention keeps one job: the newer result evicts the held one"
+    );
     let report = sweep(&projection, &synapse, ten());
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 0, 1)
     );
+    assert!(
+        inventory(dir.path())
+            .iter()
+            .all(|(occurrence, _, _)| occurrence == evict_occurrence),
+        "only the live evicting identity remains"
+    );
+    assert_eq!(engine.calls(), 2);
+}
+
+/// A served result page lets lost-commit reconciliation distinguish landed commits from unresolved commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("lost", "lost text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let synapse = component(&engine, SynapseLimits::default());
+    // The pass returns with the row admitted while the host still runs the job.
+    pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &bounds(),
+        Duration::from_millis(50),
+        NOW,
+    );
+    TestEngine::release(&gate);
+    let settled = std::time::Instant::now();
+    while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (host_job, episode): (String, String) = inspect(dir.path())
+        .query_row(
+            "SELECT host_job_id,episode_id FROM embedding_jobs WHERE occurrence_id=?1",
+            [occurrence],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    // The test keeps the served page alive so the sweep cannot reclaim its identity during reconciliation.
+    let mut served = None;
+    let ready = std::time::Instant::now();
+    while served.is_none() && ready.elapsed() < Duration::from_secs(5) {
+        match synapse.poll_admitted(&lane(FINGERPRINT), &host_job, &episode, "lost text") {
+            PollOutcome::Page(page) => served = Some(page),
+            _ => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    let page = served.expect("the completed job serves its result page");
+
+    let row = rows.iter().find(|row| row.object_id == object).unwrap();
+    let vector = TestEngine::vector_for("lost text");
+    let generation = generation();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let publication = VectorPublication {
+        expectation: CurrentInputExpectation {
+            object_id: row.object_id.clone(),
+            source_revision: row.revision,
+            occurrence_id: row.detail.occurrence_id.clone(),
+            payload_id: row.detail.payload_id.clone(),
+            artifact_digest: row.detail.artifact_digest.clone(),
+        },
+        generation: &generation,
+        vector: &vector,
+        input_bytes: "lost text".len() as u64,
+        input_tokens: 2,
+    };
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let mut report = None;
+    let result = tokio::task::block_in_place(|| {
+        publisher.publish_with_fault_for_test(
+            &publication,
+            eligibility(&project),
+            std::time::Instant::now() + Duration::from_secs(10),
+            NOW,
+            &mut |event| {
+                // The identity dies and a sweep runs between the applied commit and the reconciliation read.
+                if event == PublicationEvent::Reconciling {
+                    tombstone(&projection, occurrence, 50);
+                    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+                    report = Some(
+                        sweeper
+                            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+                            .unwrap(),
+                    );
+                }
+            },
+            PublicationFault::LoseLocalCommitReply,
+        )
+    });
+    let report = report.expect("the sweep ran inside the reconciliation window");
+    assert_eq!(
+        (report.candidates, report.held.len(), report.jobs_reclaimed),
+        (1, 1, 0),
+        "the served page holds the identity through reconciliation"
+    );
+    assert_eq!(result.unwrap(), Publication::Embedded);
+
+    // Dropping the page releases the identity; the next sweep reclaims it.
+    drop(page);
+    let report = sweep(&projection, &synapse, ten());
+    assert_eq!(
+        (report.jobs_reclaimed, report.vectors_reclaimed),
+        (1, 1),
+        "a consumed result with no live page no longer holds its identity"
+    );
     assert!(inventory(dir.path()).is_empty());
-    assert_eq!(engine.calls(), 1);
+}
+
+/// Held candidates consume the inspection bound without starving free identities across sweeps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_candidates_do_not_starve_free_identities_behind_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    for name in ["a", "b", "c", "d"] {
+        corpus.publish(name, &format!("{name} text"));
+    }
+    let (projection, _) = corpus.bootstrap(dir.path());
+    let ordered: Vec<String> = {
+        let conn = inspect(dir.path());
+        let mut statement = conn
+            .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY job_id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+    };
+    let (held_occurrences, free_occurrence) = ordered.split_at(3);
+    // The free identity dies before dispatch, so no host ever held it.
+    tombstone(&projection, &free_occurrence[0], 50);
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let synapse = component(&engine, SynapseLimits::default());
+    pass(
+        &corpus,
+        &projection,
+        &synapse,
+        &bounds(),
+        Duration::from_millis(50),
+        NOW,
+    );
+    for occurrence in held_occurrences {
+        tombstone(&projection, occurrence, 60);
+    }
+
+    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let one = NonZeroUsize::new(1).unwrap();
+    for occurrence in held_occurrences {
+        let report = tokio::task::block_in_place(|| {
+            sweeper
+                .run_sweep(one, &budget(Duration::from_secs(30)))
+                .unwrap()
+        });
+        assert_eq!(report.candidates, 1, "one candidate is inspected");
+        assert_eq!(report.held.len(), 1, "one held identity survives");
+        assert_eq!(&report.held[0].occurrence_id, occurrence);
+        assert_eq!(report.jobs_reclaimed, 0);
+    }
+    let report = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(one, &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
+    assert_eq!(report.candidates, 1, "one candidate is inspected");
+    assert!(report.held.is_empty());
+    assert_eq!(
+        report.jobs_reclaimed, 1,
+        "the free identity is eventually reclaimed"
+    );
+    assert!(
+        inventory(dir.path())
+            .iter()
+            .all(|(occurrence, _, _)| held_occurrences.contains(occurrence)),
+        "only held identities remain"
+    );
 }
 
 /// AC5: a reclamation whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
@@ -887,4 +1097,59 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     drop(projection);
     let _ = SearchProjection::open(dir.path()).unwrap();
     assert_eq!(inventory(dir.path()), expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let gone = corpus.publish("gone", "gone text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    tombstone(&projection, occurrence_of(&rows, &gone), 50);
+    let before = inventory(dir.path());
+    let database = Connection::open(search_path(dir.path())).unwrap();
+    database
+        .execute_batch(
+            "ALTER TABLE embedding_recovery_authorizations
+             RENAME TO embedding_recovery_authorizations_unavailable",
+        )
+        .unwrap();
+
+    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let error = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap_err()
+    });
+    let SweepError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        projection.quarantine(),
+        Some(quarantine.clone()),
+        "the projection must share a sweep failure with every writer"
+    );
+
+    database
+        .execute_batch(
+            "ALTER TABLE embedding_recovery_authorizations_unavailable
+             RENAME TO embedding_recovery_authorizations",
+        )
+        .unwrap();
+    let mut fresh = IdentitySweeper::new(&projection, &synapse);
+    let again = tokio::task::block_in_place(|| {
+        fresh
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap_err()
+    });
+    assert!(matches!(again, SweepError::Quarantined(q) if q == quarantine));
+    assert_eq!(
+        inventory(dir.path()),
+        before,
+        "a quarantined writer does no work"
+    );
 }
