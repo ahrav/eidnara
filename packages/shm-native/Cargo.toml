@@ -16,7 +16,7 @@ getrandom = { workspace = true }
 libc = { workspace = true }
 shm-transport = { workspace = true }
 napi = { version = "=3.12.2", default-features = false, features = ["napi8"] }
-napi-derive = "=3.6.3"
+napi-derive = "=3.6.4"
 rustix = { workspace = true, features = ["event", "fs", "net"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -18,6 +18,16 @@ use crate::envelope::check_fence;
 use crate::{KernelError, KernelStore};
 
 const HOUR_MS: i64 = 60 * 60 * 1_000;
+/// The result of probing one object file on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectPresence {
+    Present,
+    /// The shard or the file does not exist, or the path is not a regular file.
+    Absent,
+    /// The probe failed for a reason other than absence.
+    Unreadable,
+}
+
 pub(crate) const REFERENCED_GRACE_MS: i64 = 14 * 24 * HOUR_MS;
 const ORPHAN_GRACE_MS: i64 = HOUR_MS;
 
@@ -26,6 +36,25 @@ pub struct ArtifactGcResult {
     pub reclaimed_objects: usize,
     pub reclaimed_bytes: u64,
     pub failed_candidates: usize,
+    /// Candidates kept only by the consumer horizon. Retention ends when every
+    /// consumer checkpoint passes the citing descriptor.
+    pub withheld_for_replay: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Withheld {
+    /// A live reference, active pin, live reservation, or unexpired grace.
+    Retained,
+    /// A citing source descriptor is newer than the least advanced consumer checkpoint.
+    UnacknowledgedReplay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reclaim {
+    Removed(u64),
+    Withheld(Withheld),
+    /// Eligible, but the object file was already unlinked by another pass.
+    AlreadyGone,
 }
 
 #[cfg(feature = "test-support")]
@@ -70,11 +99,6 @@ struct Candidate {
 impl KernelStore {
     /// Normalizes reservations left behind by a writer that died mid-ingest, and
     /// re-arms the unlink of any purged digest whose bytes are still present.
-    ///
-    /// A digest with any reference row, invalidated or not, stays `Live`:
-    /// `prepare_reclaim` returns early once a reservation is `Reclaiming`, so
-    /// setting `Reclaiming` here would skip its invalidation-grace,
-    /// `retain_until`, and capture-pin checks and unlink bytes they protect.
     pub(crate) fn prepare_startup_cas_recovery(&self, now: i64) -> Result<(), KernelError> {
         let mut writer = self.lock_writer()?;
         let tx = writer
@@ -197,11 +221,14 @@ impl KernelStore {
         let mut result = ArtifactGcResult::default();
         for candidate in candidates {
             match self.reclaim_candidate(&candidate, now, faults) {
-                Ok(Some(bytes)) => {
+                Ok(Reclaim::Removed(bytes)) => {
                     result.reclaimed_objects += 1;
                     result.reclaimed_bytes = result.reclaimed_bytes.saturating_add(bytes);
                 }
-                Ok(None) => {}
+                Ok(Reclaim::Withheld(Withheld::UnacknowledgedReplay)) => {
+                    result.withheld_for_replay += 1;
+                }
+                Ok(Reclaim::Withheld(Withheld::Retained) | Reclaim::AlreadyGone) => {}
                 Err(error @ (KernelError::FenceLost | KernelError::Fault)) => return Err(error),
                 Err(_) => result.failed_candidates += 1,
             }
@@ -214,7 +241,7 @@ impl KernelStore {
         candidate: &Candidate,
         now: i64,
         faults: GcFaults,
-    ) -> Result<Option<u64>, KernelError> {
+    ) -> Result<Reclaim, KernelError> {
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -227,9 +254,13 @@ impl KernelStore {
                 |row| row.get(0),
             )
             .map_err(|_| KernelError::Io)?;
-        if !prepare_reclaim(&tx, candidate, now, self.lease_epoch())? {
+        // Retained bytes cancel reclamation; absent bytes still require metadata cleanup.
+        if let Some(withheld) = prepare_reclaim(&tx, candidate, now, self.lease_epoch())?
+            && self.artifact_object_presence(&candidate.digest) != ObjectPresence::Absent
+        {
+            delete_reclaiming_reservations(&tx, &candidate.digest)?;
             tx.commit().map_err(|_| KernelError::Io)?;
-            return Ok(None);
+            return Ok(Reclaim::Withheld(withheld));
         }
         tx.commit().map_err(|_| KernelError::Io)?;
 
@@ -265,12 +296,7 @@ impl KernelStore {
             self.sweep_digest_temps(&candidate.digest)
                 .map_err(|error| self.map_gc_storage_error(error))?;
         }
-        tx.execute(
-            "DELETE FROM artifact_ingestion_reservations
-             WHERE artifact_digest=?1 AND state='Reclaiming'",
-            [&candidate.digest],
-        )
-        .map_err(|_| KernelError::Io)?;
+        delete_reclaiming_reservations(&tx, &candidate.digest)?;
         tx.execute(
             "DELETE FROM artifact_pending_unlinks WHERE artifact_digest=?1",
             [&candidate.digest],
@@ -285,7 +311,11 @@ impl KernelStore {
         )
         .map_err(|_| KernelError::Io)?;
         tx.commit().map_err(|_| KernelError::Io)?;
-        Ok(removed.then_some(bytes))
+        Ok(if removed {
+            Reclaim::Removed(bytes)
+        } else {
+            Reclaim::AlreadyGone
+        })
     }
 
     /// Resumes durable reclaim rows without scanning the object tree and returns
@@ -387,16 +417,25 @@ impl KernelStore {
     /// returns `true` so recovery does not delete a reservation whose shard is
     /// merely unreadable.
     fn artifact_object_is_present(&self, digest: &str) -> bool {
+        self.artifact_object_presence(digest) != ObjectPresence::Absent
+    }
+
+    /// Whether the object file for `digest` is on disk. `digest` must satisfy
+    /// `is_artifact_digest`; callers that need "positively present" and
+    /// callers that need "not positively absent" read different arms.
+    pub(crate) fn artifact_object_presence(&self, digest: &str) -> ObjectPresence {
         match self.shard_directory(digest, false) {
             Ok(Some(shard)) => {
                 match rfs::statat(&*shard, &digest[2..], AtFlags::SYMLINK_NOFOLLOW) {
-                    Ok(stat) => rfs::FileType::from_raw_mode(stat.st_mode).is_file(),
-                    Err(rustix::io::Errno::NOENT) => false,
-                    Err(_) => true,
+                    Ok(stat) if rfs::FileType::from_raw_mode(stat.st_mode).is_file() => {
+                        ObjectPresence::Present
+                    }
+                    Ok(_) | Err(rustix::io::Errno::NOENT) => ObjectPresence::Absent,
+                    Err(_) => ObjectPresence::Unreadable,
                 }
             }
-            Ok(None) => false,
-            Err(_) => true,
+            Ok(None) => ObjectPresence::Absent,
+            Err(_) => ObjectPresence::Unreadable,
         }
     }
 
@@ -432,6 +471,19 @@ impl KernelStore {
     }
 }
 
+fn delete_reclaiming_reservations(
+    tx: &rusqlite::Transaction<'_>,
+    digest: &str,
+) -> Result<(), KernelError> {
+    tx.execute(
+        "DELETE FROM artifact_ingestion_reservations
+         WHERE artifact_digest=?1 AND state='Reclaiming'",
+        [digest],
+    )
+    .map_err(|_| KernelError::Io)?;
+    Ok(())
+}
+
 /// Only reservations from the current `lease_epoch` block reclamation; earlier
 /// epochs do not extend the reference grace period.
 fn prepare_reclaim(
@@ -439,7 +491,7 @@ fn prepare_reclaim(
     candidate: &Candidate,
     now: i64,
     lease_epoch: u64,
-) -> Result<bool, KernelError> {
+) -> Result<Option<Withheld>, KernelError> {
     let pending_purge: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM artifact_pending_unlinks WHERE artifact_digest=?1)",
@@ -455,8 +507,8 @@ fn prepare_reclaim(
             |row| row.get(0),
         )
         .map_err(|_| KernelError::Io)?;
-    if pending_purge || reclaiming {
-        return Ok(true);
+    if pending_purge {
+        return Ok(None);
     }
 
     let live_reference: bool = tx
@@ -468,7 +520,7 @@ fn prepare_reclaim(
         )
         .map_err(|_| KernelError::Io)?;
     if live_reference {
-        return Ok(false);
+        return Ok(Some(Withheld::Retained));
     }
     let active_pin: bool = tx
         .query_row(
@@ -484,7 +536,12 @@ fn prepare_reclaim(
         )
         .map_err(|_| KernelError::Io)?;
     if active_pin {
-        return Ok(false);
+        return Ok(Some(Withheld::Retained));
+    }
+    // Reclaiming carries the grace decision across a crash; recovery has no mtime.
+    if reclaiming {
+        return Ok(has_unacknowledged_replay(tx, &candidate.digest)?
+            .then_some(Withheld::UnacknowledgedReplay));
     }
 
     let writer_epoch = i64::try_from(lease_epoch).map_err(|_| KernelError::InvalidInput)?;
@@ -497,7 +554,7 @@ fn prepare_reclaim(
         )
         .map_err(|_| KernelError::Io)?;
     if live_reservation_expires_at.is_some_and(|expires_at| now < expires_at) {
-        return Ok(false);
+        return Ok(Some(Withheld::Retained));
     }
 
     let (invalidated_at, retain_until, pin_released_at): (Option<i64>, Option<i64>, Option<i64>) =
@@ -517,20 +574,23 @@ fn prepare_reclaim(
         let mut deadline = retain_until;
         for timestamp in [invalidated_at, pin_released_at].into_iter().flatten() {
             let Some(grace_deadline) = timestamp.checked_add(REFERENCED_GRACE_MS) else {
-                return Ok(false);
+                return Ok(Some(Withheld::Retained));
             };
             deadline = Some(deadline.map_or(grace_deadline, |value| value.max(grace_deadline)));
         }
         if deadline.is_some_and(|deadline| now < deadline) {
-            return Ok(false);
+            return Ok(Some(Withheld::Retained));
         }
     } else if live_reservation_expires_at.is_none() {
         let Some(modified_at) = candidate.modified_at else {
-            return Ok(false);
+            return Ok(Some(Withheld::Retained));
         };
         if !elapsed(now, modified_at, ORPHAN_GRACE_MS) {
-            return Ok(false);
+            return Ok(Some(Withheld::Retained));
         }
+    }
+    if has_unacknowledged_replay(tx, &candidate.digest)? {
+        return Ok(Some(Withheld::UnacknowledgedReplay));
     }
 
     let changed = tx
@@ -561,7 +621,30 @@ fn prepare_reclaim(
         )
         .map_err(|_| KernelError::Io)?;
     }
-    Ok(true)
+    Ok(None)
+}
+
+fn has_unacknowledged_replay(
+    tx: &rusqlite::Transaction<'_>,
+    digest: &str,
+) -> Result<bool, KernelError> {
+    // An absent consumer set gives no replay horizon, so descriptor evidence is kept.
+    tx.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM evidence_meta e
+                 JOIN observations b ON b.evidence_id=e.evidence_id
+                 WHERE e.artifact_digest=?1
+                   AND b.observation_kind='{}'
+                   AND b.created_commit_seq>COALESCE(
+                       (SELECT MIN(checkpoint_commit_seq) FROM outbox_consumers),-1)
+             )",
+            crate::source_descriptor::SOURCE_DESCRIPTOR_KIND
+        ),
+        [digest],
+        |row| row.get(0),
+    )
+    .map_err(|_| KernelError::Io)
 }
 
 fn elapsed(now: i64, since: i64, duration: i64) -> bool {

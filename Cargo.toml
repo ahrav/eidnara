@@ -12,6 +12,7 @@ members = [
     "crates/context-core",
     "crates/kernel",
     "crates/memory-store",
+    "crates/retrieval",
     "crates/daemon",
     "packages/shm-native",
 ]
@@ -36,6 +37,7 @@ context-core = { path = "crates/context-core" }
 storage = { path = "crates/storage" }
 kernel = { path = "crates/kernel" }
 memory-store = { path = "crates/memory-store" }
+retrieval = { path = "crates/retrieval" }
 tokenizer = { path = "crates/tokenizer" }
 host-runtime = { path = "crates/host-runtime" }
 lease = { path = "crates/lease" }

@@ -1,0 +1,26 @@
+[package]
+name = "retrieval"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Search projection: the baseline schema of search.sqlite and the pure identities and mutations over it. Depends only on the kernel among product crates; the daemon owns connections and effects."
+
+[dependencies]
+kernel = { workspace = true }
+storage = { workspace = true, features = ["sqlite"] }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# Digest seams that force tuple and payload collisions in tests. Gated so a
+# production build carries no way to persist under a chosen digest.
+test-support = []
+
+[dev-dependencies]
+retrieval = { path = ".", features = ["test-support"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

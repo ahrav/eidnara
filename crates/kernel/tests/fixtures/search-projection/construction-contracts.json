@@ -1,16 +1,28 @@
 {
   "version": 1,
-  "identity_contract_version": "search-projection-identity-v1",
+  "identity_contract_version": "search-projection-identity-v2",
   "ticket": "https://github.com/ahrav/eidnara/issues/352",
   "tuple_encoding": {
-    "version_byte": 1,
+    "version_byte": 2,
+    "role_bytes": {
+      "occurrence": 0,
+      "lineage": 1
+    },
     "field_order": [
       "class",
       "namespaced_identity",
       "revision",
       "representation",
       "span"
-    ]
+    ],
+    "lineage_field_order": [
+      "class",
+      "namespaced_identity",
+      "representation",
+      "span"
+    ],
+    "max_identity_value_bytes": 512,
+    "revision_spelling": "canonical decimal, nonnegative, fits i64"
   },
   "excluded_inputs": [
     "domains.name",

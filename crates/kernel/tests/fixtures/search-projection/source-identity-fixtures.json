@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "identity_contract_version": "search-projection-identity-v1",
+  "identity_contract_version": "search-projection-identity-v2",
   "records": [
     {
       "id": "m1",
@@ -15,8 +15,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "Deploy failed",
-      "expected_occurrence_id": "bb0c61298d0f40c00af42c5ecbe966564a857158d9b73b087d8933dbafaef9d0",
-      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+      "expected_occurrence_id": "f3d7594c50d5dd7a2e0d49da564c198c0c0b960bc02c890c36d17a0200136d9d",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72",
+      "expected_lineage_id": "ca28692052f57975b68085431404e6149ca53307a05db9d2901a2a49b7b8c6ad"
     },
     {
       "id": "m2",
@@ -31,8 +32,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "Deploy failed",
-      "expected_occurrence_id": "70dcf471a50d62b165ad8ab6501488ab7eb7db5c03cf475feca3673dfa281158",
-      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+      "expected_occurrence_id": "502e8729e9996518d15205d76f27559407bdc7f57c9cc81e249e0edbcc87fb1f",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72",
+      "expected_lineage_id": "96f45f7d539b60669bc1b42cbea397e22a91a526e93a6315edd5e222eb8a0dfc"
     },
     {
       "id": "m1r2",
@@ -47,8 +49,9 @@
       "revision": "2",
       "representation": "text",
       "payload": "Deploy failed",
-      "expected_occurrence_id": "01582fe67b37aa8a72d2f2f6fcacce78a4f4079598c63e5a5cb488a8567d1645",
-      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+      "expected_occurrence_id": "b02a480a8b84fd86558aa95d317ac40099177f285e206f630db45a3b6f92f8da",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72",
+      "expected_lineage_id": "ca28692052f57975b68085431404e6149ca53307a05db9d2901a2a49b7b8c6ad"
     },
     {
       "id": "m1dup",
@@ -63,8 +66,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "Deploy failed",
-      "expected_occurrence_id": "bb0c61298d0f40c00af42c5ecbe966564a857158d9b73b087d8933dbafaef9d0",
-      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+      "expected_occurrence_id": "f3d7594c50d5dd7a2e0d49da564c198c0c0b960bc02c890c36d17a0200136d9d",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72",
+      "expected_lineage_id": "ca28692052f57975b68085431404e6149ca53307a05db9d2901a2a49b7b8c6ad"
     },
     {
       "id": "m_pi",
@@ -79,8 +83,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "Deploy failed",
-      "expected_occurrence_id": "851f1f6f43c40a80eee80fe51b152773184df1cdce261d629bffc27e4e1b8a28",
-      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72"
+      "expected_occurrence_id": "139796fd3ae13b06408bdafe0bb9c6bd439dcd64039080e2c22b020f4e1adce3",
+      "expected_payload_id": "4a1fec6bb23f4b53b3e6810ec85014caf866f6779f8c28a733fc034c63640a72",
+      "expected_lineage_id": "3c59a0daa510c370795c51297de020d203a59be0d837f93e6a70acaa9bf1f43d"
     },
     {
       "id": "c1",
@@ -91,8 +96,9 @@
       "revision": "3",
       "representation": "decision_summary",
       "payload": "Use SQLite WAL for the projection.",
-      "expected_occurrence_id": "1a9ba84150ee401ebaaad21bf07849c33ef1f163f73c873208d9dd0218977f14",
-      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c"
+      "expected_occurrence_id": "d1a00556d2f0303859022de841e127f89b3f01f55484ee7f28b5671e1550014d",
+      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c",
+      "expected_lineage_id": "bbda73e6d9c0ad0e0f69649c9c918686f5e5b9ba805fbc07b1ae81cb126bc28b"
     },
     {
       "id": "c1r",
@@ -103,8 +109,9 @@
       "revision": "3",
       "representation": "rationale",
       "payload": "Use SQLite WAL for the projection.",
-      "expected_occurrence_id": "4a350b496b77b665a6a0f8924b6e4db8ee78b8f64f867eda1202b5bdc0ca2e01",
-      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c"
+      "expected_occurrence_id": "cc53366a2d37351701189b8a2ebeae32ef3b989f07be38defbcf6e6c521fe38f",
+      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c",
+      "expected_lineage_id": "5362978e2fb8026d022596b713a33cd09032cdbab23b39206abe8885018fcfa8"
     },
     {
       "id": "pm1",
@@ -115,8 +122,9 @@
       "revision": "3",
       "representation": "summary",
       "payload": "Use SQLite WAL for the projection.",
-      "expected_occurrence_id": "991feaae9ceafeca2a42ad58fa6161ca787a3dc52634e130a2a9044d5dc2b462",
-      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c"
+      "expected_occurrence_id": "10f5d7cd42a2df38a5ce535ae70cc3f3e5f349405bbec6c4e20b11b916bfa1b7",
+      "expected_payload_id": "b57269848be4432c820b4f6ea8c86fecca6a869340d53afb840f0aa2490fb86c",
+      "expected_lineage_id": "e37d462dc6423eae8bc96b301941880bd71b1f26c5d0827bf132f2e564fc0919"
     },
     {
       "id": "g1",
@@ -129,8 +137,9 @@
       "revision": "1",
       "representation": "commit_message",
       "payload": "Fix the thing\n\nBody line.\n",
-      "expected_occurrence_id": "2afd9fcb2dacfc2e2a18ee9299b761c7063048b9ab8fcd03ffdeb63e5a8ff5ee",
-      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771"
+      "expected_occurrence_id": "44de995455b5ed6d592d9a87b9bb5fb21ccdbb596d1c0bcfe10e30e5c1183771",
+      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771",
+      "expected_lineage_id": "65aafefcca23eceab2ed13df2b51638ff0c6bd66fdb1c99d3ce97d844fe3a8a4"
     },
     {
       "id": "g2",
@@ -143,8 +152,9 @@
       "revision": "1",
       "representation": "commit_message",
       "payload": "Fix the thing\n\nBody line.\n",
-      "expected_occurrence_id": "f678512f181d8fd6907f1d13bda1bbdea473f1e12fee5cf45a8ba48648c0f9c7",
-      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771"
+      "expected_occurrence_id": "7c1a23d1966d517734c4b1817c0f9943f9b970fcf9c400f300c69298b370edef",
+      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771",
+      "expected_lineage_id": "aa867570fd58204e57252c62ebd4a08e4d15110c04347564cb6c29ac96f5bb80"
     },
     {
       "id": "t_whole",
@@ -161,8 +171,32 @@
       "revision": "1",
       "representation": "tool_output",
       "payload": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
-      "expected_occurrence_id": "9ff91f81694cc79e20f6e10e63ea7b617ff48ccaaf86a922115f75b85b314bbd",
-      "expected_payload_id": "77dd5c73d21e122b86d5cb1d017fa357398e586ef8efc590a9d6fde9be69f52d"
+      "expected_occurrence_id": "564d07e4d1501f640bbea4134b46a4e81c475155be47728aabcb346718ff1fba",
+      "expected_payload_id": "77dd5c73d21e122b86d5cb1d017fa357398e586ef8efc590a9d6fde9be69f52d",
+      "expected_lineage_id": "c81ae4e4d8c8553e7480e722cce0a6c5e2ee293b2e23bfde383bdd01e2d42ba0"
+    },
+    {
+      "id": "t_whole_span",
+      "class": "raw_tool_spans",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "sess-01",
+        "parent_message_id": "msg-002",
+        "tool_call_id": "call-9",
+        "result_revision": "1",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "tool_output",
+      "payload": "error: line 1\r\nwarning: naïve 日本語 🎉\r\n",
+      "span": [
+        0,
+        47
+      ],
+      "expected_occurrence_id": "564d07e4d1501f640bbea4134b46a4e81c475155be47728aabcb346718ff1fba",
+      "expected_payload_id": "77dd5c73d21e122b86d5cb1d017fa357398e586ef8efc590a9d6fde9be69f52d",
+      "expected_lineage_id": "c81ae4e4d8c8553e7480e722cce0a6c5e2ee293b2e23bfde383bdd01e2d42ba0"
     },
     {
       "id": "t_span",
@@ -183,8 +217,9 @@
         0,
         13
       ],
-      "expected_occurrence_id": "f3bef9317aa1766fbba18da1fa759c0d7bc163a028768f9d7da614ed3efa4af1",
-      "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776"
+      "expected_occurrence_id": "7d4b7afdba2d3b2b2d0298e2d34c92c2cbefa4ba7c9c5e0d2de8fb4dd89bf287",
+      "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776",
+      "expected_lineage_id": "d4927a0313000dbe38cd5120a5332724893befd7b5e143b9615b14a93d38a001"
     },
     {
       "id": "t_span_overlap",
@@ -205,8 +240,9 @@
         7,
         40
       ],
-      "expected_occurrence_id": "21f462e8cc96bc5c9c6ce9f0b26a739df949091eee01ea96f4744c15a3937070",
-      "expected_payload_id": "e9f0840907fad4b9c6212b5dcd8beffa0c2d94b9a31d569617cee682c1e97199"
+      "expected_occurrence_id": "701e9de956d444eb76f5c9d09a28b3550085427ae08d360f0f87aa90a4e65c03",
+      "expected_payload_id": "e9f0840907fad4b9c6212b5dcd8beffa0c2d94b9a31d569617cee682c1e97199",
+      "expected_lineage_id": "fec49058e6c271e152a8e340b2181c6be2e2607333eba53a73add14d14e066c7"
     },
     {
       "id": "t_err",
@@ -223,8 +259,9 @@
       "revision": "1",
       "representation": "tool_error",
       "payload": "Traceback (most recent call last):\n  File \"x.py\"\n",
-      "expected_occurrence_id": "4f7d42171c33746acfa5e9e4218a5db256235a32dcd8072bd1e3c7a3a5277d0b",
-      "expected_payload_id": "3fb92bc84f586a29bd00d77434d1ddf3cc429a2d6c9e277708bdfaec3ff5183b"
+      "expected_occurrence_id": "63a296e3fe02d3e1b57e1242fd16ebc3d29f015a9678019050bcbfb91a703442",
+      "expected_payload_id": "3fb92bc84f586a29bd00d77434d1ddf3cc429a2d6c9e277708bdfaec3ff5183b",
+      "expected_lineage_id": "1a622ad517d95db8a5e8e779c41ddafcf97042eec868de71e07ec17aff706849"
     },
     {
       "id": "t_empty",
@@ -241,8 +278,9 @@
       "revision": "1",
       "representation": "tool_output",
       "payload": "",
-      "expected_occurrence_id": "1cc8254630f757c1611d817066df14dd53aa6c590f3ed2c2369b6db37866488b",
-      "expected_payload_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "expected_occurrence_id": "58a147d5b9e3c9525af8760eaa77ef194abb134e20b3ba8c63564abf03c315c5",
+      "expected_payload_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_lineage_id": "64ddb52db57c56e36b56c5f2fa056aa7f1107661480490487f195558e5bb2d1b"
     },
     {
       "id": "ws",
@@ -257,8 +295,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "  leading\ttab\r\nCRLF and trailing  \n\n",
-      "expected_occurrence_id": "3471110d745b02a5f12141753cbed29bab85fbcbf50f22b9ee72e55121630a3d",
-      "expected_payload_id": "ea6fc312ae018cda0cc4f95514ee36a9630444223732f8e4ae690487c32f4623"
+      "expected_occurrence_id": "53f6fcbc3ee87b80cca11daabaf3ae41f3534887e89f1aab633f1a4f9109abb6",
+      "expected_payload_id": "ea6fc312ae018cda0cc4f95514ee36a9630444223732f8e4ae690487c32f4623",
+      "expected_lineage_id": "b43f82f09b4f186b9df55f55104b31700576159e0b240e1b7b5ccf5db332569d"
     },
     {
       "id": "uni",
@@ -273,8 +312,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "naïve — 日本語 🎉 ​ zero-width",
-      "expected_occurrence_id": "74d5cee4c6896c0a9e7a5b78e0b3e010178a1cb5a2618bc49a83ff605f225204",
-      "expected_payload_id": "532e1e8f5430c827b23af2c2fdba55b9d06f6e71a8b81aa99aed0362ee2e0822"
+      "expected_occurrence_id": "c677d278f9693fab4a3756ae6d490a057732b33b681dc4d1d2cc1bda72b5bd70",
+      "expected_payload_id": "532e1e8f5430c827b23af2c2fdba55b9d06f6e71a8b81aa99aed0362ee2e0822",
+      "expected_lineage_id": "b1a0df9a66b4aee2a2c07f3fd5fd6544c0e4a3115535bbacf99f5ad675090998"
     },
     {
       "id": "sep_a",
@@ -289,8 +329,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "x",
-      "expected_occurrence_id": "fe7fce5f82e29d6de1d269b78007b6347175456663689fabd90519d38e837e81",
-      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+      "expected_occurrence_id": "778608e8a891d35d55d11359e44c59e4c5cbeb72ee7dc487cce1f70745c0f99e",
+      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "expected_lineage_id": "c51f7748dc42f6db70bd4c6227877b067e8ae342cdeecaf104dee1d1c9f9cea6"
     },
     {
       "id": "sep_b",
@@ -305,8 +346,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "x",
-      "expected_occurrence_id": "8aad9a0a10a3235e7ee644b1e754fecc54c0256cc5a7ad8c21480137608544ee",
-      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+      "expected_occurrence_id": "3414522968f704e60c87eb4c6421137b77a3e19079dcede7760ae81fad47ff66",
+      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "expected_lineage_id": "f39ed8220aae5b6684c80602cfc48b2bd44922c603aff31dcf1ebdd8b05d9240"
     },
     {
       "id": "sep_c",
@@ -321,8 +363,9 @@
       "revision": "1",
       "representation": "text",
       "payload": "x",
-      "expected_occurrence_id": "b1017b5c486b898410b67a4530b184c780a2257a2a13d59a5208ca3655c1d3e2",
-      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+      "expected_occurrence_id": "fd12dbf27fe18f7c15cd891763baaf77a33842f1e74827fc5e93c13bf93d6836",
+      "expected_payload_id": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "expected_lineage_id": "eefee6681d34b83333184d336f17f27de552622fd7d8bb70fdfab387406b7d0d"
     },
     {
       "id": "g_sha256",
@@ -335,8 +378,9 @@
       "revision": "1",
       "representation": "commit_message",
       "payload": "Fix the thing\n\nBody line.\n",
-      "expected_occurrence_id": "9b0fc6527cde07de966603587c80ca025e250fd73aae9a6f0daa1a4a03a646d6",
-      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771"
+      "expected_occurrence_id": "2868170f8ada3cf40856653664960a79557fde1fc5d1192f7f05a8cce79a0476",
+      "expected_payload_id": "98f95b43e47980c6242747a61663c22c1d903b6b6c945a053b83387356ee3771",
+      "expected_lineage_id": "73a03a0223ae9a6825c57598e8f65458491ec1ff015c3c8cd58c17bbcdd8f387"
     },
     {
       "id": "t_first_line",
@@ -353,8 +397,9 @@
       "revision": "1",
       "representation": "tool_output",
       "payload": "error: line 1",
-      "expected_occurrence_id": "f65f18ad4a021393af6c0ea7b19f1dd4a7562b7a80889f6a15db12fb69dfa8e7",
-      "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776"
+      "expected_occurrence_id": "e15547dc796fa1e4fc9e477097dae613aeeaa3351f2b8bdd3d0bf61a24634530",
+      "expected_payload_id": "c25d83e17bc2de37618c75cae5d70f24a2377e99cf9fe63d02fecd99c3da5776",
+      "expected_lineage_id": "a0b8b1ac32149589e0037c7c0d1fa2fdbff6fe5b0080c3967ae2059ec2674305"
     }
   ],
   "expectations": {
@@ -416,6 +461,10 @@
       [
         "m1",
         "m1dup"
+      ],
+      [
+        "t_whole",
+        "t_whole_span"
       ]
     ],
     "equal_payloads": [
@@ -477,7 +526,52 @@
       "t_err": "Traceback (most recent call last):\n  File \"x.py\"\n",
       "t_empty": "",
       "g1": "Fix the thing\n\nBody line.\n"
-    }
+    },
+    "equal_lineages": [
+      [
+        "m1",
+        "m1r2"
+      ],
+      [
+        "m1",
+        "m1dup"
+      ],
+      [
+        "t_whole",
+        "t_whole_span"
+      ]
+    ],
+    "distinct_lineages": [
+      [
+        "m1",
+        "m2"
+      ],
+      [
+        "c1",
+        "c1r"
+      ],
+      [
+        "c1",
+        "pm1"
+      ],
+      [
+        "t_whole",
+        "t_span"
+      ],
+      [
+        "t_span",
+        "t_span_overlap"
+      ],
+      [
+        "g1",
+        "g_sha256"
+      ],
+      [
+        "sep_a",
+        "sep_b"
+      ]
+    ],
+    "lineage_never_equals_occurrence": true
   },
   "invalid_records": [
     {
@@ -861,15 +955,152 @@
       "representation": "x",
       "payload": 5,
       "expected_refusal": "unknown_class"
+    },
+    {
+      "id": "empty_identity_value",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_identity_value"
+    },
+    {
+      "id": "overlong_identity_value",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_identity_value"
+    },
+    {
+      "id": "control_char_identity_value",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m\u0000x",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_identity_value"
+    },
+    {
+      "id": "revision_leading_zero",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "01",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_revision"
+    },
+    {
+      "id": "revision_signed",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "+2",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_revision"
+    },
+    {
+      "id": "revision_negative",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "-1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_revision"
+    },
+    {
+      "id": "revision_alpha",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "v1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_revision"
+    },
+    {
+      "id": "precedence_identity_value_before_harness",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "omp",
+        "session_id": "s",
+        "message_id": "",
+        "block_index": "0"
+      },
+      "revision": "1",
+      "representation": "text",
+      "payload": "x",
+      "expected_refusal": "malformed_identity_value"
+    },
+    {
+      "id": "precedence_malformed_revision_before_representation",
+      "class": "messages",
+      "identity": {
+        "project_id": "proj-a",
+        "harness": "opencode",
+        "session_id": "s",
+        "message_id": "m",
+        "block_index": "0"
+      },
+      "revision": "01",
+      "representation": "nope",
+      "payload": "x",
+      "expected_refusal": "malformed_revision"
     }
   ],
   "refusal_precedence": [
     "unknown_class",
     "missing_identity_field",
     "unknown_identity_field",
+    "malformed_identity_value",
     "unknown_harness",
     "malformed_oid",
     "missing_revision",
+    "malformed_revision",
     "unknown_representation",
     "payload_not_string",
     "malformed_span",

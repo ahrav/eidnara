@@ -32,7 +32,7 @@ impl Sensitivity {
     /// The whole vocabulary, in increasing strictness.
     pub const ALL: &'static [Self] = &[Self::Normal, Self::Sensitive, Self::Secret];
 
-    pub(super) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
             Self::Sensitive => "sensitive",
@@ -41,7 +41,7 @@ impl Sensitivity {
     }
 
     /// An unrecognized stored class resolves to `Secret`, the strictest handling.
-    pub(super) fn from_stored(value: &str) -> Self {
+    pub fn from_stored(value: &str) -> Self {
         match value {
             "normal" => Self::Normal,
             "sensitive" => Self::Sensitive,
@@ -265,6 +265,7 @@ pub struct Envelope<'tx> {
     pub(super) changes: Vec<PendingChange>,
     pub(super) admission_ordinal: usize,
     pub(super) admission_latest: HashMap<AdmissionKey, StoredAdmission>,
+    pub(super) descriptor_objects: HashMap<String, String>,
     poisoned: Option<KernelError>,
 }
 
@@ -287,12 +288,20 @@ impl Envelope<'_> {
         &mut self,
         mutation: impl FnOnce(&mut Self) -> Result<T, KernelError>,
     ) -> Result<T, KernelError> {
+        self.guarded_typed(|error| *error, mutation)
+    }
+
+    pub(super) fn guarded_typed<T, E: From<KernelError>>(
+        &mut self,
+        poison: impl FnOnce(&E) -> KernelError,
+        mutation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         if let Some(error) = self.poisoned {
-            return Err(error);
+            return Err(error.into());
         }
         let outcome = mutation(self);
         if let Err(error) = &outcome {
-            self.poisoned = Some(*error);
+            self.poisoned = Some(poison(error));
         }
         outcome
     }
@@ -677,6 +686,7 @@ impl KernelStore {
                     changes: Vec::new(),
                     admission_ordinal: 0,
                     admission_latest: HashMap::new(),
+                    descriptor_objects: HashMap::new(),
                     poisoned: None,
                 },
             })
@@ -1125,12 +1135,14 @@ fn commit_prepared_with_writer(
         changes: Vec::new(),
         admission_ordinal: 0,
         admission_latest: HashMap::new(),
+        descriptor_objects: HashMap::new(),
         poisoned: None,
     };
     let result = operation(&mut envelope)?;
     if let Some(error) = envelope.poisoned {
         return Err(error);
     }
+    envelope.check_descriptor_ownership()?;
     let unconditional_changes = envelope
         .changes
         .iter()

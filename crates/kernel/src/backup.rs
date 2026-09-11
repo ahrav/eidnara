@@ -362,26 +362,21 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| KernelError::Io)?;
         check_fence(&tx, self.lease_epoch())?;
-        let changed = tx
-            .execute(
-                "UPDATE capture_pins SET released_at=?1
-                 WHERE capture_pin_id=?2 AND released_at IS NULL",
-                params![released_at, capture_pin_id],
+        let is_backup: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM capture_pins WHERE capture_pin_id=?1 AND pin_kind='backup')",
+                [capture_pin_id],
+                |row| row.get(0),
             )
             .map_err(|_| KernelError::Io)?;
-        if changed != 1 {
+        if !is_backup || !release_capture_pin_in_tx(&tx, capture_pin_id, released_at)? {
             return Err(KernelError::NotFound);
         }
-        tx.execute(
-            "UPDATE capture_pin_refs SET released_at=?1
-             WHERE capture_pin_id=?2 AND released_at IS NULL",
-            params![released_at, capture_pin_id],
-        )
-        .map_err(|_| KernelError::Io)?;
         tx.commit().map_err(|_| KernelError::Io)
     }
 
     /// Expires due capture pins and prunes references past the reclaim grace period.
+    /// Expiry starts the grace period even when maintenance runs later.
     pub fn run_capture_pin_maintenance(&self, now_ms: i64) -> Result<(), KernelError> {
         let mut writer = self.lock_writer()?;
         let tx = writer
@@ -389,7 +384,7 @@ impl KernelStore {
             .map_err(|_| KernelError::Io)?;
         check_fence(&tx, self.lease_epoch())?;
         tx.execute(
-            "UPDATE capture_pins SET released_at=?1
+            "UPDATE capture_pins SET released_at=expires_at
              WHERE released_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?1",
             [now_ms],
         )
@@ -1013,6 +1008,33 @@ fn capture_state_inner(
         max_sensitivity,
         pin_id,
     })
+}
+
+/// A finite expiry caps `released_at` so release cannot extend retention.
+/// Returns `false` when the pin is already released or does not exist.
+pub(crate) fn release_capture_pin_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    capture_pin_id: &str,
+    released_at: i64,
+) -> Result<bool, KernelError> {
+    let changed = tx
+        .execute(
+            "UPDATE capture_pins SET released_at=MIN(?1,COALESCE(expires_at,?1))
+             WHERE capture_pin_id=?2 AND released_at IS NULL",
+            params![released_at, capture_pin_id],
+        )
+        .map_err(|_| KernelError::Io)?;
+    if changed != 1 {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE capture_pin_refs
+         SET released_at=(SELECT released_at FROM capture_pins WHERE capture_pin_id=?1)
+         WHERE capture_pin_id=?1 AND released_at IS NULL",
+        [capture_pin_id],
+    )
+    .map_err(|_| KernelError::Io)?;
+    Ok(true)
 }
 
 fn rollback_capture_pin(writer: &mut Connection, lease_epoch: u64, pin_id: &str) {

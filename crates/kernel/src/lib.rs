@@ -24,6 +24,10 @@ mod retention;
 pub mod schema;
 mod scope;
 mod slice;
+mod source_descriptor;
+mod source_export;
+mod source_hold;
+pub mod source_identity;
 
 pub use admission::{
     AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,
@@ -89,6 +93,22 @@ pub use slice::{
     DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionRow,
     DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload,
     ObservationRow, ObservationSpec, ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
+};
+pub use source_descriptor::{
+    MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
+    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
+    SourceDescriptorRequest, descriptor_object_id,
+};
+pub use source_export::{
+    ExportWindow, PageBound, SourceCursor, SourceExportError, SourcePage, SourcePageBounds,
+    SourcePageCharge, SourceRow,
+};
+#[cfg(feature = "test-support")]
+pub use source_hold::SourceHoldCheckPhase;
+pub use source_hold::{
+    HeldCursor, HeldDescriptor, HeldPage, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER,
+    MAX_SOURCE_HOLD_LIFETIME_MS, SourceHold, SourceHoldAdmission, SourceHoldBinding,
+    SourceHoldBounds, SourceHoldError, SourceHoldInvalidity,
 };
 
 /// `Connection::execute` and `Connection::query_row` prepare their statement
