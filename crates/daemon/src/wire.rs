@@ -64,7 +64,7 @@ pub struct FlatBlock {
 }
 
 /// The item view the transform cycle reads: identity, position, accounting
-/// bytes, and the synthetic flag copied from the source message's meta.
+/// bytes, and synthetic status including projection overrides.
 impl FlatBlock {
     /// `id` is `mid#block_index`, the key `identity_by_mid` and the frozen
     /// reduction set are keyed by.
@@ -83,8 +83,7 @@ impl FlatBlock {
         &self.bytes
     }
 
-    /// Mirrors `HarnessMeta::synthetic` on the source message; synthetic blocks
-    /// are left out of `identity_by_mid`.
+    /// Includes projection overrides; synthetic blocks are left out of `identity_by_mid`.
     pub fn synthetic(&self) -> bool {
         self.synthetic
     }
@@ -368,47 +367,97 @@ pub enum WireError {
 /// [`WireError`]. The ID rules mirror [`split_block_id`], so every projected
 /// `mid#index` splits back into its parts and names exactly one message.
 pub fn project_messages(messages: &[IngressMessage]) -> Result<FlatProjection, WireError> {
-    project_messages_from_state(messages, FlatProjectionBuilder::default())
+    MessageProjection::new(messages).project()
 }
 
-/// Projects a suffix while reusing a validated cached prefix.
-///
-/// Zero, out-of-range, or incomplete local prefix metadata falls back to a full
-/// projection. Projection errors have the same meaning as [`project_messages`].
+#[cfg(test)]
 pub(crate) fn project_messages_incremental(
     messages: &[IngressMessage],
     cached: &FlatProjection,
     prefix_messages: usize,
 ) -> Result<FlatProjection, WireError> {
-    if prefix_messages == 0
-        || prefix_messages > messages.len()
-        || prefix_messages > cached.message_count()
-    {
-        return project_messages(messages);
+    MessageProjection::new(messages)
+        .project_incremental(cached, prefix_messages)
+        .map(|(projection, _)| projection)
+}
+
+/// Tracks synthetic message IDs separately from ingress messages.
+pub(crate) struct MessageProjection<'a> {
+    messages: &'a [IngressMessage],
+    synthetic_mids: BTreeSet<&'a str>,
+}
+
+impl<'a> MessageProjection<'a> {
+    pub(crate) fn new(messages: &'a [IngressMessage]) -> Self {
+        Self {
+            messages,
+            synthetic_mids: BTreeSet::new(),
+        }
     }
 
-    let prefix_block_end = cached.message_block_ends[prefix_messages - 1];
-    let mut identity_by_mid = BTreeMap::new();
-    for message in &messages[..prefix_messages] {
-        if message.ck.meta.synthetic {
-            continue;
-        }
-        let Some(identities) = cached.identity_by_mid.get(&message.mid) else {
-            return project_messages(messages);
-        };
-        identity_by_mid.insert(message.mid.clone(), identities.clone());
+    pub(crate) fn mark_synthetic(&mut self, message: &'a IngressMessage) {
+        self.synthetic_mids.insert(message.mid.as_str());
     }
-    let builder = FlatProjectionBuilder {
-        blocks: cached.blocks[..prefix_block_end].to_vec(),
-        identity_by_mid,
-        message_meta: cached.message_meta[..prefix_messages].to_vec(),
-        message_block_ends: cached.message_block_ends[..prefix_messages].to_vec(),
-        states_after_messages: cached.states_after_messages[..prefix_messages].to_vec(),
-        state: cached.states_after_messages[prefix_messages - 1]
-            .as_ref()
-            .clone(),
-    };
-    project_messages_from_state(&messages[prefix_messages..], builder)
+
+    pub(crate) fn is_synthetic(&self, message: &IngressMessage) -> bool {
+        message.ck.meta.synthetic || self.synthetic_mids.contains(message.mid.as_str())
+    }
+
+    pub(crate) fn live_messages(&self) -> impl DoubleEndedIterator<Item = &'a IngressMessage> + '_ {
+        self.messages
+            .iter()
+            .filter(|message| !self.is_synthetic(message))
+    }
+
+    pub(crate) fn project(&self) -> Result<FlatProjection, WireError> {
+        project_messages_from_state(self, FlatProjectionBuilder::default())
+    }
+
+    /// The tuple contains the projection and the number of messages reused from the cached prefix.
+    ///
+    /// Invalid prefix bounds, missing identities, or changed synthetic status fall
+    /// back to a full projection with zero reused messages. Projection errors have
+    /// the same meaning as [`project_messages`].
+    pub(crate) fn project_incremental(
+        &self,
+        cached: &FlatProjection,
+        prefix_messages: usize,
+    ) -> Result<(FlatProjection, usize), WireError> {
+        let messages = self.messages;
+        if prefix_messages == 0
+            || prefix_messages > messages.len()
+            || prefix_messages > cached.message_count()
+        {
+            return Ok((self.project()?, 0));
+        }
+
+        let prefix_block_end = cached.message_block_ends[prefix_messages - 1];
+        let mut identity_by_mid = BTreeMap::new();
+        for (index, message) in messages[..prefix_messages].iter().enumerate() {
+            let synthetic = self.is_synthetic(message);
+            if cached.message_meta[index].meta.synthetic != synthetic {
+                return Ok((self.project()?, 0));
+            }
+            if synthetic {
+                continue;
+            }
+            let Some(identities) = cached.identity_by_mid.get(&message.mid) else {
+                return Ok((self.project()?, 0));
+            };
+            identity_by_mid.insert(message.mid.clone(), identities.clone());
+        }
+        let builder = FlatProjectionBuilder {
+            blocks: cached.blocks[..prefix_block_end].to_vec(),
+            identity_by_mid,
+            message_meta: cached.message_meta[..prefix_messages].to_vec(),
+            message_block_ends: cached.message_block_ends[..prefix_messages].to_vec(),
+            states_after_messages: cached.states_after_messages[..prefix_messages].to_vec(),
+            state: cached.states_after_messages[prefix_messages - 1]
+                .as_ref()
+                .clone(),
+        };
+        Ok((project_messages_from_state(self, builder)?, prefix_messages))
+    }
 }
 
 #[derive(Default)]
@@ -422,9 +471,15 @@ struct FlatProjectionBuilder {
 }
 
 fn project_messages_from_state(
-    messages: &[IngressMessage],
+    ingress: &MessageProjection<'_>,
     mut builder: FlatProjectionBuilder,
 ) -> Result<FlatProjection, WireError> {
+    debug_assert_eq!(builder.message_meta.len(), builder.message_block_ends.len());
+    debug_assert_eq!(
+        builder.message_meta.len(),
+        builder.states_after_messages.len()
+    );
+    // One metadata entry completes each message; its count is the suffix cursor.
     // Block ids are `mid#index`, so a repeated mid would give two messages'
     // blocks the same identities and let one message's content stand for the
     // other's. Synthetic messages take part: their block ids collide too.
@@ -433,7 +488,7 @@ fn project_messages_from_state(
         .iter()
         .map(|meta| meta.mid.clone())
         .collect();
-    for msg in messages {
+    for msg in ingress.messages.iter().skip(builder.message_meta.len()) {
         if msg.mid.is_empty() {
             return Err(WireError::EmptyMid {
                 ordinal: msg.ordinal,
@@ -475,9 +530,9 @@ fn project_messages_from_state(
             }
         }
 
+        let synthetic = ingress.is_synthetic(msg);
         let mut identities = Vec::new();
         for (index, block) in msg.ck.content().iter().enumerate() {
-            let id = block_id(&msg.mid, index);
             let arc_id = arc_for_block(
                 &msg.mid,
                 index,
@@ -485,7 +540,7 @@ fn project_messages_from_state(
                 &mut builder.state.pending_calls,
                 &builder.state.call_arcs,
             )?;
-            let flat = flatten_block(msg, index, block, id, arc_id)?;
+            let flat = flatten_block(msg, index, block, synthetic, arc_id)?;
             if !flat.synthetic {
                 identities.push(BlockIdentity {
                     kind_tag: flat.kind_tag.clone(),
@@ -502,7 +557,7 @@ fn project_messages_from_state(
         if role != "assistant" && role != "tool" {
             builder.state.pending_calls.clear();
         }
-        if !msg.ck.meta.synthetic {
+        if !synthetic {
             builder.identity_by_mid.insert(msg.mid.clone(), identities);
         }
         builder.message_meta.push(ProjectionMessageMeta {
@@ -511,7 +566,10 @@ fn project_messages_from_state(
             role: msg.ck.role.clone(),
             origin: msg.ck.origin.clone(),
             provider_extras: msg.ck.provider_extras.clone(),
-            meta: msg.ck.meta.clone(),
+            meta: HarnessMeta {
+                synthetic,
+                ..msg.ck.meta.clone()
+            },
         });
         builder.message_block_ends.push(builder.blocks.len());
         builder
@@ -623,7 +681,7 @@ fn flatten_block(
     msg: &IngressMessage,
     index: usize,
     block: &WireBlock,
-    id: String,
+    synthetic: bool,
     arc_id: Option<String>,
 ) -> Result<FlatBlock, WireError> {
     let bytes = serde_json::to_string(block).map_err(|_| WireError::UnsupportedBlock {
@@ -664,7 +722,7 @@ fn flatten_block(
         };
 
     Ok(FlatBlock {
-        id,
+        id: block_id(&msg.mid, index),
         mid: msg.mid.clone(),
         block_index: index,
         ordinal: msg.ordinal,
@@ -677,7 +735,7 @@ fn flatten_block(
         arc_id,
         bytes: Arc::from(bytes),
         content_hash,
-        synthetic: msg.ck.meta.synthetic,
+        synthetic,
         tool_call_id,
         output_kind,
         wire: Arc::new(block.clone()),
@@ -1553,5 +1611,38 @@ mod tests {
         let replayed = serde_json::to_value(&reattached[0].ck).unwrap();
         assert_eq!(replayed.get("future_field"), None);
         assert_eq!(replayed["content"][0]["future_block_field"], Value::from(2));
+    }
+
+    #[test]
+    fn incremental_projection_checks_effective_synthetic_status() {
+        let messages = [
+            text_msg("m0", 0, "user", "prefix"),
+            text_msg("m1", 1, "user", "tail"),
+        ];
+        for cached_synthetic in [false, true] {
+            let mut prior = MessageProjection::new(&messages);
+            if cached_synthetic {
+                prior.mark_synthetic(&messages[0]);
+            }
+            let cached = prior.project().unwrap();
+            for synthetic in [false, true] {
+                let mut current = MessageProjection::new(&messages);
+                if synthetic {
+                    current.mark_synthetic(&messages[0]);
+                }
+                let (incremental, reused_messages) =
+                    current.project_incremental(&cached, 1).unwrap();
+                assert_eq!(reused_messages, usize::from(cached_synthetic == synthetic));
+                assert_eq!(incremental, current.project().unwrap());
+                assert_eq!(
+                    Arc::ptr_eq(&incremental.blocks[0].wire, &cached.blocks[0].wire),
+                    cached_synthetic == synthetic,
+                );
+                assert_eq!(
+                    Arc::ptr_eq(&incremental.blocks[0].bytes, &cached.blocks[0].bytes),
+                    cached_synthetic == synthetic,
+                );
+            }
+        }
     }
 }

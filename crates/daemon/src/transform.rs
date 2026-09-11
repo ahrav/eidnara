@@ -70,7 +70,7 @@ use std::time::Instant;
 
 use crate::wire::{
     FlatBlock, FlatProjection, IngressMessage, WireBlock, WireError, WireMessage, duplicate_ids,
-    project_messages, project_messages_incremental, reduced_block, split_block_id,
+    project_messages, reduced_block, split_block_id,
 };
 
 /// Maximum CAS retries before returning a conflict.
@@ -1622,7 +1622,7 @@ struct PendingOverlayDecisions {
 }
 
 struct OverlayComputation<'a, 'ctx> {
-    req: &'a TransformRequest,
+    req: &'a TransformIngress<'a>,
     ctx: &'a ProducerContext<'ctx>,
     projection: &'a FlatProjection,
     trusted_projection_prefix: Option<(&'a str, usize)>,
@@ -2019,11 +2019,19 @@ fn prefix_projection_differential_enabled() -> bool {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn assert_prefix_projection_equivalent(
     incremental: &FlatProjection,
     messages: &[IngressMessage],
 ) -> Result<(), WireError> {
-    let full = project_messages(messages)?;
+    assert_message_projection_equivalent(incremental, &wire::MessageProjection::new(messages))
+}
+
+fn assert_message_projection_equivalent(
+    incremental: &FlatProjection,
+    messages: &wire::MessageProjection<'_>,
+) -> Result<(), WireError> {
+    let full = messages.project()?;
     assert_eq!(
         incremental.differential_bytes(),
         full.differential_bytes(),
@@ -2080,9 +2088,43 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     fingerprints
 }
 
-fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformRequest> {
-    let mut normalized = None;
-    for (index, message) in req.messages.iter().enumerate() {
+/// Normalized decisions use `projection`, not raw message flags exposed through `Deref`.
+struct TransformIngress<'a> {
+    request: &'a TransformRequest,
+    projection: wire::MessageProjection<'a>,
+}
+
+impl<'a> TransformIngress<'a> {
+    fn original(request: &'a TransformRequest) -> Self {
+        Self {
+            request,
+            projection: wire::MessageProjection::new(&request.messages),
+        }
+    }
+
+    fn is_synthetic(&self, message: &IngressMessage) -> bool {
+        self.projection.is_synthetic(message)
+    }
+
+    fn rendered_message(&self, message: &IngressMessage) -> WireMessage {
+        // Retained ingress JSON preserves passthrough bytes despite the typed metadata override.
+        let mut rendered = message.ck.clone();
+        rendered.meta.synthetic = self.is_synthetic(message);
+        rendered
+    }
+}
+
+impl std::ops::Deref for TransformIngress<'_> {
+    type Target = TransformRequest;
+
+    fn deref(&self) -> &Self::Target {
+        self.request
+    }
+}
+
+fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> TransformIngress<'_> {
+    let mut normalized = TransformIngress::original(req);
+    for message in &req.messages {
         if message.ck.meta.synthetic
             || !message.ck.content().iter().any(|block| match block.kind() {
                 wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
@@ -2093,8 +2135,7 @@ fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformR
         {
             continue;
         }
-        let next = normalized.get_or_insert_with(|| req.clone());
-        next.messages[index].ck.meta.synthetic = true;
+        normalized.projection.mark_synthetic(message);
     }
     normalized
 }
@@ -2156,7 +2197,7 @@ fn continuation_summary_anchor(
 
 fn validate_lineage_anchor(
     meta: &ModuleMeta,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     projection: &FlatProjection,
 ) -> Result<(), String> {
     let (Some(anchor_id), Some(expected_hash), Some(base)) = (
@@ -2187,9 +2228,9 @@ fn validate_lineage_anchor(
     // The transform skips synthetic head messages so seam and anchor validation use the same first-message boundary.
     // Skipping synthetic head messages prevents them from passing seam validation but failing anchor validation on every pass.
     let first = req
-        .messages
-        .iter()
-        .find(|message| !message.ck.meta.synthetic)
+        .projection
+        .live_messages()
+        .next()
         .ok_or_else(|| "anchor message is absent from the live request".to_string())?;
     if first.mid != block.mid {
         return Err(format!(
@@ -2218,14 +2259,10 @@ fn validate_lineage_anchor(
 }
 
 fn rebase_descent_ordinals(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     base: u64,
 ) -> Result<Option<TransformRequest>, TransformError> {
-    let Some(first) = req
-        .messages
-        .iter()
-        .find(|message| !message.ck.meta.synthetic)
-    else {
+    let Some(first) = req.projection.live_messages().next() else {
         return Err(TransformError::LineageProtocol(
             "descent replacement array has no real messages".to_string(),
         ));
@@ -2247,7 +2284,7 @@ fn rebase_descent_ordinals(
     let offset = expected_first
         .checked_sub(first.ordinal)
         .expect("first.ordinal <= 1 <= expected_first");
-    let mut rebased = req.clone();
+    let mut rebased = req.request.clone();
     for message in &mut rebased.messages {
         if message.ordinal < first.ordinal {
             return Err(TransformError::LineageProtocol(format!(
@@ -2264,7 +2301,7 @@ fn rebase_descent_ordinals(
 }
 
 fn lineage_protocol_passthrough(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     projection: FlatProjection,
 ) -> TransformWithProjection {
     TransformWithProjection {
@@ -2282,7 +2319,7 @@ fn lineage_protocol_passthrough(
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
-                .map(|message| message.ck.clone())
+                .map(|message| req.rendered_message(message))
                 .collect(),
             req.full_array_fingerprint.clone(),
         ),
@@ -2544,7 +2581,8 @@ fn apply_additive_only(
         meta.last_upgrade_state = req.upgrade_state.clone();
         meta.last_render_config = effective_render_config.clone();
     }
-    let provisional_tail_mid = provisional_tail_mid(req);
+    let provisional_tail_mid =
+        provisional_tail_mid(&wire::MessageProjection::new(&req.messages), req.mid_turn);
     apply_ingress_meta(&mut meta, req, &projection, provisional_tail_mid, None, &[]);
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
@@ -2853,16 +2891,18 @@ fn apply_once(
     let mut m1_revision_read_timings = M1RevisionReadTimings::default();
     let projection_started_at = Instant::now();
     let normalized_req = normalize_synthetic_todo_ingress(req);
-    let ingress_req = normalized_req.as_ref().unwrap_or(req);
+    let ingress_req = &normalized_req;
     let reusable_projection = projection_cache.filter(|cache| {
         !ingress_req.lineage_switched
             && cache.replace_from <= ingress_req.messages.len()
             && cache.replace_from <= cache.projection.message_count()
     });
-    let initial_projection = if let Some(cache) = reusable_projection {
-        project_messages_incremental(&ingress_req.messages, &cache.projection, cache.replace_from)?
+    let (initial_projection, reused_messages) = if let Some(cache) = reusable_projection {
+        ingress_req
+            .projection
+            .project_incremental(&cache.projection, cache.replace_from)?
     } else {
-        project_messages(&ingress_req.messages)?
+        (ingress_req.projection.project()?, 0)
     };
     let trusted_projection_prefix = reusable_projection.and_then(|cache| {
         cache
@@ -2871,13 +2911,13 @@ fn apply_once(
             .map(|blocks| (cache.prior_fingerprint.as_str(), blocks))
     });
     timings.projection = elapsed_ms(projection_started_at);
-    timings.projection_reused_messages = reusable_projection.map_or(0, |cache| cache.replace_from);
+    timings.projection_reused_messages = reused_messages;
     timings.projection_projected_messages = ingress_req
         .messages
         .len()
         .saturating_sub(timings.projection_reused_messages);
     if reusable_projection.is_some() && prefix_projection_differential_enabled() {
-        assert_prefix_projection_equivalent(&initial_projection, &ingress_req.messages)?;
+        assert_message_projection_equivalent(&initial_projection, &ingress_req.projection)?;
     }
     if ingress_req.lineage_switched && ingress_req.is_subagent {
         return Ok(lineage_protocol_passthrough(
@@ -2948,11 +2988,12 @@ fn apply_once(
             rebased_req = rebase_descent_ordinals(ingress_req, base)?;
         }
     }
-    let req = rebased_req.as_ref().unwrap_or(ingress_req);
+    let rebased_ingress = rebased_req.as_ref().map(normalize_synthetic_todo_ingress);
+    let req = rebased_ingress.as_ref().unwrap_or(ingress_req);
 
     let projection = if rebased_req.is_some() {
         let rebase_projection_started_at = Instant::now();
-        let projection = project_messages(&req.messages)?;
+        let projection = req.projection.project()?;
         timings.projection += elapsed_ms(rebase_projection_started_at);
         projection
     } else {
@@ -2973,7 +3014,7 @@ fn apply_once(
         }
     }
     let mut prev: Option<u64> = None;
-    for msg in req.messages.iter().filter(|m| !m.ck.meta.synthetic) {
+    for msg in req.projection.live_messages() {
         if let Some(p) = prev
             && msg.ordinal <= p
         {
@@ -2987,7 +3028,7 @@ fn apply_once(
 
     let serializer_profile = SerializerProfile::parse(&req.serializer_profile);
     let mutation_exempt_mid = latest_assistant_message_mutation_exempt_mid(
-        &req.messages,
+        &req.projection,
         serializer_profile,
         req.mid_turn,
     );
@@ -3044,9 +3085,9 @@ fn apply_once(
             )));
         }
         let first_live = req
-            .messages
-            .iter()
-            .find(|message| !message.ck.meta.synthetic)
+            .projection
+            .live_messages()
+            .next()
             .map(|message| message.ordinal);
         if first_live != Some(expected_boundary) {
             return Err(TransformError::LineageProtocol(format!(
@@ -3358,7 +3399,7 @@ fn apply_once(
     let clear_pending_rewrite_on_present =
         loaded.meta.pending_rewrite.is_some() && boundary_present;
 
-    let provisional_tail_mid = provisional_tail_mid(req);
+    let provisional_tail_mid = provisional_tail_mid(&req.projection, req.mid_turn);
     let identity_enforce_started_at = Instant::now();
     let tail_identity_re_adoptions = enforce_block_identity(
         &loaded.meta,
@@ -5065,13 +5106,16 @@ fn apply_once(
     })
 }
 
-fn provisional_tail_mid(req: &TransformRequest) -> Option<&str> {
-    if !req.mid_turn {
+fn provisional_tail_mid<'a>(
+    projection: &wire::MessageProjection<'a>,
+    mid_turn: bool,
+) -> Option<&'a str> {
+    if !mid_turn {
         return None;
     }
-    req.messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+    projection
+        .live_messages()
+        .filter(|message| message.ck.role == "assistant")
         .max_by_key(|message| message.ordinal)
         .map(|message| message.mid.as_str())
 }
@@ -5115,7 +5159,7 @@ fn trailing_blank_identity_replays_stored(
 
 fn enforce_block_identity(
     meta: &ModuleMeta,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     projection: &FlatProjection,
     core: &CoreState,
     provisional_tail_mid: Option<&str>,
@@ -5133,7 +5177,7 @@ fn enforce_block_identity(
             continue;
         }
         if trailing_blank_identity_replays_stored(req, core, mid, stored) {
-            if latest_assistant_reasoning_mutation_exempt_mid(&req.messages) == Some(mid.as_str())
+            if latest_assistant_reasoning_mutation_exempt_mid(&req.projection) == Some(mid.as_str())
                 && frozen_trailing_blank_decision(core, mid)
                     == Some(FrozenTrailingBlankDecision::Strip)
             {
@@ -5182,14 +5226,14 @@ fn enforce_block_identity(
 
 fn identity_drift_requires_reject(
     meta: &ModuleMeta,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     core: &CoreState,
     mid: &str,
 ) -> bool {
     let covered = req
-        .messages
-        .iter()
-        .find(|message| !message.ck.meta.synthetic && message.mid == mid)
+        .projection
+        .live_messages()
+        .find(|message| message.mid == mid)
         .is_some_and(|message| !is_tail(message.ordinal, meta.coverage_ordinal));
     let boundary_anchor = core.boundary_id == mid
         || split_block_id(&core.boundary_id).is_some_and(|(anchor_mid, _)| anchor_mid == mid);
@@ -5786,13 +5830,13 @@ fn surviving_caveman_units(
 
 fn frozen_units_matched_to_tail(
     core: &CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     coverage: Option<u64>,
 ) -> usize {
     let tail_mids: HashSet<&str> = req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && is_tail(message.ordinal, coverage))
+        .projection
+        .live_messages()
+        .filter(|message| is_tail(message.ordinal, coverage))
         .map(|message| message.mid.as_str())
         .collect();
     core.frozen_units
@@ -5966,18 +6010,15 @@ fn system_content_for_m0(message: &WireMessage) -> String {
 }
 
 fn covered_system_messages_for_coverage(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     coverage_ordinal: Option<u64>,
     coverage_start_ordinal: Option<u64>,
     profile: Option<SerializerProfile>,
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut covered = Vec::new();
-    for message in req.messages.iter().filter(|message| {
-        if message.ck.meta.synthetic
-            || message.ck.role != "system"
-            || is_tail(message.ordinal, coverage_ordinal)
-        {
+    for message in req.projection.live_messages().filter(|message| {
+        if message.ck.role != "system" || is_tail(message.ordinal, coverage_ordinal) {
             return false;
         }
         if profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
@@ -5994,16 +6035,15 @@ fn covered_system_messages_for_coverage(
 }
 
 fn coverage_advance_covers_new_system(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     old_coverage: Option<u64>,
     new_coverage: Option<u64>,
 ) -> bool {
     if !coverage_advanced(old_coverage, new_coverage) {
         return false;
     }
-    req.messages.iter().any(|message| {
-        !message.ck.meta.synthetic
-            && message.ck.role == "system"
+    req.projection.live_messages().any(|message| {
+        message.ck.role == "system"
             && is_tail(message.ordinal, old_coverage)
             && !is_tail(message.ordinal, new_coverage)
     })
@@ -6354,13 +6394,12 @@ fn tail_sel_items(
         .collect()
 }
 
-fn tail_end_mid(req: &TransformRequest, coverage: Option<u64>) -> Option<String> {
-    req.messages
-        .iter()
+fn tail_end_mid(req: &TransformIngress<'_>, coverage: Option<u64>) -> Option<String> {
+    req.projection
+        .live_messages()
         .rev()
         .find(|msg| {
-            !msg.ck.meta.synthetic
-                && !msg.ck.meta.summary
+            !msg.ck.meta.summary
                 && !msg.ck.meta.errored
                 && !msg.ck.meta.finish.as_deref().is_some_and(|finish| {
                     let finish = finish.to_ascii_lowercase();
@@ -6372,10 +6411,10 @@ fn tail_end_mid(req: &TransformRequest, coverage: Option<u64>) -> Option<String>
         .map(|msg| msg.mid.clone())
 }
 
-fn tail_contains_mid(req: &TransformRequest, coverage: Option<u64>, mid: &str) -> bool {
-    req.messages
-        .iter()
-        .any(|msg| !msg.ck.meta.synthetic && msg.mid == mid && is_tail(msg.ordinal, coverage))
+fn tail_contains_mid(req: &TransformIngress<'_>, coverage: Option<u64>, mid: &str) -> bool {
+    req.projection
+        .live_messages()
+        .any(|msg| msg.mid == mid && is_tail(msg.ordinal, coverage))
 }
 
 fn coverage_advanced(old: Option<u64>, new: Option<u64>) -> bool {
@@ -6447,7 +6486,7 @@ fn boundary_available(
 
 fn resolve_boundary_state(
     store: &MemoryStore,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     core: &CoreState,
     meta: &ModuleMeta,
     live: &[&FlatBlock],
@@ -6528,9 +6567,9 @@ fn resolve_boundary_state(
     }
 
     let first_live_non_system = req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && message.ck.role != "system")
+        .projection
+        .live_messages()
+        .filter(|message| message.ck.role != "system")
         .map(|message| message.ordinal)
         .min();
     if first_live_non_system != Some(declared.next_absolute_ordinal) {
@@ -6625,7 +6664,7 @@ struct PendingPassthroughArgs<'a> {
 
 fn pending_passthrough_messages(
     projection: &FlatProjection,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_overlay: Option<&TagOverlayState>,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<ServedMessage> {
@@ -6637,11 +6676,12 @@ fn pending_passthrough_messages(
                 .get(message.mid.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let mut rendered = message.ck.clone();
+            let mut rendered = req.rendered_message(message);
             if !blocks.is_empty() {
                 apply_tag_overlay_to_message(
                     &mut rendered,
                     message,
+                    req.is_synthetic(message),
                     blocks,
                     tag_overlay,
                     |_| false,
@@ -6701,15 +6741,14 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
 }
 
 fn anchor_folded_by_coverage(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     old_coverage: Option<u64>,
     new_coverage: Option<u64>,
     anchor_mid: &str,
 ) -> bool {
     coverage_advanced(old_coverage, new_coverage)
-        && req.messages.iter().any(|msg| {
-            !msg.ck.meta.synthetic
-                && msg.mid == anchor_mid
+        && req.projection.live_messages().any(|msg| {
+            msg.mid == anchor_mid
                 && is_tail(msg.ordinal, old_coverage)
                 && !is_tail(msg.ordinal, new_coverage)
         })
@@ -6720,7 +6759,7 @@ fn advance_synthetic_todo(
     is_bust_pass: bool,
     old_coverage: Option<u64>,
     coverage_shrunk_on_bust: bool,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
 ) -> Result<(), TransformError> {
     let existing = meta.synthetic_todo.clone();
     let outcome = advance_injection_from_meta(
@@ -6754,7 +6793,7 @@ fn reanchor_kept_synthetic_todo_if_folded_or_shrunk(
     meta: &mut ModuleMeta,
     old_coverage: Option<u64>,
     coverage_shrunk_on_bust: bool,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
 ) -> Result<(), TransformError> {
     let Some(pair) = meta.synthetic_todo.as_mut() else {
         return Ok(());
@@ -7447,6 +7486,7 @@ pub fn temporal_gap_prefix(gap_ms: i64) -> Option<String> {
 fn apply_tag_overlay_to_message(
     message: &mut WireMessage,
     ingress: &IngressMessage,
+    synthetic: bool,
     blocks: &[&FlatBlock],
     overlay: Option<&TagOverlayState>,
     is_reduced: impl Fn(&FlatBlock) -> bool,
@@ -7458,7 +7498,7 @@ fn apply_tag_overlay_to_message(
     let Some(overlay) = overlay else {
         return;
     };
-    if ingress.ck.role == "system" || ingress.ck.meta.synthetic {
+    if ingress.ck.role == "system" || synthetic {
         return;
     }
     let mut modified = false;
@@ -7779,7 +7819,7 @@ fn is_entire_system_reminder_wrapped(text: &str) -> bool {
 }
 
 fn is_system_reminder_transport_message(message: &IngressMessage) -> bool {
-    if message.ck.role != "user" || message.ck.meta.synthetic || message.ck.content().is_empty() {
+    if message.ck.role != "user" || message.ck.content().is_empty() {
         return false;
     }
     // CK has no transport-origin field for this Claude Code shape.
@@ -7798,27 +7838,28 @@ fn is_system_reminder_transport_message(message: &IngressMessage) -> bool {
     saw_text
 }
 
-fn is_authored_user_message(message: &IngressMessage) -> bool {
-    message.ck.role == "user"
-        && !message.ck.meta.synthetic
-        && message
-            .ck
-            .content()
-            .iter()
-            .any(|block| matches!(block.kind(), wire::BlockKind::Text { .. }))
-        && !is_system_reminder_transport_message(message)
+impl TransformIngress<'_> {
+    fn is_authored_user_message(&self, message: &IngressMessage) -> bool {
+        message.ck.role == "user"
+            && !self.is_synthetic(message)
+            && message
+                .ck
+                .content()
+                .iter()
+                .any(|block| matches!(block.kind(), wire::BlockKind::Text { .. }))
+            && !is_system_reminder_transport_message(message)
+    }
 }
 
-fn eligible_authored_user_tail(req: &TransformRequest) -> Option<&IngressMessage> {
+fn eligible_authored_user_tail<'a>(req: &TransformIngress<'a>) -> Option<&'a IngressMessage> {
     // Tool results are transport messages even when a provider carries them with role=user.
     // Tool-result carriers are skipped like synthetic and system messages; an assistant tail closes authored-user eligibility.
-    let tail = req.messages.iter().rev().find(|message| {
-        !message.ck.meta.synthetic
-            && message.ck.role != "system"
+    let tail = req.projection.live_messages().rev().find(|message| {
+        message.ck.role != "system"
             && message.ck.role != "tool"
-            && (message.ck.role != "user" || is_authored_user_message(message))
+            && (message.ck.role != "user" || req.is_authored_user_message(message))
     })?;
-    is_authored_user_message(tail).then_some(tail)
+    req.is_authored_user_message(tail).then_some(tail)
 }
 
 fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {
@@ -7896,16 +7937,15 @@ fn compute_active_overlay_decisions(
     let authored_tail = eligible_authored_user_tail(req);
     let mut previous_new_user_mint = None;
     let mut temporal_marks = Vec::new();
-    for message in req.messages.iter().filter(|message| {
-        !message.ck.meta.synthetic
-            && message.ck.role != "system"
+    for message in req.projection.live_messages().filter(|message| {
+        message.ck.role != "system"
             && message.ck.role != "tool"
-            && (message.ck.role != "user" || is_authored_user_message(message))
+            && (message.ck.role != "user" || req.is_authored_user_message(message))
             && mutation_exempt_mid != Some(message.mid.as_str())
             && lineage_anchor_mid != Some(message.mid.as_str())
     }) {
         let is_new = frontier.is_none_or(|frontier| message.ordinal > frontier);
-        if !is_authored_user_message(message) || !is_new {
+        if !req.is_authored_user_message(message) || !is_new {
             previous_new_user_mint = None;
             continue;
         }
@@ -7981,7 +8021,7 @@ fn compute_active_overlay_decisions(
     for message in req
         .messages
         .iter()
-        .filter(|message| is_authored_user_message(message))
+        .filter(|message| req.is_authored_user_message(message))
     {
         if frontier.is_some_and(|current| message.ordinal <= current) {
             continue;
@@ -8020,7 +8060,7 @@ fn compute_active_overlay_decisions(
 #[allow(clippy::too_many_arguments)]
 fn maybe_decide_live_user_hint(
     store: &MemoryStore,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     _ctx: &ProducerContext<'_>,
     projection: &FlatProjection,
     user_hint_rows: &[UserHintRow],
@@ -9421,7 +9461,7 @@ fn tag_age_cutoff(req: &TransformRequest, tag_numbers: &BTreeMap<String, u64>) -
 
 fn new_frozen_strip_units(
     core: &CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_numbers: &BTreeMap<String, u64>,
     reasoning_clear_cutoff: Option<u64>,
     is_bust_pass: bool,
@@ -9442,7 +9482,7 @@ fn new_frozen_strip_units(
         .saturating_sub(req.protected_tags.saturating_mul(2));
     let age_cutoff = tag_age_cutoff(req, tag_numbers);
     let reasoning_mutation_exempt_mid =
-        latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+        latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
     let cc_reasoning_cutoff = if SerializerProfile::parse(&req.serializer_profile)
         == Some(SerializerProfile::ClaudeCodeAnthropic)
     {
@@ -9455,7 +9495,7 @@ fn new_frozen_strip_units(
 
     for index in (0..req.messages.len()).rev() {
         let message = &req.messages[index];
-        if message.ck.meta.synthetic
+        if req.is_synthetic(message)
             || message.mid.is_empty()
             || lineage_anchor_mid == Some(message.mid.as_str())
         {
@@ -10518,7 +10558,7 @@ fn enforce_unique_tool_use_ids(
 
 fn new_merged_reasoning_strip_units(
     core: &CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     rendered_messages: &[ServedMessage],
     can_mutate_provider_prefix: bool,
 ) -> Vec<FrozenUnit> {
@@ -10533,7 +10573,7 @@ fn new_merged_reasoning_strip_units(
         .iter()
         .map(|unit| unit.key.as_str())
         .collect::<HashSet<_>>();
-    let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
     let mut prev_assistant = false;
     let mut units = Vec::new();
     for rendered in rendered_messages {
@@ -10668,7 +10708,7 @@ fn apply_frozen_trailing_blank_decision(
 
 fn refresh_trailing_blank_decisions(
     core: &mut CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     rendered_messages: &[ServedMessage],
     record_historical: bool,
 ) -> (usize, bool) {
@@ -10678,7 +10718,7 @@ fn refresh_trailing_blank_decisions(
         return (0, false);
     }
 
-    let newest_assistant_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let newest_assistant_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
     let mut updates = Vec::new();
     for rendered in rendered_messages {
         let Some(mid) = rendered.meta.harness_id.as_deref() else {
@@ -10793,7 +10833,7 @@ fn build_output(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_overlay: Option<&TagOverlayState>,
     synthetic_todo_enabled: bool,
     mutation_exempt_mid: Option<&str>,
@@ -10830,7 +10870,7 @@ fn build_output_with_tags(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_overlay: Option<&TagOverlayState>,
     synthetic_todo_enabled: bool,
     mutation_exempt_mid: Option<&str>,
@@ -10932,9 +10972,8 @@ fn build_output_with_tags(
         .and_then(split_block_id)
         .map(|(mid, _)| mid);
     let output_mids = req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic)
+        .projection
+        .live_messages()
         .filter(|message| {
             is_tail(message.ordinal, output_coverage)
                 || (serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic)
@@ -10950,7 +10989,7 @@ fn build_output_with_tags(
     let full_drop_ids = full_drop_tool_ids(&frozen_units, projection, &reasoning_ineligible_arcs);
     build_timings.full_drop_tool_ids = elapsed_ms(full_drop_tool_ids_started_at);
     let reasoning_mutation_exempt_mid =
-        latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+        latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
 
     if synthetic_todo_enabled
         && let Some(pair) = meta
@@ -10989,11 +11028,7 @@ fn build_output_with_tags(
         .map(|anchor| synthetic_todo_render_anchor_mid(projection, anchor));
     let mut inserted_synthetic_todo = false;
     let tail_loop_started_at = Instant::now();
-    for msg in req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic)
-    {
+    for msg in req.projection.live_messages() {
         let keep_leading_system = serializer_profile
             != Some(SerializerProfile::ClaudeCodeAnthropic)
             && is_uncovered_leading_system(msg, meta);
@@ -11064,6 +11099,7 @@ fn build_output_with_tags(
                 apply_tag_overlay_to_message(
                     &mut rebuilt,
                     msg,
+                    req.is_synthetic(msg),
                     blocks,
                     tag_overlay,
                     |_| false,
@@ -11175,6 +11211,7 @@ fn build_output_with_tags(
                     apply_tag_overlay_to_message(
                         &mut rebuilt,
                         msg,
+                        req.is_synthetic(msg),
                         blocks,
                         tag_overlay,
                         |block| reduced.contains_key(&block.block_index),
@@ -11364,19 +11401,21 @@ fn is_mutable_merged_reasoning_block(block: &WireBlock) -> bool {
             .is_some_and(|extras| extras.contains_key("cache_control"))
 }
 
-fn latest_assistant_reasoning_mutation_exempt_mid(messages: &[IngressMessage]) -> Option<&str> {
+fn latest_assistant_reasoning_mutation_exempt_mid<'a>(
+    messages: &wire::MessageProjection<'a>,
+) -> Option<&'a str> {
     messages
-        .iter()
+        .live_messages()
         .rev()
-        .find(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+        .find(|message| message.ck.role == "assistant")
         .map(|message| message.mid.as_str())
 }
 
-fn latest_assistant_message_mutation_exempt_mid(
-    messages: &[IngressMessage],
+fn latest_assistant_message_mutation_exempt_mid<'a>(
+    messages: &wire::MessageProjection<'a>,
     profile: Option<SerializerProfile>,
     mid_turn: bool,
-) -> Option<&str> {
+) -> Option<&'a str> {
     if profile == Some(SerializerProfile::OpencodeAiSdk) && !mid_turn {
         return None;
     }
@@ -11387,9 +11426,9 @@ fn latest_assistant_message_mutation_exempt_mid(
         return None;
     }
     messages
-        .iter()
+        .live_messages()
         .rev()
-        .find(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+        .find(|message| message.ck.role == "assistant")
         .filter(|message| {
             message
                 .ck
@@ -14395,7 +14434,7 @@ pub(crate) mod tests {
         let mutated_projection = project_messages(&mutated_request.messages).unwrap();
         let re_adoptions = enforce_block_identity(
             &before.meta,
-            &mutated_request,
+            &normalize_synthetic_todo_ingress(&mutated_request),
             &mutated_projection,
             &before.core,
             None,
@@ -17430,7 +17469,7 @@ pub(crate) mod tests {
         }];
 
         assert_eq!(
-            latest_assistant_reasoning_mutation_exempt_mid(&ingress),
+            latest_assistant_reasoning_mutation_exempt_mid(&wire::MessageProjection::new(&ingress)),
             Some("msg_text_first")
         );
 
@@ -17550,7 +17589,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             Some(&overlay),
             false,
             None,
@@ -17565,7 +17604,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             Some(&overlay),
             false,
             Some("latest"),
@@ -17924,7 +17963,7 @@ pub(crate) mod tests {
             &core,
             &ModuleMeta::default(),
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -17972,7 +18011,7 @@ pub(crate) mod tests {
             &CoreState::empty(),
             &ModuleMeta::default(),
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -20532,7 +20571,16 @@ pub(crate) mod tests {
 
         let request = req("single-anchor", "cfg0", vec![empty_message("anchor", 1)]);
         let projection = project_messages(&request.messages).unwrap();
-        let output = build_output(&core, &meta, &projection, &request, None, true, None).unwrap();
+        let output = build_output(
+            &core,
+            &meta,
+            &projection,
+            &normalize_synthetic_todo_ingress(&request),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
         let count = output
             .iter()
             .flat_map(|message| message.content().iter())
@@ -22161,7 +22209,12 @@ pub(crate) mod tests {
                 tool_result("result-tool", 2, "call", "output"),
             ],
         );
-        assert_eq!(eligible_authored_user_tail(&role_tool).unwrap().mid, "m1");
+        assert_eq!(
+            eligible_authored_user_tail(&normalize_synthetic_todo_ingress(&role_tool))
+                .unwrap()
+                .mid,
+            "m1"
+        );
 
         let role_user = active_cc_req(
             "user-result-tail",
@@ -22175,8 +22228,16 @@ pub(crate) mod tests {
                 ),
             ],
         );
-        assert_eq!(eligible_authored_user_tail(&role_user).unwrap().mid, "m1");
-        assert!(!is_authored_user_message(&role_user.messages[1]));
+        assert_eq!(
+            eligible_authored_user_tail(&normalize_synthetic_todo_ingress(&role_user))
+                .unwrap()
+                .mid,
+            "m1"
+        );
+        assert!(
+            !normalize_synthetic_todo_ingress(&role_user)
+                .is_authored_user_message(&role_user.messages[1])
+        );
     }
 
     #[test]
@@ -24507,7 +24568,7 @@ pub(crate) mod tests {
             &core,
             &ModuleMeta::default(),
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -24545,7 +24606,7 @@ pub(crate) mod tests {
                 &core,
                 &ModuleMeta::default(),
                 &projection,
-                &request,
+                &normalize_synthetic_todo_ingress(&request),
                 None,
                 false,
                 None,
@@ -26012,7 +26073,7 @@ pub(crate) mod tests {
             &core,
             &ModuleMeta::default(),
             &projection,
-            request,
+            &normalize_synthetic_todo_ingress(request),
             None,
             false,
             None,
@@ -26162,7 +26223,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26193,7 +26254,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26297,7 +26358,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26317,7 +26378,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26369,7 +26430,7 @@ pub(crate) mod tests {
             &damaged.core,
             &damaged.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -26465,7 +26526,7 @@ pub(crate) mod tests {
             &poisoned.core,
             &poisoned.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -26567,7 +26628,7 @@ pub(crate) mod tests {
             &before.core,
             &before.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -26853,7 +26914,7 @@ pub(crate) mod tests {
             &poisoned.core,
             &poisoned.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -27236,7 +27297,7 @@ pub(crate) mod tests {
             core,
             meta,
             projection,
-            request,
+            &normalize_synthetic_todo_ingress(request),
             overlay,
             false,
             None,
@@ -27264,6 +27325,254 @@ pub(crate) mod tests {
             hash.update(bytes);
         }
         format!("{:x}", hash.finalize())
+    }
+
+    #[test]
+    fn synthetic_ingress_matches_flagged_reference() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"preserve replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        for mode in ["fresh", "pending", "lineage"] {
+            let mut messages = vec![item("foreign", 90, "new prompt")];
+            for (mid, ordinal, mut ck) in [
+                ("replayed-call", 91, pair.assistant_msg.clone()),
+                ("replayed-result", 92, pair.tool_msg.clone()),
+            ] {
+                ck.meta.synthetic = false;
+                ck.meta.harness_id = Some(mid.to_string());
+                if mid == "replayed-call" {
+                    ck.content_mut()
+                        .push(WireBlock::bare(wire::BlockKind::Text {
+                            text: "synthetic carrier text".into(),
+                        }));
+                }
+                messages.push(IngressMessage {
+                    mid: mid.into(),
+                    ordinal,
+                    ck,
+                });
+            }
+            let mut original: TransformRequest = serde_json::from_value(
+                serde_json::to_value(active_cc_req("ses", "cfg0", messages)).unwrap(),
+            )
+            .unwrap();
+            original.serializer_profile = "opencode-aisdk".into();
+            original.serve_native = true;
+            if mode == "lineage" {
+                original.lineage_switched = true;
+                original.is_subagent = true;
+            }
+            let before = original.clone();
+            let mut flagged = original.clone();
+            flagged.messages[1].ck.meta.synthetic = true;
+            flagged.messages[2].ck.meta.synthetic = true;
+            let mut observations = Vec::new();
+            for request in [&original, &flagged] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = store(dir.path());
+                if mode == "pending" {
+                    s.replace_compartments("ses", &[comp(1, 1, 2, "boundary", "summary")])
+                        .unwrap();
+                    run(
+                        &s,
+                        &req("ses", "cfg0", vec![item("boundary", 2, "old")]),
+                        &spine(),
+                    );
+                }
+                let mut result = transform_with_projection(&s, request, &smart_pctx()).unwrap();
+                let served = canonical_output(result.response.messages());
+                let fingerprints = served_output_fingerprints(result.response.messages());
+                if mode != "fresh" {
+                    assert_eq!(result.response.action, "PASSTHROUGH");
+                    assert!(
+                        result.response.messages()[1..]
+                            .iter()
+                            .all(|message| message.meta.synthetic)
+                    );
+                    assert!(
+                        original.messages[1..]
+                            .iter()
+                            .all(|message| !message.ck.meta.synthetic)
+                    );
+                    assert_eq!(
+                        serde_json::to_vec(&result.response.messages()[1]).unwrap(),
+                        serde_json::to_vec(&original.messages[1].ck).unwrap()
+                    );
+                    assert_eq!(
+                        fingerprints[1].block_id,
+                        format!("eidnara_todo:{}:call#0", pair.call_id)
+                    );
+                    assert_eq!(
+                        fingerprints[3].block_id,
+                        format!("eidnara_todo:{}:result#0", pair.call_id)
+                    );
+                } else {
+                    assert!(result.response.messages().iter().all(|message| {
+                        !matches!(
+                            message.meta.harness_id.as_deref(),
+                            Some("replayed-call" | "replayed-result")
+                        )
+                    }));
+                }
+                if mode == "pending" {
+                    let overlay = TagOverlayState {
+                        tag_by_block_id: BTreeMap::from([
+                            ("foreign#0".into(), 41),
+                            ("replayed-call#1".into(), 42),
+                        ]),
+                        temporal_by_block_id: BTreeMap::from([(
+                            "replayed-call#1".into(),
+                            "<!-- synthetic overlay must not render -->\n".into(),
+                        )]),
+                        ..Default::default()
+                    };
+                    let overlaid = pending_passthrough_messages(
+                        &result.projection,
+                        &normalize_synthetic_todo_ingress(request),
+                        Some(&overlay),
+                        None,
+                    );
+                    let overlaid_bytes = canonical_output(&overlaid);
+                    assert_ne!(
+                        overlaid_bytes[0], served[0],
+                        "live control must take its overlay"
+                    );
+                    assert_eq!(overlaid_bytes[1..], served[1..]);
+                    assert_eq!(
+                        served_output_fingerprints(&overlaid)[1..],
+                        fingerprints[1..]
+                    );
+                }
+                let boundary = crate::boundary_messages(
+                    &original,
+                    &result.projection,
+                    &Mutex::new(crate::BoundaryTokenCache::new(1024 * 1024)),
+                );
+                assert_eq!(boundary.messages.len(), 3);
+                assert_eq!(boundary.messages[1].message_id, "replayed-call");
+                assert!(boundary.messages[1].blocks.is_empty());
+                assert!(boundary.messages[2].blocks.is_empty());
+                let live = result
+                    .projection
+                    .blocks
+                    .iter()
+                    .filter(|block| !block.synthetic)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let firing_input = crate::historian_chunk::build_historian_chunk(
+                    &original.messages,
+                    &live,
+                    90,
+                    1_000,
+                    91,
+                );
+                assert_eq!(firing_input.chunk.present_ordinals, [90, 91, 92]);
+                assert!(!firing_input.text.is_empty());
+                crate::attach_native_messages_with_tags(
+                    &mut result.response,
+                    &original,
+                    result.reasoning_watermark,
+                    &result.tag_numbers,
+                    result.mutation_exempt_mid.as_deref(),
+                    result.lineage_anchor_mid.as_deref(),
+                    result.transition_consumed,
+                );
+                assert!(
+                    result
+                        .response
+                        .native_messages
+                        .as_ref()
+                        .is_some_and(|messages| !messages.is_empty())
+                );
+                if mode == "fresh" {
+                    assert!(!s.load_tags_for_session("ses").unwrap().is_empty());
+                }
+                observations.push((
+                    served,
+                    fingerprints,
+                    result.projection,
+                    serde_json::to_vec(&result.response.native_messages).unwrap(),
+                    s.load_tags_for_session("ses").unwrap(),
+                    firing_input,
+                    format!("{:?}", boundary.messages),
+                ));
+            }
+            assert_eq!(observations[0], observations[1], "{mode}");
+            assert_eq!(
+                original.messages, before.messages,
+                "normalization must not mutate handler input"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_overlay_guard_uses_the_pass_local_synthetic_view() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"guard replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let mut carrier = pair.assistant_msg.clone();
+        carrier.meta.synthetic = false;
+        carrier.meta.harness_id = Some("replayed-call".into());
+        carrier
+            .content_mut()
+            .push(WireBlock::bare(wire::BlockKind::Text {
+                text: "synthetic carrier text".into(),
+            }));
+        let request = active_cc_req(
+            "ses",
+            "cfg0",
+            vec![
+                item("live", 90, "live prompt"),
+                IngressMessage {
+                    mid: "replayed-call".into(),
+                    ordinal: 91,
+                    ck: carrier,
+                },
+            ],
+        );
+        let ingress = normalize_synthetic_todo_ingress(&request);
+        let projection = ingress.projection.project().unwrap();
+        let blocks_by_mid = projection_blocks_by_mid(&projection);
+        let overlay = TagOverlayState {
+            tag_by_block_id: BTreeMap::from([
+                ("live#0".into(), 41),
+                ("replayed-call#1".into(), 42),
+            ]),
+            temporal_by_block_id: BTreeMap::from([(
+                "replayed-call#1".into(),
+                "<!-- synthetic overlay must not render -->\n".into(),
+            )]),
+            ..Default::default()
+        };
+
+        let mut rendered = Vec::new();
+        for message in &request.messages {
+            assert!(!message.ck.meta.synthetic);
+            let mut rebuilt = message.ck.clone();
+            apply_tag_overlay_to_message(
+                &mut rebuilt,
+                message,
+                ingress.is_synthetic(message),
+                &blocks_by_mid[message.mid.as_str()],
+                Some(&overlay),
+                |_| false,
+                false,
+            );
+            rendered.push(serde_json::to_vec(&rebuilt).unwrap());
+        }
+        assert_ne!(
+            rendered[0],
+            serde_json::to_vec(&request.messages[0].ck).unwrap(),
+            "live control must take its overlay"
+        );
+        assert!(ingress.is_synthetic(&request.messages[1]));
+        assert_eq!(
+            rendered[1],
+            serde_json::to_vec(&request.messages[1].ck).unwrap(),
+            "normalized synthetic message must not take an overlay"
+        );
     }
 
     #[test]
@@ -27425,7 +27734,7 @@ pub(crate) mod tests {
         text.push_str(" changed");
         let cached_projection_started_at = Instant::now();
         let cached_projection =
-            project_messages_incremental(&changed_messages, &projection, MESSAGE_COUNT - 1)
+            wire::project_messages_incremental(&changed_messages, &projection, MESSAGE_COUNT - 1)
                 .unwrap();
         let cached_projection_ms = elapsed_ms(cached_projection_started_at);
         let full_changed_projection = project_messages(&changed_messages).unwrap();
@@ -27512,7 +27821,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -27563,7 +27872,11 @@ pub(crate) mod tests {
             build_serialize_misses: replay.timings.serialize_misses,
             build_tail_loop: replay.timings.tail_loop,
             frozen_units: core.frozen_units.len(),
-            tail_units_matched: frozen_units_matched_to_tail(&core, &request, None),
+            tail_units_matched: frozen_units_matched_to_tail(
+                &core,
+                &normalize_synthetic_todo_ingress(&request),
+                None,
+            ),
             projection_blocks: projection.blocks.len(),
             tail_messages_emitted: replay
                 .messages
@@ -28334,6 +28647,93 @@ pub(crate) mod tests {
             mutated.messages.len(),
             "a mutated continuation anchor must fail closed without trimming live input"
         );
+    }
+
+    #[test]
+    fn lineage_rebase_preserves_unflagged_synthetic_head() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"rebase replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let summary = continuation_summary("synthetic-rebase");
+        let mut observations = Vec::new();
+        for flagged in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_fake_compaction_prior(&store, "A");
+            let descent = fake_compaction_request(
+                "B",
+                "A",
+                2,
+                601,
+                true,
+                fake_compaction_messages("2026-08-06", &summary),
+            );
+            assert_eq!(
+                run(&store, &descent, &spine())
+                    .lineage_descent_disposition
+                    .as_deref(),
+                Some("descended")
+            );
+            let mut head = pair.assistant_msg.clone();
+            head.content_mut()
+                .extend(pair.tool_msg.content().iter().cloned());
+            head.meta.synthetic = false;
+            head.meta.harness_id = Some("synthetic-head".into());
+            let mut messages = vec![IngressMessage {
+                mid: "synthetic-head".into(),
+                ordinal: 1,
+                ck: head,
+            }];
+            messages.extend(fake_compaction_messages("2026-08-06", &summary));
+            messages.push(item("succ-13", 3, "successor turn thirteen"));
+            let mut request: TransformRequest = serde_json::from_value(
+                serde_json::to_value(fake_compaction_request("B", "A", 2, 601, true, messages))
+                    .unwrap(),
+            )
+            .unwrap();
+            request.messages[0].ck.meta.synthetic = flagged;
+            assert!(request.lineage_switched && !request.is_subagent);
+            let result = transform_with_projection(&store, &request, &smart_pctx()).unwrap();
+            assert_eq!(
+                result.response.lineage_descent_disposition.as_deref(),
+                Some("replay")
+            );
+            assert_eq!(result.response.ordinal_continuation_base, Some(10));
+            assert!(!result.response.reconcile_pending);
+            assert_eq!(request.messages[0].ordinal, 1);
+            let reattached = result.projection.reattach_messages_prefix(2).unwrap();
+            assert_eq!(
+                reattached[0].ordinal, 11,
+                "the non-subagent pass must actually rebase"
+            );
+            assert_eq!(
+                reattached[1].ordinal, 11,
+                "synthetic head must not consume a live ordinal"
+            );
+            assert!(reattached[0].ck.meta.synthetic);
+            assert!(!reattached[1].ck.meta.synthetic);
+            assert!(
+                result
+                    .projection
+                    .blocks
+                    .iter()
+                    .filter(|block| block.mid == "synthetic-head")
+                    .all(|block| block.synthetic)
+            );
+            assert!(
+                !result
+                    .projection
+                    .identity_by_mid
+                    .contains_key("synthetic-head")
+            );
+            observations.push((
+                canonical_output(result.response.messages()),
+                served_output_fingerprints(result.response.messages()),
+                result.projection,
+            ));
+        }
+        assert_eq!(observations[0], observations[1]);
     }
 
     #[test]

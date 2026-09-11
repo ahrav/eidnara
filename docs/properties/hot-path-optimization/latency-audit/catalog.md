@@ -380,25 +380,33 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - The inside-the-pass shadow has tests; no test compares
-the historian's `BoundaryMsg` list or `input_ordinals` between a full-array
-turn and a delta turn carrying the same replayed pair, and none asserts the
-served bytes of a normalized message omit the flag.
+Exercised: yes - The [typed-flag reference comparison][synthetic-reference]
+checks served bytes, projection state and digests, native bytes, tag rows,
+historian boundary messages and chunk input ordinals. The
+[handler delta comparison][synthetic-delta-parity] checks full versus delta
+projection and native bytes; the [delta witness][synthetic-delta-witness]
+captures production historian prompts and native output on the second and
+third turns, including replay carried in the third turn's cached prefix.
+The [lineage rebase comparison][synthetic-lineage-rebase] covers a normalized
+synthetic head on a non-subagent descent replay that rebases ordinals.
 Guarantee: Replacing the normalization clone with a shared view changes no
 observer's synthetic set and no served byte.
-Check: `always` - For every pass, three observers see the same synthetic
-sets as at HEAD: inside `apply_once` a message is synthetic iff
+Check: `always` - For every pass, observers see the same synthetic
+sets as at the discovery baseline: inside `apply_once` a message is synthetic iff
 `meta.synthetic || any block id has the synthetic_todo_ prefix`
-([`normalize_synthetic_todo_ingress`][normalize] sets the flag on a clone and
-the [shadow][shadow] `req = rebased_req.as_ref().unwrap_or(ingress_req)`
-routes every later read to it); in
+([`normalize_synthetic_todo_ingress`][normalize] records borrowed message IDs
+in the pass-local projection view, and request-dependent helpers consume
+that view); in
 [`cached_boundary_messages`][cached-boundary],
 [`assemble_historian_firing`][assemble],
 [`store_projection_cache`][store-pc], and
 [`attach_native_messages_incremental`][native-attach] a message is synthetic
-iff `parsed.messages[i].ck.meta.synthetic` as it arrived; and the served wire
+iff `parsed.messages[i].ck.meta.synthetic` in that pass's ingress, including
+flags restored by prefix reattachment. The override set is not retained;
+derived projection metadata is retained with normalized flags, as in the
+clone-based baseline. The served wire
 bytes of a message whose flag was set by normalization equal the bytes of
-the same message without the flag, because
+the same decoded message without the flag, because
 [`Serialize for WireMessage`][ser-msg] replays `original` and a `meta` edit
 does not clear it ([`:210-216`][meta-doc]). `always` because the sets decide
 which blocks count for coverage, historian ordinals, native reasoning
@@ -414,25 +422,22 @@ profile), then an array in which the harness replays the pair as ordinary
 messages without the `synthetic` marker, a historian firing on that pass,
 and `serve_native` on.
 Confidence: high - [Evidence](evidence/synthetic-normalization-is-scoped-to-the-pass.md).
-The clone, the shadow, the four handler-level consumers of the un-normalized
-`parsed` ([`:5074`][boundary-call], [`:5234-5238`][assemble],
-[`:13138-13143`][newest-assistant]), and the `original` replay are
-source-verified.
+The pass-local view, the handler consumers of the original request, and
+retained-JSON replay are source-verified. Focused comparisons pass; this is
+not performance evidence or a whole-workspace gate.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
-cover the inside-the-pass shadow and the replayed pair's cache reuse; the
-transform catalog's [synthetic-strip record][tc-synthetic] states the inside
-invariant; nothing states the outside one; all unaudited.
+include the typed-flag reference, the delta witness and the replayed pair's
+cache reuse. The transform catalog's [synthetic-strip record][tc-synthetic]
+states the inside invariant. Test adequacy remains unaudited.
 Impact: Historian ordinals, native reasoning clears, and wire bytes change
 when the clone is shared or the flag is written through.
-Open questions:
-- Is the historian meant to see the replayed pair as a non-synthetic message
-  with zero blocks (full-array lane, filtered at [`:16597`][boundary-filter])
-  or not at all (delta lane, rebuilt from `message_meta` with
-  `synthetic: true`)? Both sides are HEAD behavior. (needs human input)
-- [`pending_passthrough_messages`][pending-pass] serves the normalized
-  clone's messages including the synthetic ones; their fingerprints carry
-  `eidnara_todo:` ids from the typed flag while their bytes carry no flag. Is
-  that pairing intended? (needs human input)
+Open questions: None. The preservation contract retains both observer
+semantics: an unflagged suffix remains a zero-block historian message, while
+a reattached normalized prefix is filtered out. Passthrough fingerprints keep
+`eidnara_todo:` identities while retained ingress JSON stays unflagged. The
+third-turn native and prompt reference uses the same reattached observer
+input, not a full raw array whose historian ordinals differ. The discovery
+questions and their evidence remain in the evidence file.
 
 ### tag-baseline-cache-entry-is-never-mutated-by-a-pass
 
@@ -452,10 +457,10 @@ for the session equals `store.load_tags_for_session(session)` for the
 [`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
 rows with `tag_number = max + offset + 1` in projection block order; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7156-7161`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([`:7195-7200`][mint-input]).
 `always` because the entry is read on the next pass of the same session and
 a stale or speculative row changes the active-tag match at
-[`:7350`][active-match].
+[`:7389`][active-match].
 Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
 [`snapshot`][tag-snapshot] holds a second reference. A design that appends
 in place, or stores the pass's `Arc` back before commit, exposes rows the
@@ -527,8 +532,12 @@ Open questions: None.
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - The replayed-pair test uses a full array without a
-historian firing; no delta-turn witness is recorded.
+Exercised: yes - [The delta witness][synthetic-delta-witness] freezes a pair
+on a HARD pass, reattaches two prefix messages, sends the pair unflagged in
+the protected suffix, and observes a prepared firing with native output.
+A third delta reuses all 84 prefix messages, including the normalized pair;
+its captured production prompt and native bytes match a typed-flag baseline
+prefix reconstruction.
 Guarantee: A shared-input campaign reaches the situation in which the
 normalized and un-normalized views of one request differ for a downstream
 observer.
@@ -536,23 +545,30 @@ Check: `sometimes` - For some pass with `compaction_enabled`, the request is
 a `tail_delta` body whose prefix [`expand_transform_tail_delta`][expand]
 reattaches, at least one non-synthetic message carries a
 [`synthetic_todo_`][todo-prefix] call or result id (the input condition under
-which HEAD's [`normalize_synthetic_todo_ingress`][normalize] clones; the
-marker asserts the input, not the clone, so it fires under a shared-view
-design as well), and
+which [`normalize_synthetic_todo_ingress`][normalize] adds an override; the
+marker asserts the input, not the implementation's allocation), and
 [`prepare_historian_fire`][historian-fire] runs on that pass with
 `serve_native` on. The marker asserts these preconditions, not observer
 agreement.
-Fault/timing angle: On a full-array turn or a pass without a firing the two
-views are read by the same observers, so B2's outside clause is vacuous.
+Fault/timing angle: A campaign that never combines prefix reattachment,
+unflagged replay and a firing cannot witness the delta-specific observer
+split.
 Required faults and enabling state: A prior bust pass that froze a todo pair;
 a harness replay of the pair without the `synthetic` marker, as
 [`warm_cache_selection_bust...`][t-collapsed] constructs; a delta turn; a
-configured `model_chain` so the firing is prepared.
+configured `model_chain` so the firing is prepared; `serve_native` on. The
+witness puts the pair in the protected tail. A pair inside the selected chunk
+can retain the baseline `MissingBlockIdentity` refusal.
 Confidence: medium - [Evidence](evidence/replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn.md).
-The clone trigger and the delta expansion are source-verified; whether the
+The override trigger and the delta expansion are source-verified; whether the
 harness replays pairs on delta turns in production is inferred from the
 plugin's delta protocol, not observed.
-Existing check: none found for the delta-turn form.
+Existing check: [The delta witness][synthetic-delta-witness] asserts the input
+flags and frozen call ID, configured compaction and model chain, positive
+prefix reuse, and `historian.fired` before emitting the constant marker
+`replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn`. It compares captured
+producer prompts, third-turn boundary and chunk inputs, and native bytes;
+unaudited.
 Impact: B2 can pass while the divergent observer is never reached.
 Open questions: None.
 
@@ -1665,9 +1681,9 @@ rotation at [`GENERATION_CAP = 65_536`][tc-cap] while a promote-on-hit insert
 runs; a sharded replacement that omits its term from the declaration. The
 direct `tokenizer::estimate_tokens` calls in production transform code at
 HEAD are the SOFT predicate's `m0_tokens` and `m1_tokens` at
-[`:4298-4309`][soft-direct] (W9), the tag-mint `token_count` at
-[`:7160`][mint-direct], and `ActiveTagForNudge.token_count` at
-[`:8558`][nudge-direct]; the tokenizer crate exposes no call counter
+[`:4339-4350`][soft-direct] (W9), the tag-mint `token_count` at
+[`:7199`][mint-direct], and `ActiveTagForNudge.token_count` at
+[`:8598`][nudge-direct]; the tokenizer crate exposes no call counter
 ([`estimate_tokens`][tok-fn]).
 Required faults and enabling state: Two concurrent transform passes; 65_536
 distinct digests; a pass minting new tags on the tail; a pass whose SOFT
@@ -1686,7 +1702,7 @@ declaration undercounts a cache.
 Open questions:
 - Is there any measured lock contention at HEAD? The comment is conditional;
   the audit should measure before sharding.
-- Should the `:7160` and `:8558` calls stay direct because their inputs are
+- Should the `:7199` and `:8598` calls stay direct because their inputs are
   new tail blocks that miss the cache anyway, or route through the interface
   for accounting? (needs human input)
 - Extend the source-scan test to the whole `apply_once` body, or replace it
@@ -1949,7 +1965,7 @@ a frozen reference, and the parent's H records follow the estimator into
 Guarantee: The SOFT pass's pressure-refold classification is preserved for
 fixed frozen m0, composed m1, budget, and update count.
 Check: `always` - For every SOFT pass, `pressure_refold` equals a frozen copy
-of the predicate at [`:4298-4316`][soft-predicate], kept as a test-only
+of the predicate at [`:4339-4357`][soft-predicate], kept as a test-only
 reference function, evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
 `m1.body`: `m1.memory_update_count > 40`, or `m1` has content and
@@ -1973,7 +1989,7 @@ store with no `m0` frozen unit.
 Confidence: high - [Evidence](evidence/soft-pressure-refold-predicate-preserves-its-classification.md).
 The predicate, its two direct tokenizer calls, and the `M1_PLACEHOLDER`
 guard are source-verified; the m1 composition itself receives
-`cached_estimate_tokens` at [`:4295`][soft-m1-compose].
+`cached_estimate_tokens` at [`:4336`][soft-m1-compose].
 Existing check: none found for the predicate; [H2][h2] states the SOFT and
 refold boundaries and [H1][h1] the cache-equals-direct clause for history
 rendering.
@@ -2260,10 +2276,10 @@ oracle. The following notes define the evidence to request, not tickets.
 | [A2][a2] | Build the discriminator and decode corpus once; run it through both lanes and the probe. |
 | [A3][a3] | Construct concurrent parses with a barrier so the shortfall is observable. |
 | [B1][b1] | Run both differential gates from an integration test; add `tool_input`, sidecar order, chunk sharing, and sorted-key oracles. |
-| [B2][b2] | Compare historian `BoundaryMsg` lists and served bytes across full-array and delta turns for one replayed pair. |
+| [B2][b2] | Typed-flag reference and delta comparisons run. Extend the finite observer corpus when new replay shapes appear. |
 | [B3][b3] | Fail a mint commit and inspect the cache entry; compare `source_bytes` with projected text. |
 | [B4][b4] | State the digest input explicitly against `FlatBlock.content_hash`. |
-| [B5][b5] | Construct the delta-turn replay with a prepared firing. |
+| [B5][b5] | The constructed delta-turn witness fires. A production plugin body remains unobserved. |
 | [C1][c1] | Pair a narrow read with `MemoryStore::load` over malformed and defaulted rows; observe the post-commit `row_version`. |
 | [C2][c2] | Inject a `pass_trace` failure beside a commit; count breadcrumbs across reject, stable, and rerun passes. |
 | [C3][c3] | Crash between mark and delete; run two drainers on one session; pin order, limit, and backoff. |
@@ -2403,42 +2419,41 @@ evaluation of this area and its disposition are recorded in
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
 [expand]: ../../../../crates/daemon/src/lib.rs#L4151-L4245
-[store-pc]: ../../../../crates/daemon/src/lib.rs#L4302-L4345
-[historian-fire]: ../../../../crates/daemon/src/lib.rs#L4994
-[boundary-call]: ../../../../crates/daemon/src/lib.rs#L5074
-[assemble]: ../../../../crates/daemon/src/lib.rs#L5234-L5238
+[store-pc]: ../../../../crates/daemon/src/lib.rs#L4303-L4346
+[historian-fire]: ../../../../crates/daemon/src/lib.rs#L4995
+[assemble]: ../../../../crates/daemon/src/lib.rs#L5235-L5239
 [ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13026-L13070
 [gate-native]: ../../../../crates/daemon/src/lib.rs#L13072-L13079
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13082-L13094
-[newest-assistant]: ../../../../crates/daemon/src/lib.rs#L13138-L13143
+[native-attach]: ../../../../crates/daemon/src/lib.rs#L13083-L13095
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13315-L13332
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14427-L14442
 [segments]: ../../../../crates/daemon/src/lib.rs#L14448-L14454
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16566-L16626
-[boundary-filter]: ../../../../crates/daemon/src/lib.rs#L16597
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567-L16626
 [sel-kind]: ../../../../crates/daemon/src/lib.rs#L16628-L16643
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2028-L2050
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2020
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2083-L2100
-[shadow]: ../../../../crates/daemon/src/transform.rs#L2951
-[sel-item]: ../../../../crates/daemon/src/transform.rs#L6315-L6344
-[pending-pass]: ../../../../crates/daemon/src/transform.rs#L6626-L6654
-[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6782-L6807
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6827-L6832
-[load-tags]: ../../../../crates/daemon/src/transform.rs#L6899-L6957
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7156-L7161
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7261-L7282
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7286-L7310
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7350
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7883-L7884
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27270
-[flatproj]: ../../../../crates/daemon/src/wire.rs#L115-L128
-[reattach]: ../../../../crates/daemon/src/wire.rs#L146-L187
-[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L330-L338
-[flatten]: ../../../../crates/daemon/src/wire.rs#L622-L685
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L775-L786
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2125-L2141
+[sel-item]: ../../../../crates/daemon/src/transform.rs#L6355-L6384
+[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
+[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
+[load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7195-L7200
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7300-L7321
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7389
+[make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27579
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27331
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23118
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28653
+[flatproj]: ../../../../crates/daemon/src/wire.rs#L114-L127
+[reattach]: ../../../../crates/daemon/src/wire.rs#L145-L186
+[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L329-L337
+[flatten]: ../../../../crates/daemon/src/wire.rs#L680-L743
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L833-L844
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264
@@ -2480,10 +2495,10 @@ evaluation of this area and its disposition are recorded in
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1940-L1979
 [stable-call]: ../../../../crates/daemon/src/transform.rs#L1819-L1843
-[descend]: ../../../../crates/daemon/src/transform.rs#L2921-L2932
-[value-compare]: ../../../../crates/daemon/src/transform.rs#L3184
-[truncate]: ../../../../crates/daemon/src/transform.rs#L4089-L4095
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13564
+[descend]: ../../../../crates/daemon/src/transform.rs#L2961-L2972
+[value-compare]: ../../../../crates/daemon/src/transform.rs#L3225
+[truncate]: ../../../../crates/daemon/src/transform.rs#L4130-L4136
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13603
 [received]: ../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6496-L6514
@@ -2639,16 +2654,16 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12378-L12383
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L27395-L27400
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12417-L12422
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L27704-L27709
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8463-L8488
 [respond]: ../../../../crates/daemon/src/lib.rs#L14404
 [tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1199-L1210
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
-[snap-add]: ../../../../crates/daemon/src/transform.rs#L2373
-[snap-once]: ../../../../crates/daemon/src/transform.rs#L2852
+[snap-add]: ../../../../crates/daemon/src/transform.rs#L2410
+[snap-once]: ../../../../crates/daemon/src/transform.rs#L2890
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
@@ -2662,13 +2677,13 @@ evaluation of this area and its disposition are recorded in
 [tc-inject]: ../../../../crates/daemon/src/transform.rs#L1799-L1815
 [declared-doc]: ../../../../crates/daemon/src/lib.rs#L2236-L2241
 [declared]: ../../../../crates/daemon/src/lib.rs#L2243-L2257
-[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2836-L2840
-[soft-direct]: ../../../../crates/daemon/src/transform.rs#L4298-L4309
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4298-L4316
-[soft-m1-compose]: ../../../../crates/daemon/src/transform.rs#L4295
-[mint-direct]: ../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../crates/daemon/src/transform.rs#L8558
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24170-L24181
+[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2874-L2878
+[soft-direct]: ../../../../crates/daemon/src/transform.rs#L4339-L4350
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4339-L4357
+[soft-m1-compose]: ../../../../crates/daemon/src/transform.rs#L4336
+[mint-direct]: ../../../../crates/daemon/src/transform.rs#L7199
+[nudge-direct]: ../../../../crates/daemon/src/transform.rs#L8598
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24231-L24242
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
@@ -2756,7 +2771,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L10981-L10985
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5900-L5909
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35555
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35834
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261

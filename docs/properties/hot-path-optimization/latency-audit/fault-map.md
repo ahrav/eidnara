@@ -56,10 +56,10 @@ raw-row provider, and foreign-owner stat are controlled seams.
 | [A2][a2] | The discriminator and shape corpus through both lanes and the probe. | The reference reader's route, admit decision, and typed result. |
 | [A3][a3] | Two concurrent bodies whose footprints sum above the scratch reserve while each fits alone. | Footprint and pool availability at reservation entry. |
 | [B1][b1] | A cache-hit delta turn with tool calls, repeated ids, an equal-but-not-pointer-equal chunk, and every served shell kind. | Full projection, full native encode, and `to_vec(to_value(msg))` computed independently. |
-| [B2][b2] | The B5 situation: a replayed unflagged pair on a delta turn with a firing. | Synthetic sets at each observer and served bytes with and without the flag. |
+| [B2][b2] | The B5 situation, fresh and passthrough inputs, a carrier-targeted overlay, non-subagent ordinal rebasing, and third-turn cached-prefix reuse. | Executed: projection/digests, canonical and native bytes, tag rows, boundary/chunk inputs, captured production prompts, and passthrough fingerprint IDs. Comparisons keep the handler-observer input fixed; full raw ingress and reattached normalized prefixes retain different synthetic sets. |
 | [B3][b3] | A warm baseline entry, a minting pass, a second pass; a mint commit that fails. | The store's ordered rows and the cache entry read directly. |
 | [B4][b4] | A tail with every part kind and an excluded block, measured twice. | Independent `sha256(kind ++ NUL ++ content)` per part. |
-| [B5][b5] | A prior bust pass, a harness replay without the flag, a delta body, a configured `model_chain`. | The three preconditions recorded at normalization and firing preparation. |
+| [B5][b5] | A prior bust pass, a harness replay without the flag, a delta body, enabled compaction, a configured `model_chain`, and `serve_native` on. | Executed: frozen call ID, unflagged suffix, two reattached prefix messages, and a prepared firing. The pair starts in the protected tail, then enters an 84-message reused prefix on the third turn. An unflagged selected-chunk replay can retain the baseline identity refusal. |
 | [C1][c1] | A committing pass with a new no-fire reason; an Emergency95 pass with a publication in the window; a CAS conflict; rows with absent, unknown, `null`, and corrupt fields. | Post-commit `row_version` and a paired full `MemoryStore::load`. |
 | [C2][c2] | Reject, stable, rerun, and fresh-session passes; an injected `pass_trace` failure beside a commit. | `pass_trace` counters and `cache_state.row_version` read after each pass. |
 | [C3][c3] | A firing with all three kinds; a crash or abort between mark and delete; a second drainer between load and deliver; `now_ms` around the backoff. | Target table row counts and outbox state read directly. |
@@ -105,8 +105,9 @@ scheduling preconditions, never the defect:
 
 - A3 asserts footprint fit and pool shortfall, not the handler's code or side
   effects.
-- B5 asserts delta, the replayed-id input, and firing, not observer
-  agreement.
+- B5 is implemented by the [delta witness][synthetic-delta-witness]. It asserts
+  delta prefix reuse, the replayed-id input, enabled compaction, configured
+  models, native serving and firing, not observer agreement.
 - C5 asserts the foreign commit's `row_version` and its ordering before the
   pass's post-commit read, not a stale consumer.
 - C6 asserts a due outbox row per kind at the pass drain, not the delivery.
@@ -201,6 +202,7 @@ in the records' open questions.
 [b3]: catalog.md#tag-baseline-cache-entry-is-never-mutated-by-a-pass
 [b4]: catalog.md#hygiene-digest-is-kind-prefixed-part-content
 [b5]: catalog.md#replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
 [c1]: catalog.md#consolidated-cache-state-reads-match-per-consumer-loads
 [c2]: catalog.md#pass-trace-writes-count-every-pass-outside-the-cache-cas
 [c3]: catalog.md#side-channel-drain-delivers-each-row-once-and-keeps-its-schedule

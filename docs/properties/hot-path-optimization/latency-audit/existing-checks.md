@@ -49,13 +49,20 @@ not the handler.
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [`assert_prefix_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; live under [`prefix_projection_differential_enabled`][gate-prefix], which is `cfg!(test) || env`. | unaudited |
+| [`assert_message_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; production calls run under [`prefix_projection_differential_enabled`][gate-prefix], which is enabled in tests or by `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1`. The test-only slice adapter `assert_prefix_projection_equivalent` delegates to this shared check. | unaudited |
 | [`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`][t-inc] | Reattached prefix equals `from_parts` inputs; incremental equals full; prefix `Arc`s are pointer-shared. | unaudited |
+| [`incremental_projection_checks_effective_synthetic_status`][t-synthetic-status] | Across all four cached/current effective synthetic-flag pairs, incremental and full projections agree; prefix `wire` and `bytes` `Arc`s are shared exactly when flags agree. | unaudited |
+| [`compaction_mode_projection_cache_reclassifies_synthetic_prefix`][t-compaction-cache] | Direct off/on/on/off/on changes to `ProducerContext.compaction_enabled` drive real transforms and the handler's cache lookup/store helpers. Checks full-projection equality, reattached flags, prefix `wire` reuse on the repeated on pass, and unchanged ingress bytes. On enabled passes, `(projection_reused_messages, projection_projected_messages)` is `(0, 4)` after a mode change and `(4, 0)` on stable reuse. No route binding or config reload. | unaudited |
 | [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach] | An unknown message-level field is dropped; a block-level field is kept. | unaudited |
 | [`projection_differential_catches_corrupt_first_changed_position`][t-projdiff] | A corrupt frontier is caught by the differential. | unaudited |
 | [`astro_scale_projection_cache_reuses_on_the_second_pass`][t-astro] | The second pass reuses the cached projection. | unaudited |
 | [`pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`][t-pending] | Pass reads of ingress meta are isolated. | unaudited |
 | [`warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live`][t-collapsed] | A replayed pair without the flag yields no duplicate tool-use id and reuses the cache. | unaudited |
+| [synthetic_ingress_matches_flagged_reference][synthetic-reference] | Fresh, pending and lineage cases preserve canonical bytes, digests/projection state, native bytes and tag rows against typed-flagged input. Complete boundary diagnostics and chunk inputs agree with the same original handler request. A carrier-targeted overlay cannot mutate the synthetic message; a live control does take its tag. | unaudited |
+| [handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier][synthetic-delta-parity] | Full and delta requests agree on projection and native bytes after expanding the native response delta. | unaudited |
+| [unflagged_synthetic_delta_prepares_historian_and_native_output][synthetic-delta-witness] | A prior HARD pass freezes the pair; an unflagged suffix reaches the situation marker with a prepared firing and native serving. A third delta reuses the pair in its cached prefix. Captured producer prompts and native bytes match a typed-flag baseline reconstruction; boundary/chunk checks retain the difference from full raw ingress. | unaudited |
+| [lineage_rebase_preserves_unflagged_synthetic_head][synthetic-lineage-rebase] | A non-subagent descent replay rebases a synthetic head from ordinal 1 to 11 without consuming a live ordinal. Projection marks, served bytes and fingerprints equal the typed-flag reference. | unaudited |
+| [tag_overlay_guard_uses_the_pass_local_synthetic_view][synthetic-overlay-guard] | `apply_tag_overlay_to_message` takes its synthetic flag from the pass-local view. A normalized carrier rendered from the raw ingress clone keeps its bytes under a carrier-targeted overlay; a live control takes its tag. | unaudited |
 | [`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline`][t-parked] | Reused `content_hash` fingerprints and `canonical_bytes` equal a full rehash. | unaudited |
 | [`served_fingerprint_block_ids_pin_flat_mid_index_format`][t-fpids] | Fingerprint block ids are `mid#index` and synthetic ids. | unaudited |
 | [`transform_segments_preserve_existing_golden_bytes`][t-segments] | `Exact` segments concatenate into the golden body. | unaudited |
@@ -73,10 +80,9 @@ not the handler.
 
 None found: a test that `tool_input` on a `FlatBlock` equals the `input`
 inside its `wire.kind()`; a test that a `Served` prepared segment writes
-`canonical_bytes`, or that names the sorted-key form; a two-lane (full array
-versus delta) comparison of the historian's `BoundaryMsg` list,
-`input_ordinals`, or the native attachment for one replayed synthetic pair; a
-test that the tag baseline entry is unchanged after a pass whose mint commit
+`canonical_bytes`, or that names the sorted-key form; a captured production
+delta body replaying a synthetic pair; a test that the tag baseline entry is
+unchanged after a pass whose mint commit
 fails; a test that runs either differential gate from `crates/daemon/tests/`
 or `crates/daemon/benches/` (`cfg!(test)` is false there and no file sets the
 variables); a comparison of incremental and full `DecodeSidecar` values
@@ -361,10 +367,10 @@ not a claim that no related check exists anywhere in the repository.
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 [t-cap]: ../../../../crates/daemon/src/lib.rs#L18567-L18625
 [t-fp]: ../../../../crates/daemon/src/lib.rs#L18627-L18691
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L26568-L26623
-[t-shape]: ../../../../crates/daemon/src/lib.rs#L32419-L32436
-[t-shape2]: ../../../../crates/daemon/src/lib.rs#L32439-L32479
-[t-envelope]: ../../../../crates/daemon/src/transform.rs#L16159-L16185
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L26847-L26902
+[t-shape]: ../../../../crates/daemon/src/lib.rs#L32698-L32715
+[t-shape2]: ../../../../crates/daemon/src/lib.rs#L32718-L32758
+[t-envelope]: ../../../../crates/daemon/src/transform.rs#L16198-L16224
 [t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../crates/daemon/tests/direct_host.rs#L48-L128
 [t-prep]: ../../../../crates/daemon/tests/prepared_output.rs#L103-L115
@@ -372,49 +378,56 @@ not a claim that no related check exists anywhere in the repository.
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503
 
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2020
-[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2022-L2037
-[t-inc]: ../../../../crates/daemon/src/wire.rs#L1360
-[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1545
+[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2022-L2045
+[t-inc]: ../../../../crates/daemon/src/wire.rs#L1418
+[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1617
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36395
+[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1603
 [t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22220
 [t-astro]: ../../../../crates/daemon/src/lib.rs#L20948
-[t-pending]: ../../../../crates/daemon/src/transform.rs#L19129
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27270
-[t-parked]: ../../../../crates/daemon/src/transform.rs#L13707
-[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13577
+[t-pending]: ../../../../crates/daemon/src/transform.rs#L19168
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27579
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27331
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23118
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28653
+[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27510
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
+[t-parked]: ../../../../crates/daemon/src/transform.rs#L13746
+[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13616
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
 [t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20644
 [t-native-reject]: ../../../../crates/daemon/src/lib.rs#L21748
 [t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21678
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L22264
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L22265
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2062
-[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22418
-[t-poison]: ../../../../crates/daemon/src/transform.rs#L22487
-[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22520
+[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22479
+[t-poison]: ../../../../crates/daemon/src/transform.rs#L22548
+[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22581
 [t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L795
 [t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L1104
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8224-L8232
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5449
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L35691
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L34923
-[t-cas]: ../../../../crates/daemon/src/lib.rs#L22606
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L35970
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L35202
+[t-cas]: ../../../../crates/daemon/src/lib.rs#L22607
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L16453
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L16507
 [t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L16576
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-reject]: ../../../../crates/daemon/src/lib.rs#L23449
-[t-success]: ../../../../crates/daemon/src/lib.rs#L23479
-[t-repeat]: ../../../../crates/daemon/src/lib.rs#L23495
-[t-frozen]: ../../../../crates/daemon/src/lib.rs#L23523
-[t-status]: ../../../../crates/daemon/src/lib.rs#L23556
-[t-divergence]: ../../../../crates/daemon/src/lib.rs#L31641
+[t-reject]: ../../../../crates/daemon/src/lib.rs#L23728
+[t-success]: ../../../../crates/daemon/src/lib.rs#L23758
+[t-repeat]: ../../../../crates/daemon/src/lib.rs#L23774
+[t-frozen]: ../../../../crates/daemon/src/lib.rs#L23802
+[t-status]: ../../../../crates/daemon/src/lib.rs#L23835
+[t-divergence]: ../../../../crates/daemon/src/lib.rs#L31920
 [t-upserts]: ../../../../crates/memory-store/src/lib.rs#L17545
-[t-sched]: ../../../../crates/daemon/src/transform.rs#L13521
+[t-sched]: ../../../../crates/daemon/src/transform.rs#L13560
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L15376
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35555
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35834
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19067
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L20529
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15112
@@ -490,14 +503,14 @@ not a claim that no related check exists anywhere in the repository.
 
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[t-line]: ../../../../crates/daemon/src/transform.rs#L12278
-[t-timings]: ../../../../crates/daemon/src/transform.rs#L12228
+[t-line]: ../../../../crates/daemon/src/transform.rs#L12317
+[t-timings]: ../../../../crates/daemon/src/transform.rs#L12267
 [t-tc-match]: ../../../../crates/daemon/src/token_cache.rs#L188
 [t-tc-hits]: ../../../../crates/daemon/src/token_cache.rs#L209
 [t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L233
 [t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L249
 [t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L266
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24170-L24181
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24231-L24242
 [t-preselect]: ../../../../crates/secret-scanner/src/rules.rs#L685-L722
 [t-canaries]: ../../../../crates/secret-scanner/tests/rule_canaries.rs#L4
 [t-qual]: ../../../../crates/secret-scanner/tests/qualification.rs#L49-L63

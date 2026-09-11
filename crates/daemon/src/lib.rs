@@ -22849,6 +22849,273 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn unflagged_synthetic_delta_prepares_historian_and_native_output() {
+        let mut observations = Vec::new();
+        for cached_prefix in [true, false] {
+            let producer = Arc::new(ProducerState::default());
+            producer.block_output.store(true, Ordering::SeqCst);
+            let config = default_test_config();
+            assert!(config.compaction_enabled);
+            assert!(!config.model_chain.is_empty());
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), config);
+            let pair = injection::build_synthetic_todo_pair(
+                r#"[{"content":"preserve delta replay","status":"pending","priority":"high"}]"#,
+            )
+            .unwrap();
+            let mut todo = pair.assistant_msg;
+            todo.meta.synthetic = false;
+            let BlockKind::ToolCall { id, .. } = todo.content_mut()[0].kind_mut() else {
+                panic!("todo call")
+            };
+            *id = "authored-todo".into();
+            let mut result = pair.tool_msg;
+            result.meta.synthetic = false;
+            let BlockKind::ToolResult { id, .. } = result.content_mut()[0].kind_mut() else {
+                panic!("todo result")
+            };
+            *id = "authored-todo".into();
+            let mut boot_request = native_cache_request(
+                "ses",
+                vec![
+                    IngressMessage {
+                        mid: "authored-todo".into(),
+                        ordinal: 1,
+                        ck: todo,
+                    },
+                    IngressMessage {
+                        mid: "authored-result".into(),
+                        ordinal: 2,
+                        ck: result,
+                    },
+                ],
+                Vec::new(),
+                "todo-replay-boot",
+            );
+            boot_request.todo_tool_present = Some(true);
+            let boot =
+                call_transform_request(&handler, serde_json::to_value(&boot_request).unwrap())
+                    .await;
+            assert_eq!(boot["action"], "HARD", "{boot}");
+            let frozen = store
+                .load("ses")
+                .unwrap()
+                .meta
+                .synthetic_todo
+                .expect("prior bust freezes a pair");
+            let mut suffix = big_messages_from(3);
+            for (mid, ordinal, mut ck) in [
+                ("replay-call", 83, frozen.assistant_msg),
+                ("replay-result", 84, frozen.tool_msg),
+            ] {
+                ck.meta.synthetic = false;
+                ck.meta.harness_id = Some(mid.into());
+                if mid == "replay-call" {
+                    ck.content_mut().push(WireBlock::bare(BlockKind::Text {
+                        text: "replayed synthetic carrier sentinel".into(),
+                    }));
+                }
+                ck.mark_modified();
+                suffix.push(IngressMessage {
+                    mid: mid.into(),
+                    ordinal,
+                    ck,
+                });
+            }
+            let mut delta = native_cache_request("ses", suffix, Vec::new(), "todo-replay-delta");
+            delta.todo_tool_present = Some(true);
+            delta.usage = Some(ModuleUsage {
+                current_total_input_tokens: 45_000,
+                context_limit_tokens: 50_000,
+                ..Default::default()
+            });
+            delta.tail_delta = Some(
+                json!({ "after": "todo-replay-boot", "replace_from": 2, "native_replace_from": 0 }),
+            );
+            assert!(
+                delta.messages[80..]
+                    .iter()
+                    .all(|message| !message.ck.meta.synthetic)
+            );
+            assert!(
+                delta.messages[80..]
+                    .iter()
+                    .all(
+                        |message| message.ck.content().iter().any(|block| match block.kind() {
+                            BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } =>
+                                id == &frozen.call_id,
+                            _ => false,
+                        })
+                    )
+            );
+            assert!(delta.serve_native);
+            let mut full_second = boot_request.clone();
+            full_second.messages.extend(delta.messages.iter().cloned());
+            let mut flagged_second: TransformRequest =
+                serde_json::from_value(serde_json::to_value(&full_second).unwrap()).unwrap();
+            flagged_second.messages[82].ck.meta.synthetic = true;
+            flagged_second.messages[83].ck.meta.synthetic = true;
+            let baseline_projection =
+                crate::wire::project_messages(&flagged_second.messages).unwrap();
+            let response =
+                call_transform_request(&handler, serde_json::to_value(&delta).unwrap()).await;
+            assert_eq!(response["status"], "ok", "{response}");
+            assert_eq!(response["timings"]["projection_reused_messages"], 2);
+            assert_eq!(response["historian"]["fired"], true, "{response}");
+            eprintln!("replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn: reached");
+            assert!(
+                response["native_messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty())
+            );
+            wait_for_count(&producer.starts, 1).await;
+            let first_prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
+            assert!(first_prompt.contains("message 3 "));
+            assert!(!first_prompt.contains("replayed synthetic carrier sentinel"));
+            producer.block_output.store(false, Ordering::SeqCst);
+            producer.notify.notify_waiters();
+            wait_for_idle(&store).await;
+
+            producer.block_output.store(true, Ordering::SeqCst);
+            let mut third = native_cache_request(
+                "ses",
+                big_messages_from(85),
+                Vec::new(),
+                "todo-replay-prefix",
+            );
+            third.todo_tool_present = Some(true);
+            third.usage = delta.usage.clone();
+            third.tail_delta = Some(
+                json!({ "after": "todo-replay-delta", "replace_from": 84, "native_replace_from": 0 }),
+            );
+            let mut reference = third.clone();
+            reference.messages = baseline_projection.reattach_messages_prefix(84).unwrap();
+            reference.messages.extend(third.messages.iter().cloned());
+            reference.tail_delta = None;
+            let mut reattached = third.clone();
+            let frontier = handler
+                .expand_transform_tail_delta(&mut reattached)
+                .expect("third delta reattaches");
+            assert!(
+                frontier.projection_cache.is_some(),
+                "must use the cached projection, not the snapshot fallback"
+            );
+            assert_eq!(reattached.messages, reference.messages);
+            assert!(
+                reattached.messages[82..84]
+                    .iter()
+                    .all(|message| message.ck.meta.synthetic)
+            );
+            let projection = crate::wire::project_messages(&reference.messages).unwrap();
+            let boundary = boundary_messages(&reattached, &projection, &handler.boundary_tokens);
+            let reference_boundary =
+                boundary_messages(&reference, &projection, &handler.boundary_tokens);
+            assert_eq!(
+                format!("{:?}", boundary.messages),
+                format!("{:?}", reference_boundary.messages)
+            );
+            assert!(boundary.messages.iter().all(|message| !matches!(
+                message.message_id.as_str(),
+                "replay-call" | "replay-result"
+            )));
+            let mut raw_full = reference.clone();
+            raw_full.messages[82].ck.meta.synthetic = false;
+            raw_full.messages[83].ck.meta.synthetic = false;
+            let raw_boundary = boundary_messages(&raw_full, &projection, &handler.boundary_tokens);
+            assert_eq!(raw_boundary.messages.len(), boundary.messages.len() + 2);
+            assert!(
+                raw_boundary
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(
+                        message.message_id.as_str(),
+                        "replay-call" | "replay-result"
+                    ))
+                    .all(|message| message.blocks.is_empty())
+            );
+            let live = projection
+                .blocks
+                .iter()
+                .filter(|block| !block.synthetic)
+                .cloned()
+                .collect::<Vec<_>>();
+            let chunk = crate::historian_chunk::build_historian_chunk(
+                &reattached.messages,
+                &live,
+                1,
+                100_000,
+                165,
+            );
+            let reference_chunk = crate::historian_chunk::build_historian_chunk(
+                &reference.messages,
+                &live,
+                1,
+                100_000,
+                165,
+            );
+            let raw_chunk = crate::historian_chunk::build_historian_chunk(
+                &raw_full.messages,
+                &live,
+                1,
+                100_000,
+                165,
+            );
+            assert_eq!(chunk, reference_chunk);
+            assert!(
+                !chunk.chunk.present_ordinals.contains(&83)
+                    && !chunk.chunk.present_ordinals.contains(&84)
+            );
+            assert!(
+                raw_chunk.chunk.present_ordinals.contains(&83)
+                    && raw_chunk.chunk.present_ordinals.contains(&84)
+            );
+            let third_response = call_transform_request(
+                &handler,
+                serde_json::to_value(if cached_prefix { third } else { reference }).unwrap(),
+            )
+            .await;
+            assert_eq!(third_response["status"], "ok", "{third_response}");
+            assert_eq!(
+                third_response["timings"]["projection_reused_messages"],
+                if cached_prefix { 84 } else { 0 }
+            );
+            assert_eq!(
+                third_response["historian"]["fired"], true,
+                "{third_response}"
+            );
+            wait_for_count(&producer.starts, 2).await;
+            let third_prompt = producer.prompts.lock().unwrap()[1].clone();
+            assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
+            assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
+            let native = if let Some(suffix) = third_response.get("native_messages_delta") {
+                assert_eq!(suffix["after"], "todo-replay-delta");
+                let replace_from = suffix["replace_from"].as_u64().unwrap() as usize;
+                let mut native =
+                    response["native_messages"].as_array().unwrap()[..replace_from].to_vec();
+                native.extend(suffix["messages"].as_array().unwrap().iter().cloned());
+                native
+            } else {
+                third_response["native_messages"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            };
+            assert!(!native.is_empty());
+            observations.push((
+                first_prompt,
+                third_prompt,
+                third_response["messages"].clone(),
+                serde_json::to_vec(&native).unwrap(),
+            ));
+            producer.block_output.store(false, Ordering::SeqCst);
+            producer.notify.notify_waiters();
+            wait_for_idle(&store).await;
+        }
+        assert_eq!(observations[0], observations[1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier() {
         let (cached_handler, cached_store, _cached_dir, _cached_project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
@@ -22859,6 +23126,7 @@ mod tests {
             assistant_tool_call("call-ordinary", 2),
             tool_result("result-ordinary", 3, "ordinary"),
         ];
+        let mut initial_native = Vec::new();
         for handler in [&cached_handler, &control_handler] {
             let request = native_cache_request(
                 "ses",
@@ -22869,6 +23137,7 @@ mod tests {
             let response =
                 call_transform_request(handler, serde_json::to_value(request).unwrap()).await;
             assert_eq!(response["status"], "ok", "{response}");
+            initial_native.push(response["native_messages"].as_array().unwrap().clone());
         }
 
         let pair = injection::build_synthetic_todo_pair(
@@ -22921,6 +23190,15 @@ mod tests {
         assert_eq!(cached["status"], "ok", "{cached}");
         assert_eq!(cached["timings"]["projection_reused_messages"], 1);
         assert_eq!(cached["messages"], full["messages"]);
+        let native_delta = &cached["native_messages_delta"];
+        assert_eq!(native_delta["after"], "todo-normalize-fp-1");
+        let frontier = native_delta["replace_from"].as_u64().unwrap() as usize;
+        let mut expanded_native = initial_native[0][..frontier].to_vec();
+        expanded_native.extend(native_delta["messages"].as_array().unwrap().iter().cloned());
+        assert_eq!(
+            serde_json::to_vec(&expanded_native).unwrap(),
+            serde_json::to_vec(&full["native_messages"]).unwrap()
+        );
         let cached_epoch = cached_store.load("ses").unwrap().meta.revert_epoch;
         let full_epoch = control_store.load("ses").unwrap().meta.revert_epoch;
         let cached_projection = cached_handler
@@ -36110,5 +36388,123 @@ mod release_contract_tests {
         assert!(!state_sync_epoch_compatible(
             &json!({ "state_sync_epoch": current + 1 })
         ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
+    use test_support::FixtureBuilder;
+
+    let store_fixture = FixtureBuilder::store();
+    let store = Arc::new(store_fixture.store);
+    let handler = Handler::new();
+    handler.install_store_for_test(Arc::clone(&store));
+    let mut fixture = FixtureBuilder::synthetic_todo_armed();
+    fixture.session_id = "compaction-mode-projection-cache".into();
+    for message in &mut fixture.messages {
+        message.ck.meta.synthetic = false;
+        message.ck.meta.harness_id = Some(message.mid.clone());
+        message.ck.mark_modified();
+    }
+    let mut live = FixtureBuilder::session_with_boundary().messages;
+    for message in &mut live {
+        message.ordinal += 2;
+    }
+    fixture.messages.extend(live);
+    let mut request: TransformRequest = serde_json::from_value(fixture.call_transform()).unwrap();
+    request.serializer_profile = "opencode-aisdk".into();
+    request.full_array_fingerprint = Some("compaction-mode-unchanged-input".into());
+    let original = serde_json::to_vec(&request).unwrap();
+    let mut ctx = transform::ProducerContext {
+        project_memory: None,
+        project_path: "git:projection-cache",
+        note_project_path: "git:projection-cache",
+        project_directory: store_fixture.dir.path().to_str().unwrap(),
+        history_budget_tokens: 60_000.0,
+        user_profile_budget_tokens: 4_000.0,
+        memory_enabled: false,
+        inject_docs: false,
+        temporal_awareness: false,
+        now_ms: 0,
+        execute_threshold_percentage: 65.0,
+        compaction_enabled: false,
+        smart_drops: true,
+        cache_ttl: "5m".into(),
+        cache_ttl_provenance: config::CacheTtlProvenance::Default,
+        model_key: None,
+        observed_last_response_at_ms: None,
+        guidance_date: None,
+        historian_active: false,
+        wrapup_active: false,
+        injected_reductions: Vec::new(),
+    };
+
+    // Route-bound compaction settings can differ while the session and ingress stay the same.
+    for (pass, compaction_enabled) in [false, true, true, false, true].into_iter().enumerate() {
+        ctx.compaction_enabled = compaction_enabled;
+        let cached = handler.lookup_full_projection_cache(&request);
+        assert_eq!(cached.is_some(), pass > 0);
+        if let Some(cache) = &cached {
+            assert_eq!(cache.replace_from, request.messages.len());
+        }
+        let result = transform::transform_with_projection_cached(
+            &store,
+            &request,
+            &ctx,
+            &handler.serialized_outputs,
+            cached.as_ref(),
+        )
+        .expect("compaction mode switch must preserve projection correctness");
+        if compaction_enabled {
+            let timings = result.response.timings.as_ref().expect("transform timings");
+            assert_eq!(
+                (
+                    timings.projection_reused_messages,
+                    timings.projection_projected_messages,
+                ),
+                if pass == 2 { (4, 0) } else { (0, 4) },
+                "pass {pass}"
+            );
+        }
+        let mut expected = wire::MessageProjection::new(&request.messages);
+        if compaction_enabled {
+            for message in &request.messages[..2] {
+                expected.mark_synthetic(message);
+            }
+        }
+        assert_eq!(
+            result.projection,
+            expected.project().unwrap(),
+            "pass {pass}"
+        );
+        let reattached = result
+            .projection
+            .reattach_messages_prefix(request.messages.len())
+            .unwrap();
+        assert!(
+            reattached[..2]
+                .iter()
+                .all(|message| message.ck.meta.synthetic == compaction_enabled)
+        );
+        assert!(
+            reattached[2..]
+                .iter()
+                .all(|message| !message.ck.meta.synthetic)
+        );
+        if pass == 2 {
+            let cache = cached.as_ref().unwrap();
+            assert!(Arc::ptr_eq(
+                &result.projection.blocks[0].wire,
+                &cache.projection.blocks[0].wire,
+            ));
+        }
+        handler.store_projection_cache(
+            &request,
+            result.revert_epoch,
+            Arc::new(result.projection),
+            None,
+        );
+        assert_eq!(serde_json::to_vec(&request).unwrap(), original);
     }
 }
