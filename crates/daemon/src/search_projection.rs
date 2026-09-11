@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, MutationIdentity, ProjectionBatch};
+use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
 use retrieval::{BASELINE, ProjectionError};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, StoreError, open_sqlite,
@@ -152,13 +152,13 @@ impl SearchProjection {
         self.write(|conn| retrieval::batch::apply_batch(conn, batch, bounds, now))
     }
 
-    /// Whether a batch whose commit outcome was lost is durably applied, read
-    /// from the stored checkpoint rather than assumed.
+    /// Reconciles a lost commit outcome by reading checkpoint coverage and required batch effects in one transaction.
+    /// Conflicting stored identity or payload bytes propagate as projection errors.
     pub fn batch_status(
         &self,
-        identity: &MutationIdentity,
+        batch: &ProjectionBatch<'_>,
     ) -> Result<BatchStatus, SearchProjectionError> {
-        self.read(|conn| retrieval::batch::batch_status(conn, identity))
+        self.read(|conn| retrieval::batch::batch_status(conn, batch))
     }
 
     /// One epoch-fenced write transaction. The closure's rows commit together

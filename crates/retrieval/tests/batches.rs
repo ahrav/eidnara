@@ -611,6 +611,21 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
             "a handled admission error commits no batch writes"
         );
     }
+    let mut future_record = batch.clone();
+    future_record.records[1].created_commit_seq = 5;
+    let result = store
+        .with_conn_fenced(|conn| Ok(apply_batch(conn, &future_record, bounds(), 5)))
+        .unwrap();
+    assert_eq!(
+        result,
+        Err(ProjectionError::MutationConflict),
+        "a record created after the batch end is refused"
+    );
+    assert_eq!(
+        store.with_conn(|conn| Ok(durable(conn))).unwrap(),
+        prior,
+        "a handled admission error commits no batch writes"
+    );
     for fault in [
         BatchFault::AfterAdmission,
         BatchFault::AfterRows,
@@ -631,10 +646,7 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
         store
             .with_conn(|conn| {
                 assert_eq!(durable(conn), prior, "{fault:?}");
-                assert_eq!(
-                    batch_status(conn, &batch.identity).unwrap(),
-                    BatchStatus::NotApplied
-                );
+                assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::NotApplied);
                 Ok(())
             })
             .unwrap();
@@ -649,10 +661,7 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
     let store = open(dir.path());
     store
         .with_conn(|conn| {
-            assert_eq!(
-                batch_status(conn, &batch.identity).unwrap(),
-                BatchStatus::Applied
-            );
+            assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::Applied);
             assert_eq!(durable(conn), after);
             Ok(())
         })
@@ -765,7 +774,14 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
         .with_conn(|conn| {
             assert_eq!(durable(conn), settled, "the old prefix moved nothing");
             assert_eq!(
-                batch_status(conn, &mutation(3, 4)).unwrap(),
+                batch_status(
+                    conn,
+                    &ProjectionBatch {
+                        identity: mutation(3, 4),
+                        ..batch1.clone()
+                    }
+                )
+                .unwrap(),
                 BatchStatus::Applied
             );
             Ok(())
@@ -805,7 +821,7 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
     store
         .with_conn(|conn| {
             assert_eq!(
-                batch_status(conn, &other_kernel.identity),
+                batch_status(conn, &other_kernel),
                 Err(ProjectionError::IdentityMismatch)
             );
             Ok(())
@@ -1156,6 +1172,7 @@ fn a_whole_buffer_record_under_a_whole_covering_span_lands_under_the_spanless_id
     assert_eq!((outcome.rows_inserted, outcome.pending_created), (1, 1));
     store
         .with_conn(|conn| {
+            assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::Applied);
             let stored = read_occurrence(conn, &spanless_id)
                 .unwrap()
                 .expect("stored under the spanless identity");
@@ -1375,6 +1392,238 @@ fn exported_row(
 }
 
 #[test]
+fn batch_status_requires_the_requested_generation_and_batch_effects() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let rows = vec![exported_row(
+        "status",
+        1,
+        Some("hello"),
+        Some((7, 12)),
+        2,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(2, 2), Some(GENERATION)).unwrap();
+    assert_eq!(
+        store
+            .with_conn(|conn| Ok(batch_status(conn, &batch)))
+            .unwrap(),
+        Err(ProjectionError::IdentityMismatch)
+    );
+    setup(&store);
+    let mut statuses = vec![
+        store
+            .with_conn(|conn| Ok(batch_status(conn, &batch).unwrap()))
+            .unwrap(),
+    ];
+    let empty = ProjectionBatch {
+        records: vec![],
+        generation_id: None,
+        ..batch.clone()
+    };
+    apply(&store, &empty, 2).unwrap();
+    statuses.push(
+        store
+            .with_conn(|conn| Ok(batch_status(conn, &batch).unwrap()))
+            .unwrap(),
+    );
+    store
+        .with_conn_fenced(|conn| {
+            register_generation(
+                conn,
+                &VectorGeneration {
+                    generation_id: "gen-other".to_string(),
+                    ..generation()
+                },
+                2,
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    for generation_id in [None, Some("gen-other")] {
+        let other = ProjectionBatch {
+            generation_id,
+            ..batch.clone()
+        };
+        apply(&store, &other, 3).unwrap();
+        statuses.push(
+            store
+                .with_conn(|conn| Ok(batch_status(conn, &batch).unwrap()))
+                .unwrap(),
+        );
+        assert_eq!(
+            store
+                .with_conn(|conn| Ok(batch_status(conn, &other).unwrap()))
+                .unwrap(),
+            BatchStatus::Applied
+        );
+    }
+    assert_eq!(
+        statuses,
+        [BatchStatus::NotApplied; 4],
+        "an absent checkpoint, empty batch, lexical batch, or other generation cannot satisfy the requested batch"
+    );
+    assert_eq!(apply(&store, &batch, 4).unwrap().pending_created, 1);
+    drop(store);
+    let store = open(dir.path());
+    store
+        .with_conn(|conn| {
+            assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::Applied);
+            Ok(())
+        })
+        .unwrap();
+    for state in ["admitted", "embedded", "published", "failed", "obsolete"] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE embedding_jobs SET state=?1 WHERE generation_id=?2",
+                    [state, GENERATION],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    batch_status(conn, &batch).unwrap(),
+                    BatchStatus::Applied,
+                    "{state}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute("UPDATE vector_generations SET state='retired'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn(|conn| {
+            assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::Applied);
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "DELETE FROM embedding_jobs WHERE generation_id=?1",
+                [GENERATION],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                batch_status(conn, &batch).unwrap(),
+                BatchStatus::NotApplied,
+                "retiring a generation does not prove its missing job was applied"
+            );
+            Ok(())
+        })
+        .unwrap();
+    let invalidation = ProjectionBatch {
+        identity: mutation(2, 3),
+        records: vec![],
+        invalidations: vec![Invalidation {
+            occurrence_id: rows[0].detail.occurrence_id.clone(),
+            tombstone: Tombstone {
+                invalidated_commit_seq: 3,
+                reason: TombstoneReason::Retired,
+            },
+        }],
+        generation_id: None,
+    };
+    apply(
+        &store,
+        &ProjectionBatch {
+            identity: mutation(2, 3),
+            ..empty
+        },
+        5,
+    )
+    .unwrap();
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                batch_status(conn, &invalidation).unwrap(),
+                BatchStatus::NotApplied
+            );
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            retrieval::tombstone_occurrence(
+                conn,
+                &invalidation.invalidations[0].occurrence_id,
+                invalidation.invalidations[0].tombstone,
+                6,
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    for state in ["pending", "admitted"] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute(
+                    "UPDATE embedding_jobs SET state=?1 WHERE generation_id='gen-other'",
+                    [state],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    batch_status(conn, &invalidation).unwrap(),
+                    BatchStatus::NotApplied,
+                    "the tombstone does not prove {state} work was obsoleted"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    apply(&store, &invalidation, 6).unwrap();
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                batch_status(conn, &invalidation).unwrap(),
+                BatchStatus::Applied
+            );
+            assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::Applied);
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE projection_identity SET kernel_incarnation_id='other'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                batch_status(conn, &batch),
+                Err(ProjectionError::IdentityMismatch)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn rows_map_to_a_batch_at_the_window_edges_and_selected_text_persists_under_its_span() {
     use retrieval::batch::{batch_from_rows, row_identities};
     let snapshot = 10;
@@ -1474,6 +1723,29 @@ fn rows_map_to_a_batch_at_the_window_edges_and_selected_text_persists_under_its_
             "descriptor identity must match its encoded fields at {index}"
         );
     }
+    let mut corrupted_text = rows.clone();
+    corrupted_text[5].text = Some("different txt".to_string());
+    assert_eq!(corrupted_text[5].text.as_ref().unwrap().len(), 13);
+    let mut corrupted_payload_id = rows.clone();
+    corrupted_payload_id[5].detail.payload_id =
+        kernel::source_identity::payload_id(b"other payload");
+    let refusals: Vec<_> = [corrupted_text, corrupted_payload_id]
+        .iter()
+        .map(|rows| {
+            batch_from_rows(
+                rows,
+                &row_identities(rows),
+                mutation(snapshot, through),
+                None,
+            )
+            .err()
+        })
+        .collect();
+    assert_eq!(
+        refusals,
+        vec![Some(ProjectionError::MalformedBatch); 2],
+        "selected bytes must match the descriptor payload identity"
+    );
 
     // Selected text persists under the kernel's own occurrence identity and
     // span; a selection whose length disagrees with its span is refused

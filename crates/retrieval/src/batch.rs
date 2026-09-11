@@ -25,8 +25,7 @@ use crate::{
     persist_occurrences, tombstone_occurrence,
 };
 
-/// Where the batch comes from and how far it reaches. Two batches with the
-/// same identity apply the same rows; an application is replayed by identity.
+/// The batch's source prefix does not depend on vector generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationIdentity {
     /// The kernel incarnation the projection identity was installed under.
@@ -94,12 +93,12 @@ pub struct BatchOutcome {
     pub checkpoint_commit_seq: i64,
 }
 
-/// Whether a batch's mutation identity is durably applied.
+/// A covering checkpoint alone cannot distinguish batches that request different vector generations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchStatus {
-    /// The checkpoint under this hold and snapshot reaches the batch's end.
+    /// The checkpoint covers the batch, rows and invalidations match, and required generation jobs exist.
     Applied,
-    /// The checkpoint stands before the batch's end, or nothing is applied yet.
+    /// The checkpoint does not cover the batch, or a required effect is missing.
     NotApplied,
 }
 
@@ -159,6 +158,9 @@ pub fn batch_from_rows<'a>(
             return Err(ProjectionError::MalformedBatch);
         }
         if let Some(text) = row.text.as_deref() {
+            if kernel::source_identity::payload_id(text.as_bytes()) != row.detail.payload_id {
+                return Err(ProjectionError::MalformedBatch);
+            }
             records.push(OccurrenceRecord {
                 occurrence,
                 payload: Payload::Selected(text),
@@ -210,25 +212,68 @@ pub fn row_identities(rows: &[SourceRow]) -> Vec<Vec<(&str, &str)>> {
         .collect()
 }
 
-/// Whether the batch's end is already inside the durable checkpoint under the
-/// batch's hold and snapshot. Reconciles an unknown commit outcome from the
-/// durable contents rather than assuming a rollback.
+/// Reconciles an unknown commit outcome from the checkpoint and the batch's durable effects in the caller's read transaction.
+/// A covering checkpoint alone does not prove that work for the requested generation exists.
+/// Jobs in any state count as applied; tombstoned records require no job.
+/// Status does not identify which transaction produced the durable effects.
 /// A missing or different installed kernel incarnation is an identity error.
+/// Conflicting occurrence identity or payload bytes return collision errors.
+/// A missing or different tombstone returns `NotApplied`; replay can still refuse a conflicting tombstone.
+/// Recovery must supply the original records, including their payload variants and spans.
 pub fn batch_status(
     conn: &GuardedConn<'_>,
-    identity: &MutationIdentity,
+    batch: &ProjectionBatch<'_>,
 ) -> Result<BatchStatus, ProjectionError> {
-    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
-    Ok(match stored {
-        Some(checkpoint)
-            if checkpoint.hold_id == identity.hold_id
-                && checkpoint.snapshot_commit_seq == identity.snapshot_commit_seq
-                && checkpoint.checkpoint_commit_seq >= identity.through_commit_seq =>
-        {
-            BatchStatus::Applied
+    let identity = &batch.identity;
+    let Some(checkpoint) = read_checkpoint(conn, &identity.kernel_incarnation_id)? else {
+        return Ok(BatchStatus::NotApplied);
+    };
+    if checkpoint.hold_id != identity.hold_id
+        || checkpoint.snapshot_commit_seq != identity.snapshot_commit_seq
+        || checkpoint.checkpoint_commit_seq < identity.through_commit_seq
+    {
+        return Ok(BatchStatus::NotApplied);
+    }
+    for record in &batch.records {
+        let (encoded, selected) = crate::encode_record(record)?;
+        let (occurrence_id, payload_id) = crate::canonical_digests(&encoded, selected);
+        let Some(stored) = crate::read_occurrence(conn, &occurrence_id)? else {
+            return Ok(BatchStatus::NotApplied);
+        };
+        if stored.tuple != encoded.tuple || stored.payload_id != payload_id {
+            return Err(ProjectionError::OccurrenceCollision { occurrence_id });
         }
-        _ => BatchStatus::NotApplied,
-    })
+        if stored.bytes != selected {
+            return Err(ProjectionError::PayloadCollision {
+                payload_id: stored.payload_id,
+            });
+        }
+        if let Some(generation) = batch.generation_id
+            && dense_eligible(record.occurrence.class)
+            && stored.tombstone.is_none()
+            && !has_job(conn, &occurrence_id, generation)?
+        {
+            return Ok(BatchStatus::NotApplied);
+        }
+    }
+    for invalidation in &batch.invalidations {
+        let applied: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones
+             WHERE occurrence_id=?1 AND invalidated_commit_seq=?2 AND reason=?3)
+             AND NOT EXISTS(SELECT 1 FROM embedding_jobs
+             WHERE occurrence_id=?1 AND state IN ('pending','admitted'))",
+            params![
+                invalidation.occurrence_id,
+                invalidation.tombstone.invalidated_commit_seq,
+                invalidation.tombstone.reason.as_str(),
+            ],
+            |row| row.get(0),
+        )?;
+        if !applied {
+            return Ok(BatchStatus::NotApplied);
+        }
+    }
+    Ok(BatchStatus::Applied)
 }
 
 struct Checkpoint {
@@ -369,6 +414,10 @@ fn admit<'a>(
     if identity.through_commit_seq < identity.snapshot_commit_seq
         || identity.snapshot_commit_seq < 0
         || identity.hold_id.is_empty()
+        || batch
+            .records
+            .iter()
+            .any(|record| record.created_commit_seq > identity.through_commit_seq)
         || batch.invalidations.iter().any(|invalidation| {
             let at = invalidation.tombstone.invalidated_commit_seq;
             at <= identity.snapshot_commit_seq || at > identity.through_commit_seq
@@ -429,12 +478,7 @@ fn admit<'a>(
             if !queues_work(conn, record.occurrence.class, occurrence_id, &tombstoned)? {
                 continue;
             }
-            let queued: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2)",
-                params![occurrence_id, generation],
-                |row| row.get(0),
-            )?;
-            if !queued {
+            if !has_job(conn, occurrence_id, generation)? {
                 new_jobs.insert(occurrence_id);
             }
         }
@@ -579,6 +623,18 @@ fn has_tombstone(conn: &GuardedConn<'_>, occurrence_id: &str) -> Result<bool, Pr
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM occurrence_tombstones WHERE occurrence_id=?1)",
         [occurrence_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_job(
+    conn: &GuardedConn<'_>,
+    occurrence_id: &str,
+    generation_id: &str,
+) -> Result<bool, ProjectionError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2)",
+        params![occurrence_id, generation_id],
         |row| row.get(0),
     )?)
 }

@@ -718,7 +718,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         max_pending: NonZeroUsize::new(64).unwrap(),
     };
     assert_eq!(
-        projection.batch_status(&mutation).unwrap(),
+        projection.batch_status(&batch).unwrap(),
         BatchStatus::NotApplied
     );
     let hold_before = kernel
@@ -735,7 +735,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
     assert_eq!((outcome.rows_inserted, outcome.pending_created), (2, 1));
     assert_eq!(outcome.checkpoint_commit_seq, hold.snapshot);
     assert_eq!(
-        projection.batch_status(&mutation).unwrap(),
+        projection.batch_status(&batch).unwrap(),
         BatchStatus::Applied
     );
     let message_row = page
