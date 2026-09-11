@@ -103,7 +103,8 @@ pub struct Unresolved {
 
 /// A host job submitted by this supervisor remains shutdown work while the host owns it.
 struct HostJob {
-    host_job_id: String,
+    /// The durable job whose episode submitted this host job; one durable job owns a new host job per episode.
+    job_id: String,
     /// Whether the admitted row still owns this job's result; retried and stopped rows do not.
     result_expected: bool,
 }
@@ -117,7 +118,7 @@ pub struct EmbeddingSupervisor {
     shutdown: CancellationToken,
     slices: AtomicUsize,
     stop: Mutex<Option<Stop>>,
-    /// Host jobs this supervisor submitted and has not seen published, by durable job identifier. An entry outlives its row's disposition: the host runs the call to completion whatever the row says.
+    /// Host jobs this supervisor submitted and has not seen published, by host job identifier. An entry outlives its row's disposition: the host runs the call to completion whatever the row says, and a row reopened under a new episode submits a second host job beside the first.
     admitted: Mutex<BTreeMap<String, HostJob>>,
     panic_next_slice: AtomicBool,
     fail_next_read: AtomicBool,
@@ -265,23 +266,27 @@ impl EmbeddingSupervisor {
                             host_job_id,
                         } => {
                             self.lock_admitted().insert(
-                                job_id,
+                                host_job_id,
                                 HostJob {
-                                    host_job_id,
+                                    job_id,
                                     result_expected: true,
                                 },
                             );
                         }
                         DispatchEvent::Admitted { .. } => admitted += 1,
-                        DispatchEvent::Published { job_id, .. } => {
+                        DispatchEvent::Published { host_job_id, .. } => {
                             published += 1;
-                            self.lock_admitted().remove(&job_id);
+                            self.lock_admitted().remove(&host_job_id);
                         }
-                        // A retried or stopped job stays tracked: the host still runs its call, and only the host's status retires it.
+                        // A retried or stopped job stays tracked: the host still runs its call, and only the host's status retires it. Every host job the row submitted loses its claim on a result.
                         DispatchEvent::Retried { job_id, .. }
                         | DispatchEvent::Stopped { job_id, .. } => {
                             dispositions += 1;
-                            if let Some(job) = self.lock_admitted().get_mut(&job_id) {
+                            for job in self
+                                .lock_admitted()
+                                .values_mut()
+                                .filter(|job| job.job_id == job_id)
+                            {
                                 job.result_expected = false;
                             }
                         }
@@ -350,6 +355,8 @@ impl EmbeddingSupervisor {
         if native > 0 {
             return Err(Unresolved { slices: 0, native });
         }
+        // The first writer wins: this records `Shutdown` only for a loop the cancellation reached before it was first polled, so the report is final.
+        self.stop_with(Stop::Shutdown);
         Ok(DrainReport {
             slices: self.slices.load(Ordering::SeqCst),
             stop: self
@@ -364,14 +371,16 @@ impl EmbeddingSupervisor {
     /// `(running, held)` counts over the host jobs this supervisor submitted and has not seen published: calls the host still owns, and settled results an admitted row still expects.
     fn native_census(&self) -> (usize, usize) {
         let admitted = self.lock_admitted();
-        admitted.values().fold((0, 0), |(running, held), job| {
-            // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
-            match self.maintained.synapse.job_status(&job.host_job_id) {
-                None | Some("failed") => (running, held),
-                Some("ready") => (running, held + usize::from(job.result_expected)),
-                Some(_) => (running + 1, held),
-            }
-        })
+        admitted
+            .iter()
+            .fold((0, 0), |(running, held), (host_job_id, job)| {
+                // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
+                match self.maintained.synapse.job_status(host_job_id) {
+                    None | Some("failed") => (running, held),
+                    Some("ready") => (running, held + usize::from(job.result_expected)),
+                    Some(_) => (running + 1, held),
+                }
+            })
     }
 
     fn lock_admitted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, HostJob>> {
@@ -409,23 +418,16 @@ impl Idle {
     }
 }
 
-/// A blocked backfill is idle because the next slice cannot clear its blocker; a slice of either kind that its budget cut short is not idle.
+/// A slice that moved nothing is idle, whatever ended it: a blocked backfill cannot clear its blocker, and a budget that ran out before anything moved would run out again, so the next slice waits instead of spinning. A slice the budget cut short after some progress is not idle.
 fn idle_after(outcome: &SliceOutcome) -> bool {
     match outcome {
         SliceOutcome::Backfill {
             admitted,
             published,
             dispositions,
-            end,
-        } => {
-            *admitted == 0
-                && *published == 0
-                && *dispositions == 0
-                && *end != Some(Blocked::BudgetExhausted)
-        }
-        SliceOutcome::Sweep(report) => {
-            report.jobs_reclaimed == 0 && report.vectors_reclaimed == 0 && !report.budget_exhausted
-        }
+            ..
+        } => *admitted == 0 && *published == 0 && *dispositions == 0,
+        SliceOutcome::Sweep(report) => report.jobs_reclaimed == 0 && report.vectors_reclaimed == 0,
         SliceOutcome::ReadFailed(_) => true,
     }
 }

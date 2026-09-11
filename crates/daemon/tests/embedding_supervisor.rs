@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use daemon::embedding_dispatch::{
-    Blocked, DispatchBounds, DispatchEvent, EmbeddingDispatcher, Stage,
+    Blocked, DispatchBounds, DispatchEvent, DispatchFault, EmbeddingDispatcher, Stage,
 };
 use daemon::embedding_supervisor::{
     EmbeddingSupervisor, Maintained, SliceBounds, SliceKind, SliceOutcome, Stop, SupervisorEvent,
@@ -20,6 +20,7 @@ use daemon::search_projection::SearchProjection;
 use host_runtime::synapse::{EmbeddingEngine, SynapseComponent, SynapseLimits};
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, ProjectScope};
+use retrieval::dispatch::{Recovery, authorize_recovery};
 use rusqlite::Connection;
 use support::embedding_fixtures::{
     Corpus, DAY_MS, GateGuard, NOW, PROJECT, TestEngine, bounds, budget, component, eligibility,
@@ -757,4 +758,286 @@ async fn grace_expiry_reports_an_unjoined_slice_and_a_later_request_joins_it() {
         0,
         "the cancelled slice admitted nothing once the store was free"
     );
+}
+
+/// A budget that expires while lane binding waits on the store stops the pass before the eligibility read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_budget_spent_during_binding_stops_before_the_eligibility_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("a", "a text");
+    let (projection, _) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    // Another writer holds the projection file past the budget's deadline, so the binding write returns from its busy wait only after the budget ended.
+    let blocker = Connection::open(search_path(dir.path())).unwrap();
+    blocker.busy_timeout(Duration::ZERO).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        blocker.execute_batch("COMMIT").unwrap();
+    });
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    // The injected read failure distinguishes budget exhaustion before the eligibility read from a read that ran.
+    dispatcher.inject_fault_for_test(DispatchFault::RefuseEligibilityRead);
+    let spent_during_bind = budget(Duration::from_millis(200));
+    let end = tokio::task::block_in_place(|| {
+        dispatcher.run_pass(
+            eligibility(&project),
+            &bounds(),
+            &spent_during_bind,
+            NOW,
+            &mut |_| {},
+        )
+    });
+    releaser.join().unwrap();
+    assert!(
+        matches!(end, Ok(Some(Blocked::BudgetExhausted))),
+        "the pass ended with its budget, without opening the eligibility read: {end:?}"
+    );
+    assert_eq!(engine.calls(), 0);
+}
+
+/// A zero-length slice that makes no progress waits `idle` before the next slice to prevent a scheduler-speed loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exhausted_slice_without_progress_takes_the_idle_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("a", "a text");
+    let (projection, _) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let idle = Duration::from_millis(300);
+    let (sender, mut events) = unbounded_channel();
+    // A zero slice is exhausted the moment it starts, so every backfill and every sweep ends with the budget and nothing done.
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), synapse),
+        SliceBounds {
+            idle,
+            ..slice_bounds(Duration::ZERO)
+        },
+        Arc::new(|| NOW),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+
+    assert_eq!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill {
+            end: Some(Blocked::BudgetExhausted),
+            admitted: 0,
+            published: 0,
+            dispositions: 0,
+        }
+    );
+    let exhausted_at = Instant::now();
+    assert!(matches!(
+        next_event(&mut events).await,
+        SupervisorEvent::SliceStarted {
+            kind: SliceKind::Sweep,
+            ..
+        }
+    ));
+    assert!(
+        exhausted_at.elapsed() >= idle,
+        "an exhausted slice that moved nothing waits the idle interval before the next slice"
+    );
+
+    supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(engine.calls(), 0);
+}
+
+/// Shutdown before the spawned loop is first polled and a repeated shutdown each report the same final stop.
+#[tokio::test]
+async fn shutdown_before_the_loop_is_polled_reports_a_final_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("a", "a text");
+    let (projection, _) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), synapse),
+        slice_bounds(Duration::from_secs(5)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    // On a current-thread runtime the spawned loop cannot run until this task yields, and draining an empty tracker never yields, so shutdown resolves before the loop takes its token.
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let report = supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(report.stop, Some(Stop::Shutdown));
+    assert_eq!(report.slices, 0);
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        supervisor.shutdown(Duration::from_secs(2)).await.unwrap(),
+        report,
+        "a repeated shutdown reports what the first one did"
+    );
+    assert_eq!(
+        next_event(&mut events).await,
+        SupervisorEvent::Stopped(Stop::Shutdown)
+    );
+    assert!(events.try_recv().is_err(), "the stop is reported once");
+    assert_eq!(engine.calls(), 0);
+}
+
+/// A reauthorized row resubmits under a new episode while its earlier host job runs, so one durable job owns two host jobs; shutdown stays unresolved until each has exited.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("again", "again text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let projection = Arc::new(projection);
+    let engine = TestEngine::new();
+    let first_gate = engine.block_calls();
+    let _release_first = GateGuard(Arc::clone(&first_gate));
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    // The clock is advanced past the first episode's deadline once the row is admitted, so a later pass stops the row while its call runs.
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let now = Arc::clone(&clock);
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::clone(&projection), Arc::clone(&synapse)),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                grant: grant(1, NOW + DAY_MS),
+                ..bounds()
+            },
+            ..slice_bounds(Duration::from_secs(2))
+        },
+        Arc::new(move || now.load(Ordering::SeqCst)),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+
+    // The first backfill admits the row and reaches its deadline while the gate holds the embedding call.
+    assert_eq!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill {
+            end: Some(Blocked::BudgetExhausted),
+            admitted: 1,
+            published: 0,
+            dispositions: 0,
+        }
+    );
+    // The episode deadline passes; the first backfill that starts after the clock moved stops the row while the first embedding call runs.
+    let expired = NOW + DAY_MS + 1;
+    clock.store(expired, Ordering::SeqCst);
+    let first_job = row(dir.path(), &occurrence).2.unwrap();
+    loop {
+        match ended(&mut events, SliceKind::Backfill).await {
+            SliceOutcome::Backfill {
+                end: None,
+                admitted: 0,
+                published: 0,
+                dispositions: 1,
+            } => break,
+            SliceOutcome::Backfill {
+                end: Some(Blocked::BudgetExhausted),
+                admitted: 0,
+                published: 0,
+                dispositions: 0,
+            } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(row(dir.path(), &occurrence).0, "failed");
+    assert_eq!(synapse.job_status(&first_job), Some("running"));
+
+    // The next admitting backfill submits a second host job before the first host call returns.
+    let second_gate = engine.block_calls();
+    let _release_second = GateGuard(Arc::clone(&second_gate));
+    let job_id: String = inspect(dir.path())
+        .query_row(
+            "SELECT job_id FROM embedding_jobs WHERE occurrence_id=?1",
+            [&occurrence],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let recovery = projection
+        .write(|conn| {
+            authorize_recovery(conn, &job_id, "auth-1", grant(1, expired + DAY_MS), expired)
+        })
+        .unwrap();
+    assert!(matches!(recovery, Recovery::Granted { .. }), "{recovery:?}");
+    loop {
+        match ended(&mut events, SliceKind::Backfill).await {
+            SliceOutcome::Backfill { admitted: 1, .. } => break,
+            SliceOutcome::Backfill {
+                admitted: 0,
+                published: 0,
+                dispositions: 0,
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    let reopened = row(dir.path(), &occurrence);
+    assert_eq!((reopened.0.as_str(), reopened.1), ("admitted", 1));
+    let second_job = reopened.2.unwrap();
+    assert_ne!(first_job, second_job, "a new episode is a new host job");
+    assert_eq!(synapse.job_status(&first_job), Some("running"));
+    // The single CPU permit serializes the two calls, so the second call is queued until the first returns.
+    assert!(matches!(
+        synapse.job_status(&second_job),
+        Some("queued" | "running")
+    ));
+    assert_eq!(engine.calls(), 1);
+
+    assert_eq!(
+        supervisor.shutdown(Duration::from_secs(2)).await,
+        Err(Unresolved {
+            slices: 0,
+            native: 2
+        }),
+        "the census counts the first host job and the second host job"
+    );
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+
+    TestEngine::release(&first_gate);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while synapse.job_status(&second_job) != Some("running") && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(synapse.job_status(&first_job), Some("ready"));
+    assert_eq!(
+        supervisor.shutdown(Duration::from_secs(2)).await,
+        Err(Unresolved {
+            slices: 0,
+            native: 1
+        }),
+        "the second host job runs after the first returned"
+    );
+
+    TestEngine::release(&second_gate);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while synapse.job_status(&second_job) == Some("running") && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(engine.completed(), 2);
+    let report = supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
+    assert_eq!(report.stop, Some(Stop::Shutdown));
+    assert_eq!(
+        report.held_results, 1,
+        "the stopped episode expects no result; the reopened episode holds one"
+    );
+    assert_eq!(row(dir.path(), &occurrence).0, "admitted");
 }

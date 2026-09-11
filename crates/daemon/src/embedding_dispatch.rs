@@ -61,8 +61,10 @@ pub enum DispatchEvent {
         host_job_id: String,
         attempts: u32,
     },
+    /// The vector is durable and the row is settled; `host_job_id` names the host job whose result it was, so a census can retire exactly that job.
     Published {
         job_id: String,
+        host_job_id: String,
         outcome: Publication,
     },
     Retried {
@@ -219,6 +221,10 @@ impl<'a> EmbeddingDispatcher<'a> {
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
             outcome => observer(DispatchEvent::Bound(outcome)),
         }
+        // The binding's busy wait may have outlived the budget; a read under an exhausted budget selects rows the first `drive` would refuse anyway.
+        if budget.is_exhausted() {
+            return Ok(Some(Blocked::BudgetExhausted));
+        }
         let jobs = if self.take_fault(DispatchFault::RefuseEligibilityRead) {
             Err(SearchProjectionError::Store(storage::StoreError::Backend(
                 "database is locked".to_owned(),
@@ -353,7 +359,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                         input_bytes: job.text.len() as u64,
                         input_tokens: admitted.tokens().get(),
                     };
-                    return self.publish(job, &publication, pass, observer);
+                    return self.publish(job, &host_job_id, &publication, pass, observer);
                 }
                 PollOutcome::Failed { code, .. } if !failure_is_permanent(&code) => {
                     return self.retry(job, "execution_failure", pass, observer);
@@ -527,6 +533,7 @@ impl<'a> EmbeddingDispatcher<'a> {
     fn publish(
         &mut self,
         job: &DispatchJob,
+        host_job_id: &str,
         publication: &VectorPublication<'_>,
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
@@ -543,6 +550,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             Ok(outcome) => {
                 observer(DispatchEvent::Published {
                     job_id: job.job_id.clone(),
+                    host_job_id: host_job_id.to_owned(),
                     outcome,
                 });
                 Ok(None)

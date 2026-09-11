@@ -132,7 +132,9 @@ impl EmbeddingEngine for TestEngine {
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(gate) = self.gate.lock().unwrap().clone() {
+        // The gate slot's guard is released before the wait, so `block_calls` can install a later gate while this call is held.
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
             let mut released = gate.0.lock().unwrap();
             while !*released {
                 released = gate.1.wait(released).unwrap();

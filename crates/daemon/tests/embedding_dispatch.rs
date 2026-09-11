@@ -152,7 +152,9 @@ fn published(events: &[DispatchEvent]) -> Vec<(String, Publication)> {
     events
         .iter()
         .filter_map(|event| match event {
-            DispatchEvent::Published { job_id, outcome } => Some((job_id.clone(), outcome.clone())),
+            DispatchEvent::Published {
+                job_id, outcome, ..
+            } => Some((job_id.clone(), outcome.clone())),
             _ => None,
         })
         .collect()
