@@ -444,12 +444,12 @@ impl fmt::Display for ArtifactErrorMessage<'_> {
     }
 }
 
+pub use deletion::{
+    ARTIFACT_DELETION_SOURCE_KIND, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactDeletionResult, BarrierConsumerStatus, DeletionBarrierStatus,
+};
 #[cfg(feature = "test-support")]
 pub use deletion::{ArtifactDeletionFault, ArtifactDeletionHook};
-pub use deletion::{
-    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
-    ArtifactDeletionResult, BarrierConsumerStatus, DeletionBarrierStatus,
-};
 #[cfg(feature = "test-support")]
 pub use gc::ArtifactGcFault;
 pub use gc::ArtifactGcResult;

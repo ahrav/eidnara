@@ -6,6 +6,7 @@
 //! The local transaction is committed and released before the kernel writer is taken, so the two databases never hold transactions at the same time.
 //!
 //! A refusal ends the episode without moving either checkpoint.
+//! A window that carries an artifact deletion is refused, because the descriptor export carries no tombstone for it and acknowledging it would report the deletion as propagated.
 //! An unknown local commit outcome is reconciled from the projection's durable rows.
 //! An unknown acknowledgement outcome is reconciled from the kernel's durable consumer checkpoint.
 //! Integrity and storage failures quarantine the driver, which then refuses further episodes, so no acknowledgement can rest on a projection whose contents are in doubt.
@@ -13,9 +14,9 @@
 use std::num::NonZeroUsize;
 
 use kernel::{
-    CommitPageBounds, CommitReadError, CommitReadRequest, ExportWindow, KernelError, KernelStore,
-    PageEnd, SourceExportError, SourceHoldAdmission, SourceHoldBinding, SourceHoldError,
-    SourcePageBounds, SourceRow,
+    ARTIFACT_DELETION_SOURCE_KIND, CommitPageBounds, CommitReadError, CommitReadRequest,
+    CompleteCommit, ExportWindow, KernelError, KernelStore, PageEnd, SourceExportError,
+    SourceHoldAdmission, SourceHoldBinding, SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::{
@@ -101,6 +102,11 @@ pub enum Blocked {
     TargetUnreachable {
         after: i64,
         target: i64,
+    },
+    /// The window holds an artifact deletion, and the projection has no way to tombstone the deleted occurrences.
+    /// Acknowledging it would satisfy the consumer's deletion barrier while the deleted text is still served.
+    DeletionUnpropagated {
+        commit_seq: i64,
     },
     HoldExtension(SourceHoldError),
     Export(SourceExportError),
@@ -376,6 +382,13 @@ impl<'a> SearchCatchUp<'a> {
                 }
                 .into());
             }
+            // The export delivers creations, supersessions, and retirements; a deletion arrives only as a control row, and the batch it would need is not built here.
+            if let Some(deletion) = first_deletion(&page.commits) {
+                return Err(Blocked::DeletionUnpropagated {
+                    commit_seq: deletion,
+                }
+                .into());
+            }
             let through = page.through;
             self.apply_window(consumer, bounds, after, through, now, observer)?;
             report.batches_applied += 1;
@@ -604,6 +617,18 @@ impl<'a> SearchCatchUp<'a> {
         self.quarantine = Some(quarantine.clone());
         CatchUpError::Quarantined(quarantine)
     }
+}
+
+fn first_deletion(commits: &[CompleteCommit]) -> Option<i64> {
+    commits
+        .iter()
+        .find(|commit| {
+            commit
+                .rows
+                .iter()
+                .any(|row| row.source_kind == ARTIFACT_DELETION_SOURCE_KIND)
+        })
+        .map(|commit| commit.commit_seq)
 }
 
 /// An acknowledgement that failed this way may still have committed, because the failure can strike after the kernel's COMMIT or while waiting for its writer, so the durable checkpoint decides.

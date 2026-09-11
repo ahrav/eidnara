@@ -19,10 +19,11 @@ use daemon::search_catchup::{
 use daemon::search_projection::SearchProjection;
 use kernel::source_identity::Occurrence;
 use kernel::{
-    ArtifactIngestRequest, CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest,
-    DomainSpec, ExportWindow, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
-    SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourceHoldError, SourcePageBounds, SourceRow,
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
+    ArtifactDeletionResult, ArtifactIngestRequest, CommitIntent, CommitPageBounds, CommitReadError,
+    CommitReadRequest, DomainSpec, ExportWindow, KernelStore, ProviderEgress, RepositoryProvenance,
+    Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding,
+    SourceHoldBounds, SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::{
@@ -390,6 +391,29 @@ impl Corpus {
             .commit(intent(&format!("empty-{key}")), |_| Ok(String::new()))
             .unwrap()
             .commit_seq
+    }
+
+    /// Logical (non-purge) deletion for `evidence_id`.
+    /// The ledger records nothing: the projection must not change until it can tombstone the deletion.
+    fn delete(&self, key: &str, evidence_id: &str) -> ArtifactDeletionResult {
+        let digest: String = inspect(&self.kernel_db())
+            .query_row(
+                "SELECT artifact_digest FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        self.kernel
+            .delete_artifact(ArtifactDeletionRequest {
+                intent: intent(&format!("delete-{key}")),
+                identity: ArtifactDeletionIdentity::Digest(digest),
+                kind: ArtifactDeletionKind::Delete,
+                operator_id: None,
+                target_locator: None,
+                reason: None,
+                deleted_at: 42,
+            })
+            .unwrap()
     }
 
     /// A control commit: another consumer registers, which projects nothing.
@@ -899,6 +923,90 @@ fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
         .unwrap();
     assert_eq!(*blocked(&report), Blocked::NoLocalBaseline);
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+/// Acknowledging past a deletion would satisfy the search consumer's deletion barrier while the projection still serves the deleted text, so the window is refused and none of its commits move.
+#[test]
+fn a_window_holding_a_deletion_is_refused_and_leaves_its_barrier_unsatisfied() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, _) = corpus.bootstrap(dir.path());
+
+    // One ingest and one publish fill the first two-commit window; the deletion opens the next.
+    let doomed = corpus.publish("doomed", &[("msg-b", "1", "doomed message")]);
+    let deletion = corpus.delete("doomed", "evidence-doomed-0");
+    assert_eq!(deletion.commit_seq, doomed + 1);
+    assert_eq!(corpus.tip(), deletion.commit_seq);
+    let ledger = corpus.ledger();
+    assert!(
+        ledger.tombstones.is_empty(),
+        "the ledger predicts the row stays live until a tombstone can be projected"
+    );
+
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let mut trace = Vec::new();
+    let report = driver
+        .run_episode(&consumer, &two_commit_windows(), 3, &mut |event| {
+            trace.push(event);
+            assert_each_window(dir.path(), dir.path(), &ledger, event);
+        })
+        .unwrap();
+    assert_eq!(
+        *blocked(&report),
+        Blocked::DeletionUnpropagated {
+            commit_seq: deletion.commit_seq,
+        }
+    );
+    assert_eq!(report.target, deletion.commit_seq);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert_eq!(report.acknowledged_through, doomed);
+    assert_eq!(windows(&trace), vec![doomed]);
+    assert_eq!(corpus.kernel_checkpoint(), doomed);
+    assert_matches_ledger(dir.path(), &ledger, doomed);
+    assert!(
+        durable(dir.path())
+            .rows
+            .values()
+            .any(|text| text == "doomed message"),
+        "the deleted text is still served, so the deletion must not count as propagated"
+    );
+
+    let barrier = corpus
+        .kernel
+        .deletion_barrier(&deletion.barrier_id)
+        .unwrap();
+    let search = barrier
+        .consumers
+        .iter()
+        .find(|status| status.consumer_id == CONSUMER)
+        .unwrap();
+    assert_eq!(search.required_checkpoint_commit_seq, deletion.commit_seq);
+    assert_eq!(search.checkpoint_commit_seq, Some(doomed));
+    assert!(!search.satisfied, "{barrier:?}");
+    assert!(!barrier.cleared, "{barrier:?}");
+
+    let before = durable(dir.path());
+    let again = driver
+        .run_episode(&consumer, &two_commit_windows(), 4, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        *blocked(&again),
+        Blocked::DeletionUnpropagated {
+            commit_seq: deletion.commit_seq,
+        }
+    );
+    assert_eq!((again.batches_applied, again.commits_consumed), (0, 0));
+    assert_eq!(corpus.kernel_checkpoint(), doomed);
+    assert_eq!(durable(dir.path()), before);
+    assert!(
+        !corpus
+            .kernel
+            .deletion_barrier(&deletion.barrier_id)
+            .unwrap()
+            .cleared
+    );
 }
 
 /// Probes the projection's write lock from an independent connection whenever the driver is about to take the kernel writer; an open local transaction makes the probe fail.
