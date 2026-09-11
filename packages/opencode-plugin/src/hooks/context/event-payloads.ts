@@ -2,6 +2,7 @@ import { isRecord } from "../../shared/record-type-guard";
 
 export type EidnaraEventType =
     | "session.created"
+    | "session.updated"
     | "session.error"
     | "message.updated"
     | "message.removed"

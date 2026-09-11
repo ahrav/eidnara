@@ -118,4 +118,22 @@ describe("BoundedSessionMap", () => {
         expect(map.has("missing")).toBe(false);
         expect(map.size).toBe(0);
     });
+
+    it("iterates without touching recency and supports deletion during a scan", () => {
+        const map = new BoundedSessionMap<number>(3);
+        map.set("a", 1);
+        map.set("b", 2);
+        map.set("c", 3);
+        expect([...map.entries()]).toEqual([
+            ["a", 1],
+            ["b", 2],
+            ["c", 3],
+        ]);
+        map.set("d", 4);
+        expect(map.has("a")).toBe(false);
+        for (const [key, value] of map.entries()) {
+            if (value % 2 === 0) map.delete(key);
+        }
+        expect([...map.entries()]).toEqual([["c", 3]]);
+    });
 });

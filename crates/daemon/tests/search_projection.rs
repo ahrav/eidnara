@@ -452,6 +452,7 @@ fn a_name_only_remediation_changes_no_persisted_input() {
         .capture_source_hold(
             &binding,
             SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(selections.len()).unwrap(),
                 admission: SourceHoldAdmission {
                     max_references: NonZeroUsize::new(64).unwrap(),
                     max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
@@ -672,6 +673,7 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         .capture_source_hold(
             &binding,
             SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(64).unwrap(),
                 admission: SourceHoldAdmission {
                     max_references: NonZeroUsize::new(64).unwrap(),
                     max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),

@@ -5,12 +5,11 @@
 //! only on the kernel, whose CC4 occurrence encoder and CC5 payload identity
 //! it reuses rather than restating.
 //!
-//! Persistence is exact or refused. An occurrence is stored beside its tuple
-//! bytes and a payload beside its byte length; a digest is never taken as
-//! equality. When an identifier already exists, the stored tuple or bytes are
-//! compared with the incoming ones, equal values replay as a no-op, and unequal
-//! values are refused without a suffix, a rename, or a replacement. Payloads
-//! are never logged; refusals name identities and sizes, not content.
+//! Persistence is exact or refused. A repeated occurrence identifier must
+//! carry the same canonical tuple, payload, and immutable metadata; a repeated
+//! payload identifier must carry identical bytes. Exact replays write nothing,
+//! and conflicts are refused without a suffix, a rename, or a replacement.
+//! Payloads are never logged; refusals name identities and sizes, not content.
 
 pub mod batch;
 
@@ -19,8 +18,8 @@ use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
 use kernel::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceRefusal, encode, encode_preserving_span, payload_id,
-    select,
+    EncodedOccurrence, Occurrence, OccurrenceRefusal, Span, derived_lineage_id, encode,
+    encode_preserving_span, identity_digest, select,
 };
 use rusqlite::{CachedStatement, OptionalExtension, params};
 use storage::GuardedConn;
@@ -227,7 +226,7 @@ pub enum ProjectionError {
     )]
     TombstoneNotAfterCreation { occurrence_id: String },
     #[error(
-        "occurrence {occurrence_id} is stored with a different tuple under the same identifier"
+        "occurrence {occurrence_id} is stored with a different tuple, payload, or immutable metadata under the same identifier"
     )]
     OccurrenceCollision { occurrence_id: String },
     #[error("payload {payload_id} is stored with different bytes under the same identifier")]
@@ -365,7 +364,7 @@ pub fn read_identity(
 type Digests<'a> = dyn Fn(&EncodedOccurrence, &[u8]) -> (String, String) + 'a;
 
 fn canonical_digests(encoded: &EncodedOccurrence, selected: &[u8]) -> (String, String) {
-    (encoded.occurrence_id.clone(), payload_id(selected))
+    (encoded.occurrence_id.clone(), identity_digest(selected))
 }
 
 /// Persists `records` in input order. Every collision check runs before the
@@ -430,6 +429,36 @@ pub(crate) fn encode_record<'a>(
     }
 }
 
+/// Everything replay equality compares for one occurrence identifier.
+/// `persisted_at` is excluded because it records this store's write time, not
+/// source data.
+#[derive(PartialEq, Eq)]
+struct OccurrenceContent<'a> {
+    tuple: &'a [u8],
+    payload_id: &'a str,
+    domain_id: &'a str,
+    sensitivity: &'a str,
+    source_object_id: &'a str,
+    source_evidence_id: &'a str,
+    source_artifact_digest: &'a str,
+    created_commit_seq: i64,
+}
+
+impl OccurrenceRecord<'_> {
+    fn content<'a>(&'a self, tuple: &'a [u8], payload_id: &'a str) -> OccurrenceContent<'a> {
+        OccurrenceContent {
+            tuple,
+            payload_id,
+            domain_id: self.domain_id,
+            sensitivity: self.sensitivity.as_str(),
+            source_object_id: self.source_object_id,
+            source_evidence_id: self.source_evidence_id,
+            source_artifact_digest: self.source_artifact_digest,
+            created_commit_seq: self.created_commit_seq,
+        }
+    }
+}
+
 /// A batch prepares these statements once rather than once per record.
 struct Statements<'c> {
     occurrence_lookup: CachedStatement<'c>,
@@ -441,8 +470,11 @@ struct Statements<'c> {
 impl<'c> Statements<'c> {
     fn prepare(conn: &GuardedConn<'c>) -> Result<Self, ProjectionError> {
         Ok(Self {
-            occurrence_lookup: conn
-                .prepare_cached("SELECT tuple,payload_id FROM occurrences WHERE occurrence_id=?1")?,
+            occurrence_lookup: conn.prepare_cached(
+                "SELECT tuple,payload_id,domain_id,sensitivity,source_object_id,
+                        source_evidence_id,source_artifact_digest,created_commit_seq
+                 FROM occurrences WHERE occurrence_id=?1",
+            )?,
             payload_lookup: conn.prepare_cached("SELECT bytes FROM payloads WHERE payload_id=?1")?,
             payload_insert: conn.prepare_cached(
                 "INSERT INTO payloads(payload_id,bytes,byte_length,created_at) VALUES (?1,?2,?3,?4)",
@@ -460,21 +492,28 @@ impl<'c> Statements<'c> {
     fn occurrence_stored(
         &mut self,
         occurrence_id: &str,
-        tuple: &[u8],
-        payload_id: &str,
+        content: &OccurrenceContent<'_>,
     ) -> Result<bool, ProjectionError> {
-        let stored: Option<(Vec<u8>, String)> = self
+        let matches = self
             .occurrence_lookup
-            .query_row([occurrence_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row([occurrence_id], |row| {
+                let stored = OccurrenceContent {
+                    tuple: row.get_ref(0)?.as_blob()?,
+                    payload_id: row.get_ref(1)?.as_str()?,
+                    domain_id: row.get_ref(2)?.as_str()?,
+                    sensitivity: row.get_ref(3)?.as_str()?,
+                    source_object_id: row.get_ref(4)?.as_str()?,
+                    source_evidence_id: row.get_ref(5)?.as_str()?,
+                    source_artifact_digest: row.get_ref(6)?.as_str()?,
+                    created_commit_seq: row.get(7)?,
+                };
+                Ok(stored == *content)
+            })
             .optional()?;
-        match stored {
+        match matches {
             None => Ok(false),
-            Some((stored_tuple, stored_payload))
-                if stored_tuple == tuple && stored_payload == payload_id =>
-            {
-                Ok(true)
-            }
-            Some(_) => Err(ProjectionError::OccurrenceCollision {
+            Some(true) => Ok(true),
+            Some(false) => Err(ProjectionError::OccurrenceCollision {
                 occurrence_id: occurrence_id.to_string(),
             }),
         }
@@ -585,17 +624,21 @@ fn persist_with_digests<'c>(
             });
         }
         let (occurrence_id, payload_id) = digests(&encoded, selected);
+        let content = record.content(&encoded.tuple, &payload_id);
         let insert_occurrence = match batch_occurrences.get(&occurrence_id) {
             Some(&earlier) => {
                 let earlier = &prepared[earlier];
-                if earlier.encoded.tuple != encoded.tuple || earlier.payload_id != payload_id {
+                if earlier
+                    .record
+                    .content(&earlier.encoded.tuple, &earlier.payload_id)
+                    != content
+                {
                     return Err(ProjectionError::OccurrenceCollision { occurrence_id });
                 }
                 false
             }
             None => {
-                let stored =
-                    statements.occurrence_stored(&occurrence_id, &encoded.tuple, &payload_id)?;
+                let stored = statements.occurrence_stored(&occurrence_id, &content)?;
                 batch_occurrences.insert(occurrence_id.clone(), index);
                 !stored
             }
@@ -711,7 +754,8 @@ pub fn tombstone_occurrence(
 
 /// One stored occurrence with its payload bytes and tombstone, or `None`. A
 /// row whose columns do not decode to the shape the schema promises is
-/// `CorruptRow`.
+/// `CorruptRow`, as is a tuple or payload that no longer hashes to its stored
+/// identifier.
 pub fn read_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
@@ -744,10 +788,15 @@ pub fn read_occurrence(
                     row.get::<_, Option<String>>(17)?,
                 ) {
                     (None, None) => None,
-                    (Some(invalidated_commit_seq), Some(reason)) => Some(Tombstone {
-                        invalidated_commit_seq,
-                        reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
-                    }),
+                    (Some(invalidated_commit_seq), Some(reason)) => {
+                        if invalidated_commit_seq <= row.get::<_, i64>(15)? {
+                            return Err(corrupt());
+                        }
+                        Some(Tombstone {
+                            invalidated_commit_seq,
+                            reason: TombstoneReason::parse(&reason).ok_or_else(corrupt)?,
+                        })
+                    }
                     _ => return Err(corrupt()),
                 };
                 Ok(StoredOccurrence {
@@ -776,5 +825,20 @@ pub fn read_occurrence(
             rusqlite::Error::InvalidQuery => ProjectionError::CorruptRow,
             other => other.into(),
         })?;
+    if let Some(stored) = &stored {
+        let lineage = derived_lineage_id(
+            &stored.tuple,
+            &stored.class,
+            stored.revision,
+            &stored.representation,
+            stored.span.map(|(start, end)| Span { start, end }),
+        );
+        if identity_digest(&stored.tuple) != stored.occurrence_id
+            || identity_digest(&stored.bytes) != stored.payload_id
+            || lineage.as_deref() != Some(stored.lineage_id.as_str())
+        {
+            return Err(ProjectionError::CorruptRow);
+        }
+    }
     Ok(stored)
 }

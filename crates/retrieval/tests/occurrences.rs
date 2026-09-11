@@ -60,6 +60,7 @@ fn open(dir: &Path) -> SqliteStore {
 #[derive(Debug, Clone)]
 struct Owned {
     id: String,
+    source_id: String,
     class: String,
     identity: Vec<(String, String)>,
     revision: String,
@@ -74,6 +75,7 @@ struct Owned {
 
 impl Owned {
     fn from_json(value: &Value) -> Self {
+        let id = value["id"].as_str().unwrap();
         let identity = value["identity"]
             .as_object()
             .map(|fields| {
@@ -102,7 +104,14 @@ impl Owned {
                 _ => None,
             });
         Self {
-            id: value["id"].as_str().unwrap().to_string(),
+            id: id.to_string(),
+            // A replay is metadata-equal to its canonical record.
+            source_id: match id {
+                "m1dup" => "m1",
+                "t_whole_span" => "t_whole",
+                other => other,
+            }
+            .to_string(),
             class: value["class"].as_str().unwrap_or("").to_string(),
             identity,
             revision: value["revision"]
@@ -150,8 +159,8 @@ impl Owned {
             payload: Payload::Whole(&self.payload),
             domain_id: "domain-stable-id",
             sensitivity: Sensitivity::Normal,
-            source_object_id: &self.id,
-            source_evidence_id: &self.id,
+            source_object_id: &self.source_id,
+            source_evidence_id: &self.source_id,
             source_artifact_digest: "0000000000000000000000000000000000000000000000000000000000000000",
             created_commit_seq: 7,
         }
@@ -342,7 +351,7 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
                 .map(|r| {
                     (
                         r.class.clone(),
-                        r.id.clone(),
+                        r.source_id.clone(),
                         r.revision.parse().unwrap(),
                         by_id[r.id.as_str()].occurrence_id.clone(),
                     )
@@ -384,6 +393,13 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
                 assert_eq!(stored.tombstone, None);
                 assert_eq!(stored.sensitivity, Sensitivity::Normal);
                 assert_eq!(stored.domain_id, "domain-stable-id");
+                assert_eq!(stored.source_object_id, record.source_id);
+                assert_eq!(stored.source_evidence_id, record.source_id);
+                assert_eq!(
+                    stored.source_artifact_digest,
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                );
+                assert_eq!(stored.created_commit_seq, 7);
                 let expected_text = exact
                     .get(&record.id)
                     .or_else(|| spans.get(&record.id))
@@ -411,51 +427,75 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
 }
 
 #[test]
-fn missing_payload_is_corruption_not_absence() {
+fn missing_or_altered_payload_is_corruption_not_absence() {
     let fixtures = fixtures();
     let record = Owned::from_json(&fixtures["records"][0]);
     let mut empty = Owned::from_json(&fixtures["records"][1]);
     empty.payload.clear();
-    let dir = tempfile::tempdir().unwrap();
-    let outcomes = {
+    let mut valid = Owned::from_json(&fixtures["records"][2]);
+    valid.payload = "intact payload".to_string();
+    let mut altered = record.payload.as_bytes().to_vec();
+    altered[0] ^= 1;
+    assert_eq!(altered.len(), record.payload.len());
+    assert_ne!(altered, record.payload.as_bytes());
+
+    for damaged_payload in [None, Some(altered.as_slice())] {
+        let dir = tempfile::tempdir().unwrap();
+        let outcomes = {
+            let store = open(dir.path());
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(persist_all(conn, &[record.clone(), empty.clone(), valid.clone()]).unwrap())
+                })
+                .unwrap()
+        };
+
+        // Corruption injection uses a raw connection; the guarded store is closed.
+        {
+            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+            let changed = match damaged_payload {
+                Some(bytes) => {
+                    raw.pragma_update(None, "foreign_keys", true).unwrap();
+                    raw.execute(
+                        "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
+                        rusqlite::params![outcomes[0].payload_id, bytes],
+                    )
+                }
+                None => {
+                    raw.pragma_update(None, "foreign_keys", false).unwrap();
+                    raw.execute(
+                        "DELETE FROM payloads WHERE payload_id=?1",
+                        [&outcomes[0].payload_id],
+                    )
+                }
+            };
+            assert_eq!(changed.unwrap(), 1);
+        }
+
         let store = open(dir.path());
-        store
-            .with_conn_fenced(|conn| Ok(persist_all(conn, &[record, empty]).unwrap()))
-            .unwrap()
-    };
-
-    // Corruption injection uses a raw connection; the guarded store is closed.
-    {
-        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
-        raw.pragma_update(None, "foreign_keys", false).unwrap();
         assert_eq!(
-            raw.execute(
-                "DELETE FROM payloads WHERE payload_id=?1",
-                [&outcomes[0].payload_id],
-            )
-            .unwrap(),
-            1
+            row_counts(&store),
+            (3, 2 + i64::from(damaged_payload.is_some()))
         );
+        store
+            .with_conn(|conn| {
+                assert_eq!(read_occurrence(conn, "no-such-occurrence"), Ok(None));
+                for (outcome, expected) in outcomes[1..].iter().zip([&empty, &valid]) {
+                    assert_eq!(
+                        read_occurrence(conn, &outcome.occurrence_id)
+                            .unwrap()
+                            .map(|stored| stored.bytes),
+                        Some(expected.payload.as_bytes().to_vec())
+                    );
+                }
+                assert_eq!(
+                    read_occurrence(conn, &outcomes[0].occurrence_id),
+                    Err(ProjectionError::CorruptRow)
+                );
+                Ok(())
+            })
+            .unwrap();
     }
-
-    let store = open(dir.path());
-    assert_eq!(row_counts(&store), (2, 1));
-    store
-        .with_conn(|conn| {
-            assert_eq!(read_occurrence(conn, "no-such-occurrence"), Ok(None));
-            assert_eq!(
-                read_occurrence(conn, &outcomes[1].occurrence_id)
-                    .unwrap()
-                    .map(|stored| stored.bytes),
-                Some(Vec::new())
-            );
-            assert_eq!(
-                read_occurrence(conn, &outcomes[0].occurrence_id),
-                Err(ProjectionError::CorruptRow)
-            );
-            Ok(())
-        })
-        .unwrap();
 }
 
 #[test]
@@ -548,7 +588,10 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
     );
     let collide_tuple = store
         .with_conn_fenced(|conn| {
-            let request = t_err.record(&t_err_identity);
+            let request = OccurrenceRecord {
+                occurrence: t_err.record(&t_err_identity).occurrence,
+                ..m1.record(&m1_identity)
+            };
             let target = m1.expected_occurrence_id.clone().unwrap();
             let result = persist_occurrences_with_digests_for_test(
                 conn,
@@ -556,6 +599,7 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
                 bounds(),
                 2,
                 &|_, selected| {
+                    assert_eq!(selected, m1.payload.as_bytes());
                     (
                         target.clone(),
                         kernel::source_identity::payload_id(selected),
@@ -612,11 +656,15 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
             let target = m1.expected_occurrence_id.clone().unwrap();
             Ok(persist_occurrences_with_digests_for_test(
                 conn,
-                &[one_byte.record(&one_byte_identity)],
+                &[OccurrenceRecord {
+                    occurrence: one_byte.record(&one_byte_identity).occurrence,
+                    ..m1.record(&m1_identity)
+                }],
                 bounds(),
                 2,
                 &|encoded, selected| {
                     assert_eq!(encoded.tuple.len(), m1_tuple_len);
+                    assert_eq!(selected, m1.payload.as_bytes());
                     (
                         target.clone(),
                         kernel::source_identity::payload_id(selected),
@@ -632,12 +680,12 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
         })
     );
 
-    // The same digests with equal values are not collisions: replaying m1
-    // under its own digests is the no-op it always was.
+    // Replaying m1 with equal values and its own digests writes nothing.
     let equal = store
         .with_conn_fenced(|conn| {
             let request = m1.record(&m1_identity);
-            Ok(persist_occurrences_with_digests_for_test(
+            let before: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+            let replay = persist_occurrences_with_digests_for_test(
                 conn,
                 &[request],
                 bounds(),
@@ -649,7 +697,10 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
                     )
                 },
             )
-            .unwrap())
+            .unwrap();
+            let after: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+            assert_eq!(after, before, "equal replay must not mutate rows");
+            Ok(replay)
         })
         .unwrap();
     assert!(!equal[0].inserted && !equal[0].payload_inserted);
@@ -1229,4 +1280,292 @@ fn a_different_identity_cannot_be_installed_over_an_existing_projection() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn replay_with_different_immutable_metadata_is_a_collision_not_a_noop() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let identity = borrowed(&record.identity);
+    let occurrence_id = occurrence_id_of(&record);
+    let original = record.record(&identity);
+    let mut fresh = record.clone();
+    fresh
+        .identity
+        .iter_mut()
+        .find(|(name, _)| name == "message_id")
+        .unwrap()
+        .1 = "msg-fresh".to_string();
+    fresh.payload = "unrelated payload".to_string();
+    let fresh_identity = borrowed(&fresh.identity);
+
+    // The preflight rejects metadata variants that conflict with either a
+    // stored row or an earlier batch record.
+    let variants: Vec<OccurrenceRecord<'_>> = vec![
+        OccurrenceRecord {
+            sensitivity: Sensitivity::Secret,
+            ..record.record(&identity)
+        },
+        OccurrenceRecord {
+            domain_id: "domain-other",
+            ..record.record(&identity)
+        },
+        OccurrenceRecord {
+            source_object_id: "other-object",
+            ..record.record(&identity)
+        },
+        OccurrenceRecord {
+            source_evidence_id: "other-evidence",
+            ..record.record(&identity)
+        },
+        OccurrenceRecord {
+            source_artifact_digest: "1111111111111111111111111111111111111111111111111111111111111111",
+            ..record.record(&identity)
+        },
+        OccurrenceRecord {
+            created_commit_seq: 8,
+            ..record.record(&identity)
+        },
+    ];
+    for stored in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        if stored {
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(
+                        persist_occurrences(conn, std::slice::from_ref(&original), bounds(), 1)
+                            .unwrap(),
+                    )
+                })
+                .unwrap();
+        }
+        let before = store
+            .with_conn(|conn| Ok(read_occurrence(conn, &occurrence_id).unwrap()))
+            .unwrap();
+        assert_eq!(before.is_some(), stored);
+        if let Some(row) = &before {
+            assert_eq!(row.sensitivity, Sensitivity::Normal);
+            assert_eq!(row.created_commit_seq, 7);
+        }
+        for (index, variant) in variants.iter().enumerate() {
+            assert_eq!(variant.occurrence, original.occurrence);
+            assert!(matches!(
+                (variant.payload, original.payload),
+                (Payload::Whole(a), Payload::Whole(b)) if a == b
+            ));
+            let mut requests = vec![fresh.record(&fresh_identity)];
+            if !stored {
+                requests.push(original.clone());
+            }
+            requests.push(variant.clone());
+            store
+                .with_conn_fenced(|conn| {
+                    let changes_before: i64 =
+                        conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                    let result = persist_occurrences(conn, &requests, bounds(), 2);
+                    let changes_after: i64 =
+                        conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                    assert_eq!(
+                        result,
+                        Err(ProjectionError::OccurrenceCollision {
+                            occurrence_id: occurrence_id.clone()
+                        }),
+                        "metadata variant {index}, stored {stored}"
+                    );
+                    assert_eq!(
+                        changes_after, changes_before,
+                        "preflight must not mutate rows"
+                    );
+                    assert_eq!(read_occurrence(conn, &occurrence_id).unwrap(), before);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(row_counts(&store), (i64::from(stored), i64::from(stored)));
+        }
+    }
+}
+
+#[test]
+fn altered_tuple_bytes_are_corruption_not_served_identity() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let identity = borrowed(&record.identity);
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = {
+        let store = open(dir.path());
+        store
+            .with_conn_fenced(|conn| {
+                Ok(
+                    persist_occurrences(conn, &[record.record(&identity)], bounds(), 1)
+                        .unwrap()
+                        .remove(0),
+                )
+            })
+            .unwrap()
+    };
+
+    // Same-length bit flip in the stored tuple: type and foreign-key
+    // constraints cannot see it, only the digest relation can.
+    {
+        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+        let mut tuple: Vec<u8> = raw
+            .query_row(
+                "SELECT tuple FROM occurrences WHERE occurrence_id=?1",
+                [&outcome.occurrence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let original = tuple.clone();
+        *tuple.last_mut().unwrap() ^= 1;
+        assert_eq!(tuple.len(), original.len());
+        assert_ne!(tuple, original);
+        let changed = raw
+            .execute(
+                "UPDATE occurrences SET tuple=?2 WHERE occurrence_id=?1",
+                rusqlite::params![outcome.occurrence_id, tuple],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    let store = open(dir.path());
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                read_occurrence(conn, &outcome.occurrence_id),
+                Err(ProjectionError::CorruptRow)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn altered_tuple_derived_columns_are_corruption_not_served_identity() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let with_span = Owned::from_json(
+        fixtures["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["id"] == "t_span")
+            .unwrap(),
+    );
+
+    // Each derived column swapped to a schema-valid value that disagrees with
+    // the retained tuple: SQLite's CHECK vocabulary accepts all of them.
+    let damages: &[(&str, &str)] = &[
+        (
+            "class",
+            "UPDATE occurrences SET class='git_commits' WHERE occurrence_id=?1",
+        ),
+        (
+            "revision",
+            "UPDATE occurrences SET revision=9 WHERE occurrence_id=?1",
+        ),
+        (
+            "representation",
+            "UPDATE occurrences SET representation='tool_output' WHERE occurrence_id=?1",
+        ),
+        (
+            "lineage_id",
+            "UPDATE occurrences SET lineage_id='0000000000000000000000000000000000000000000000000000000000000000' WHERE occurrence_id=?1",
+        ),
+        (
+            "span_added",
+            "UPDATE occurrences SET span_start=0, span_end=5 WHERE occurrence_id=?1",
+        ),
+        (
+            "span_removed",
+            "UPDATE occurrences SET span_start=NULL, span_end=NULL WHERE occurrence_id=?1",
+        ),
+        (
+            "span_shifted",
+            "UPDATE occurrences SET span_end=span_end-1 WHERE occurrence_id=?1",
+        ),
+    ];
+    for (damage, sql) in damages {
+        let target = match *damage {
+            "span_removed" | "span_shifted" => &with_span,
+            _ => &record,
+        };
+        let identity = borrowed(&target.identity);
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = {
+            let store = open(dir.path());
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(
+                        persist_occurrences(conn, &[target.record(&identity)], bounds(), 1)
+                            .unwrap()
+                            .remove(0),
+                    )
+                })
+                .unwrap()
+        };
+        {
+            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+            let changed = raw.execute(sql, [&outcome.occurrence_id]).unwrap();
+            assert_eq!(changed, 1, "{damage}");
+        }
+        let store = open(dir.path());
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    read_occurrence(conn, &outcome.occurrence_id),
+                    Err(ProjectionError::CorruptRow),
+                    "{damage}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn stored_tombstone_at_or_before_creation_is_corruption() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let identity = borrowed(&record.identity);
+    // The writer refuses seq <= created_commit_seq (7); both boundary values
+    // must also be refused when found already stored.
+    for planted_seq in [7, 3] {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = {
+            let store = open(dir.path());
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(
+                        persist_occurrences(conn, &[record.record(&identity)], bounds(), 1)
+                            .unwrap()
+                            .remove(0),
+                    )
+                })
+                .unwrap()
+        };
+        {
+            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+            let changed = raw
+                .execute(
+                    "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+                     VALUES (?1,?2,'retired',1)",
+                    rusqlite::params![outcome.occurrence_id, planted_seq],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+        }
+        let store = open(dir.path());
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    read_occurrence(conn, &outcome.occurrence_id),
+                    Err(ProjectionError::CorruptRow),
+                    "seq={planted_seq}"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 }

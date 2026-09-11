@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,13 @@ import {
     __resetProjectIdentityForTests,
     resolveProjectIdentityForSession,
 } from "../../features/context/project-identity";
+import * as logger from "../../shared/logger";
+import { TimeoutError } from "../../shared/with-timeout";
+import * as permissionAvailability from "./ctx-reduce-availability";
+import {
+    clearToolPermissionDenied,
+    peekToolPermissionDeniedForTest,
+} from "./ctx-reduce-availability";
 import { createEidnaraHook, type EidnaraDeps } from "./hook";
 import {
     createKernelClient,
@@ -76,6 +83,8 @@ function installOneRawMessage(sessionId: string): MessageLike[] {
 }
 
 afterEach(() => {
+    jest.useRealTimers();
+    mock.restore();
     closeReadOnlySessionDb();
     resetKernelClientsForTest();
     for (const unregister of unregisterProviders.splice(0)) unregister();
@@ -154,6 +163,310 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
 }
 
 describe("eidnara hook", () => {
+    for (const failure of ["rejection", "timeout"] as const) {
+        it(`keeps todowrite absent after a cached deny and live ${failure}`, async () => {
+            useTempDataHome("hook-permission-failure-");
+            jest.useFakeTimers();
+            const sessionId = `ses-deny-read-${failure}`;
+            const logSpy = spyOn(logger, "sessionLog");
+            clearToolPermissionDenied(sessionId);
+            const client = createClientMock();
+            const agents = mock(async () => ({
+                data: [{ name: "build", permission: { todowrite: "deny" } }],
+            }));
+            client.app.agents = agents as never;
+            const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+            const hook = requireHook(
+                createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+            );
+            const messages = installOneRawMessage(sessionId);
+            Object.assign(messages[0]!.info!, { agent: "build" });
+            const transform = () =>
+                hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+            await transform();
+            expect(peekToolPermissionDeniedForTest(sessionId, "todowrite", "build")).toBe(true);
+
+            for (const consume of [
+                transform,
+                () =>
+                    hook["tool.execute.after"]({
+                        tool: "todowrite",
+                        sessionID: sessionId,
+                        agent: "build",
+                        args: {
+                            todos: [{ content: "Blocked", status: "pending", priority: "high" }],
+                        },
+                    }),
+            ]) {
+                if (failure === "rejection") {
+                    await hook.event({
+                        event: { type: "session.updated", properties: { info: { id: sessionId } } },
+                    });
+                } else {
+                    jest.advanceTimersByTime(30_000);
+                }
+                const cachedDenyAtEntry =
+                    peekToolPermissionDeniedForTest(sessionId, "todowrite", "build") === true;
+                const started = Promise.withResolvers<void>();
+                const read = Promise.withResolvers<never>();
+                agents.mockImplementationOnce(() => {
+                    started.resolve();
+                    return read.promise;
+                });
+                const callsBefore = agents.mock.calls.length;
+                const logsBefore = logSpy.mock.calls.length;
+                const pending = consume();
+                await started.promise;
+                if (failure === "rejection") read.reject(new Error("permission unavailable"));
+                else jest.advanceTimersByTime(2_000);
+                await pending;
+                const readError = logSpy.mock.calls
+                    .slice(logsBefore)
+                    .find(
+                        ([id, text]) => id === sessionId && text.includes("permission read failed"),
+                    )?.[2];
+                expect(readError).toBeInstanceOf(failure === "timeout" ? TimeoutError : Error);
+                const liveReadFailed =
+                    agents.mock.calls.length === callsBefore + 1 && readError instanceof Error;
+                expect(
+                    cachedDenyAtEntry && liveReadFailed,
+                    "todowrite-deny-then-read-failure-is-exercised",
+                ).toBe(true);
+                expect(peekToolPermissionDeniedForTest(sessionId, "todowrite", "build")).toBe(true);
+            }
+            expect(fake.calls.filter((call) => call.method === "todo_state.set")).toEqual([]);
+            const bodies = fake.calls
+                .filter((call) => call.method === "transform")
+                .map((call) => call.body as { todo_tool_present: boolean });
+            expect(bodies.map((body) => body.todo_tool_present)).toEqual([false, false]);
+        });
+    }
+
+    it("shares fresh permission hits between transform and capture without SDK reads", async () => {
+        useTempDataHome("hook-permission-hit-");
+        const sessionId = "ses-permission-hit";
+        clearToolPermissionDenied(sessionId);
+        const client = createClientMock();
+        const agents = mock(async () => ({ data: [{ name: "build" }] }));
+        client.app.agents = agents as never;
+        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        const messages = installOneRawMessage(sessionId);
+        Object.assign(messages[0]!.info!, { agent: "build" });
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: sessionId,
+            agent: "build",
+            args: { todos: [{ content: "Allowed", status: "pending", priority: "high" }] },
+        });
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        expect(agents).toHaveBeenCalledTimes(1);
+        expect(fake.calls.some((call) => call.method === "todo_state.set")).toBe(true);
+    });
+
+    it("suppresses both consumers when the permission client is unavailable", async () => {
+        useTempDataHome("hook-permission-unavailable-");
+        const sessionId = "ses-permission-unavailable";
+        clearToolPermissionDenied(sessionId);
+        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client: undefined, rustModeModuleClient: fake.client })),
+        );
+        const messages = installOneRawMessage(sessionId);
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        await hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: sessionId,
+            args: { todos: [{ content: "Blocked", status: "pending", priority: "high" }] },
+        });
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toEqual([]);
+        expect(fake.calls.find((call) => call.method === "transform")?.body).toMatchObject({
+            todo_tool_present: false,
+        });
+    });
+
+    for (const boundary of ["session.updated", "session.compacted", "ctx-flush"] as const) {
+        it(`refreshes all session agents after ${boundary} without changing other sessions`, async () => {
+            useTempDataHome("hook-permission-invalidate-");
+            const sessionId = `ses-permission-${boundary}`;
+            const otherSession = `${sessionId}-other`;
+            clearToolPermissionDenied(sessionId);
+            clearToolPermissionDenied(otherSession);
+            const client = createClientMock();
+            let action = "allow";
+            const agents = mock(async () => ({
+                data: ["build", "plan"].map((name) => ({
+                    name,
+                    permission: { todowrite: action },
+                })),
+            }));
+            client.app.agents = agents as never;
+            const fake = createFakeModuleClient(() => ({
+                native_messages: [],
+                result: { armed: false },
+            }));
+            const hook = requireHook(
+                createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+            );
+            const messages = installOneRawMessage(sessionId);
+            Object.assign(messages[0]!.info!, { agent: "build" });
+            const capture = (sessionID: string, agent: string) =>
+                hook["tool.execute.after"]({
+                    tool: "todowrite",
+                    sessionID,
+                    agent,
+                    args: { todos: [{ content: "Snapshot", status: "pending", priority: "high" }] },
+                });
+            await capture(sessionId, "build");
+            await capture(sessionId, "plan");
+            await capture(otherSession, "build");
+            await Bun.sleep(0);
+            for (action of ["deny", "allow"]) {
+                if (boundary === "ctx-flush") {
+                    await expectSentinel(
+                        hook["command.execute.before"](
+                            { command: "ctx-flush", sessionID: sessionId, arguments: "" },
+                            { parts: [{ type: "text", text: "" }] },
+                        ),
+                        "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+                    );
+                } else {
+                    await hook.event({
+                        event: { type: boundary, properties: { info: { id: sessionId } } },
+                    });
+                }
+                const reads = agents.mock.calls.length;
+                const captures = fake.calls.filter(
+                    (call) => call.method === "todo_state.set",
+                ).length;
+                await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+                await capture(sessionId, "build");
+                await capture(sessionId, "plan");
+                await capture(otherSession, "build");
+                await Bun.sleep(0);
+                expect(agents).toHaveBeenCalledTimes(reads + 2);
+                expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(
+                    captures + (action === "allow" ? 3 : 1),
+                );
+                expect(
+                    fake.calls.filter((call) => call.method === "transform").at(-1)?.body,
+                ).toMatchObject({ todo_tool_present: action === "allow" });
+            }
+            await hook.event({
+                event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+            });
+            expect(
+                peekToolPermissionDeniedForTest(sessionId, "todowrite", "build"),
+            ).toBeUndefined();
+            expect(peekToolPermissionDeniedForTest(sessionId, "todowrite", "plan")).toBeUndefined();
+            expect(peekToolPermissionDeniedForTest(otherSession, "todowrite", "build")).toBe(false);
+        });
+    }
+
+    it("suppresses an in-flight capture allow invalidated before a newer transform deny", async () => {
+        useTempDataHome("hook-permission-race-");
+        const sessionId = "ses-permission-race";
+        clearToolPermissionDenied(sessionId);
+        const started = Promise.withResolvers<void>();
+        const response = Promise.withResolvers<unknown>();
+        const client = createClientMock();
+        const agents = mock(async () => ({
+            data: [{ name: "build", permission: { todowrite: "deny" } }],
+        }));
+        agents.mockImplementationOnce(() => {
+            started.resolve();
+            return response.promise as never;
+        });
+        client.app.agents = agents as never;
+        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        const pending = hook["tool.execute.after"]({
+            tool: "todowrite",
+            sessionID: sessionId,
+            agent: "build",
+            args: { todos: [{ content: "Blocked", status: "pending", priority: "high" }] },
+        });
+        await started.promise;
+        await hook.event({
+            event: { type: "session.updated", properties: { info: { id: sessionId } } },
+        });
+        const messages = installOneRawMessage(sessionId);
+        Object.assign(messages[0]!.info!, { agent: "build" });
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        response.resolve({ data: [] });
+        await pending;
+        expect(peekToolPermissionDeniedForTest(sessionId, "todowrite", "build")).toBe(true);
+        expect(fake.calls.filter((call) => call.method === "todo_state.set")).toEqual([]);
+        expect(fake.calls.find((call) => call.method === "transform")?.body).toMatchObject({
+            todo_tool_present: false,
+        });
+    });
+
+    for (const [agent, action] of [
+        ["build", "allow"],
+        ["", "allow"],
+        ["", "deny"],
+    ] as const) {
+        it(`shares an overlapping transform and capture ${action} for host agent ${JSON.stringify(agent)}`, async () => {
+            useTempDataHome("hook-permission-overlap-");
+            const sessionId = `ses-permission-overlap-${agent}`;
+            clearToolPermissionDenied(sessionId);
+            const started = Promise.withResolvers<void>();
+            const response = Promise.withResolvers<unknown>();
+            const client = createClientMock();
+            const get = mock(() => {
+                started.resolve();
+                return response.promise;
+            });
+            const agents = mock(async () => ({ data: agent ? [{ name: agent }] : [] }));
+            client.app.agents = agents as never;
+            const resolver = spyOn(permissionAvailability, "todowritePermissionDenied");
+            const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+            const hook = requireHook(
+                createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+            );
+            await hook.resolveSessionDirectory(sessionId);
+            client.session.get = get as never;
+            const messages = installOneRawMessage(sessionId);
+            Object.assign(messages[0]!.info!, { agent });
+            const transform = hook["experimental.chat.messages.transform"](
+                {},
+                { messages: [...messages] },
+            );
+            await started.promise;
+            const capture = hook["tool.execute.after"]({
+                tool: "todowrite",
+                sessionID: sessionId,
+                agent: agent || undefined,
+                args: { todos: [{ content: "Allowed", status: "pending", priority: "high" }] },
+            });
+            await Bun.sleep(0);
+            expect(resolver).toHaveBeenCalledTimes(2);
+            response.resolve({ data: { permission: { todowrite: action } } });
+            await Promise.all([transform, capture]);
+            await hook["tool.execute.after"]({
+                tool: "todowrite",
+                sessionID: sessionId,
+                agent,
+                args: { todos: [{ content: "Cached", status: "pending", priority: "high" }] },
+            });
+            await Bun.sleep(0);
+            expect(fake.calls.find((call) => call.method === "transform")?.body).toMatchObject({
+                todo_tool_present: action === "allow",
+            });
+            expect(fake.calls.filter((call) => call.method === "todo_state.set")).toHaveLength(
+                action === "allow" ? 2 : 0,
+            );
+            expect(agents).toHaveBeenCalledTimes(agent ? 1 : 0);
+            expect(get).toHaveBeenCalledTimes(1);
+        });
+    }
+
     it("returns exactly the session hook keys and attaches rustToolBackends non-enumerably", () => {
         useTempDataHome("hook-keys-");
         const fake = createFakeModuleClient();

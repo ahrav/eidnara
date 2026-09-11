@@ -1,6 +1,8 @@
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import { sha256Hex } from "../../shared/kernel-client";
 import { sessionLog } from "../../shared/logger";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
 
 /**
@@ -14,7 +16,7 @@ import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
  *
  * The resolver keeps the `ctx_reduce` verdict frozen when live permissions deny the tool because the verdict gates guidance and the system-prompt hash.
  * Changing the ctx_reduce verdict mid-session would invalidate the provider prefix even though permission changes do not alter the prompt.
- * Todowrite checks live permissions only at cache-busting boundaries.
+ * Todowrite permission freshness is independent of the frozen tools map.
  *
  * When the tools map is absent, does not deny the wildcard, or the OpenCode DB is unreadable, availability defaults to true.
  */
@@ -54,9 +56,16 @@ const TODOWRITE_TOOL = "todowrite";
  */
 const availabilityBySession = new BoundedSessionMap<boolean>(1000);
 
-/** The cached permission verdict is updated only during cache-busting passes;
- * Defer passes reuse the cached permission verdict without a live permission read. */
-const permissionDeniedBySession = new BoundedSessionMap<boolean>(2000);
+interface PermissionVerdict {
+    denied: boolean | undefined;
+    expiresAt: number;
+    invalidated: boolean;
+    pending: Promise<boolean> | undefined;
+}
+
+const PERMISSION_TTL_MS = 30_000;
+/** The 2,000-entry LRU bounds digest keys and verdict state; concurrent fills share one promise per entry. */
+const permissionDeniedBySession = new BoundedSessionMap<PermissionVerdict>(2000);
 const ctxReducePermissionDenyLogged = new BoundedSessionMap<boolean>(1000);
 
 type PermissionAction = "ask" | "allow" | "deny";
@@ -68,8 +77,17 @@ export interface PermissionRule {
     action: PermissionAction;
 }
 
-function permissionCacheKey(toolName: string, sessionId: string): string {
-    return `${toolName}\u0000${sessionId}`;
+function permissionSessionKey(sessionId: string): string {
+    return sha256Hex(JSON.stringify(sessionId));
+}
+
+function permissionCacheKey(
+    toolName: string,
+    sessionId: string,
+    activeAgent: string | undefined,
+): string {
+    const identity = JSON.stringify([toolName, activeAgent ?? null]);
+    return `${permissionSessionKey(sessionId)}:${sha256Hex(identity)}`;
 }
 
 function cacheKey(toolName: string, sessionId: string): string {
@@ -222,23 +240,27 @@ function appendPermissionRule(
     pattern: unknown,
     action: unknown,
 ): void {
-    if (typeof permission !== "string" || permission.length === 0) return;
+    if (typeof permission !== "string" || permission.length === 0) {
+        throw new Error("OpenCode permission name is malformed");
+    }
     const normalizedAction = actionOf(action);
-    if (!normalizedAction) return;
-    const patterns = Array.isArray(pattern) ? pattern : [pattern ?? "*"];
+    if (!normalizedAction) throw new Error("OpenCode permission action is malformed");
+    const patterns = Array.isArray(pattern) ? pattern : [pattern === undefined ? "*" : pattern];
     for (const candidate of patterns) {
-        if (typeof candidate === "string") {
-            target.push({ permission, pattern: candidate, action: normalizedAction });
+        if (typeof candidate !== "string") {
+            throw new Error("OpenCode permission pattern is malformed");
         }
+        target.push({ permission, pattern: candidate, action: normalizedAction });
     }
 }
 
 /** The normalizer accepts both OpenCode's object shorthand and its already-expanded rules. */
 function permissionRules(value: unknown): PermissionRule[] {
+    if (value === undefined) return [];
     if (Array.isArray(value)) {
         const result: PermissionRule[] = [];
         for (const item of value) {
-            if (!isRecord(item)) continue;
+            if (!isRecord(item)) throw new Error("OpenCode permission rule is malformed");
             appendPermissionRule(
                 result,
                 item.permission ?? item.tool ?? item.name,
@@ -248,10 +270,15 @@ function permissionRules(value: unknown): PermissionRule[] {
         }
         return result;
     }
-    if (!isRecord(value)) return [];
+    if (!isRecord(value)) throw new Error("OpenCode permission payload is malformed");
 
     const result: PermissionRule[] = [];
-    if (Array.isArray(value.rules)) result.push(...permissionRules(value.rules));
+    if (Object.hasOwn(value, "rules")) {
+        if (!Array.isArray(value.rules)) {
+            throw new Error("OpenCode permission rules are malformed");
+        }
+        result.push(...permissionRules(value.rules));
+    }
     for (const [permission, configured] of Object.entries(value)) {
         if (permission === "rules") continue;
         const simpleAction = actionOf(configured);
@@ -260,7 +287,9 @@ function permissionRules(value: unknown): PermissionRule[] {
             appendPermissionRule(result, permission, "*", simpleAction);
             continue;
         }
-        if (!isRecord(configured)) continue;
+        if (!isRecord(configured)) {
+            throw new Error("OpenCode permission configuration is malformed");
+        }
         for (const [pattern, action] of Object.entries(configured)) {
             appendPermissionRule(result, permission, pattern, action);
         }
@@ -272,63 +301,130 @@ function permissionRules(value: unknown): PermissionRule[] {
  * Session rules follow agent rules, so later session rules override agent rules.
  *
  * The caller supplies the active agent for agent-rule lookup; the SDK `Session` payload carries no agent field.
- * An `undefined` agent skips agent rules and evaluates session rules alone.
+ * An `undefined` agent skips the agent-list API and evaluates session rules alone.
  */
 export async function resolveToolPermissionDenied(
+    client: PluginContext["client"] | undefined,
+    sessionId: string,
+    toolName: string,
+    activeAgent: string | undefined,
+): Promise<boolean> {
+    if (!client?.session?.get || (activeAgent !== undefined && !client.app?.agents)) {
+        sessionLog(sessionId, `${toolName} permission APIs are unavailable (fail-closed)`);
+        return true;
+    }
+    const key = permissionCacheKey(toolName, sessionId, activeAgent);
+    const cached = permissionDeniedBySession.get(key);
+    const startedAt = performance.now();
+    if (!cached?.invalidated && cached?.denied !== undefined && startedAt < cached.expiresAt) {
+        return cached.denied;
+    }
+
+    let entry = cached;
+    if (!entry?.pending || entry.invalidated) {
+        // Replacement fences invalidated or evicted fills without a separate generation map.
+        entry = { denied: cached?.denied, expiresAt: 0, invalidated: false, pending: undefined };
+        permissionDeniedBySession.set(key, entry);
+        const filling = entry;
+        const expiresAt = startedAt + PERMISSION_TTL_MS;
+        filling.pending = (async () => {
+            try {
+                const denied = await withTimeout(
+                    readToolPermissionDenied(client, sessionId, toolName, activeAgent),
+                    HOST_SDK_READ_TIMEOUT_MS,
+                    `${toolName} permission read timed out`,
+                );
+                if (
+                    permissionDeniedBySession.peek(key) !== filling ||
+                    filling.invalidated ||
+                    performance.now() >= expiresAt
+                ) {
+                    return true;
+                }
+                filling.denied = denied;
+                // Read-start expiry also rejects results delayed by an event-loop stall.
+                filling.expiresAt = expiresAt;
+                return denied;
+            } catch (error) {
+                sessionLog(sessionId, `${toolName} permission read failed (fail-closed):`, error);
+                return true;
+            } finally {
+                filling.pending = undefined;
+            }
+        })();
+    }
+    const denied = await entry.pending;
+    return permissionDeniedBySession.peek(key) === entry &&
+        !entry.invalidated &&
+        performance.now() < entry.expiresAt
+        ? (denied ?? true)
+        : true;
+}
+
+async function readToolPermissionDenied(
     client: PluginContext["client"],
     sessionId: string,
     toolName: string,
     activeAgent: string | undefined,
 ): Promise<boolean> {
-    const sdk = client as unknown as {
-        app?: { agents?: () => Promise<unknown> };
-        session?: { get?: (input: { path: { id: string } }) => Promise<unknown> };
-    };
-    if (!sdk.app?.agents || !sdk.session?.get) {
-        throw new Error("OpenCode permission APIs are unavailable");
-    }
-
     const [agentsResponse, sessionResponse] = await Promise.all([
-        sdk.app.agents(),
-        sdk.session.get({ path: { id: sessionId } }),
+        activeAgent === undefined ? undefined : client.app.agents(),
+        client.session.get({ path: { id: sessionId } }),
     ]);
-    const agents = responseData(agentsResponse);
     const session = responseData(sessionResponse);
-    const agent =
-        activeAgent !== undefined && Array.isArray(agents)
-            ? agents.find((candidate) => isRecord(candidate) && candidate.name === activeAgent)
-            : undefined;
-    const agentRules = permissionRules(isRecord(agent) ? agent.permission : undefined);
+    if (!isRecord(session) || (isRecord(sessionResponse) && sessionResponse.error != null)) {
+        throw new Error("OpenCode permission response is unavailable");
+    }
+    let agentRules: PermissionRule[] = [];
+    if (activeAgent !== undefined) {
+        const agents = responseData(agentsResponse);
+        if (!Array.isArray(agents) || (isRecord(agentsResponse) && agentsResponse.error != null)) {
+            throw new Error("OpenCode agent permission response is unavailable");
+        }
+        const agent = agents.find(
+            (candidate) => isRecord(candidate) && candidate.name === activeAgent,
+        );
+        if (!isRecord(agent)) {
+            throw new Error("OpenCode active agent permission evidence is unavailable");
+        }
+        agentRules = permissionRules(agent.permission);
+    }
     const sessionRules = permissionRules(
-        isRecord(session) ? (session.permission ?? session.permissions) : undefined,
+        session.permission === undefined ? session.permissions : session.permission,
     );
-    const denied = permissionDisabled(toolName, [...agentRules, ...sessionRules]);
-    permissionDeniedBySession.set(permissionCacheKey(toolName, sessionId), denied);
-    return denied;
+    return permissionDisabled(toolName, [...agentRules, ...sessionRules]);
 }
 
 export function todowritePermissionDenied(
-    client: PluginContext["client"],
+    client: PluginContext["client"] | undefined,
     sessionId: string,
     activeAgent: string | undefined,
 ): Promise<boolean> {
     return resolveToolPermissionDenied(client, sessionId, TODOWRITE_TOOL, activeAgent);
 }
 
-/* */
-export function cachedToolPermissionDenied(
+/** Returns the last successful verdict, including stale entries, without claiming freshness. */
+export function peekToolPermissionDeniedForTest(
     sessionId: string,
     toolName: string,
+    activeAgent: string | undefined,
 ): boolean | undefined {
-    return permissionDeniedBySession.get(permissionCacheKey(toolName, sessionId));
+    return permissionDeniedBySession.peek(permissionCacheKey(toolName, sessionId, activeAgent))
+        ?.denied;
 }
 
-export function clearToolPermissionDenied(sessionId: string, toolName?: string): void {
-    if (toolName) {
-        permissionDeniedBySession.delete(permissionCacheKey(toolName, sessionId));
-    } else {
-        permissionDeniedBySession.delete(permissionCacheKey(TODOWRITE_TOOL, sessionId));
-        permissionDeniedBySession.delete(permissionCacheKey(CTX_REDUCE_TOOL, sessionId));
+/** Marks one session's cached verdicts stale so the next read fills again instead of serving them. */
+export function invalidateToolPermissionDenied(sessionId: string): void {
+    const prefix = `${permissionSessionKey(sessionId)}:`;
+    for (const [key, entry] of permissionDeniedBySession.entries()) {
+        if (key.startsWith(prefix)) entry.invalidated = true;
+    }
+}
+
+export function clearToolPermissionDenied(sessionId: string): void {
+    const prefix = `${permissionSessionKey(sessionId)}:`;
+    for (const [key] of permissionDeniedBySession.entries()) {
+        if (key.startsWith(prefix)) permissionDeniedBySession.delete(key);
     }
     ctxReducePermissionDenyLogged.delete(sessionId);
 }

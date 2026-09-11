@@ -37,7 +37,7 @@ only defense on this path against log forgery and symlink redirection.
   [`PRIVATE_FILE_MODE = 0o600`][modes], rejects a non-regular file, tightens
   an existing managed file's mode, and writes through the descriptor.
 - On the transform path, [`logTransformTiming`][stagelog] and the pass logs
-  call `sessionLog`; [rust-mode-transform.test.ts:244][t244] spies on
+  call `sessionLog`; [rust-mode-transform.test.ts:248][t244] spies on
   `logger.sessionLog` and asserts the `rust pass:` and `rust module stages:`
   lines per pass.
 - No secret redaction runs here. [`shared/redaction.ts`][redaction] is
@@ -107,7 +107,7 @@ and hardening once each; none asserts line counts per pass or event.
 [redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [cliredact]: ../../../../../packages/cli/src/lib/redaction.ts#L1
 [e2eredact]: ../../../../../packages/e2e-tests/src/opencode-runner/spawn.ts#L11
-[t244]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
+[t244]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L248
 [t358]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L358
 [t381]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L381
 [t342]: ../../../../../packages/opencode-plugin/src/shared/logger.test.ts#L342
