@@ -7,13 +7,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { openCodeDbExists, withReadOnlySessionDb } from "../hooks/context/read-session-db";
+import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "../hooks/context/read-session-db";
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
-import type { Database } from "../shared/sqlite";
+import type { SqliteReader } from "../shared/sqlite";
 import { jsonField } from "../shared/sqlite-helpers";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
@@ -205,7 +205,7 @@ WHERE m.session_id = ?
 ORDER BY m.time_created, m.id`;
 
 export function findIgnoredMarkerMessageIdsFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     marker: string,
 ): string[] {
@@ -227,7 +227,7 @@ async function findMarkerMessageIds(
     sessionId: string,
     marker: string,
 ): Promise<string[]> {
-    if (openCodeDbExists()) {
+    if (refreshOpenCodeDbPresence()) {
         try {
             return withReadOnlySessionDb((db) =>
                 findIgnoredMarkerMessageIdsFromDb(db, sessionId, marker),

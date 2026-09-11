@@ -1,25 +1,31 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Database } from "../../shared/sqlite";
+import { Database, type SqliteReader } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    frozenIsMidTurnFromOpenCodeDb,
+    MID_TURN_REFERENCE_SHA,
+} from "./__tests__/mid-turn-reference";
+import {
+    isMidTurnFromOpenCodeDb as candidateIsMidTurn,
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
     getMessageTimesFromOpenCodeDb,
     isMidTurn,
-    isMidTurnFromOpenCodeDb,
-    openCodeDbExists,
+    refreshOpenCodeDbPresence,
 } from "./read-session-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalOpenCodeDb = process.env.OPENCODE_DB;
+const midTurnDbs: Database[] = [];
 
 afterEach(() => {
-    // Close the cached OpenCode read-only DB handle so the next test case opens a DB under the new XDG_DATA_HOME.
     closeReadOnlySessionDb();
+    for (const db of midTurnDbs.splice(0)) closeQuietly(db);
     process.env.XDG_DATA_HOME = originalXdgDataHome;
     if (originalOpenCodeDb === undefined) {
         delete process.env.OPENCODE_DB;
@@ -38,6 +44,7 @@ afterEach(() => {
 
 function createMidTurnDb(): Database {
     const db = new Database(":memory:");
+    midTurnDbs.push(db);
     db.exec(
         "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
     );
@@ -45,6 +52,25 @@ function createMidTurnDb(): Database {
         "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
     );
     return db;
+}
+
+function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
+    const expected = frozenIsMidTurnFromOpenCodeDb(db, sessionId);
+    expect(candidateIsMidTurn(db, sessionId)).toBe(expected);
+    db.exec("SAVEPOINT differential_extra_session");
+    try {
+        insertAssistant(db, "other-session", "other-assistant", { finish: "tool-calls" }, 10_000);
+        insertUser(db, "other-session", "other-user", {}, 20_000);
+        insertPart(db, "other-session", "other-user", "other-part", { type: "compaction" });
+        for (const session of [sessionId, "other-session", "absent-session"]) {
+            expect(candidateIsMidTurn(db, session)).toBe(
+                frozenIsMidTurnFromOpenCodeDb(db, session),
+            );
+        }
+    } finally {
+        db.exec("ROLLBACK TO differential_extra_session; RELEASE differential_extra_session");
+    }
+    return expected;
 }
 
 // A finished assistant row carries `time.completed`; pass `time: { created }` for a message still being produced.
@@ -95,6 +121,243 @@ function insertPart(
 }
 
 describe("isMidTurnFromOpenCodeDb", () => {
+    it("pins the frozen reference to its base", () => {
+        expect(MID_TURN_REFERENCE_SHA).toBe("7ed1e9845af1a76ff04c31d95ea811367a926bb0");
+        // Only the reference file is frozen. It calls the same live `jsonField`,
+        // `isMachineAuthoredPart`, and `isMeaningfulUserText` as the candidate, so the
+        // differential proves the query collapse, not the shared primitives.
+        expect(
+            createHash("sha256")
+                .update(readFileSync(join(import.meta.dir, "__tests__/mid-turn-reference.ts")))
+                .digest("hex"),
+        ).toBe("71ffca14e993205825465bda9ff34af779289757b3ab0c574f2d7112929b2bff");
+    });
+
+    it("can check the same database twice without retaining the injected session", () => {
+        const db = createMidTurnDb();
+        insertUser(db, "session-1", "user-1", {}, 100);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expect(db.prepare("SELECT COUNT(*) AS n FROM message").get()).toEqual({ n: 1 });
+    });
+
+    it("bounds candidate reads and stops after the first real user message", () => {
+        let candidateSql = "";
+        const partMessageIds: unknown[] = [];
+        const db = {
+            prepare(sql: string) {
+                if (sql.includes("FROM message m")) {
+                    candidateSql = sql;
+                    return {
+                        get: () => null,
+                        all: () =>
+                            sql.includes("JOIN part")
+                                ? [
+                                      {
+                                          id: "user-1",
+                                          data: JSON.stringify({ type: "text", text: "prompt" }),
+                                          hasPart: 1,
+                                      },
+                                      {
+                                          id: "user-2",
+                                          data: JSON.stringify({ type: "text", text: "later" }),
+                                          hasPart: 1,
+                                      },
+                                  ]
+                                : [
+                                      { id: "user-1", timeCreated: 100 },
+                                      { id: "user-2", timeCreated: 200 },
+                                  ],
+                    };
+                }
+                if (sql === "SELECT data FROM part WHERE session_id = ? AND message_id = ?") {
+                    return {
+                        get: () => null,
+                        all: (_sessionId: unknown, messageId: unknown) => {
+                            partMessageIds.push(messageId);
+                            return [{ data: JSON.stringify({ type: "text", text: "prompt" }) }];
+                        },
+                    };
+                }
+                return { get: () => null, all: () => [] };
+            },
+        } as SqliteReader;
+
+        expect(candidateIsMidTurn(db, "session-1")).toBe(true);
+        expect(candidateSql).toContain("LIMIT ?");
+        expect(candidateSql).not.toContain("JOIN part");
+        expect(partMessageIds).toEqual(["user-1"]);
+    });
+
+    it.each([
+        ["partless", undefined, true],
+        ["SQL NULL", null, false],
+        ["malformed", "{", false],
+        ["number", 42, false],
+        ["blob", Buffer.from('{"type":"text","text":"prompt"}'), false],
+        ["array", "[]", false],
+        ["duplicate type last wins", '{"type":"tool","type":"text","text":""}', false],
+        ["duplicate ignored last wins", '{"type":"file","ignored":true,"ignored":false}', true],
+        ["string true flag", '{"type":"file","synthetic":"true"}', false],
+        ["string one flag", '{"type":"file","synthetic":"1"}', true],
+        ["numeric marker", '{"type":"file","metadata":{"marker":{"kind":0}}}', false],
+        ["null marker", '{"type":"file","metadata":{"marker":{"kind":null}}}', true],
+        ["NEXT LINE whitespace", JSON.stringify({ type: "text", text: "\u0085" }), false],
+        [
+            "notice",
+            JSON.stringify({ type: "text", text: "§42§ [SYSTEM DIRECTIVE: EIDNARA x]" }),
+            false,
+        ],
+        [
+            "authored beside notice",
+            JSON.stringify({ type: "text", text: "<system-reminder>x</system-reminder> prompt" }),
+            true,
+        ],
+        ["compaction", '{"type":"compaction"}', false],
+    ] as const)("differentiates %s user parts after an idle assistant", (_label, data, expected) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        insertUser(db, "session-1", "user-1", {}, 200);
+        if (data !== undefined) {
+            db.prepare(
+                "INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)",
+            ).run("part-1", "user-1", "session-1", data);
+        }
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(expected);
+    });
+
+    it.each(
+        [undefined, null, false, true, 0, 1, "1", {}, []].map((value) => [value]),
+    )("preserves SQLite extraction types for completed=%j", (completed) => {
+        const db = createMidTurnDb();
+        insertAssistant(
+            db,
+            "session-1",
+            "assistant-1",
+            { finish: "stop", time: { completed } },
+            100,
+        );
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(
+            !(typeof completed === "number" || typeof completed === "boolean"),
+        );
+    });
+
+    it.each([
+        -2,
+        -1,
+        0,
+        null,
+        "later",
+        Buffer.from("time"),
+    ])("preserves the absent-assistant tuple sentinel for time_created=%j", (time) => {
+        const db = createMidTurnDb();
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run("user-1", "session-1", time, '{"role":"user"}');
+        isMidTurnFromOpenCodeDb(db, "session-1");
+    });
+
+    it("rejects duplicate message IDs across sessions under the fixture schema", () => {
+        const db = createMidTurnDb();
+        insertUser(db, "session-1", "shared-id", {}, 100);
+        expect(() => insertUser(db, "session-2", "shared-id", {}, 100)).toThrow();
+    });
+
+    it.each([
+        "compaction",
+        "text",
+    ])("scopes foreign %s parts even with a mismatched session ID", (type) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        insertUser(db, "session-1", "user-1", {}, 200);
+        insertPart(db, "session-2", "user-1", "foreign-part", { type, text: "", ignored: true });
+        expect(frozenIsMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(candidateIsMidTurn(db, "session-1")).toBe(true);
+    });
+
+    it("does not let a real foreign part override machine-authored in-session parts", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        insertUser(db, "session-1", "user-1", {}, 200);
+        insertPart(db, "session-1", "user-1", "local-part", {
+            type: "text",
+            text: "notice",
+            ignored: true,
+        });
+        insertPart(db, "session-2", "user-1", "foreign-part", { type: "text", text: "prompt" });
+        expect(frozenIsMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expect(candidateIsMidTurn(db, "session-1")).toBe(false);
+    });
+
+    it("reuses one statement per candidate class while reading each message separately", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        for (let i = 0; i < 20; i++) {
+            insertUser(db, "session-1", `user-${i}`, {}, 200 + i);
+            insertPart(db, "session-1", `user-${i}`, `part-${i}`, { type: "text", ignored: true });
+        }
+        const nativePrepare = db.prepare.bind(db);
+        const reads: Array<{ mock: { calls: unknown[][] }; mockRestore(): void }> = [];
+        const prepare = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+            const statement = nativePrepare(sql);
+            reads.push(spyOn(statement, "get"), spyOn(statement, "all"));
+            return statement;
+        }) as Database["prepare"]);
+        try {
+            expect(candidateIsMidTurn(db, "session-1")).toBe(false);
+            // The query count covers the assistant row, candidate page, candidate parts, and completed assistant parts.
+            expect(prepare.mock.calls.length).toBeLessThanOrEqual(4);
+            expect(reads.reduce((count, read) => count + read.mock.calls.length, 0)).toBe(23);
+            for (const read of reads.splice(0)) read.mockRestore();
+            expect(frozenIsMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+            expect(reads.reduce((count, read) => count + read.mock.calls.length, 0)).toBe(23);
+        } finally {
+            for (const read of reads) read.mockRestore();
+            prepare.mockRestore();
+        }
+    });
+
+    it.each([
+        ["streaming", { time: { created: 100 } }],
+        ["tool-calls", { finish: "tool-calls" }],
+    ] as const)("does not materialize assistant parts when the %s assistant row already answers", (_label, data) => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", data, 100);
+        const partCount = 40;
+        for (let i = 0; i < partCount; i++) {
+            insertPart(db, "session-1", "assistant-1", `part-${i}`, {
+                type: "tool",
+                state: { status: "completed", output: "x".repeat(4096) },
+            });
+        }
+        const nativePrepare = db.prepare.bind(db);
+        let materializedRows = 0;
+        const prepare = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+            const statement = nativePrepare(sql);
+            const all = statement.all.bind(statement);
+            const get = statement.get.bind(statement);
+            statement.all = ((...args: unknown[]) => {
+                const rows = all(...args);
+                materializedRows += rows.length;
+                return rows;
+            }) as typeof statement.all;
+            statement.get = ((...args: unknown[]) => {
+                const row = get(...args);
+                if (row !== null && row !== undefined) materializedRows += 1;
+                return row;
+            }) as typeof statement.get;
+            return statement;
+        }) as Database["prepare"]);
+        try {
+            expect(candidateIsMidTurn(db, "session-1")).toBe(true);
+        } finally {
+            prepare.mockRestore();
+        }
+        // The answer comes from the assistant row alone; the `part` payload of a message still being produced must not be read.
+        expect(materializedRows).toBeLessThanOrEqual(1);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
     it("is not mid-turn when there is no message at all", () => {
         const db = createMidTurnDb();
 
@@ -606,6 +869,57 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it("finds a real user message after a full candidate page", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        for (let index = 0; index < 64; index++) {
+            const messageId = `user-${index.toString().padStart(2, "0")}`;
+            insertUser(db, "session-1", messageId, {}, 200 + index);
+            insertPart(db, "session-1", messageId, `part-${index}`, {
+                type: "text",
+                ignored: true,
+            });
+        }
+        insertUser(db, "session-1", "user-real", {}, 300);
+        insertPart(db, "session-1", "user-real", "part-real", {
+            type: "text",
+            text: "next task",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("continues after a full candidate page ending with a non-text message ID", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        for (let index = 0; index < 63; index++) {
+            const messageId = `user-${index.toString().padStart(2, "0")}`;
+            insertUser(db, "session-1", messageId, {}, 200 + index);
+            insertPart(db, "session-1", messageId, `part-${index}`, {
+                type: "text",
+                ignored: true,
+            });
+        }
+        const blobId = Buffer.from("blob-user");
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(blobId, "session-1", 263, '{"role":"user"}');
+        db.prepare("INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)").run(
+            "part-blob",
+            blobId,
+            "session-1",
+            '{"type":"text","ignored":true}',
+        );
+        insertUser(db, "session-1", "user-real", {}, 264);
+        insertPart(db, "session-1", "user-real", "part-real", {
+            type: "text",
+            text: "next task",
+        });
+
+        expect(frozenIsMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expect(candidateIsMidTurn(db, "session-1")).toBe(true);
+    });
+
     it("stays mid-turn when a compaction summary assistant follows the tool-calls assistant", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
@@ -990,7 +1304,7 @@ describe("OPENCODE_DB override", () => {
         }
 
         process.env.OPENCODE_DB = overridePath;
-        expect(openCodeDbExists()).toBe(true);
+        expect(refreshOpenCodeDbPresence()).toBe(true);
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
             messageID: "msg_override",
             providerID: "override-provider",

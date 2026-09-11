@@ -1,8 +1,13 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
-import { Database } from "../../shared/sqlite";
+import {
+    Database,
+    type SqliteReader,
+    type SqliteReadStatement,
+    type Statement,
+} from "../../shared/sqlite";
 import { closeQuietly, jsonField } from "../../shared/sqlite-helpers";
 import { isMachineAuthoredPart, isMeaningfulUserText } from "./read-session-formatting";
 
@@ -13,12 +18,13 @@ interface AssistantMidTurnRow {
     timeCompleted?: number | null;
 }
 
-interface MessageIdRow {
-    id?: string;
+interface PartDataRow {
+    data?: unknown;
 }
 
-interface PartDataRow {
-    data?: string | null;
+interface UserMessageCursorRow {
+    id?: unknown;
+    timeCreated?: unknown;
 }
 
 function getOpenCodeDbPath(): string {
@@ -28,41 +34,184 @@ function getOpenCodeDbPath(): string {
     return join(getDataDir(), "opencode", "opencode.db");
 }
 
-/**
- */
-export function openCodeDbExists(): boolean {
-    return existsSync(getOpenCodeDbPath());
+export function refreshOpenCodeDbPresence(): boolean {
+    const exists = existsSync(getOpenCodeDbPath());
+    if (!exists) closeCachedReadOnlyDb();
+    return exists;
 }
 
-let cachedReadOnlyDb: { path: string; db: Database } | null = null;
+const MAX_CACHED_STATEMENTS = 64;
+const MAX_CACHED_SQL_UNITS = 4096;
+const MAX_CACHED_BIND_BYTES = 128 * 1024;
+
+function canRetainBindings(args: unknown[]): boolean {
+    let bytes = 0;
+    if (args.length > MAX_CACHED_BIND_BYTES / 8) return false;
+    for (const arg of args) {
+        if (typeof arg === "string") bytes += arg.length * 2;
+        else if (typeof arg === "number" || typeof arg === "bigint") bytes += 8;
+        else if (ArrayBuffer.isView(arg)) bytes += arg.byteLength;
+        else if (arg !== null) return false;
+        if (bytes > MAX_CACHED_BIND_BYTES) return false;
+    }
+    return true;
+}
+
+type NativeReadStatement = Statement & { finalize?: () => void };
+
+class ReadOnlySessionDb implements SqliteReader {
+    #statements = new Map<string, { native: NativeReadStatement; query: SqliteReadStatement }>();
+    #db: Database | null = null;
+    #closed = false;
+
+    constructor(
+        readonly path: string,
+        readonly dev: bigint,
+        readonly ino: bigint,
+    ) {
+        this.#connection();
+    }
+
+    get closed(): boolean {
+        return this.#closed;
+    }
+
+    #connection(): Database {
+        if (this.#closed) throw new Error("OpenCode read-only database is closed");
+        if (this.#db) return this.#db;
+        const before = statSync(this.path, { bigint: true });
+        if (before.dev !== this.dev || before.ino !== this.ino) {
+            throw new Error("OpenCode database identity changed before opening");
+        }
+        const db = new Database(this.path, { readonly: true });
+        try {
+            const after = statSync(this.path, { bigint: true });
+            if (after.dev !== this.dev || after.ino !== this.ino) {
+                throw new Error("OpenCode database changed while opening the read-only connection");
+            }
+            this.#db = db;
+            return db;
+        } catch (error) {
+            closeQuietly(db);
+            throw error;
+        }
+    }
+
+    prepare(sql: string): SqliteReadStatement {
+        if (this.#closed) throw new Error("OpenCode read-only database is closed");
+        const cached = this.#statements.get(sql);
+        if (cached) return cached.query;
+        // Handles keep SQL, not native statements, so a chunk loop can resume after eviction.
+        const query: SqliteReadStatement = Object.freeze({
+            get: (...args: unknown[]) => this.#execute(sql, query, "get", args),
+            all: (...args: unknown[]) => this.#execute(sql, query, "all", args) as unknown[],
+        });
+        return query;
+    }
+
+    #execute(
+        sql: string,
+        query: SqliteReadStatement,
+        method: "get" | "all",
+        args: unknown[],
+    ): unknown {
+        if (this.#closed) throw new Error("OpenCode read-only database is closed");
+        const bindings = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+        const retain = sql.length <= MAX_CACHED_SQL_UNITS && canRetainBindings(bindings);
+        let entry = this.#statements.get(sql);
+        if (entry && !retain) {
+            this.#statements.delete(sql);
+            this.#finalize(entry.native);
+            entry = undefined;
+        }
+        if (!entry) {
+            if (retain && this.#statements.size === MAX_CACHED_STATEMENTS) {
+                const oldest = this.#statements.entries().next().value;
+                if (oldest) {
+                    this.#statements.delete(oldest[0]);
+                    this.#finalize(oldest[1].native);
+                }
+            }
+            entry = { native: this.#connection().prepare(sql), query };
+            if (retain) this.#statements.set(sql, entry);
+        }
+        try {
+            return entry.native[method](...bindings);
+        } finally {
+            if (!retain) this.#finalize(entry.native);
+        }
+    }
+
+    #finalize(statement: NativeReadStatement): void {
+        try {
+            if (statement.finalize) statement.finalize();
+            // Node has no statement finalizer; closing its connection releases all native handles.
+            else this.#closeConnection();
+        } catch (error) {
+            this.close();
+            throw error;
+        }
+    }
+
+    #closeConnection(): void {
+        const db = this.#db;
+        this.#db = null;
+        let failure: unknown;
+        try {
+            for (const entry of this.#statements.values()) {
+                try {
+                    entry.native.finalize?.();
+                } catch (error) {
+                    failure ??= error;
+                }
+            }
+        } finally {
+            this.#statements.clear();
+            db?.close();
+        }
+        if (failure !== undefined) throw failure;
+    }
+
+    close(): void {
+        this.#closed = true;
+        this.#closeConnection();
+    }
+}
+
+let cachedReadOnlyDb: ReadOnlySessionDb | null = null;
 
 function closeCachedReadOnlyDb(): void {
-    if (!cachedReadOnlyDb) {
-        return;
-    }
-
+    const db = cachedReadOnlyDb;
+    cachedReadOnlyDb = null;
     try {
-        closeQuietly(cachedReadOnlyDb.db);
+        db?.close();
     } catch (error) {
         log("[eidnara] failed to close cached OpenCode read-only DB:", error);
-    } finally {
-        cachedReadOnlyDb = null;
     }
 }
 
-function getReadOnlySessionDb(): Database {
+function getReadOnlySessionDb(): SqliteReader {
     const dbPath = getOpenCodeDbPath();
-    if (cachedReadOnlyDb?.path === dbPath) {
-        return cachedReadOnlyDb.db;
+    try {
+        const { dev, ino } = statSync(dbPath, { bigint: true });
+        if (
+            cachedReadOnlyDb?.path === dbPath &&
+            cachedReadOnlyDb.dev === dev &&
+            cachedReadOnlyDb.ino === ino &&
+            !cachedReadOnlyDb.closed
+        ) {
+            return cachedReadOnlyDb;
+        }
+        closeCachedReadOnlyDb();
+        cachedReadOnlyDb = new ReadOnlySessionDb(dbPath, dev, ino);
+        return cachedReadOnlyDb;
+    } catch (error) {
+        closeCachedReadOnlyDb();
+        throw error;
     }
-
-    closeCachedReadOnlyDb();
-    const db = new Database(dbPath, { readonly: true });
-    cachedReadOnlyDb = { path: dbPath, db };
-    return db;
 }
 
-export function withReadOnlySessionDb<T>(fn: (db: Database) => T): T {
+export function withReadOnlySessionDb<T>(fn: (db: SqliteReader) => T): T {
     return fn(getReadOnlySessionDb());
 }
 
@@ -72,7 +221,7 @@ export function closeReadOnlySessionDb(): void {
 
 /** Treat errors reading an existing database as mid-turn; a missing database is idle. */
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
-    if (!openCodeDbExists()) return false;
+    if (!refreshOpenCodeDbPresence()) return false;
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
     } catch (error) {
@@ -81,7 +230,7 @@ export function isMidTurn(_deps: unknown, sessionId: string): boolean {
     }
 }
 
-export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
+export function isMidTurnFromOpenCodeDb(db: SqliteReader, sessionId: string): boolean {
     // `(time_created, id)` is the session ordering `read-session-raw.ts` uses; the id tiebreak
     // resolves two assistant rows that share a millisecond.
     // A compaction summary is written mid-turn and would otherwise hide the `tool-calls`
@@ -104,8 +253,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
         )
         .get(sessionId) as AssistantMidTurnRow | null;
 
-    // A real user row newer than the latest assistant is a turn whose assistant row does not exist
-    // yet, including the first prompt of a session with no assistant row at all.
+    // The fallback tuple lets a first user prompt count before an assistant exists.
     if (
         hasNewerRealUserMessage(
             db,
@@ -121,6 +269,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
     if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
 
+    // Only completed assistants require part classification.
     const partRows = db
         .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
         .all(sessionId, latestAssistant.id) as PartDataRow[];
@@ -148,9 +297,8 @@ function isProviderExecuted(part: Record<string, unknown>): boolean {
     );
 }
 
-/** Callers pass `""` and `-1` when the session has no assistant row; every user row is then newer. */
 function hasNewerRealUserMessage(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     latestAssistantId: string,
     latestAssistantTimeCreated: number,
@@ -158,46 +306,54 @@ function hasNewerRealUserMessage(
     // "Newer" is the `(time_created, id)` tuple ordering, so a user row that shares the
     // assistant's millisecond still counts when its id sorts after the assistant's.
     // A `compaction` part excludes the whole message.
-    const candidates = db
-        .prepare(
-            `SELECT m.id
-             FROM message m
-             WHERE m.session_id = ?
-               AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
-               AND ${jsonField("m.data", "$.role")} = 'user'
-               AND NOT EXISTS (
-                 SELECT 1 FROM part p
-                 WHERE p.message_id = m.id
-                   AND ${jsonField("p.data", "$.type")} = 'compaction'
-               )
-             ORDER BY m.time_created ASC, m.id ASC`,
-        )
-        .all(
+    const candidateBatchSize = 64;
+    const selectCandidates = db.prepare(
+        `SELECT m.id, m.time_created AS timeCreated
+         FROM message m
+         WHERE m.session_id = ?
+           AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
+           AND ${jsonField("m.data", "$.role")} = 'user'
+           AND typeof(m.id) = 'text'
+           AND NOT EXISTS (
+             SELECT 1 FROM part c
+             WHERE c.session_id = m.session_id AND c.message_id = m.id
+               AND ${jsonField("c.data", "$.type")} = 'compaction'
+           )
+         ORDER BY m.time_created ASC, m.id ASC
+         LIMIT ?`,
+    );
+    const selectParts = db.prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?");
+    let cursorTimeCreated: unknown = latestAssistantTimeCreated;
+    let cursorId: unknown = latestAssistantId;
+
+    while (true) {
+        const candidates = selectCandidates.all(
             sessionId,
-            latestAssistantTimeCreated,
-            latestAssistantTimeCreated,
-            latestAssistantId,
-        ) as MessageIdRow[];
-
-    const selectParts = db.prepare("SELECT data FROM part WHERE message_id = ?");
-    for (const candidate of candidates) {
-        if (typeof candidate.id !== "string") continue;
-        const partRows = selectParts.all(candidate.id) as PartDataRow[];
-        if (isRealUserMessage(partRows)) return true;
+            cursorTimeCreated,
+            cursorTimeCreated,
+            cursorId,
+            candidateBatchSize,
+        ) as UserMessageCursorRow[];
+        for (const candidate of candidates) {
+            if (typeof candidate.id !== "string") continue;
+            const partRows = selectParts.all(sessionId, candidate.id) as PartDataRow[];
+            // A partless user message counts as real; NULL data on an existing part does not.
+            if (partRows.length === 0) return true;
+            if (
+                partRows.some((row) => {
+                    const part = parsePart(row);
+                    return part !== null && isRealUserPart(part);
+                })
+            ) {
+                return true;
+            }
+        }
+        if (candidates.length < candidateBatchSize) return false;
+        const last = candidates[candidates.length - 1];
+        if (!last || typeof last.id !== "string") return false;
+        cursorTimeCreated = last.timeCreated;
+        cursorId = last.id;
     }
-    return false;
-}
-
-/**
- * A partless user message counts as real. Otherwise at least one part must be real; a malformed
- * part is not evidence of a real turn.
- */
-function isRealUserMessage(partRows: PartDataRow[]): boolean {
-    if (partRows.length === 0) return true;
-    return partRows.some((row) => {
-        const part = parsePart(row);
-        return part !== null && isRealUserPart(part);
-    });
 }
 
 /**
@@ -255,14 +411,15 @@ export function getMessageTimesFromOpenCodeDb(
 
     try {
         withReadOnlySessionDb((db) => {
+            // NULL padding fixes the SQL shape without adding IDs to the lookup.
+            const placeholders = Array(MESSAGE_ID_CHUNK).fill("?").join(",");
+            const selectTimes = db.prepare(
+                `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
+            );
             for (let start = 0; start < messageIds.length; start += MESSAGE_ID_CHUNK) {
-                const chunk = messageIds.slice(start, start + MESSAGE_ID_CHUNK);
-                const placeholders = chunk.map(() => "?").join(",");
-                const rows = db
-                    .prepare(
-                        `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
-                    )
-                    .all(sessionId, ...chunk) as MessageTimeRow[];
+                const chunk: (string | null)[] = messageIds.slice(start, start + MESSAGE_ID_CHUNK);
+                while (chunk.length < MESSAGE_ID_CHUNK) chunk.push(null);
+                const rows = selectTimes.all(sessionId, ...chunk) as MessageTimeRow[];
                 for (const row of rows) {
                     if (typeof row.id === "string" && typeof row.time_created === "number") {
                         result.set(row.id, row.time_created);
@@ -281,7 +438,7 @@ export function getMessageTimesFromOpenCodeDb(
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
 ): { messageID: string; providerID: string; modelID: string; agent?: string } | null {
-    if (!openCodeDbExists()) return null;
+    if (!refreshOpenCodeDbPresence()) return null;
     try {
         return withReadOnlySessionDb((db) => {
             const row = db
@@ -336,7 +493,7 @@ export interface PersistedAssistantUsage {
 
 /** Whether the session holds a compaction summary row, the boundary `findLastAssistantUsageFromOpenCodeDb` skips back to. */
 export function sessionHasCompactionSummaryInOpenCodeDb(sessionId: string): boolean {
-    if (!openCodeDbExists()) return false;
+    if (!refreshOpenCodeDbPresence()) return false;
     try {
         return withReadOnlySessionDb((db) => {
             const row = db
@@ -360,7 +517,7 @@ export function sessionHasCompactionSummaryInOpenCodeDb(sessionId: string): bool
 export function findLastAssistantUsageFromOpenCodeDb(
     sessionId: string,
 ): PersistedAssistantUsage | null {
-    if (!openCodeDbExists()) return null;
+    if (!refreshOpenCodeDbPresence()) return null;
     const promptTokens = `COALESCE(${jsonField("m.data", "$.tokens.input")}, 0)
                               + COALESCE(${jsonField("m.data", "$.tokens.cache.read")}, 0)
                               + COALESCE(${jsonField("m.data", "$.tokens.cache.write")}, 0)`;

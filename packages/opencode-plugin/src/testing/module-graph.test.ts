@@ -47,6 +47,10 @@ const AWAITING_CONSUMER = new Map<string, string>([
     ["config/load-outcome.ts", "type-only"],
     ["features/builtin-commands/types.ts", "type-only"],
     ["features/context/sidekick/index.ts", "barrel; the entry imports ./agent directly"],
+    [
+        "hooks/context/__tests__/session-db-cache-contract.ts",
+        "test infrastructure: built and run as child process, never imported",
+    ],
     ["plugin/types.ts", "type-only"],
     ["tui/types/opencode-plugin-tui.d.ts", "type-only"],
     ["shared/context-limit-provenance.ts", "type-only"],
@@ -157,7 +161,7 @@ describe("module graph over the landed tree", () => {
         };
         for (const reader of HARNESS_DATABASE_READERS) {
             expect(opens(reader)).toEqual([
-                "    const db = new Database(dbPath, { readonly: true });",
+                "        const db = new Database(this.path, { readonly: true });",
             ]);
         }
         expect(opens(HARNESS_DATABASE_WRITER)).toEqual(["    const db = new Database(dbPath);"]);

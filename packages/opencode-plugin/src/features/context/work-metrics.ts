@@ -1,4 +1,4 @@
-import type { Database } from "../../shared/sqlite";
+import type { SqliteReader } from "../../shared/sqlite";
 import { jsonField } from "../../shared/sqlite-helpers";
 
 export interface WorkMetrics {
@@ -101,7 +101,10 @@ function getPiUsage(entry: unknown): PiUsage | null {
     };
 }
 
-export function computeOpenCodeWorkMetrics(openCodeDb: Database, sessionId: string): WorkMetrics {
+export function computeOpenCodeWorkMetrics(
+    openCodeDb: SqliteReader,
+    sessionId: string,
+): WorkMetrics {
     const row = openCodeDb
         .prepare(OPEN_CODE_WORK_METRICS_SQL)
         .get(sessionId) as WorkMetricsRow | null;
@@ -263,7 +266,7 @@ interface AssistantUsageDbRow {
 }
 
 export function readAssistantUsageRowsAfter(
-    openCodeDb: Database,
+    openCodeDb: SqliteReader,
     sessionId: string,
     afterTimeCreated: number,
     afterId: string,
@@ -290,7 +293,7 @@ export function readAssistantUsageRowsAfter(
  * The returned metrics include the held-back row without committing that row to `carry`.
  */
 export function computeOpenCodeWorkMetricsIncremental(
-    openCodeDb: Database,
+    openCodeDb: SqliteReader,
     sessionId: string,
     carry: WorkMetricsCarry,
 ): { carry: WorkMetricsCarry; metrics: WorkMetrics } {
