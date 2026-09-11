@@ -540,7 +540,8 @@ fn byte_overflow_missing_identity_empty_input_and_lane_failures_have_exact_dispo
         })
     );
 
-    // A count the lane cannot produce names its failure class, not the text.
+    // A count the lane cannot produce names its failure class, not the text, and the fixed
+    // settled reason keeps the canary out of the lane state too.
     let deterministic = DeterministicEngine::new();
     let component = ready_component(Arc::clone(&deterministic), SynapseLimits::default());
     let deterministic_limits = limits_of(&test_lane());
@@ -555,8 +556,14 @@ fn byte_overflow_missing_identity_empty_input_and_lane_failures_have_exact_dispo
     );
     assert_non_content(&refusal);
     assert_eq!(deterministic.calls.load(Ordering::SeqCst), 0);
+    let SynapseStatus::Disabled { reason } = component.status() else {
+        panic!("a count artifact fault disables the lane");
+    };
+    assert!(!reason.contains(CANARY), "{reason}");
 
     // An invariant failure marks the lane failing; automatic dispatch stops until an operator repairs it.
+    let deterministic = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&deterministic), SynapseLimits::default());
     deterministic.fail_next(InferenceError::Invariant(format!("{CANARY} bad vector")));
     let admitted = component
         .preflight_embedding(deterministic_limits, "alpha beta")
@@ -752,4 +759,66 @@ fn an_admission_reused_across_same_identity_lanes_respects_the_receiving_byte_ca
     // The refusal is the receiving lane's own; the admitting lane still serves the input.
     wide.embed_admitted(&admitted)
         .expect("the admitting lane still embeds its own admission");
+}
+
+/// The count consults the same artifact inference serves, so its `Artifact` and `Invariant`
+/// failure classes settle the lane exactly as the inference path settles them.
+#[test]
+fn a_count_failure_settles_the_lane_like_an_inference_failure() {
+    // An artifact fault from counting disables the lane rather than leaving it serving.
+    let engine = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&engine), SynapseLimits::default());
+    let limits = limits_of(&test_lane());
+    *engine.fail_next_count.lock().unwrap() =
+        Some(InferenceError::Artifact("tokenizer lost".to_owned()));
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Artifact
+        ))
+    );
+    assert!(
+        matches!(component.status(), SynapseStatus::Disabled { .. }),
+        "a count artifact fault disables the lane: {:?}",
+        component.status()
+    );
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::LaneUnavailable {
+            state: LaneUnavailableState::Disabled,
+        })
+    );
+
+    // An invariant count fault marks the lane failing.
+    let engine = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&engine), SynapseLimits::default());
+    *engine.fail_next_count.lock().unwrap() =
+        Some(InferenceError::Invariant("count overflowed".to_owned()));
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Invariant
+        ))
+    );
+    assert!(
+        matches!(component.status(), SynapseStatus::Failing { .. }),
+        "a count invariant fault marks the lane failing: {:?}",
+        component.status()
+    );
+
+    // Input-class count failures stay per-text; the lane keeps serving.
+    let engine = DeterministicEngine::new();
+    let component = ready_component(Arc::clone(&engine), SynapseLimits::default());
+    *engine.fail_next_count.lock().unwrap() =
+        Some(InferenceError::Input("unencodable text".to_owned()));
+    assert_eq!(
+        component.preflight_embedding(limits, "alpha beta"),
+        Err(DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Input
+        ))
+    );
+    assert!(matches!(component.status(), SynapseStatus::Ready(_)));
+    component
+        .preflight_embedding(limits, "alpha beta")
+        .expect("an input-class count failure refuses one text, not the lane");
 }

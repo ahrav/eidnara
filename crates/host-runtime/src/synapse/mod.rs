@@ -357,13 +357,27 @@ impl SynapseComponent {
     /// # Errors
     ///
     /// Returns [`DenseUnavailable`] naming the first check that failed; the text is never part of the reason.
+    /// A count failure settles the lane by the same classes as inference: `Artifact` disables it and `Invariant` marks it failing, with fixed reasons because a count error message can echo the text.
     pub fn preflight_embedding<'t>(
         &self,
         limits: EmbeddingInputLimits,
         text: &'t str,
     ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
         let lane = self.ready_or_unavailable()?;
-        preflight::admit(&lane.lane, &*lane.backend, limits, text)
+        let admitted = preflight::admit(&lane.lane, &*lane.backend, limits, text);
+        if let Err(DenseUnavailable::CountUnavailable(kind)) = &admitted {
+            match kind {
+                InferenceFailureKind::Artifact => mark_disabled(
+                    &self.inner,
+                    "token counting declared the artifact unusable".to_owned(),
+                ),
+                InferenceFailureKind::Invariant => {
+                    mark_failing(&self.inner, "token counting failed an invariant".to_owned())
+                }
+                InferenceFailureKind::Input | InferenceFailureKind::Execution => {}
+            }
+        }
+        admitted
     }
 
     /// Embeds one admitted text, byte for byte as admitted, under the lane it was admitted for.
