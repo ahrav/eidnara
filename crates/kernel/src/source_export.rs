@@ -43,6 +43,9 @@ pub enum ExportWindow {
     /// Descriptors created in `(S, through]`, each with its text, and
     /// descriptors live at S that were invalidated in the window, without text.
     CatchUp { through: i64 },
+    /// One step of catch-up: descriptors created in `(after, through]`, each with its text, and descriptors live at `after` that were invalidated in the window, without text.
+    /// `after` is a complete commit at or after S that an earlier window already delivered, so the hold must cover `(S, through]`.
+    Delta { after: i64, through: i64 },
 }
 
 /// An exporter-issued continuation for one hold and one fixed window.
@@ -256,6 +259,16 @@ impl KernelStore {
                     }
                     (catch_up_body(), through, pin.snapshot)
                 }
+                ExportWindow::Delta { after, through } => {
+                    check_window(&tx, pin.snapshot, through)?;
+                    if after < pin.snapshot || after > through {
+                        return Err(SourceHoldError::InvalidRequest.into());
+                    }
+                    if cursor.is_none() {
+                        check_coverage(&tx, pin.snapshot, hold_id, through)?;
+                    }
+                    (catch_up_body(), through, after)
+                }
             };
             let keyset = Keyset::after(cursor.map(|cursor| &cursor.key), bounds.max_rows);
             let mut statement = tx.prepare_cached(&Keyset::sql(ROW_SELECT, &body))?;
@@ -364,9 +377,10 @@ const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence
      o.superseded_by";
 
 /// The catch-up window as one row source: the descriptors created in
-/// `(S, through]` exactly as the hold pins them, or the descriptors live at S
-/// that were invalidated inside the window, which carry the invalidation fact
-/// and export no text. `?1` is `through` and `?2` is S.
+/// `(start, through]` exactly as the hold pins them, or the descriptors live at
+/// `start` that were invalidated inside the window, which carry the
+/// invalidation fact and export no text. `?1` is `through` and `?2` is the
+/// window's start, S for a whole catch-up and `after` for one delta.
 fn catch_up_body() -> String {
     format!(
         "{rows} AND (({created}) OR ({live_at_s}
@@ -515,6 +529,7 @@ fn preflight(
     let (exports_text, end) = match window {
         ExportWindow::Snapshot => (true, snapshot),
         ExportWindow::CatchUp { through } => (raw.created > snapshot, through),
+        ExportWindow::Delta { after, through } => (raw.created > after, through),
     };
     let invalidated = raw.invalidated.filter(|at| *at <= end);
     Ok(Preflight {
