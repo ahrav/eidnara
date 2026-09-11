@@ -400,7 +400,7 @@ export function peekToolPermissionDeniedForTest(
         ?.denied;
 }
 
-/** Expires cached verdicts without discarding last successful results. */
+/** Marks one session's cached verdicts stale so the next read fills again instead of serving them. */
 export function invalidateToolPermissionDenied(sessionId: string): void {
     const prefix = `${permissionSessionKey(sessionId)}:`;
     for (const [key, entry] of permissionDeniedBySession.entries()) {
