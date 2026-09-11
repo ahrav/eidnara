@@ -990,7 +990,8 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
         events,
         [
             PublicationEvent::VectorValidated,
-            PublicationEvent::GuardRequested
+            PublicationEvent::GuardRequested,
+            PublicationEvent::StaleWriterReleased,
         ]
     );
     let (state, bytes) = durable(dir.path(), &stale_guarded.input.detail.occurrence_id);
@@ -1019,11 +1020,11 @@ fn a_mismatched_publication_cannot_change_a_live_input() {
     wrong_creation.input.created_commit_seq += 1;
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
 
-    for (label, forged) in [
-        ("object", wrong_object),
-        ("artifact", wrong_artifact),
-        ("payload", wrong_payload),
-        ("creation", wrong_creation),
+    for (label, forged, stale_verdict) in [
+        ("object", wrong_object, true),
+        ("artifact", wrong_artifact, true),
+        ("payload", wrong_payload, true),
+        ("creation", wrong_creation, false),
     ] {
         let (result, events) = publish_once(&mut publisher, &forged, &project);
         assert!(
@@ -1038,14 +1039,14 @@ fn a_mismatched_publication_cannot_change_a_live_input() {
             (Some("pending".to_string()), None),
             "a stale verdict about another {label} obsoleted the live job: {result:?}",
         );
-        assert_eq!(
-            events,
-            [
-                PublicationEvent::VectorValidated,
-                PublicationEvent::GuardRequested,
-            ],
-            "{label}",
-        );
+        let mut expected = vec![
+            PublicationEvent::VectorValidated,
+            PublicationEvent::GuardRequested,
+        ];
+        if stale_verdict {
+            expected.push(PublicationEvent::StaleWriterReleased);
+        }
+        assert_eq!(events, expected, "{label}");
     }
     assert!(publisher.quarantine().is_none());
 }
@@ -1964,15 +1965,81 @@ fn stale_obsoletion_quarantines_a_terminal_job_missing_its_vector() {
         .unwrap();
     corpus.retire(&object);
 
-    let result = publish_once(&mut publisher, &publication, &project).0;
+    let mut intent_visible_at_release = false;
+    let mut writer_released_before_synchronization = false;
+    let result = publisher.publish(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            if event == PublicationEvent::StaleWriterReleased {
+                intent_visible_at_release = projection.quarantine().is_some();
+                assert_kernel_writable(&corpus, "before-stale-quarantine-synchronization");
+                writer_released_before_synchronization = true;
+            }
+        },
+    );
     let Err(PublicationError::Quarantined(quarantine)) = result else {
         panic!("terminal vector loss during obsoletion must quarantine: {result:?}");
     };
     assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert!(intent_visible_at_release);
+    assert!(writer_released_before_synchronization);
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("embedded".to_string()), None),
     );
+}
+
+#[test]
+fn stale_writer_is_released_before_obsoletion_reconciliation() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    corpus.retire(&object);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let mut reconciled_after_release = false;
+    let mut events = Vec::new();
+
+    let result = publisher.publish_with_fault_for_test(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            events.push(event);
+            if event == PublicationEvent::Reconciling {
+                assert_kernel_writable(&corpus, "during-obsoletion-reconciliation");
+                reconciled_after_release = true;
+            }
+        },
+        PublicationFault::LoseLocalCommitReply,
+    );
+
+    let publication = result.unwrap();
+    assert!(reconciled_after_release, "publication did not reconcile");
+    assert!(matches!(
+        publication,
+        Publication::Obsolete(ObsoleteCause::Canonical(_))
+    ));
+    assert_eq!(
+        events,
+        [
+            PublicationEvent::VectorValidated,
+            PublicationEvent::GuardRequested,
+            PublicationEvent::StaleWriterReleased,
+            PublicationEvent::Reconciling,
+        ]
+    );
+    assert!(publisher.quarantine().is_none());
 }
 
 #[test]
@@ -2111,12 +2178,18 @@ fn concurrent_obsoletion_after_a_rolled_back_commit_reconciles_without_quarantin
     let (obsolete_tx, obsolete_rx) = mpsc::channel();
     let retire_object = object.clone();
     let helper = std::thread::spawn(move || {
-        released_rx.recv().unwrap();
+        if released_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+            return;
+        }
         kernel
-            .commit(intent("retire-during-reconciliation"), |envelope| {
-                envelope.retire_observation(&retire_object)?;
-                Ok(String::new())
-            })
+            .commit_before(
+                Instant::now() + Duration::from_secs(5),
+                intent("retire-during-reconciliation"),
+                |envelope| {
+                    envelope.retire_observation(&retire_object)?;
+                    Ok(String::new())
+                },
+            )
             .unwrap();
         let connection = mutate(&search);
         connection
@@ -2147,11 +2220,12 @@ fn concurrent_obsoletion_after_a_rolled_back_commit_reconciles_without_quarantin
         &mut |event| {
             if event == PublicationEvent::GuardReleased {
                 released_tx.send(()).unwrap();
-                obsolete_rx.recv().unwrap();
+                obsolete_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             }
         },
         PublicationFault::LoseLocalCommit,
     );
+    drop(released_tx);
     helper.join().unwrap();
     assert_eq!(
         result.unwrap(),
