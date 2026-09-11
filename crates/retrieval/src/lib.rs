@@ -13,6 +13,7 @@
 
 pub mod batch;
 pub mod dispatch;
+pub mod identity_sweep;
 pub mod vectors;
 
 use std::collections::HashMap;

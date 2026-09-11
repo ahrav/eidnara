@@ -756,6 +756,17 @@ impl JobTable {
         self.sweep_expired(&mut jobs, &mut released);
     }
 
+    /// Whether the table still holds the job, after expiring what retention no longer keeps. Unlike a poll, this neither issues a page nor refreshes the job's retention rank.
+    pub fn retains(&self, job_id: &str) -> bool {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return false;
+        };
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        jobs.by_seq.contains_key(&seq)
+    }
+
     fn sweep_expired(&self, jobs: &mut Jobs, released: &mut Released) {
         let now = Instant::now();
         let expired: Vec<u64> = jobs

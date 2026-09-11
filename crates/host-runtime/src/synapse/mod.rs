@@ -444,6 +444,11 @@ impl SynapseComponent {
         )
     }
 
+    /// Whether this component's job table still holds `job_id`: queued, running, or retaining a result. A job identifier from another incarnation is never held. The answer does not refresh the job's retention rank.
+    pub fn holds_job(&self, job_id: &str) -> bool {
+        self.inner.jobs.retains(job_id)
+    }
+
     /// Polls the job `submit_admitted` issued for `item_id` and `text`, recomputing the request key from them so the caller persists only the job identifier.
     /// A single-item job returns its whole result in one page; the page's lease keeps the result bytes counted while the caller holds the vector.
     /// A job identifier from another incarnation or an evicted job polls as [`PollOutcome::Restarted`]; a failed lane still answers for the jobs it settled.
