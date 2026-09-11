@@ -12,6 +12,7 @@
 //! Payloads are never logged; refusals name identities and sizes, not content.
 
 pub mod batch;
+pub mod vectors;
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -249,6 +250,12 @@ pub enum ProjectionError {
     BatchOverBound { bound: &'static str, size: usize },
     #[error("vector generation {generation_id} is not registered for this projection")]
     UnknownGeneration { generation_id: String },
+    #[error("no open embedding job exists for occurrence {occurrence_id} under the generation")]
+    NoPendingWork { occurrence_id: String },
+    #[error("the vector is not the generation's shape: {reason}")]
+    InvalidVector { reason: &'static str },
+    #[error("occurrence {occurrence_id} already has a different vector under the generation")]
+    VectorConflict { occurrence_id: String },
     #[error("sqlite: {0}")]
     Sqlite(String),
 }

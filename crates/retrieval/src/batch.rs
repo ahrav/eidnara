@@ -656,24 +656,9 @@ pub fn register_generation(
     generation: &VectorGeneration,
     now: i64,
 ) -> Result<bool, ProjectionError> {
-    let stored: Option<(String, String, i64, i64)> = conn
-        .query_row(
-            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
-             FROM vector_generations WHERE generation_id=?1",
-            [&generation.generation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    match stored {
-        Some((model, fingerprint, dimension, epoch))
-            if model == generation.embedding_model
-                && fingerprint == generation.tokenizer_fingerprint
-                && dimension == i64::from(generation.vector_dimension)
-                && u64::try_from(epoch).ok() == Some(generation.generation_epoch) =>
-        {
-            Ok(false)
-        }
-        Some(_) => Err(ProjectionError::IdentityMismatch),
+    match registered_generation(conn, generation)? {
+        Some(true) => Ok(false),
+        Some(false) => Err(ProjectionError::IdentityMismatch),
         None => {
             conn.execute(
                 "INSERT INTO vector_generations(
@@ -693,6 +678,27 @@ pub fn register_generation(
             Ok(true)
         }
     }
+}
+
+/// Whether `generation.generation_id` is registered, and if so whether every identity field agrees with `generation`.
+pub(crate) fn registered_generation(
+    conn: &GuardedConn<'_>,
+    generation: &VectorGeneration,
+) -> Result<Option<bool>, ProjectionError> {
+    let stored: Option<(String, String, i64, i64)> = conn
+        .query_row(
+            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
+             FROM vector_generations WHERE generation_id=?1",
+            [&generation.generation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    Ok(stored.map(|(model, fingerprint, dimension, epoch)| {
+        model == generation.embedding_model
+            && fingerprint == generation.tokenizer_fingerprint
+            && dimension == i64::from(generation.vector_dimension)
+            && u64::try_from(epoch).ok() == Some(generation.generation_epoch)
+    }))
 }
 
 /// The identity of one vector generation.

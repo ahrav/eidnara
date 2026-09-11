@@ -213,7 +213,7 @@ fn same_lineage(stored: &SourceDescriptorDetail, fresh: &SourceDescriptorDetail)
         && stored.span == fresh.span
 }
 
-fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> {
+pub(crate) fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> {
     let stored: ObservationPayload =
         serde_json::from_slice(payload).map_err(|_| KernelError::CorruptCanonicalRow)?;
     let detail: SourceDescriptorDetail = stored

@@ -24,6 +24,7 @@ use retrieval::batch::{
 };
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
+pub use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The registered consumer, its capture hold, and the projection identity an episode acts under.
 /// The hold must be the one the projection's durable checkpoint records; the episode refuses any other.
@@ -119,22 +120,6 @@ pub enum Blocked {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuarantineKind {
-    /// Stored rows disagree with what was written or with their own digests.
-    Integrity,
-    /// The projection store failed while running or reading back a batch, so its durable contents cannot be trusted from this side.
-    Storage,
-}
-
-/// The reason the driver stopped trusting the projection; every later episode of this driver returns it unchanged.
-/// `detail` is unredacted backend error text for the operator and must not be forwarded to untrusted sinks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Quarantine {
-    pub kind: QuarantineKind,
-    pub detail: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EpisodeEnd {
     /// Every commit through the captured target is applied and acknowledged.
@@ -161,7 +146,7 @@ pub enum CatchUpError {
 }
 
 /// Which reply an episode loses, or which order it violates, so a test can watch the reconciliation and the ordering observation discriminate.
-#[cfg(feature = "test-support")]
+/// Only the test-support entry point can set one; a production build never injects a fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpisodeFault {
     /// The batch commits, then its reply arrives as a store failure whose effect is unknown.
@@ -172,34 +157,12 @@ pub enum EpisodeFault {
     AcknowledgeInsideLocalTransaction,
 }
 
-#[cfg(feature = "test-support")]
-type Fault = Option<EpisodeFault>;
-
-/// A production build has no reply to lose and no order to violate.
-#[cfg(not(feature = "test-support"))]
-#[derive(Clone, Copy, Default)]
-struct Fault;
-
-#[cfg(feature = "test-support")]
-macro_rules! fault {
-    ($fault:expr, $which:ident) => {
-        $fault == Some(EpisodeFault::$which)
-    };
-}
-#[cfg(not(feature = "test-support"))]
-macro_rules! fault {
-    ($fault:expr, $which:ident) => {{
-        let _: Fault = $fault;
-        false
-    }};
-}
-
 /// Runs bounded catch-up episodes for one projection against one kernel.
 pub struct SearchCatchUp<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
     quarantine: Option<Quarantine>,
-    fault: Fault,
+    fault: Option<EpisodeFault>,
 }
 
 /// Why one step ended the episode: a refusal that moved nothing, or a failure the caller must see.
@@ -232,7 +195,7 @@ impl<'a> SearchCatchUp<'a> {
             kernel,
             projection,
             quarantine: None,
-            fault: Fault::default(),
+            fault: None,
         }
     }
 
@@ -255,7 +218,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
-        self.fault = Fault::default();
+        self.fault = None;
         self.run_episode_inner(consumer, bounds, now, observer)
     }
 
@@ -454,7 +417,8 @@ impl<'a> SearchCatchUp<'a> {
             Ok(()) => Ok(()),
             // The store returned before COMMIT, so the batch rolled back and nothing of it is durable.
             Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
-                Refusal::Admission => Blocked::Admission(error).into(),
+                // A batch writes no vectors, so an operator-repair refusal is unreachable here and, if it ever arrives, is a refusal with nothing durable.
+                Refusal::Admission | Refusal::OperatorRepair => Blocked::Admission(error).into(),
                 Refusal::Identity => Blocked::ProjectionIdentity.into(),
                 Refusal::Integrity => self
                     .enter_quarantine(QuarantineKind::Integrity, &error)
@@ -483,7 +447,8 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), SearchProjectionError> {
         let through = batch.identity.through_commit_seq;
         let kernel = self.kernel;
-        let acknowledge_inside = fault!(self.fault, AcknowledgeInsideLocalTransaction);
+        let acknowledge_inside =
+            self.fault == Some(EpisodeFault::AcknowledgeInsideLocalTransaction);
         let applied = self.projection.write(|conn| {
             retrieval::batch::apply_batch(conn, batch, bounds.batch, now)?;
             observer(EpisodeEvent::LocalStaged { through });
@@ -500,7 +465,7 @@ impl<'a> SearchCatchUp<'a> {
             Ok(())
         });
         observer(EpisodeEvent::LocalReleased { through });
-        if fault!(self.fault, LoseLocalCommitReply) && applied.is_ok() {
+        if self.fault == Some(EpisodeFault::LoseLocalCommitReply) && applied.is_ok() {
             return Err(SearchProjectionError::Store(storage::StoreError::Backend(
                 "database is locked".to_string(),
             )));
@@ -558,7 +523,7 @@ impl<'a> SearchCatchUp<'a> {
             through,
             now,
         );
-        if fault!(self.fault, LoseAcknowledgementReply) && acknowledged.is_ok() {
+        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply) && acknowledged.is_ok() {
             acknowledged = Err(SourceHoldError::Kernel(KernelError::Io));
         }
         match acknowledged {
@@ -597,10 +562,7 @@ impl<'a> SearchCatchUp<'a> {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> CatchUpError {
-        let quarantine = Quarantine {
-            kind,
-            detail: error.to_string(),
-        };
+        let quarantine = Quarantine::new(kind, error);
         self.quarantine = Some(quarantine.clone());
         CatchUpError::Quarantined(quarantine)
     }
@@ -617,17 +579,19 @@ fn outcome_unknown(error: KernelError) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Refusal {
+pub(crate) enum Refusal {
     /// The batch was judged and refused before any row was written.
     Admission,
     Identity,
+    /// The input contradicts durable state in a way no automatic retry may resolve.
+    OperatorRepair,
     /// Stored state contradicts the batch or itself.
     Integrity,
     /// A statement failed for a reason the error text alone does not classify.
     Storage,
 }
 
-fn classify(error: &ProjectionError) -> Refusal {
+pub(crate) fn classify(error: &ProjectionError) -> Refusal {
     match error {
         ProjectionError::Occurrence(_)
         | ProjectionError::OverBound { .. }
@@ -639,7 +603,11 @@ fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::MutationConflict
         | ProjectionError::MalformedBatch
         | ProjectionError::BatchOverBound { .. }
-        | ProjectionError::UnknownGeneration { .. } => Refusal::Admission,
+        | ProjectionError::UnknownGeneration { .. }
+        | ProjectionError::NoPendingWork { .. } => Refusal::Admission,
+        ProjectionError::InvalidVector { .. } | ProjectionError::VectorConflict { .. } => {
+            Refusal::OperatorRepair
+        }
         ProjectionError::IdentityMismatch => Refusal::Identity,
         ProjectionError::OccurrenceCollision { .. }
         | ProjectionError::PayloadCollision { .. }
