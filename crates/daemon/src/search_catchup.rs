@@ -474,6 +474,9 @@ impl<'a> SearchCatchUp<'a> {
                     .enter_quarantine(QuarantineKind::Storage, &error)
                     .into(),
             }),
+            Err(SearchProjectionError::Quarantined(quarantine)) => {
+                Err(CatchUpError::Quarantined(quarantine).into())
+            }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
             Err(_) => match self.projection.batch_status(&batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
@@ -596,6 +599,9 @@ impl<'a> SearchCatchUp<'a> {
     }
 
     fn quarantine_from(&mut self, error: SearchProjectionError) -> CatchUpError {
+        if let SearchProjectionError::Quarantined(quarantine) = &error {
+            return CatchUpError::Quarantined(quarantine.clone());
+        }
         let kind = match &error {
             SearchProjectionError::Projection(error) if classify(error) == Refusal::Integrity => {
                 QuarantineKind::Integrity

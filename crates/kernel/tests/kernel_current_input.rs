@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use kernel::source_identity::Occurrence;
 use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
     CurrentInputExpectation, Dimension, DomainSpec, EligibilityBinding, EligibilityVerdict,
     EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, RepositoryProvenance,
     ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, SourceDescriptorRequest, StaleInput,
@@ -338,6 +339,65 @@ fn every_stale_dimension_is_named_and_releases_the_writer_at_once() {
         .guard_current_input(&current, binding(&project), soon())
         .unwrap()
         .expect("the current descriptor is admitted");
+}
+
+#[test]
+fn a_descriptor_whose_cited_evidence_was_logically_deleted_is_retracted() {
+    let fixture = Fixture::open();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let expectation = fixture.publish("a", "msg-a", "1", "first message", true, true);
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("delete-evidence"),
+            identity: ArtifactDeletionIdentity::Digest(expectation.artifact_digest.clone()),
+            kind: ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: 1,
+        })
+        .unwrap();
+
+    let local = EligibilityBinding {
+        project: &project,
+        destination: ArtifactDestination::Local,
+    };
+    assert_eq!(
+        fixture
+            .store
+            .guard_current_input(&expectation, local, soon())
+            .unwrap()
+            .err(),
+        Some(StaleInput::Retracted),
+        "the guard granted a descriptor whose evidence was canonically deleted",
+    );
+}
+
+#[test]
+fn a_descriptor_whose_evidence_digest_disagrees_is_corrupt() {
+    let fixture = Fixture::open();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let expectation = fixture.publish("a", "msg-a", "1", "first message", true, true);
+    let other_digest = format!("{:x}", Sha256::digest(b"other artifact"));
+    rusqlite::Connection::open(fixture._root.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE evidence_meta SET artifact_digest=?1 WHERE evidence_id='evidence-a'",
+            [other_digest],
+        )
+        .unwrap();
+    let local = EligibilityBinding {
+        project: &project,
+        destination: ArtifactDestination::Local,
+    };
+
+    assert!(matches!(
+        fixture
+            .store
+            .guard_current_input(&expectation, local, soon()),
+        Err(KernelError::CorruptCanonicalRow),
+    ));
 }
 
 #[test]

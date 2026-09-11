@@ -10,7 +10,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use daemon::embedding_publication::{EmbeddingPublisher, PublicationError, VectorPublication};
 use daemon::search_catchup::{
@@ -37,7 +37,6 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 const CONSUMER: &str = "search";
-const KERNEL_INCARNATION: &str = "kernel-1";
 const GENERATION: &str = "gen-1";
 const POLICY: &str = "source-policy.v1";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -469,9 +468,13 @@ impl Corpus {
             ExportWindow::Snapshot,
         );
         let projection = SearchProjection::open(data_home).unwrap();
+        let kernel_incarnation_id = self
+            .kernel
+            .database_incarnation_id(Instant::now() + Duration::from_secs(5))
+            .unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(KERNEL_INCARNATION), 1)?;
+                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
                 register_generation(conn, &generation(), 1)?;
                 Ok(())
             })
@@ -481,7 +484,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id: kernel_incarnation_id.clone(),
                 hold_id: hold.hold_id.clone(),
                 snapshot_commit_seq: hold.snapshot,
                 through_commit_seq: hold.snapshot,
@@ -496,7 +499,7 @@ impl Corpus {
         let consumer = CatchUpConsumer {
             binding,
             hold_id: hold.hold_id.clone(),
-            kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+            kernel_incarnation_id,
             generation_id: Some(GENERATION.to_string()),
         };
         (projection, consumer, hold)
@@ -917,7 +920,7 @@ fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
     let empty_home = tempfile::tempdir().unwrap();
     let fresh = SearchProjection::open(empty_home.path()).unwrap();
     fresh
-        .write(|conn| install_identity(conn, &identity(KERNEL_INCARNATION), 1))
+        .write(|conn| install_identity(conn, &identity(&consumer.kernel_incarnation_id), 1))
         .unwrap();
     let mut driver = SearchCatchUp::new(&corpus.kernel, &fresh);
     let report = driver
@@ -1163,7 +1166,7 @@ fn apply_without_acknowledging(
         &rows,
         &identities,
         MutationIdentity {
-            kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+            kernel_incarnation_id: consumer.kernel_incarnation_id.clone(),
             hold_id: consumer.hold_id.clone(),
             snapshot_commit_seq: hold.snapshot,
             through_commit_seq: through,
@@ -1976,7 +1979,9 @@ fn crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_earl
                     source_policy_version: POLICY.to_string(),
                 },
                 hold_id: hold_id.clone(),
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id: kernel
+                    .database_incarnation_id(Instant::now() + Duration::from_secs(5))
+                    .unwrap(),
                 generation_id: Some(GENERATION.to_string()),
             };
             let mut driver = SearchCatchUp::new(&kernel, &projection);

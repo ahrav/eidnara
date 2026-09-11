@@ -11,15 +11,17 @@ use kernel::{
     CurrentInputExpectation, EligibilityBinding, EligibilityVerdict, KernelError, KernelStore,
     StaleInput,
 };
-use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::vectors::{
     CompletionOutcome, CompletionPhase, ObsoleteReason, Obsoletion, VectorCompletion,
     complete_embedding_observed, completion_status, obsolete_embedding,
 };
+use retrieval::{ProjectionError, read_identity};
 
 use crate::search_catchup::{Refusal, classify};
-use crate::search_projection::{SearchProjection, SearchProjectionError};
+use crate::search_projection::{
+    SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
+};
 use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// One vector ready to publish: the descriptor it was produced for, the generation it belongs to, and the accounting the inference charged.
@@ -57,6 +59,8 @@ pub enum ObsoleteCause {
     Canonical(StaleInput),
     /// The projection's own row disagrees with the vector's identity.
     Projected(ObsoleteReason),
+    /// The projection reports an obsolete job without an exact cause.
+    ProjectedReconciled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,12 +204,27 @@ impl<'a> EmbeddingPublisher<'a> {
                 Ok(Err(StaleInput::Ineligible(EligibilityVerdict::WrongScope))) => {
                     return Err(PublicationError::WrongScope);
                 }
-                Ok(Err(stale)) => return self.obsolete(publication, deadline, now, stale),
+                Ok(Err(stale)) => {
+                    let kernel_incarnation_id = self.kernel.database_incarnation_id(deadline)?;
+                    return self.obsolete(
+                        publication,
+                        &kernel_incarnation_id,
+                        deadline,
+                        now,
+                        stale,
+                    );
+                }
                 Err(KernelError::Deadline) => return Err(PublicationError::GuardDeadline),
                 Err(error) => return Err(error.into()),
             };
         observer(PublicationEvent::GuardAcquired);
-        let outcome = self.commit(publication, deadline, now, observer);
+        let outcome = self.commit(
+            publication,
+            guard.database_incarnation_id(),
+            deadline,
+            now,
+            observer,
+        );
         drop(guard);
         observer(PublicationEvent::GuardReleased);
         match outcome {
@@ -224,6 +243,9 @@ impl<'a> EmbeddingPublisher<'a> {
                     Ok(status) if status.has_durable_vector(publication.vector) => {
                         Ok(Publication::Embedded)
                     }
+                    Ok(status) if status.job_state.as_deref() == Some("obsolete") => {
+                        Ok(Publication::Obsolete(ObsoleteCause::ProjectedReconciled))
+                    }
                     Ok(_) => Err(PublicationError::LocalCommitUnresolved),
                     Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
                 }
@@ -238,6 +260,7 @@ impl<'a> EmbeddingPublisher<'a> {
     fn commit(
         &mut self,
         publication: &VectorPublication<'_>,
+        kernel_incarnation_id: &str,
         deadline: Instant,
         now: i64,
         observer: &mut dyn FnMut(PublicationEvent),
@@ -252,6 +275,7 @@ impl<'a> EmbeddingPublisher<'a> {
         };
         let roll_back = self.fault == Some(PublicationFault::LoseLocalCommit);
         let mut applied = self.projection.write_within(deadline, |conn| {
+            require_kernel_incarnation(conn, kernel_incarnation_id)?;
             let outcome = complete_embedding_observed(conn, &completion, now, &mut |phase| {
                 observer(match phase {
                     CompletionPhase::VectorInserted => PublicationEvent::VectorStaged,
@@ -299,11 +323,19 @@ impl<'a> EmbeddingPublisher<'a> {
                 },
                 Refusal::Storage => self.enter_quarantine(QuarantineKind::Storage, &error),
             }),
-            // BEGIN never ran, so nothing of the completion is durable.
-            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
-                Err(PublicationError::SearchDeadline)
+            Err(SearchProjectionError::Quarantined(quarantine)) => {
+                Err(PublicationError::Quarantined(quarantine))
             }
-            Err(_) => Ok(Settled::Unresolved),
+            Err(SearchProjectionError::Connection(error)) => {
+                Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
+            }
+            Err(SearchProjectionError::Store(error)) => match classify_store_failure(&error) {
+                StoreFailure::Deadline => Err(PublicationError::SearchDeadline),
+                StoreFailure::Integrity => {
+                    Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
+                }
+                StoreFailure::Unknown => Ok(Settled::Unresolved),
+            },
         }
     }
 
@@ -313,6 +345,7 @@ impl<'a> EmbeddingPublisher<'a> {
     fn obsolete(
         &mut self,
         publication: &VectorPublication<'_>,
+        kernel_incarnation_id: &str,
         deadline: Instant,
         now: i64,
         stale: StaleInput,
@@ -320,7 +353,14 @@ impl<'a> EmbeddingPublisher<'a> {
         let occurrence_id = &publication.expectation.occurrence_id;
         let generation_id = &publication.generation.generation_id;
         let marked = self.projection.write_within(deadline, |conn| {
-            obsolete_embedding(conn, occurrence_id, generation_id, now)
+            require_kernel_incarnation(conn, kernel_incarnation_id)?;
+            obsolete_embedding(
+                conn,
+                occurrence_id,
+                generation_id,
+                &publication.expectation.object_id,
+                now,
+            )
         });
         match marked {
             Ok(Obsoletion::Marked | Obsoletion::AlreadyTerminal) => {
@@ -338,11 +378,16 @@ impl<'a> EmbeddingPublisher<'a> {
                     PublicationError::Refused(error)
                 }
             }),
-            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
-                Err(PublicationError::SearchDeadline)
+            Err(SearchProjectionError::Quarantined(quarantine)) => {
+                Err(PublicationError::Quarantined(quarantine))
+            }
+            Err(SearchProjectionError::Connection(error)) => {
+                Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
             }
             // The store failed between BEGIN and COMMIT; the durable job state, not the error, says whether the update took effect.
-            Err(_) => {
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Unknown =>
+            {
                 let status = self
                     .projection
                     .read(|conn| completion_status(conn, occurrence_id, generation_id));
@@ -354,6 +399,13 @@ impl<'a> EmbeddingPublisher<'a> {
                     Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
                 }
             }
+            Err(SearchProjectionError::Store(error)) => match classify_store_failure(&error) {
+                StoreFailure::Deadline => Err(PublicationError::SearchDeadline),
+                StoreFailure::Integrity => {
+                    Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
+                }
+                StoreFailure::Unknown => unreachable!("unknown store failures reconcile above"),
+            },
         }
     }
 
@@ -363,5 +415,15 @@ impl<'a> EmbeddingPublisher<'a> {
         error: &dyn std::fmt::Display,
     ) -> PublicationError {
         PublicationError::Quarantined(self.projection.enter_quarantine(kind, error))
+    }
+}
+
+fn require_kernel_incarnation(
+    conn: &storage::GuardedConn<'_>,
+    kernel_incarnation_id: &str,
+) -> Result<(), ProjectionError> {
+    match read_identity(conn)? {
+        Some(identity) if identity.kernel_incarnation_id == kernel_incarnation_id => Ok(()),
+        _ => Err(ProjectionError::IdentityMismatch),
     }
 }

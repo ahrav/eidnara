@@ -229,8 +229,32 @@ pub fn obsolete_embedding(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
     generation_id: &str,
+    source_object_id: &str,
     now: i64,
 ) -> Result<Obsoletion, ProjectionError> {
+    let job_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2
+         )",
+        params![occurrence_id, generation_id],
+        |row| row.get(0),
+    )?;
+    if !job_exists {
+        return Ok(Obsoletion::NoJob);
+    }
+    let Some(stored_source_object_id) = conn
+        .query_row(
+            "SELECT source_object_id FROM occurrences WHERE occurrence_id=?1",
+            [occurrence_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Err(ProjectionError::CorruptRow);
+    };
+    if stored_source_object_id != source_object_id {
+        return Err(ProjectionError::IdentityMismatch);
+    }
     let changed = conn.execute(
         "UPDATE embedding_jobs SET state='obsolete',updated_at=?3
          WHERE occurrence_id=?1 AND generation_id=?2 AND state IN ('pending','admitted')",
@@ -239,16 +263,7 @@ pub fn obsolete_embedding(
     if changed == 1 {
         return Ok(Obsoletion::Marked);
     }
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2)",
-        params![occurrence_id, generation_id],
-        |row| row.get(0),
-    )?;
-    Ok(if exists {
-        Obsoletion::AlreadyTerminal
-    } else {
-        Obsoletion::NoJob
-    })
+    Ok(Obsoletion::AlreadyTerminal)
 }
 
 /// A retired generation's files may already be reclaimed, so it accepts no completion; the same rule keeps `apply_batch` from queuing new work for it.

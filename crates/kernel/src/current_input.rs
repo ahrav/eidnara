@@ -1,21 +1,22 @@
-//! Holds the kernel writer while a consumer publishes work derived from one source descriptor, so no canonical mutation can change that input until the consumer's own transaction is over.
+//! Holds one kernel instance's writer while a consumer publishes work derived from one source descriptor.
 //!
-//! Every canonical mutation runs under the writer mutex: source publication and retirement, artifact classification, remediation, and restore.
-//! Taking that mutex therefore excludes all of them for as long as the guard lives, and revalidating the descriptor under it makes the comparison and the exclusion one step.
+//! Every canonical mutation through that instance runs under the writer mutex: source publication and retirement, artifact classification, remediation, and restore.
+//! Taking that mutex excludes those mutations for as long as the guard lives, and revalidating the descriptor under it makes the comparison and the exclusion one step.
 //! The guard opens no kernel transaction, so the consumer may commit to its own store while holding it without two transactions ever overlapping.
+//! A successor kernel instance can advance the durable writer fence while this process still holds its instance-local mutex; cross-store consumers need their own fencing protocol to reject work from the superseded instance.
 //! Acquisition is bounded by a deadline, and the guard performs no work of its own: what the consumer does under it is the consumer's bound.
 
 use std::sync::MutexGuard;
 use std::time::Instant;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::cas::ArtifactDestination;
 use super::eligibility::{
     EligibilityCandidate, EligibilityVerdict, ProjectScope, check_bounds, judge_in_tx,
 };
 use super::envelope::check_fence;
-use super::open::AcquireLimit;
+use super::open::{AcquireLimit, database_incarnation_id_via};
 use super::source_descriptor::{descriptor_object_id, reencoded_identity, stored_detail};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
@@ -51,7 +52,7 @@ pub enum StaleInput {
     Ineligible(EligibilityVerdict),
 }
 
-/// The kernel writer, held until dropped. No canonical mutation can begin while it lives.
+/// One kernel instance's writer, held until dropped. No canonical mutation through that instance can begin while it lives.
 ///
 /// The holder must call nothing on the [`KernelStore`] until the guard drops: the writer mutex is not reentrant, and a bounded kernel call would burn its whole deadline before failing.
 /// The only lock order is kernel writer first, then the consumer's own store; code that holds its own store's writer must never wait for this guard.
@@ -59,12 +60,17 @@ pub enum StaleInput {
 pub struct CurrentInputGuard<'a> {
     _writer: MutexGuard<'a, Connection>,
     tip: i64,
+    database_incarnation_id: String,
 }
 
 impl CurrentInputGuard<'_> {
     /// The commit-log tip the descriptor was judged current at; nothing can move it while the guard lives.
     pub fn tip(&self) -> i64 {
         self.tip
+    }
+
+    pub fn database_incarnation_id(&self) -> &str {
+        &self.database_incarnation_id
     }
 
     /// Whether the held writer connection has a transaction open; the guard promises it never does.
@@ -101,10 +107,13 @@ impl KernelStore {
         if !writer.is_autocommit() {
             return Err(KernelError::Io);
         }
-        Ok(judged.map(|tip| CurrentInputGuard {
-            _writer: writer,
-            tip,
-        }))
+        Ok(
+            judged.map(|(tip, database_incarnation_id)| CurrentInputGuard {
+                _writer: writer,
+                tip,
+                database_incarnation_id,
+            }),
+        )
     }
 }
 
@@ -115,7 +124,7 @@ fn revalidate(
     expected: &CurrentInputExpectation,
     candidate: &EligibilityCandidate,
     eligibility: EligibilityBinding<'_>,
-) -> Result<Result<i64, StaleInput>, KernelError> {
+) -> Result<Result<(i64, String), StaleInput>, KernelError> {
     let tx = writer
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(map_sqlite)?;
@@ -168,11 +177,25 @@ fn revalidate(
     {
         return Err(KernelError::CorruptCanonicalRow);
     }
+    let evidence: Option<(String, Option<i64>)> = tx
+        .query_row_cached(
+            "SELECT artifact_digest,invalidated_commit_seq
+             FROM evidence_meta WHERE evidence_id=?1",
+            params![detail.evidence_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    match evidence {
+        Some((digest, None)) if digest == detail.artifact_digest => {}
+        Some((_, Some(_))) => return Ok(Err(StaleInput::Retracted)),
+        Some((_, None)) | None => return Err(KernelError::CorruptCanonicalRow),
+    }
     if detail.occurrence_id != expected.occurrence_id
         || detail.payload_id != expected.payload_id
         || detail.artifact_digest != expected.artifact_digest
     {
         return Ok(Err(StaleInput::InputChanged));
     }
-    Ok(Ok(tip))
+    Ok(Ok((tip, database_incarnation_id_via(&tx)?)))
 }
