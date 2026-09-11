@@ -411,6 +411,54 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
 }
 
 #[test]
+fn missing_payload_is_corruption_not_absence() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let mut empty = Owned::from_json(&fixtures["records"][1]);
+    empty.payload.clear();
+    let dir = tempfile::tempdir().unwrap();
+    let outcomes = {
+        let store = open(dir.path());
+        store
+            .with_conn_fenced(|conn| Ok(persist_all(conn, &[record, empty]).unwrap()))
+            .unwrap()
+    };
+
+    // Corruption injection uses a raw connection; the guarded store is closed.
+    {
+        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+        raw.pragma_update(None, "foreign_keys", false).unwrap();
+        assert_eq!(
+            raw.execute(
+                "DELETE FROM payloads WHERE payload_id=?1",
+                [&outcomes[0].payload_id],
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    let store = open(dir.path());
+    assert_eq!(row_counts(&store), (2, 1));
+    store
+        .with_conn(|conn| {
+            assert_eq!(read_occurrence(conn, "no-such-occurrence"), Ok(None));
+            assert_eq!(
+                read_occurrence(conn, &outcomes[1].occurrence_id)
+                    .unwrap()
+                    .map(|stored| stored.bytes),
+                Some(Vec::new())
+            );
+            assert_eq!(
+                read_occurrence(conn, &outcomes[0].occurrence_id),
+                Err(ProjectionError::CorruptRow)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
     let fixtures = fixtures();
     let records: Vec<Owned> = fixtures["records"]

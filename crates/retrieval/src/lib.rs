@@ -676,7 +676,7 @@ pub fn read_occurrence(
                     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,
                     o.created_commit_seq,t.invalidated_commit_seq,t.reason
              FROM occurrences o
-             JOIN payloads p ON p.payload_id=o.payload_id
+             LEFT JOIN payloads p ON p.payload_id=o.payload_id
              LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
              WHERE o.occurrence_id=?1",
             [occurrence_id],
@@ -709,7 +709,7 @@ pub fn read_occurrence(
                     representation: row.get(5)?,
                     span,
                     payload_id: row.get(8)?,
-                    bytes: row.get(9)?,
+                    bytes: row.get::<_, Option<Vec<u8>>>(9)?.ok_or_else(corrupt)?,
                     domain_id: row.get(10)?,
                     sensitivity: parse_sensitivity(&row.get::<_, String>(11)?)
                         .ok_or_else(corrupt)?,

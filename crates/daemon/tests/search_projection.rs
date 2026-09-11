@@ -87,6 +87,37 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_data_home_is_rejected_without_creating_either_path() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_home = dir.path().join(OsString::from_vec(b"data-\xff".to_vec()));
+    let lossy_home = dir.path().join("data-\u{fffd}");
+    let result = SearchProjection::open(&data_home).map(|_| ());
+
+    for home in [&data_home, &lossy_home] {
+        assert_eq!(
+            (
+                home.try_exists().unwrap(),
+                home.join("search/search.sqlite").try_exists().unwrap(),
+            ),
+            (false, false),
+            "non-UTF-8 input must not create the root or database at {home:?}"
+        );
+    }
+    assert!(
+        matches!(
+            &result,
+            Err(SearchProjectionError::Store(storage::StoreError::Io(error)))
+                if error.kind() == std::io::ErrorKind::InvalidInput
+        ),
+        "expected InvalidInput, got {result:?}"
+    );
+}
+
 #[test]
 fn the_connection_is_verified_owner_only_and_rows_survive_close_and_reopen() {
     let dir = tempfile::tempdir().unwrap();

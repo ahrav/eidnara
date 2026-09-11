@@ -69,7 +69,15 @@ impl SearchProjection {
             storage_namespace: "search-projection".to_string(),
             isolation: Isolation::Module,
             backend: StorageBackend::Sqlite {
-                path: path.to_string_lossy().into_owned(),
+                path: path
+                    .to_str()
+                    .ok_or_else(|| {
+                        StoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "search projection path is not valid UTF-8",
+                        ))
+                    })?
+                    .to_owned(),
             },
         };
         let store = open_sqlite(&descriptor, BASELINE)?;
