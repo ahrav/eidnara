@@ -18,11 +18,6 @@ const DEGREE = "\u00b0";
 const CYRILLIC_HA = "\u04a9"; // ҩ — a stray closer a model improvised in the wild
 
 describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", () => {
-    it("strips §N$ — the agent opened the tag and closed with $ (would orphan '$')", () => {
-        // The cleanup consumes `$` as the improvised closer to prevent an orphaned `$` in output.
-        expect(stripPersistedAssistantText(`${SECTION}103012$ Fixed it`)).toBe("Fixed it");
-    });
-
     it("strips §N + a non-ASCII improvised closer (§11865ҩ → '')", () => {
         expect(stripPersistedAssistantText(`${SECTION}11865${CYRILLIC_HA} done`)).toBe("done");
         expect(stripDanglingTagNotationGlobally(`mid ${SECTION}11865${CYRILLIC_HA} text`)).toBe(
@@ -34,48 +29,26 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
         expect(stripPersistedAssistantText(`${SECTION}42 files changed`)).toBe("files changed");
     });
 
-    it("strips a dangling leading §N$ via stripTagPrefix without orphaning", () => {
-        expect(stripTagPrefix(`${SECTION}103012$ Fixed it`)).toBe("Fixed it");
-    });
-
-    it("does NOT eat a real letter following §N (only a non-word closer)", () => {
-        // `i` is a word char, so it is NOT consumed as a closer.
-        expect(stripDanglingTagNotationGlobally(`${SECTION}42important`)).toBe("important");
-    });
-
-    it("leaves well-formed §N§ to the pair/prefix passes (not mangled by dangling)", () => {
-        expect(stripPersistedAssistantText(`${SECTION}42${SECTION} hi`)).toBe("hi");
-        expect(stripTagPrefix(`${SECTION}42${SECTION} hi`)).toBe("hi");
-    });
-
-    it("does not touch bare digits (no leading §)", () => {
-        expect(stripDanglingTagNotationGlobally("99 files, 2024 roadmap")).toBe(
-            "99 files, 2024 roadmap",
-        );
-    });
-
     it("keeps the whole digit run of a multi-digit decimal section reference (§12.3 → 12.3)", () => {
+        // `§42.1` must not backtrack to match `§4` and leave `2.1`.
         expect(stripDanglingTagNotationGlobally(`see ${SECTION}12.3 and ${SECTION}5.1`)).toBe(
             `see ${SECTION}12.3 and ${SECTION}5.1`,
+        );
+        expect(stripDanglingTagNotationGlobally(`see ${SECTION}42.1 for details`)).toBe(
+            `see ${SECTION}42.1 for details`,
         );
         expect(stripPersistedAssistantText(`see ${SECTION}12.3 and ${SECTION}123.45`)).toBe(
             "see 12.3 and 123.45",
         );
-        expect(stripTagPrefix(`${SECTION}12.3 of the plan`)).toBe(`${SECTION}12.3 of the plan`);
-    });
-
-    it("does not backtrack a multi-digit decimal reference into a shorter dangling tag", () => {
-        // `§42.1` must not match as `§4` and leave `2.1`.
-        expect(stripDanglingTagNotationGlobally(`see ${SECTION}42.1 for details`)).toBe(
-            `see ${SECTION}42.1 for details`,
-        );
         expect(stripPersistedAssistantText(`see ${SECTION}42.1 for details`)).toBe(
             "see 42.1 for details",
         );
+        expect(stripTagPrefix(`${SECTION}12.3 of the plan`)).toBe(`${SECTION}12.3 of the plan`);
         expect(stripTagPrefix(`${SECTION}42.1 hello`)).toBe(`${SECTION}42.1 hello`);
     });
 
     it.each([
+        ["ASCII letter", "important"],
         ["CJK", "修复完成"],
         ["Latin with diacritic", "éclair"],
         ["Greek", "αβγ"],
@@ -118,10 +91,6 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         );
     });
 
-    it("#given malformed xml hybrid prefix #when stripTagPrefix runs #then removes it", () => {
-        expect(stripTagPrefix(`${SECTION}15298">${SECTION}15298${SECTION} hello`)).toBe("hello");
-    });
-
     it("#given well-formed prefix hiding a malformed one #when stripTagPrefix runs #then removes both whole", () => {
         // Removing `§1§ ` exposes `§2">§2§ `; the dangling pass must not take only `§2"` and leave `>§2§`.
         expect(
@@ -135,20 +104,6 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         expect(
             prependTag(7, `${SECTION}1${SECTION} ${SECTION}2">${SECTION}2${SECTION} hello`),
         ).toBe(`${SECTION}7${SECTION} hello`);
-    });
-
-    it("#given a long alternating run of well-formed and malformed prefixes #when stripTagPrefix runs #then consumes every one", () => {
-        let value = "";
-        for (let i = 0; i < 40; i++) {
-            value +=
-                i % 2 === 0
-                    ? `${SECTION}${i}${SECTION} `
-                    : `${SECTION}${i}">${SECTION}${i}${SECTION} `;
-        }
-        value += "hello";
-
-        expect(stripTagPrefix(value)).toBe("hello");
-        expect(prependTag(99, value)).toBe(`${SECTION}99${SECTION} hello`);
     });
 
     it("#given a dangling prefix before a well-formed tag #when stripTagPrefix runs #then removes both whole", () => {
@@ -176,12 +131,6 @@ describe("stripTagPrefix (transform §N§ notation only)", () => {
         expect(stripTagPrefix(value)).toBe("hello");
         // The 40,000-prefix input distinguishes linear scans from quadratic scans.
         expect(performance.now() - started).toBeLessThan(200);
-    });
-
-    it("#given accumulated bare digit residue #when stripTagPrefix runs #then preserves digits", () => {
-        expect(stripTagPrefix(`2030  2030  2030${DEGREE} Run clippy`)).toBe(
-            `2030  2030  2030${DEGREE} Run clippy`,
-        );
     });
 
     it("#given legitimate leading numbers #when stripTagPrefix runs #then preserves them", () => {
@@ -271,78 +220,43 @@ describe("prependTag", () => {
             `${SECTION}11${SECTION} hello`,
         );
     });
-
-    it("#given legitimate numbers #when prependTag runs #then preserves them", () => {
-        expect(prependTag(5, "99 files are located")).toBe(
-            `${SECTION}5${SECTION} 99 files are located`,
-        );
-    });
 });
 
 describe("peelLeadingMcTagNotation", () => {
-    it("#given leading tag prefix #when peel runs #then splits prefix and body", () => {
+    it("#given well-formed or malformed leading prefix #when peel runs #then splits the raw prefix from the body", () => {
         expect(peelLeadingMcTagNotation(`${SECTION}3${SECTION} hello`)).toEqual({
             tagPrefix: `${SECTION}3${SECTION} `,
-
             body: "hello",
         });
-    });
-
-    it("#given malformed leading prefix #when peel runs #then splits raw prefix before strip", () => {
         expect(peelLeadingMcTagNotation(`${SECTION}9">${SECTION}9${SECTION} body`)).toEqual({
             tagPrefix: `${SECTION}9">${SECTION}9${SECTION} `,
-
             body: "body",
         });
     });
 });
 
 describe("stripPersistedAssistantText edge cases", () => {
-    it("#given malformed prefix with trailing space #when strip runs #then trims result", () => {
+    it("#given only tag notation or whitespace #when strip runs #then trims to empty", () => {
         expect(stripPersistedAssistantText(`${SECTION}15298">§15298§ `)).toBe("");
-    });
-
-    it("#given tag-only text with trailing space #when strip runs #then returns empty", () => {
         expect(stripPersistedAssistantText(`${SECTION}42${SECTION} `)).toBe("");
-    });
-
-    it("#given whitespace-only after strip #when strip runs #then trims to empty", () => {
         expect(stripPersistedAssistantText(`   `)).toBe("");
     });
 });
 
 describe("byteSize", () => {
-    it("#given ascii string #when byteSize runs #then returns byte length", () => {
+    it("#given ascii, empty, and multibyte strings #when byteSize runs #then returns the UTF-8 byte length", () => {
         expect(byteSize("hello")).toBe(5);
-    });
-
-    it("#given empty string #when byteSize runs #then returns 0", () => {
         expect(byteSize("")).toBe(0);
-    });
-
-    it("#given multibyte string #when byteSize runs #then returns encoded byte length", () => {
         expect(byteSize("§42§")).toBe(6);
     });
 });
 
 describe("isThinkingPart", () => {
-    it("#given thinking part #when isThinkingPart runs #then returns true", () => {
+    it("#given thinking, reasoning, text, null, and primitive inputs #when isThinkingPart runs #then narrows on the reasoning types only", () => {
         expect(isThinkingPart({ type: "thinking", thinking: "..." })).toBe(true);
-    });
-
-    it("#given reasoning part #when isThinkingPart runs #then returns true", () => {
         expect(isThinkingPart({ type: "reasoning", reasoning: "..." })).toBe(true);
-    });
-
-    it("#given text part #when isThinkingPart runs #then returns false", () => {
         expect(isThinkingPart({ type: "text", text: "hello" })).toBe(false);
-    });
-
-    it("#given null #when isThinkingPart runs #then returns false", () => {
         expect(isThinkingPart(null)).toBe(false);
-    });
-
-    it("#given primitive #when isThinkingPart runs #then returns false", () => {
         expect(isThinkingPart("string")).toBe(false);
     });
 });

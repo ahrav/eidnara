@@ -2102,34 +2102,6 @@ fn an_excluding_scope_is_decided_before_check_inputs_are_read() {
     assert!(!batch.objects[0].append_pending);
 }
 
-/// Git paths cannot hold a NUL, so a declared path with one can never overlap
-/// a dirty entry; it is unplaceable rather than a clean path.
-#[test]
-fn an_affected_path_with_an_embedded_nul_is_unplaceable() {
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    let snapshot = checkout(&fixture, tip);
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[ApplicabilityCandidate {
-            payload: Some(
-                ObjectApplicabilitySpec::new(vec!["src\0/lib.rs".to_string()], vec![]).encode(),
-            ),
-            ..candidate("object-nul")
-        }],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(
-        batch.objects[0].evidence.contains("does not resolve"),
-        "{}",
-        batch.objects[0].evidence
-    );
-}
-
 /// An anchor payload past the decode cap is refused like an object payload:
 /// the object is uncertain without the request hashing or decoding the bytes.
 #[test]
@@ -2177,70 +2149,78 @@ fn an_oversized_anchor_payload_is_uncertain_without_being_decoded() {
     assert_eq!(batch.stats.graph_operations, 0);
 }
 
-/// A scope set past the engine's bound is refused before it is hashed or
-/// canonicalized, so stored scope data cannot hold a request past its deadline.
+/// Scope terms are bounded by value count and aggregate bytes. A term
+/// exceeding either bound yields `Uncertain` before hashing.
 #[test]
-fn an_oversized_scope_set_is_uncertain_without_being_hashed() {
+fn oversized_scope_terms_are_uncertain_without_being_hashed() {
     let dir = tempfile::tempdir().unwrap();
     let (fixture, _base, tip) = seeded_repo(dir.path());
     let snapshot = checkout(&fixture, tip);
-    let values: Vec<String> = (0..=kernel::applicability::MAX_SCOPE_SET_VALUES)
+    let engine = ApplicabilityEngine::new();
+
+    let too_many: Vec<String> = (0..=kernel::applicability::MAX_SCOPE_SET_VALUES)
         .map(|index| format!("project-{index}"))
         .collect();
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
-        &[ApplicabilityCandidate {
-            scope_terms: Some(vec![ScopeTermSpec {
+    let wide_value = "x".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
+    let wide_payload = "p".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
+    let payload_term = |dimension: Dimension| ScopeTermSpec {
+        dimension: dimension.as_str().to_string(),
+        operator: "exact".to_string(),
+        exact_value: Some("x".to_string()),
+        payload: Some(wide_payload.clone()),
+        ..ScopeTermSpec::default()
+    };
+    for (index, (terms, needle)) in [
+        (
+            vec![ScopeTermSpec {
                 dimension: Dimension::Project.as_str().to_string(),
                 operator: "set".to_string(),
-                set_values: Some(values),
+                set_values: Some(too_many),
                 ..ScopeTermSpec::default()
-            }]),
-            ..candidate("object-big-set")
-        }],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(
-        batch.objects[0].evidence.contains("set values"),
-        "{}",
-        batch.objects[0].evidence
-    );
-}
-
-/// Scope bytes are bounded as well as counts: a few large set values are
-/// refused before they are hashed or canonicalized.
-#[test]
-fn an_oversized_scope_by_bytes_is_uncertain_without_being_hashed() {
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    let snapshot = checkout(&fixture, tip);
-    let value = "x".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
-        &[ApplicabilityCandidate {
-            scope_terms: Some(vec![ScopeTermSpec {
+            }],
+            "set values",
+        ),
+        (
+            vec![ScopeTermSpec {
                 dimension: Dimension::Project.as_str().to_string(),
                 operator: "set".to_string(),
-                set_values: Some(vec![value.clone(), value]),
+                set_values: Some(vec![wide_value.clone(), wide_value]),
                 ..ScopeTermSpec::default()
-            }]),
-            ..candidate("object-big-bytes")
-        }],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(
-        batch.objects[0].evidence.contains("bytes"),
-        "{}",
-        batch.objects[0].evidence
-    );
+            }],
+            "bytes",
+        ),
+        (
+            vec![
+                payload_term(Dimension::Project),
+                payload_term(Dimension::Environment),
+            ],
+            "bytes",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let batch = engine.evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new().with_value(Dimension::Project, "project-0"),
+            &[ApplicabilityCandidate {
+                scope_terms: Some(terms),
+                ..candidate(&format!("object-big-scope-{index}"))
+            }],
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(
+            batch.objects[0].state,
+            ApplicabilityState::Uncertain,
+            "#{index}"
+        );
+        assert!(
+            batch.objects[0].evidence.contains(needle),
+            "#{index}: {}",
+            batch.objects[0].evidence
+        );
+    }
 }
 
 /// An unmaterialized skip-worktree path is absent on disk while its index entry
@@ -2295,39 +2275,6 @@ fn a_file_exists_check_on_an_unmaterialized_sparse_path_reports_stale() {
     assert_eq!(
         batch.objects[0].state,
         ApplicabilityState::Stale,
-        "{}",
-        batch.objects[0].evidence
-    );
-}
-
-/// Scope payloads count toward the aggregate byte cap like every other field.
-#[test]
-fn scope_payloads_count_toward_the_byte_cap() {
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    let snapshot = checkout(&fixture, tip);
-    let payload = "p".repeat(kernel::applicability::MAX_SCOPE_BYTES / 2 + 1);
-    let term = |dimension: Dimension| ScopeTermSpec {
-        dimension: dimension.as_str().to_string(),
-        operator: "exact".to_string(),
-        exact_value: Some("x".to_string()),
-        payload: Some(payload.clone()),
-        ..ScopeTermSpec::default()
-    };
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[ApplicabilityCandidate {
-            scope_terms: Some(vec![term(Dimension::Project), term(Dimension::Environment)]),
-            ..candidate("object-payload-bytes")
-        }],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(
-        batch.objects[0].evidence.contains("bytes"),
         "{}",
         batch.objects[0].evidence
     );
@@ -2494,9 +2441,10 @@ fn a_config_key_resolves_in_single_line_json() {
 
 /// A config file the check could not read leaves the key unevaluated, so the
 /// object is uncertain rather than definitely stale, and read repair records
-/// no repairable failure.
+/// no repairable failure. A missing config file and a directory at a
+/// `FileExists` path are definite failures with a failed check attached.
 #[test]
-fn an_unreadable_config_file_is_uncertain_not_stale() {
+fn unreadable_missing_and_non_file_check_paths_take_distinct_verdicts() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let tip = commit_snapshot(
@@ -2508,76 +2456,58 @@ fn an_unreadable_config_file_is_uncertain_not_stale() {
         1,
     );
     let snapshot = checkout(&fixture, tip);
-    // A directory is present but is not a config file to read.
+    // A directory is present but is neither a config file to read nor a
+    // regular file to find.
     std::fs::create_dir_all(fixture.root.join("config.d")).unwrap();
+    std::fs::create_dir_all(fixture.root.join("adir")).unwrap();
 
     let engine = ApplicabilityEngine::new();
-    let checked = ApplicabilityCandidate {
-        payload: Some(
-            ObjectApplicabilitySpec::new(
-                vec![],
-                vec![CheckSpec::ConfigKey {
-                    path: "config.d".to_string(),
-                    key: "flag".to_string(),
-                }],
-            )
-            .encode(),
+    for (name, check, expected, repairable) in [
+        (
+            "object-unreadable",
+            CheckSpec::ConfigKey {
+                path: "config.d".to_string(),
+                key: "flag".to_string(),
+            },
+            ApplicabilityState::Uncertain,
+            false,
         ),
-        ..candidate("object-unreadable")
-    };
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[checked],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(
-        batch.objects[0].failed_check.is_none(),
-        "an unevaluated read attached a repairable failure"
-    );
-}
-
-/// A missing config file is a definite failure, unlike one that could not be
-/// read.
-#[test]
-fn a_missing_config_file_stays_stale() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let tip = commit_snapshot(
-        &fixture.repo,
-        "main",
-        &[],
-        &[("src/lib.rs", "pub fn a() {}\n")],
-        "base",
-        1,
-    );
-    let snapshot = checkout(&fixture, tip);
-
-    let engine = ApplicabilityEngine::new();
-    let checked = ApplicabilityCandidate {
-        payload: Some(
-            ObjectApplicabilitySpec::new(
-                vec![],
-                vec![CheckSpec::ConfigKey {
-                    path: "absent.toml".to_string(),
-                    key: "flag".to_string(),
-                }],
-            )
-            .encode(),
+        (
+            "object-missing-config",
+            CheckSpec::ConfigKey {
+                path: "absent.toml".to_string(),
+                key: "flag".to_string(),
+            },
+            ApplicabilityState::Stale,
+            true,
         ),
-        ..candidate("object-missing-config")
-    };
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[checked],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Stale);
-    assert!(batch.objects[0].failed_check.is_some());
+        (
+            "object-dir-exists",
+            CheckSpec::FileExists {
+                path: "adir".to_string(),
+            },
+            ApplicabilityState::Stale,
+            true,
+        ),
+    ] {
+        let checked = ApplicabilityCandidate {
+            payload: Some(ObjectApplicabilitySpec::new(vec![], vec![check.clone()]).encode()),
+            ..candidate(name)
+        };
+        let batch = engine.evaluate_batch(
+            &snapshot,
+            &QueryContext::default(),
+            &ScopeMatchContext::new(),
+            &[checked],
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(batch.objects[0].state, expected, "{check:?}");
+        assert_eq!(
+            batch.objects[0].failed_check.is_some(),
+            repairable,
+            "{check:?}: only a definite failure reaches read repair"
+        );
+    }
 }
 
 /// The default spec has to survive an encode/decode round trip; a derived
@@ -2631,31 +2561,6 @@ fn a_cached_uncertain_verdict_claims_no_pending_append() {
         !batch.objects[0].append_pending,
         "a cached uncertain verdict advertised an append repair never attempts"
     );
-}
-
-/// A verdict the engine declined to cache has no entry to confirm, so the
-/// confirmation is dropped rather than applied to some other key's entry.
-#[test]
-fn confirming_an_uncacheable_verdict_reports_the_drop() {
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    let snapshot = checkout(&fixture, tip);
-
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[candidate("object-1")],
-        // An already-expired budget yields the uncacheable early exit.
-        &EvalBudget::new(
-            Some(Instant::now() - Duration::from_millis(1)),
-            Default::default(),
-        ),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(!batch.objects[0].append_pending);
-    assert!(!engine.confirm_durable_append(&batch.objects[0].token));
 }
 
 #[test]
@@ -2792,16 +2697,27 @@ fn changing_sparse_patterns_invalidates_the_object_cache() {
     assert_eq!(batch.stats.object_cache_hits, 0);
 }
 
-/// `affected_paths` and `checks` both default to empty, so a misspelled or
-/// unknown top-level field would otherwise decode as an object declaring
-/// nothing and classify `Current`.
+/// Unknown fields must fail decoding because empty defaults would otherwise
+/// silently drop constraints. An unknown check kind degrades to unsupported.
 #[test]
-fn an_unknown_payload_field_is_undecodable_rather_than_empty() {
+fn unknown_payload_fields_are_undecodable_at_any_depth_but_an_unknown_kind_is_not() {
+    use kernel::applicability::PayloadDecode;
+
     let typo =
         br#"{"schema":"eidnara.applicability.object.v1","cheks":[{"kind":"file_exists","path":"x"}]}"#;
+    let extra_constraint = br#"{"schema":"eidnara.applicability.object.v1","checks":[{"kind":"file_exists","path":"x","must_be_executable":true}]}"#;
+    for undecodable in [&typo[..], &extra_constraint[..]] {
+        assert!(matches!(
+            ObjectApplicabilitySpec::decode(Some(undecodable)),
+            PayloadDecode::Undecodable(_)
+        ));
+    }
+
+    let unknown_kind =
+        br#"{"schema":"eidnara.applicability.object.v1","checks":[{"kind":"brand_new","path":"x"}]}"#;
     assert!(matches!(
-        ObjectApplicabilitySpec::decode(Some(typo)),
-        kernel::applicability::PayloadDecode::Undecodable(_)
+        ObjectApplicabilitySpec::decode(Some(unknown_kind)),
+        PayloadDecode::Present(_)
     ));
 
     let dir = tempfile::tempdir().unwrap();
@@ -2812,13 +2728,26 @@ fn an_unknown_payload_field_is_undecodable_rather_than_empty() {
         &snapshot,
         &QueryContext::default(),
         &ScopeMatchContext::new(),
-        &[ApplicabilityCandidate {
-            payload: Some(typo.to_vec()),
-            ..candidate("object-typo")
-        }],
+        &[
+            ApplicabilityCandidate {
+                payload: Some(typo.to_vec()),
+                ..candidate("object-typo")
+            },
+            ApplicabilityCandidate {
+                payload: Some(extra_constraint.to_vec()),
+                ..candidate("object-extra")
+            },
+        ],
         &EvalBudget::unbounded(),
     );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
+    for object in &batch.objects {
+        assert_eq!(
+            object.state,
+            ApplicabilityState::Uncertain,
+            "{}",
+            object.object_id
+        );
+    }
 }
 
 /// A cheap check reads the live worktree, not the snapshot. A checked file that
@@ -3070,49 +2999,10 @@ fn a_checked_path_that_is_a_symlink_never_reads_its_target() {
     }
 }
 
-/// An extra field inside a recognized check kind is a constraint this build
-/// would silently drop, so the payload has to fail closed. An unknown *kind*
-/// must still degrade to unsupported rather than voiding the payload.
+/// Git reports an `assume_valid` entry clean until its worktree bytes differ
+/// from the index, and the dirty gate follows the bytes rather than the flag.
 #[test]
-fn an_unknown_field_inside_a_check_is_undecodable_but_an_unknown_kind_is_not() {
-    use kernel::applicability::PayloadDecode;
-
-    let extra_constraint = br#"{"schema":"eidnara.applicability.object.v1","checks":[{"kind":"file_exists","path":"x","must_be_executable":true}]}"#;
-    assert!(matches!(
-        ObjectApplicabilitySpec::decode(Some(extra_constraint)),
-        PayloadDecode::Undecodable(_)
-    ));
-
-    let unknown_kind =
-        br#"{"schema":"eidnara.applicability.object.v1","checks":[{"kind":"brand_new","path":"x"}]}"#;
-    assert!(matches!(
-        ObjectApplicabilitySpec::decode(Some(unknown_kind)),
-        PayloadDecode::Present(_)
-    ));
-
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    let snapshot = checkout(&fixture, tip);
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[ApplicabilityCandidate {
-            payload: Some(extra_constraint.to_vec()),
-            ..candidate("object-extra")
-        }],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Uncertain);
-}
-
-/// `assume_valid` and `skip_worktree` entries exist so a fingerprint covers
-/// state the status walk skips. Git reports both clean, and a sparse checkout
-/// marks every unmaterialized path `skip_worktree`, so reading them as
-/// uncommitted edits would gate such an object forever.
-#[test]
-fn index_bookkeeping_entries_do_not_trip_the_dirty_gate() {
+fn an_assume_valid_entry_trips_the_dirty_gate_only_when_its_bytes_change() {
     use gix::index::entry::Flags;
 
     let dir = tempfile::tempdir().unwrap();
@@ -3153,78 +3043,26 @@ fn index_bookkeeping_entries_do_not_trip_the_dirty_gate() {
         &EvalBudget::unbounded(),
     );
     assert_eq!(batch.objects[0].state, ApplicabilityState::Current);
-}
 
-/// A genuine uncommitted edit still gates, so excluding bookkeeping entries did
-/// not disarm the dirty gate.
-#[test]
-fn a_real_uncommitted_edit_still_trips_the_dirty_gate() {
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    set_head_detached(&fixture.repo, tip);
-    materialize(&fixture.repo, tip);
     write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* dirty */ }\n");
-    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
-
-    let engine = ApplicabilityEngine::new();
-    let batch = engine.evaluate_batch(
-        &snapshot,
-        &QueryContext::default(),
-        &ScopeMatchContext::new(),
-        &[ApplicabilityCandidate {
-            payload: Some(
-                ObjectApplicabilitySpec::new(vec!["src/lib.rs".to_string()], vec![]).encode(),
-            ),
-            ..candidate("object-src")
-        }],
-        &EvalBudget::unbounded(),
-    );
-    assert_eq!(
-        batch.objects[0].state,
-        ApplicabilityState::DirtyTreeUncertain
-    );
-}
-
-/// An assume-valid index entry suppresses Git's worktree check; modified bytes still make dependent objects DirtyTreeUncertain.
-#[test]
-fn an_edited_assume_valid_file_still_trips_the_dirty_gate() {
-    use gix::index::entry::Flags;
-
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    set_head_detached(&fixture.repo, tip);
-    materialize(&fixture.repo, tip);
-
-    let mut index = fixture.repo.open_index().expect("index opens");
-    let position = index
-        .entry_index_by_path("src/lib.rs".into())
-        .expect("entry exists");
-    index.entries_mut()[position].flags |= Flags::ASSUME_VALID;
-    index
-        .write(gix::index::write::Options::default())
-        .expect("index writes");
-    write_worktree_file(&fixture.repo, "src/lib.rs", "pub fn a() { /* dirty */ }\n");
-
-    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
+    let edited = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
     assert!(
-        snapshot
+        edited
             .dirty_entries()
             .iter()
             .any(|entry| entry.path == "src/lib.rs" && entry.status == "assume_valid_modified"),
         "{:?}",
-        snapshot.dirty_entries()
+        edited.dirty_entries()
     );
-
-    let engine = ApplicabilityEngine::new();
     let batch = engine.evaluate_batch(
-        &snapshot,
+        &edited,
         &QueryContext::default(),
         &ScopeMatchContext::new(),
         &[ApplicabilityCandidate {
             payload: Some(
                 ObjectApplicabilitySpec::new(vec!["src/lib.rs".to_string()], vec![]).encode(),
             ),
-            ..candidate("object-trusted")
+            ..candidate("object-trusted-edited")
         }],
         &EvalBudget::unbounded(),
     );
@@ -3531,14 +3369,12 @@ fn every_candidate_sharing_an_absent_object_declines_to_cache() {
     }
 }
 
-/// The snapshot records a non-UTF-8 path as its lossy rendering plus a digest
-/// of the raw bytes, and a repository can hold a valid UTF-8 file named
-/// exactly that string. Comparing the rendering alone lets a dirty instance of
-/// the byte path stand in for the declared UTF-8 twin, so an unrelated file
-/// would gate the object.
+/// Appending the raw-byte digest prevents a non-UTF-8 path from matching a
+/// valid UTF-8 twin, and appending it only to the final component preserves
+/// overlap with declared ancestor directories.
 #[cfg(unix)]
 #[test]
-fn a_dirty_byte_path_does_not_gate_its_utf8_twin() {
+fn a_byte_named_file_gates_its_declared_ancestor_but_not_its_utf8_twin() {
     use std::os::unix::ffi::OsStrExt;
 
     let dir = tempfile::tempdir().unwrap();
@@ -3576,28 +3412,6 @@ fn a_dirty_byte_path_does_not_gate_its_utf8_twin() {
         ApplicabilityState::Current,
         "a dirty non-UTF-8 file was treated as the declared UTF-8 path"
     );
-}
-
-/// The rendering preserves valid leading bytes verbatim and appends the digest
-/// to the final component alone, so a declared ancestor directory of a
-/// byte-named file still overlaps it.
-#[cfg(unix)]
-#[test]
-fn a_declared_directory_still_gates_a_byte_named_file_inside_it() {
-    use std::os::unix::ffi::OsStrExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    set_head_detached(&fixture.repo, tip);
-    materialize(&fixture.repo, tip);
-    let workdir = fixture.repo.workdir().unwrap().to_path_buf();
-
-    std::fs::write(
-        workdir.join(std::ffi::OsStr::from_bytes(b"src/\xff")),
-        "bytes\n",
-    )
-    .unwrap();
-    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
 
     let declared = ApplicabilityCandidate {
         payload: Some(ObjectApplicabilitySpec::new(vec!["src".to_string()], vec![]).encode()),
@@ -4074,7 +3888,7 @@ fn an_unplaceable_affected_path_is_uncertain_on_a_clean_checkout() {
         "the premise is a checkout with no uncommitted change"
     );
 
-    for spelling in ["../outside", "src/../../outside", ".."] {
+    for spelling in ["../outside", "src/../../outside", "..", "src\0/lib.rs"] {
         let declared = ApplicabilityCandidate {
             payload: Some(
                 ObjectApplicabilitySpec::new(vec![spelling.to_string()], vec![]).encode(),
@@ -4086,6 +3900,11 @@ fn an_unplaceable_affected_path_is_uncertain_on_a_clean_checkout() {
             batch.objects[0].state,
             ApplicabilityState::Uncertain,
             "affected path {spelling:?} was called current on a clean checkout"
+        );
+        assert!(
+            batch.objects[0].evidence.contains("does not resolve"),
+            "affected path {spelling:?}: {}",
+            batch.objects[0].evidence
         );
     }
 
@@ -4113,38 +3932,6 @@ fn an_unplaceable_affected_path_is_uncertain_on_a_clean_checkout() {
     assert_eq!(
         engine_batch(&dirty, &declared).objects[0].state,
         ApplicabilityState::DirtyTreeUncertain
-    );
-}
-
-/// A directory or other non-file at a `FileExists` path settles the question the
-/// check asked: no regular file is there. Reporting that unevaluated leaves the
-/// object uncertain and hands read repair nothing to act on.
-#[test]
-fn a_non_file_at_an_existence_check_path_is_a_failed_check() {
-    let dir = tempfile::tempdir().unwrap();
-    let (fixture, _base, tip) = seeded_repo(dir.path());
-    set_head_detached(&fixture.repo, tip);
-    materialize(&fixture.repo, tip);
-    std::fs::create_dir_all(fixture.root.join("adir")).unwrap();
-    let snapshot = snapshot_checkout(&fixture.root, &EvalBudget::unbounded()).unwrap();
-
-    let declared = ApplicabilityCandidate {
-        payload: Some(
-            ObjectApplicabilitySpec::new(
-                vec![],
-                vec![CheckSpec::FileExists {
-                    path: "adir".to_string(),
-                }],
-            )
-            .encode(),
-        ),
-        ..candidate("object-dir-exists")
-    };
-    let batch = engine_batch(&snapshot, &declared);
-    assert_eq!(batch.objects[0].state, ApplicabilityState::Stale);
-    assert!(
-        batch.objects[0].failed_check.is_some(),
-        "a definite non-file must reach read repair as a failed check"
     );
 }
 

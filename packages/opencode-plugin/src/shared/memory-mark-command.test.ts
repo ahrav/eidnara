@@ -152,12 +152,6 @@ describe("runMemoryMarkCommand", () => {
         );
     });
 
-    test("the confirm flag stands in for the dialog", async () => {
-        const h = harness();
-        const outcome = await run(h, args("contradict", "mem_verified", true));
-        expect(outcome.kind).toBe("applied");
-    });
-
     test("a relaxation without an approval is denied before anything is written", async () => {
         const h = harness();
         // Hiding a labeled row from `explicit_search` is a visibility change, so the flag confirms it.

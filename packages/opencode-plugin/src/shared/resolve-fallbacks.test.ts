@@ -4,25 +4,16 @@ import { modelBodyField, parseProviderModel, resolveFallbackChain } from "./reso
 
 describe("resolveFallbackChain", () => {
     // resolveFallbackChain has no built-in provider-agnostic fallback chain.
-    test("returns empty when user provides nothing (no builtin chain)", () => {
+    test("returns empty for undefined, an empty string, and an empty array (no builtin chain)", () => {
         expect(resolveFallbackChain(undefined)).toEqual([]);
-    });
-
-    test("returns empty for empty string", () => {
         expect(resolveFallbackChain("")).toEqual([]);
-    });
-
-    test("returns empty for empty array", () => {
         expect(resolveFallbackChain([])).toEqual([]);
     });
 
-    test("user-only when user provides valid fallback_models string", () => {
+    test("user-only when user provides a valid fallback_models string or array", () => {
         expect(resolveFallbackChain("anthropic/claude-sonnet-4-6")).toEqual([
             "anthropic/claude-sonnet-4-6",
         ]);
-    });
-
-    test("user-only when user provides valid fallback_models array", () => {
         expect(
             resolveFallbackChain(["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"]),
         ).toEqual(["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"]);
@@ -71,47 +62,33 @@ describe("resolveFallbackChain", () => {
 });
 
 describe("parseProviderModel", () => {
-    test("parses standard provider/model", () => {
+    test("splits on the first slash and trims surrounding whitespace", () => {
         expect(parseProviderModel("anthropic/claude-sonnet-4-6")).toEqual({
             providerID: "anthropic",
             modelID: "claude-sonnet-4-6",
         });
-    });
-
-    test("handles model id with slashes (only splits on first slash)", () => {
         expect(parseProviderModel("lemonade/GLM-4.7-Flash-GGUF/main")).toEqual({
             providerID: "lemonade",
             modelID: "GLM-4.7-Flash-GGUF/main",
         });
-    });
-
-    test("trims whitespace", () => {
         expect(parseProviderModel("  anthropic/claude-sonnet-4-6  ")).toEqual({
             providerID: "anthropic",
             modelID: "claude-sonnet-4-6",
         });
     });
 
-    test("returns null for no slash", () => {
-        expect(parseProviderModel("anthropic")).toBeNull();
-    });
-
-    test("returns null for leading slash", () => {
-        expect(parseProviderModel("/claude-sonnet-4-6")).toBeNull();
-    });
-
-    test("returns null for trailing slash", () => {
-        expect(parseProviderModel("anthropic/")).toBeNull();
-    });
-
-    test("returns null for empty string", () => {
-        expect(parseProviderModel("")).toBeNull();
-    });
-
-    test("returns null when whitespace is the only text beside the slash", () => {
-        expect(parseProviderModel(" /claude-sonnet-4-6")).toBeNull();
-        expect(parseProviderModel("anthropic/ ")).toBeNull();
-        expect(parseProviderModel(" / ")).toBeNull();
+    test("returns null without a slash, with an empty side, or when whitespace is the only text beside the slash", () => {
+        for (const input of [
+            "anthropic",
+            "/claude-sonnet-4-6",
+            "anthropic/",
+            "",
+            " /claude-sonnet-4-6",
+            "anthropic/ ",
+            " / ",
+        ]) {
+            expect(parseProviderModel(input), JSON.stringify(input)).toBeNull();
+        }
     });
 });
 

@@ -46,13 +46,6 @@ describe("rpc notifications", () => {
         expect(bPoll.map((m) => m.type).sort()).toEqual(["for-b", "global"]);
     });
 
-    test("session-less drain (legacy client) still receives all items", () => {
-        pushNotification("x", { ok: true }, "ses_1");
-        pushNotification("y", { ok: true }, "ses_2");
-        const poll = drainNotifications(0);
-        expect(poll.map((m) => m.type).sort()).toEqual(["x", "y"]);
-    });
-
     test("one session's single-cursor ack keeps a global notification for another session", () => {
         pushNotification("global-upgrade", { action: "show-upgrade-dialog" });
         pushNotification("for-b", { ok: true }, "ses_B");
@@ -189,41 +182,29 @@ describe("rpc notifications", () => {
         expect(isTuiConnected()).toBe(false);
     });
 
-    test("a modern session-less sink is global-only", () => {
-        const received: string[] = [];
-        const unregister = registerNotificationSink({
-            sessionId: undefined,
-            protocol: 2,
-            send: (notification) => received.push(notification.type),
-        });
-        expect(isTuiConnected("ses_whatever")).toBe(false);
-        expect(isTuiConnected()).toBe(true);
+    test("a session-less sink's visibility follows its protocol: legacy sees every session, 2 and newer are global-only", () => {
+        const cases: Array<{ protocol?: number; seesSessions: boolean; expected: string[] }> = [
+            { protocol: undefined, seesSessions: true, expected: ["scoped", "global"] },
+            { protocol: 2, seesSessions: false, expected: ["global"] },
+            // An unknown newer protocol keeps strict scoping instead of falling back to legacy.
+            { protocol: 3, seesSessions: false, expected: ["global"] },
+        ];
+        for (const { protocol, seesSessions, expected } of cases) {
+            __resetNotificationStateForTests();
+            const received: string[] = [];
+            const unregister = registerNotificationSink({
+                sessionId: undefined,
+                protocol,
+                send: (notification) => received.push(notification.type),
+            });
+            expect(isTuiConnected("ses_whatever"), `protocol ${protocol}`).toBe(seesSessions);
+            expect(isTuiConnected()).toBe(true);
 
-        pushNotification("scoped", { ok: true }, "ses_whatever");
-        pushNotification("global", { ok: true });
-        expect(received).toEqual(["global"]);
-        unregister();
-    });
-
-    test("a legacy session-less sink retains broad compatibility", () => {
-        const unregister = registerNotificationSink({ sessionId: undefined, send: () => {} });
-        expect(isTuiConnected("ses_whatever")).toBe(true);
-        unregister();
-    });
-
-    test("an unknown newer protocol keeps strict scoping instead of falling back to legacy", () => {
-        const received: string[] = [];
-        const unregister = registerNotificationSink({
-            sessionId: undefined,
-            protocol: 3,
-            send: (notification) => received.push(notification.type),
-        });
-        expect(isTuiConnected("ses_whatever")).toBe(false);
-
-        pushNotification("scoped", { ok: true }, "ses_whatever");
-        pushNotification("global", { ok: true });
-        expect(received).toEqual(["global"]);
-        unregister();
+            pushNotification("scoped", { ok: true }, "ses_whatever");
+            pushNotification("global", { ok: true });
+            expect(received, `protocol ${protocol}`).toEqual(expected);
+            unregister();
+        }
     });
 
     test("pushNotification fans out live to a matching sink and skips a foreign session", () => {

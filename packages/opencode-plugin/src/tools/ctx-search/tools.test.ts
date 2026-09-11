@@ -100,14 +100,6 @@ describe("createCtxSearchTools", () => {
         expect(routedRoots).toEqual([pinnedRoot]);
     });
 
-    it("validates required query", async () => {
-        const tools = createCtxSearchTools(kernelHarness().deps);
-
-        const result = await tools.ctx_search.execute({ query: "   " }, toolContext());
-
-        expect(result).toBe("Error: 'query' is required.");
-    });
-
     it("rejects an over-cap query with the native string error before any work", async () => {
         const harness = kernelHarness();
         const resolveCalls: string[] = [];
@@ -391,11 +383,12 @@ describe("createCtxSearchTools", () => {
 });
 
 describe("executeCtxSearch", () => {
-    it("returns invalid outcomes with the same error text the tool returns", async () => {
+    it("rejects a blank query as invalid with the same error text the tool returns", async () => {
         const { deps } = kernelHarness();
         const tools = createCtxSearchTools(deps);
         const execution = await executeCtxSearch(deps, { query: "   " }, toolContext());
         expect(execution.status).toBe("invalid");
+        expect(execution.text).toBe("Error: 'query' is required.");
         expect(execution.text).toBe(
             String(await tools.ctx_search.execute({ query: "   " }, toolContext())),
         );

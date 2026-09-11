@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isEidnaraPiPackageEntry, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
+import { PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
 import { PiAdapter } from "./pi";
 
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
@@ -37,15 +37,17 @@ describe("PiAdapter settings safety", () => {
         expect(JSON.parse(readFileSync(settingsPath, "utf-8")).packages).toHaveLength(2);
     });
 
-    it("refuses to replace a non-array packages value", async () => {
+    it("reports a non-array packages value as absent and refuses to replace it", async () => {
         const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-scalar-"));
         tempDirs.push(root);
         process.env.PI_CODING_AGENT_DIR = root;
         const settingsPath = join(root, "settings.json");
         const before = JSON.stringify({ packages: "npm:other" });
         writeFileSync(settingsPath, before);
+        const adapter = new PiAdapter();
 
-        const result = await new PiAdapter().ensurePluginEntry();
+        expect(adapter.hasPluginEntry()).toBe(false);
+        const result = await adapter.ensurePluginEntry();
 
         expect(result.ok).toBe(false);
         expect(result.action).toBe("error");
@@ -72,14 +74,6 @@ describe("PiAdapter settings safety", () => {
             "npm:@eidnara/pi-extras",
             pinned,
         ]);
-    });
-
-    it("does not mistake a sibling scoped package for the plugin", () => {
-        const baseDir = tmpdir();
-        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi-extras", baseDir)).toBe(false);
-        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi", baseDir)).toBe(true);
-        expect(isEidnaraPiPackageEntry("npm:@eidnara/pi@0.1.0", baseDir)).toBe(true);
-        expect(isEidnaraPiPackageEntry(["npm:@eidnara/pi"], baseDir)).toBe(false);
     });
 
     it("aborts plugin updates when existing settings are malformed", async () => {
@@ -114,14 +108,5 @@ describe("PiAdapter settings safety", () => {
         expect(written).toContain("// keep me");
         expect(written).toContain("/* trailing */");
         expect(written).toContain(PI_PACKAGE_SOURCE);
-    });
-
-    it("reports the plugin absent instead of throwing when packages is not an array", () => {
-        const root = mkdtempSync(join(tmpdir(), "eidnara-pi-adapter-"));
-        tempDirs.push(root);
-        process.env.PI_CODING_AGENT_DIR = root;
-        writeFileSync(join(root, "settings.json"), JSON.stringify({ packages: "npm:other" }));
-
-        expect(new PiAdapter().hasPluginEntry()).toBe(false);
     });
 });

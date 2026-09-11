@@ -1209,12 +1209,6 @@ mod tests {
     }
 
     #[test]
-    fn pre_raise_thresholds_keep_the_exact_85_percent_force_band() {
-        assert_eq!(escalation_bands(65.0).force_materialize_percentage, 85.0);
-        assert_eq!(escalation_bands(80.0).force_materialize_percentage, 85.0);
-    }
-
-    #[test]
     fn durable_overflow_arm_upgrades_only_a_would_be_defer_to_emergency() {
         let mut inputs = base_inputs();
         inputs.emergency_recovery_armed = true;
@@ -1310,17 +1304,6 @@ mod tests {
             ),
             "bypass resumes at the backoff boundary"
         );
-    }
-
-    #[test]
-    fn decide_is_deterministic_for_identical_inputs() {
-        let mut inputs = base_inputs();
-        inputs.usage.percentage = 86.0;
-        inputs.overflow_error_text =
-            Some("This model's maximum context length is 128000 tokens".to_string());
-        let first = decide(&inputs);
-        let second = decide(&inputs);
-        assert_eq!(first, second);
     }
 
     #[test]

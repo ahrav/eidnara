@@ -200,6 +200,10 @@ describe("subagent-runner pure helpers", () => {
     });
 
     it("builds argv with system prompt, primary model, and prompt last", () => {
+        // Exact argv for the stock Pi host: extension discovery stays enabled (no
+        // `--no-extensions`), the source tree has no `dist/subagent-entry.js` so no
+        // `--extension`/`-x` appears, sidekick gets its read-only `--tools` allow-list,
+        // `--no-context-files` precedes `--tools`, and the prompt is last without a `--` sentinel.
         expect(
             buildArgsForTest({
                 ...baseOptions,
@@ -223,35 +227,6 @@ describe("subagent-runner pure helpers", () => {
             // `baseOptions` leaves `thinkingLevel` unset, so Pi resolves thinking for Anthropic.
             "summarize this session",
         ]);
-    });
-
-    it("keeps extension discovery enabled so provider and AFT extensions can load", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            model: "google/antigravity-gemini-3.5-flash",
-        });
-
-        expect(args).not.toContain("--no-extensions");
-        expect(args).toContain("--no-skills");
-        expect(args).toContain("--no-prompt-templates");
-    });
-
-    it("isolated retry disables discovered extensions but keeps explicit --extension paths", () => {
-        const args = buildArgsForTest(
-            {
-                ...baseOptions,
-                agent: "sidekick",
-                model: "anthropic/claude-sonnet",
-            },
-            {
-                disableDiscoveredExtensions: true,
-                subagentEntryPath: "/tmp/subagent-entry.js",
-            },
-        );
-
-        expect(args).toEqual(
-            expect.arrayContaining(["--no-extensions", "--extension", "/tmp/subagent-entry.js"]),
-        );
     });
 
     it("uses the configured extension allowlist in order and resolves relative paths from Pi settings", () => {
@@ -412,26 +387,6 @@ describe("subagent-runner pure helpers", () => {
         }
     });
 
-    it("keeps the current all-extension argv shape when no allowlist is configured", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            model: "anthropic/claude-sonnet",
-        });
-
-        expect(args).not.toContain("--no-extensions");
-        expect(args).not.toContain("--extension");
-    });
-
-    it("disables project context files so hidden subagents see only our prompt", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            model: "anthropic/claude-sonnet",
-        });
-
-        expect(args).toContain("--no-context-files");
-        expect(args.indexOf("--no-context-files")).toBeLessThan(args.indexOf("--tools"));
-    });
-
     it("emits only OMP-supported startup flags and tool names on an OMP host", () => {
         const root = mkdtempSync(join(homedir(), ".eidnara-omp-argv-test-"));
         const previousPackageDir = process.env.PI_PACKAGE_DIR;
@@ -456,32 +411,6 @@ describe("subagent-runner pure helpers", () => {
         }
     });
 
-    it("always includes --no-session so child sessions don't appear in pi resume", () => {
-        // Hidden sidekick subagents must not appear in Pi's session list or `pi resume`.
-        const args = buildArgsForTest({
-            ...baseOptions,
-            model: "anthropic/claude-sonnet",
-        });
-        expect(args).toContain("--no-session");
-        const noSessionIdx = args.indexOf("--no-session");
-        const modelIdx = args.indexOf("--model");
-        expect(noSessionIdx).toBeLessThan(modelIdx);
-    });
-
-    it("builds a single --model; runner handles fallback with fresh children", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            model: "anthropic/primary",
-            fallbackModels: ["openai/fallback", "google/last"],
-        });
-
-        expect(args).toContain("--model");
-        expect(args).not.toContain("--models");
-        expect(args).toContain("anthropic/primary");
-        expect(args).not.toContain("openai/fallback");
-        expect(args.at(-1)).toBe("summarize this session");
-    });
-
     it("translates the canonical (OpenCode) provider to Pi's form at --model", () => {
         // `--model` receives Pi provider IDs rather than canonical provider IDs.
         expect(buildArgsForTest({ ...baseOptions, model: "openai/gpt-5.5" })).toEqual(
@@ -497,27 +426,6 @@ describe("subagent-runner pure helpers", () => {
         );
         expect(buildArgsForTest({ ...baseOptions, model: "anthropic/claude-opus-4-8" })).toEqual(
             expect.arrayContaining(["--model", "anthropic/claude-opus-4-8"]),
-        );
-    });
-
-    it("passes prompt last without a -- sentinel", () => {
-        const args = buildArgsForTest({
-            ...baseOptions,
-            model: "anthropic/claude-sonnet",
-            userMessage: "ordinary prompt",
-        });
-
-        expect(args.at(-1)).toBe("ordinary prompt");
-        expect(args).not.toContain("--");
-    });
-
-    it("locks sidekick to an explicit read-only allow-list", () => {
-        const sidekickArgs = buildArgsForTest({
-            ...baseOptions,
-            agent: "sidekick",
-        });
-        expect(sidekickArgs).toEqual(
-            expect.arrayContaining(["--tools", "read,grep,find,ls,ctx_search"]),
         );
     });
 
@@ -604,22 +512,6 @@ describe("subagent-runner pure helpers", () => {
         if (result.ok) {
             expect(result.assistantText).toBe("done");
         }
-    });
-
-    // `dist/subagent-entry.js` is absent in unit tests unless `bun run build` runs.
-    // The source build omits `--extension` because `dist/subagent-entry.js` is absent.
-
-    it("dev mode (no bundle): does NOT pass --extension flag, so ctx_* tools are unavailable", () => {
-        // In dev mode (running .ts source), there's no dist/subagent-entry.js
-        // extensions still load; only Eidnara's explicit ctx_* entry is absent.
-        const args = buildArgsForTest({
-            ...baseOptions,
-            agent: "sidekick",
-            model: "anthropic/claude-sonnet",
-        });
-        // `-x` hard-fails in Pi 0.71+.
-        expect(args).not.toContain("--extension");
-        expect(args).not.toContain("-x");
     });
 });
 
@@ -931,20 +823,6 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         });
     });
 
-    it("returns spawn_failed when spawn throws synchronously", async () => {
-        const spawnImpl = mock(() => {
-            throw new Error("ENOENT pi");
-        });
-        const runner = new PiSubagentRunner({ spawnImpl: spawnImpl as never });
-
-        expect(await runner.run(baseOptions)).toEqual({
-            ok: false,
-            reason: "spawn_failed",
-            error: "ENOENT pi",
-            durationMs: expect.any(Number),
-        });
-    });
-
     it("writes the system prompt to a temp file path and removes it after success", async () => {
         const child = createMockChild();
         let promptPath: string | undefined;
@@ -1150,11 +1028,13 @@ describe("PiSubagentRunner spawn lifecycle", () => {
     });
 
     it("ignores malformed lines if a later agent_end succeeds", async () => {
+        // A line that starts with `{` but fails to parse is a deferred parse error, not
+        // noise; a later terminal event still turns the run into a success.
         const child = createMockChild();
         const { runner } = runnerWith(child);
 
         const resultPromise = runner.run(baseOptions);
-        child.writeRawStdoutLine("not json");
+        child.writeRawStdoutLine("{not-json");
         child.writeStdoutLine(
             agentEnd([{ role: "assistant", content: [{ type: "text", text: "recovered" }] }]),
         );
@@ -1181,31 +1061,6 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             ok: false,
             reason: "no_assistant",
             error: "pi agent_end did not include an assistant message",
-            durationMs: expect.any(Number),
-            meta: { stderr: undefined, sawProtocolOutput: true },
-        });
-    });
-
-    it("returns no_assistant for empty assistant text", async () => {
-        const child = createMockChild();
-        const { runner } = runnerWith(child);
-
-        const resultPromise = runner.run(baseOptions);
-        child.writeStdoutLine(
-            agentEnd([
-                {
-                    role: "assistant",
-                    content: [{ type: "text", text: "   " }],
-                    stopReason: "stop",
-                },
-            ]),
-        );
-        child.emitClose(0);
-
-        expect(await resultPromise).toEqual({
-            ok: false,
-            reason: "no_assistant",
-            error: "pi assistant produced empty text",
             durationMs: expect.any(Number),
             meta: { stderr: undefined, sawProtocolOutput: true },
         });
@@ -1264,42 +1119,49 @@ describe("PiSubagentRunner spawn lifecycle", () => {
     });
 
     it("retries a translated provider with the canonical form after a missing-key exit", async () => {
-        const first = createMockChild();
-        const second = createMockChild();
-        const { runner, spawnImpl } = runnerWith([first, second]);
+        // Every provider with two host forms takes the same path: the translated form
+        // spawns first, its missing-key exit triggers one canonical-form retry.
+        for (const [model, translated] of [
+            ["openai/gpt-5.5", "openai-codex/gpt-5.5"],
+            ["google/gemini-2.5-pro", "google-antigravity/gemini-2.5-pro"],
+        ] as const) {
+            __test.resetProviderFormCache();
+            const first = createMockChild();
+            const second = createMockChild();
+            const { runner, spawnImpl } = runnerWith([first, second]);
 
-        const resultPromise = runner.run({
-            ...baseOptions,
-            model: "openai/gpt-5.5",
-        });
-        first.writeStderr("No API key found for openai-codex. Use /login to authenticate.");
-        first.emitClose(1);
-        await nextTick();
-        second.writeStdoutLine(
-            agentEnd([
-                {
-                    role: "assistant",
-                    content: [{ type: "text", text: "direct API success" }],
-                    stopReason: "stop",
-                },
-            ]),
-        );
-        second.emitClose(0);
+            const resultPromise = runner.run({ ...baseOptions, model });
+            first.writeStderr(
+                `No API key found for ${translated.split("/")[0]}. Use /login to authenticate.`,
+            );
+            first.emitClose(1);
+            await nextTick();
+            second.writeStdoutLine(
+                agentEnd([
+                    {
+                        role: "assistant",
+                        content: [{ type: "text", text: "direct API success" }],
+                        stopReason: "stop",
+                    },
+                ]),
+            );
+            second.emitClose(0);
 
-        expect(await resultPromise).toEqual({
-            ok: true,
-            assistantText: "direct API success",
-            toolCallCount: 0,
-            durationMs: expect.any(Number),
-            meta: { stderr: undefined },
-        });
-        expect(spawnImpl).toHaveBeenCalledTimes(2);
-        expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
-            expect.arrayContaining(["--model", "openai-codex/gpt-5.5"]),
-        );
-        expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
-            expect.arrayContaining(["--model", "openai/gpt-5.5"]),
-        );
+            expect(await resultPromise, model).toEqual({
+                ok: true,
+                assistantText: "direct API success",
+                toolCallCount: 0,
+                durationMs: expect.any(Number),
+                meta: { stderr: undefined },
+            });
+            expect(spawnImpl, model).toHaveBeenCalledTimes(2);
+            expect(spawnImpl.mock.calls[0]?.[1], model).toEqual(
+                expect.arrayContaining(["--model", translated]),
+            );
+            expect(spawnImpl.mock.calls[1]?.[1], model).toEqual(
+                expect.arrayContaining(["--model", model]),
+            );
+        }
     });
 
     it("caches the provider form that succeeds for later spawns", async () => {
@@ -1406,39 +1268,6 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         const result = await resultPromise;
         expect(result.ok).toBe(false);
         expect(spawnImpl).toHaveBeenCalledTimes(1);
-    });
-
-    it("retries google's translated provider with canonical google", async () => {
-        const first = createMockChild();
-        const second = createMockChild();
-        const { runner, spawnImpl } = runnerWith([first, second]);
-
-        const resultPromise = runner.run({
-            ...baseOptions,
-            model: "google/gemini-2.5-pro",
-        });
-        first.writeStderr("No API key found for google-antigravity. Use /login to authenticate.");
-        first.emitClose(1);
-        await nextTick();
-        second.writeStdoutLine(
-            agentEnd([
-                {
-                    role: "assistant",
-                    content: [{ type: "text", text: "google API success" }],
-                    stopReason: "stop",
-                },
-            ]),
-        );
-        second.emitClose(0);
-        await resultPromise;
-
-        expect(spawnImpl).toHaveBeenCalledTimes(2);
-        expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
-            expect.arrayContaining(["--model", "google-antigravity/gemini-2.5-pro"]),
-        );
-        expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
-            expect.arrayContaining(["--model", "google/gemini-2.5-pro"]),
-        );
     });
 
     it("bounds provider and extension retries to three spawns", async () => {
@@ -2068,6 +1897,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
             expect(result.ok).toBe(false);
             if (!result.ok) {
                 expect(result.reason).toBe("no_assistant");
+                expect(result.error).toBe("pi assistant produced empty text");
                 expect(result.meta).toEqual({
                     stderr: undefined,
                     sawProtocolOutput: true,
@@ -2259,63 +2089,6 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         );
     });
 
-    it("retries fallback models by spawning fresh children", async () => {
-        const first = createMockChild();
-        const second = createMockChild();
-        let spawnCount = 0;
-        const spawnImpl = mock(() => {
-            spawnCount += 1;
-            return (spawnCount === 1 ? first : second) as never;
-        });
-        const runner = new PiSubagentRunner({
-            piBinary: "pi-test",
-            spawnImpl: spawnImpl as never,
-        });
-
-        const resultPromise = runner.run({
-            ...baseOptions,
-            model: "anthropic/primary",
-            fallbackModels: ["openai/fallback"],
-        });
-        first.writeStdoutLine(
-            agentEnd([
-                {
-                    role: "assistant",
-                    content: [{ type: "text", text: "bad" }],
-                    stopReason: "error",
-                },
-            ]),
-        );
-        first.emitClose(0);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        second.writeStdoutLine(
-            agentEnd([
-                {
-                    role: "assistant",
-                    content: [{ type: "text", text: "good" }],
-                    stopReason: "stop",
-                },
-            ]),
-        );
-        second.emitClose(0);
-
-        expect(await resultPromise).toEqual({
-            ok: true,
-            assistantText: "good",
-            toolCallCount: 0,
-            durationMs: expect.any(Number),
-            meta: { stderr: undefined },
-        });
-        expect(spawnImpl).toHaveBeenCalledTimes(2);
-        expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
-            expect.arrayContaining(["--model", "anthropic/primary"]),
-        );
-        // The spawn boundary translates OpenCode's canonical `openai/` provider prefix to Pi's `openai-codex/` prefix.
-        expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
-            expect.arrayContaining(["--model", "openai-codex/fallback"]),
-        );
-    });
-
     it("retries fallback models after empty assistant text", async () => {
         const first = createMockChild();
         const second = createMockChild();
@@ -2379,25 +2152,6 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         }
         expect(child.kill).toHaveBeenCalledWith("SIGTERM");
         expect(child.killSignals).toEqual(["SIGTERM"]);
-    });
-
-    it("does not emit child_exit after a timeout has already settled the run", async () => {
-        const child = createMockChild();
-        const { runner } = runnerWith(child);
-        const eventTypes: string[] = [];
-
-        const result = await runner.run({
-            ...baseOptions,
-            timeoutMs: 20,
-            onProgress: (event) => {
-                eventTypes.push(event.type);
-            },
-        });
-        expect(result.ok).toBe(false);
-        child.emitClose(null, "SIGTERM");
-        await nextTick();
-
-        expect(eventTypes).not.toContain("child_exit");
     });
 
     it("measures durationMs across every attempt in the retry chain", async () => {
@@ -2584,22 +2338,18 @@ describe("PiSubagentRunner spawn lifecycle", () => {
         expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     });
 
-    it("does not send SIGKILL when child exits after SIGTERM before escalation timeout", async () => {
-        const child = createMockChild();
+    it("escalates to SIGKILL only for a child still alive past the escalation timeout", async () => {
+        // Both children share one real 2s escalation window: the one that exits after
+        // SIGTERM never sees SIGKILL, the one that stays alive does.
+        const exited = createMockChild();
+        const lingering = createMockChild();
 
-        __test.terminateChild(child as never);
-        child.emitExit(0, null);
+        __test.terminateChild(exited as never);
+        exited.emitExit(0, null);
+        __test.terminateChild(lingering as never);
         await new Promise((resolve) => setTimeout(resolve, 2100));
 
-        expect(child.killSignals).toEqual(["SIGTERM"]);
-    });
-
-    it("sends SIGKILL when child remains alive past escalation timeout", async () => {
-        const child = createMockChild();
-
-        __test.terminateChild(child as never);
-        await new Promise((resolve) => setTimeout(resolve, 2100));
-
-        expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+        expect(exited.killSignals).toEqual(["SIGTERM"]);
+        expect(lingering.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
     });
 });

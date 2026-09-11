@@ -54,12 +54,15 @@ function wrapupHarness(respond: (call: RecordedCall) => unknown, compactionOff =
 }
 
 describe("Pi /ctx-wrapup", () => {
-    it("sends session.wrapup with the default keep, a minted command id, and the request budget", async () => {
+    it("sends session.wrapup with the default keep, a minted command id, the request budget, and the abort signal", async () => {
         const { calls, run } = wrapupHarness(() => ({ result: { disposition: "completed" } }));
-        const entries = await run();
+        const signal = new AbortController().signal;
+        const entries = await run("", signal);
         expect(calls).toHaveLength(1);
         expect(calls[0]?.method).toBe("session.wrapup");
         expect(calls[0]?.timeoutMs).toBe(MAX_WRAPUP_REQUEST_BUDGET_MS);
+        // The forwarded signal lets a cancelled wrapup stop without waiting out its budget.
+        expect(calls[0]?.signal).toBe(signal);
         expect(calls[0]?.body).toMatchObject({
             method: "session.wrapup",
             v: 1,
@@ -71,13 +74,6 @@ describe("Pi /ctx-wrapup", () => {
         expect(entries[0]?.text).toBe("## Eidnara Wrapup\n\nStarting wrapup…");
         expect(entries[1]?.text).toBe("## Eidnara Wrapup\n\nWrapup completed.");
         expect(entries[1]?.level).toBe("info");
-    });
-
-    it("forwards the command's abort signal so a cancelled wrapup does not wait out its budget", async () => {
-        const { calls, run } = wrapupHarness(() => ({ result: { disposition: "completed" } }));
-        const signal = new AbortController().signal;
-        await run("", signal);
-        expect(calls[0]?.signal).toBe(signal);
     });
 
     it("parses an explicit messages_to_keep into the keep field", async () => {

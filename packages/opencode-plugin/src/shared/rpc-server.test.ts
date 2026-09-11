@@ -101,42 +101,29 @@ function readNewestPortRecord(storageDir: string, directory: string): RpcPortFil
 }
 
 describe("EidnaraRpcServer port-file directory scan", () => {
-    test("a port file for a dead PID does not trigger the other-instance warning", async () => {
-        const storageDir = makeTempDir();
-        const directory = "/repo-dead-pid";
-        const deadPid = 4_000_001;
-        seedPortFile(storageDir, directory, deadPid, 65_000);
-        stubPidLiveness(deadPid, "dead");
-        const logSpy = spyOn(logger, "log");
+    test("the other-instance warning fires only for a port file whose foreign PID is alive", async () => {
+        const cases: Array<{ state: "alive" | "dead"; pid: number; warnings: number }> = [
+            { state: "dead", pid: 4_000_001, warnings: 0 },
+            { state: "alive", pid: 4_000_002, warnings: 1 },
+        ];
+        for (const { state, pid, warnings: expectedWarnings } of cases) {
+            const storageDir = makeTempDir();
+            const directory = `/repo-${state}-pid`;
+            seedPortFile(storageDir, directory, pid, 65_000);
+            stubPidLiveness(pid, state);
+            const logSpy = spyOn(logger, "log");
 
-        try {
-            await makeServer(storageDir, directory).start();
-            const warnings = logSpy.mock.calls.filter(([message]) =>
-                String(message).includes(OTHER_INSTANCE_LOG),
-            );
-            expect(warnings).toHaveLength(0);
-        } finally {
-            logSpy.mockRestore();
-        }
-    });
-
-    test("a port file for a live foreign PID triggers the other-instance warning", async () => {
-        const storageDir = makeTempDir();
-        const directory = "/repo-live-pid";
-        const livePid = 4_000_002;
-        seedPortFile(storageDir, directory, livePid, 65_001);
-        stubPidLiveness(livePid, "alive");
-        const logSpy = spyOn(logger, "log");
-
-        try {
-            await makeServer(storageDir, directory).start();
-            const warnings = logSpy.mock.calls.filter(([message]) =>
-                String(message).includes(OTHER_INSTANCE_LOG),
-            );
-            expect(warnings).toHaveLength(1);
-            expect(String(warnings[0][0])).toContain(`pid ${livePid}`);
-        } finally {
-            logSpy.mockRestore();
+            try {
+                await makeServer(storageDir, directory).start();
+                const warnings = logSpy.mock.calls.filter(([message]) =>
+                    String(message).includes(OTHER_INSTANCE_LOG),
+                );
+                expect(warnings, state).toHaveLength(expectedWarnings);
+                if (expectedWarnings > 0) expect(String(warnings[0][0])).toContain(`pid ${pid}`);
+            } finally {
+                logSpy.mockRestore();
+                __resetRpcIdentityTestHooks();
+            }
         }
     });
 
@@ -365,27 +352,38 @@ describe("EidnaraRpcServer acknowledgement scope", () => {
         }
     });
 
-    test("a legacy cursor acknowledgement naming another session is ignored", async () => {
+    test("a legacy cursor acknowledgement prunes the socket's own session up to the cursor and ignores another session", async () => {
         const storageDir = makeTempDir();
         const directory = "/repo-ack-scope-legacy";
         const server = makeServer(storageDir, directory);
         const port = await server.start();
-        const token = readToken(storageDir, directory);
+        const record = readNewestPortRecord(storageDir, directory);
+        const token = record?.token ?? "";
+        expect(token.length).toBeGreaterThan(0);
 
-        pushNotification("for-a", { ok: true }, "ses_A");
+        pushNotification("legacy-one", { ok: true }, "ses_A");
+        pushNotification("legacy-two", { ok: true }, "ses_A");
         pushNotification("for-b", { ok: true }, "ses_B");
-        const [forA] = drainNotifications(0, "ses_A", { sessionOnly: true });
+        const queued = drainNotifications(0, "ses_A", { sessionOnly: true });
+        expect(queued).toHaveLength(2);
         const [forB] = drainNotifications(0, "ses_B", { sessionOnly: true });
 
-        const ws = await helloSocket(port, token, { sessionId: "ses_A" });
+        const ws = await openRpcSocket(port, token);
         try {
+            const helloAck = waitForJsonMessage<{ type?: string; instanceId?: string }>(
+                ws,
+                (message) => message.type === "hello-ack",
+            );
+            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_A" }));
+            expect((await helloAck).instanceId).toBe(record?.instance_id);
+
             ws.send(JSON.stringify({ type: "ack", cursor: forB.id, sessionId: "ses_B" }));
             // Frames arrive in order, so the ses_B frame has been handled once ses_A is pruned.
-            ws.send(JSON.stringify({ type: "ack", cursor: forA.id, sessionId: "ses_A" }));
-            await waitFor(
-                () => drainNotifications(0, "ses_A", { sessionOnly: true }).length === 0,
-                "own-session acknowledgement",
-            );
+            ws.send(JSON.stringify({ type: "ack", cursor: queued[0].id, sessionId: "ses_A" }));
+            await waitFor(() => {
+                const pending = drainNotifications(0, "ses_A", { sessionOnly: true });
+                return pending.length === 1 && pending[0].id === queued[1].id;
+            }, "legacy cursor acknowledgement pruning");
             expect(drainNotifications(0, "ses_B", { sessionOnly: true }).map((n) => n.id)).toEqual([
                 forB.id,
             ]);
@@ -569,39 +567,6 @@ describe("EidnaraRpcServer WebSocket handshake", () => {
 
             ws.close();
             await waitFor(() => !isTuiConnected(), "socket sink cleanup");
-        } finally {
-            ws.close();
-        }
-    });
-
-    test("accepts legacy cursor acknowledgements during protocol skew", async () => {
-        const storageDir = makeTempDir();
-        const directory = "/repo-legacy-ack";
-        const server = makeServer(storageDir, directory);
-        const port = await server.start();
-        const record = readNewestPortRecord(storageDir, directory);
-        const token = record?.token ?? "";
-        expect(token.length).toBeGreaterThan(0);
-
-        pushNotification("legacy-one", { ok: true }, "ses_legacy");
-        pushNotification("legacy-two", { ok: true }, "ses_legacy");
-        const queued = drainNotifications(0, "ses_legacy", { sessionOnly: true });
-        expect(queued).toHaveLength(2);
-
-        const ws = await openRpcSocket(port, token);
-        try {
-            const helloAck = waitForJsonMessage<{ type?: string; instanceId?: string }>(
-                ws,
-                (message) => message.type === "hello-ack",
-            );
-            ws.send(JSON.stringify({ type: "hello", token, sessionId: "ses_legacy" }));
-            expect((await helloAck).instanceId).toBe(record?.instance_id);
-
-            ws.send(JSON.stringify({ type: "ack", cursor: queued[0].id, sessionId: "ses_legacy" }));
-            await waitFor(() => {
-                const pending = drainNotifications(0, "ses_legacy", { sessionOnly: true });
-                return pending.length === 1 && pending[0].id === queued[1].id;
-            }, "legacy cursor acknowledgement pruning");
         } finally {
             ws.close();
         }

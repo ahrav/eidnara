@@ -40,35 +40,6 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
         ]);
     });
 
-    it("assigns the first folded toolResult's id to a synthetic user emitted at toolResult→assistant", () => {
-        const entries = [
-            messageEntry("user-1", { role: "user", content: "kick off" }),
-            messageEntry("asst-1", {
-                role: "assistant",
-                content: [{ type: "toolCall", id: "tc-1", name: "read" }],
-            }),
-            messageEntry("tr-1", {
-                role: "toolResult",
-                toolCallId: "tc-1",
-                toolName: "read",
-                content: [{ type: "text", text: "output-1" }],
-            }),
-            messageEntry("asst-2", {
-                role: "assistant",
-                content: [{ type: "text", text: "follow-up" }],
-            }),
-        ];
-
-        const raws = convertEntriesToRawMessages(entries);
-
-        expect(raws.map((r) => ({ ordinal: r.ordinal, id: r.id, role: r.role }))).toEqual([
-            { ordinal: 1, id: "user-1", role: "user" },
-            { ordinal: 2, id: "asst-1", role: "assistant" },
-            { ordinal: 3, id: "synth-user-tr-1", role: "user" },
-            { ordinal: 4, id: "asst-2", role: "assistant" },
-        ]);
-    });
-
     it("assigns the first folded toolResult's id when multiple toolResults stack before an assistant", () => {
         const entries = [
             messageEntry("user-1", { role: "user", content: "start" }),

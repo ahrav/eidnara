@@ -273,12 +273,10 @@ describe("thinking-block successor verifiers", () => {
         expect(result.checks.map((check) => check.id)).toEqual([...THINKING_NUDGE_ANCHOR_CHECKS]);
     });
 
-    it("rejects nudge text in a signed assistant even when every other field reads healthy", () => {
-        const result = verifyThinkingNudgeAnchor(nudgeObservation({ nudgeMarkerFound: true }));
-        expect(failedCheckIds(result)).toEqual(["check-thinking-a-no-nudge-in-signed-assistant"]);
-    });
-
-    it("rejects vacuous inspection and a thinking block that reached the wire", () => {
+    it("rejects nudge text in a signed assistant, vacuous inspection, and a thinking block that reached the wire", () => {
+        expect(
+            failedCheckIds(verifyThinkingNudgeAnchor(nudgeObservation({ nudgeMarkerFound: true }))),
+        ).toEqual(["check-thinking-a-no-nudge-in-signed-assistant"]);
         expect(
             failedCheckIds(verifyThinkingNudgeAnchor(nudgeObservation({ assistantCandidates: 0 }))),
         ).toEqual(["check-thinking-a-nonvacuous-inspection"]);

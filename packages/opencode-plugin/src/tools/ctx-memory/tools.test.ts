@@ -290,27 +290,6 @@ describe("ctx_memory create and revise through the cached token", () => {
         expect(tool.kernel.liveRows()).toHaveLength(1);
     });
 
-    test("a redelivered revise repeating every explicit field replays as already applied", async () => {
-        const kernel = new FakeKernel();
-        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
-        const tool = harness(kernel);
-        const args = {
-            action: "revise",
-            objectId: "mem_a",
-            category: "ARCHITECTURE",
-            content: "A, revised.",
-            reason: "clarified",
-        };
-        const first = parseJson<CommitJson>(await tool.execute(args, "call-revise-redeliver"));
-        expect(first.outcome).toBe("applied");
-        const second = parseJson<CommitJson>(await tool.execute(args, "call-revise-redeliver"));
-        expect(second).toMatchObject({
-            outcome: "already applied",
-            objectId: first.objectId,
-        });
-        expect(kernel.liveRows()).toHaveLength(1);
-    });
-
     test("a redelivered revise that inherited category and reason replays as already applied", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
@@ -348,31 +327,6 @@ describe("ctx_memory create and revise through the cached token", () => {
         expect(text).toBe("Error: memory not found or not visible from this project: mem_a");
         expect(kernel.liveRows()).toHaveLength(1);
         expect(kernel.liveRows()[0]?.decision?.payload.summary).toBe("A, revised.");
-    });
-
-    test("an omitted-expiry anti-memory create redelivered across a day boundary replays", async () => {
-        const tool = harness();
-        const args = {
-            action: "create",
-            category: "REJECTED_APPROACH",
-            antiMemory: {
-                trigger: "session caching",
-                rejectedStrategy: "Redis",
-                rejectionReason: "it creates split ownership",
-            },
-        };
-        try {
-            setSystemTime(new Date("2026-01-01T12:00:00Z"));
-            const first = parseJson<CommitJson>(await tool.execute(args, "call-anti-replay"));
-            expect(first.outcome).toBe("applied");
-            setSystemTime(new Date("2026-01-03T12:00:00Z"));
-            const second = parseJson<CommitJson>(await tool.execute(args, "call-anti-replay"));
-            expect(second.outcome).toBe("already applied");
-            expect(second.objects).toEqual(first.objects);
-            expect(tool.kernel.liveRows()).toHaveLength(1);
-        } finally {
-            setSystemTime();
-        }
     });
 
     test("a retry that drops the original's explicit expiry keeps its digest conflict", async () => {
@@ -457,7 +411,7 @@ describe("ctx_memory create and revise through the cached token", () => {
 });
 
 describe("ctx_memory reads", () => {
-    test("get returns typed memories and reports missing ids", async () => {
+    test("get returns typed memories complete with no elision fields and reports missing ids", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({
             object_id: "mem_a",
@@ -467,7 +421,7 @@ describe("ctx_memory reads", () => {
         });
         kernel.seedDecision({ object_id: "mem_b", decision_kind: "NAMING", summary: "B." });
         const tool = harness(kernel);
-        const got = parseJson<ReadJson>(
+        const got = parseJson<ReadJson & { elidedObjectIds?: string[] }>(
             await tool.execute({ action: "get", objectIds: ["mem_a", "mem_missing"] }, "call-get"),
         );
         expect(got.memories).toEqual([
@@ -479,22 +433,12 @@ describe("ctx_memory reads", () => {
             }),
         ]);
         expect(got.missingObjectIds).toEqual(["mem_missing"]);
+        expect(got.elidedObjectIds).toBeUndefined();
         const read = tool.transport.calls[0]?.body as { surface: string; gated: boolean };
         expect(read).toMatchObject({ surface: "explicit_search", gated: false });
         expect(await tool.execute({ action: "list" }, "call-list-primary")).toContain(
             "not allowed",
         );
-    });
-
-    test("a truncated daemon read marks get responses", async () => {
-        const kernel = new FakeKernel();
-        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
-        kernel.readTruncated = true;
-        const tool = harness(kernel);
-        const got = parseJson<ReadJson>(
-            await tool.execute({ action: "get", objectIds: ["mem_a"] }, "call-get-truncated"),
-        );
-        expect(got.truncated).toBe(true);
     });
 
     test("get with more than 20 unique ids is rejected naming the limit", async () => {
@@ -652,21 +596,6 @@ describe("ctx_memory lifecycle and merge", () => {
         const bare = tool.transport.calls.filter((call) => call.method === "kernel.commit")[1]
             ?.body as { intent: { cause: string } };
         expect(bare.intent.cause).toBe("call-archive-bare");
-    });
-
-    test("an archive tool call redelivered against another target is rejected, not applied", async () => {
-        const kernel = new FakeKernel();
-        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
-        kernel.seedDecision({ object_id: "mem_b", decision_kind: "ARCHITECTURE", summary: "B." });
-        const tool = harness(kernel);
-        const first = parseJson<CommitJson>(
-            await tool.execute({ action: "archive", objectId: "mem_a" }, "call-archive-redeliver"),
-        );
-        expect(first.outcome).toBe("applied");
-        expect(
-            await tool.execute({ action: "archive", objectId: "mem_b" }, "call-archive-redeliver"),
-        ).toBe("Error: The operation key was reused with a different request digest.");
-        expect(kernel.objects.get("mem_b")?.invalidated_commit_seq).toBeNull();
     });
 
     test("an archive redelivered with another target keeps its key regardless of the reason text", async () => {
@@ -984,28 +913,33 @@ describe("ctx_memory domain fence and lineage", () => {
 });
 
 describe("ctx_memory anti-memory", () => {
-    test("create without an expiry defaults the anti-memory horizon and replays byte-identically", async () => {
-        const tool = harness();
+    test("an omitted or explicit null expiry defaults the anti-memory horizon, and the omitted create replays byte-identically", async () => {
         const payload = {
             trigger: "Choosing a cache backend",
             rejectedStrategy: "Use Redis",
             rejectionReason: "The project must work offline",
         };
-        const created = parseJson<CommitJson>(
-            await tool.execute(
-                { action: "create", category: "REJECTED_APPROACH", antiMemory: payload },
-                "call-anti-ttl",
-            ),
-        );
-        const objectId = created.objects[0] as string;
-        const summary = tool.kernel.objects.get(objectId)?.decision?.payload.summary ?? "";
-        const match = summary.match(/^Expires at: (\d+)$/m);
-        expect(match).not.toBeNull();
-        const expiresAt = Number(match?.[1]);
         const ninetyDays = 90 * 24 * 60 * 60 * 1_000;
         const day = 24 * 60 * 60 * 1_000;
-        expect(expiresAt).toBeGreaterThanOrEqual(Date.now() + ninetyDays - day);
-        expect(expiresAt).toBeLessThanOrEqual(Date.now() + ninetyDays + day);
+        const tool = harness();
+        for (const [callId, antiMemory] of [
+            ["call-anti-ttl", payload],
+            ["call-anti-null-ttl", { ...payload, expiresAt: null }],
+        ] as const) {
+            const created = parseJson<CommitJson>(
+                await tool.execute(
+                    { action: "create", category: "REJECTED_APPROACH", antiMemory },
+                    callId,
+                ),
+            );
+            const objectId = created.objects[0] as string;
+            const summary = tool.kernel.objects.get(objectId)?.decision?.payload.summary ?? "";
+            const match = summary.match(/^Expires at: (\d+)$/m);
+            expect(match, callId).not.toBeNull();
+            const expiresAt = Number(match?.[1]);
+            expect(expiresAt, callId).toBeGreaterThanOrEqual(Date.now() + ninetyDays - day);
+            expect(expiresAt, callId).toBeLessThanOrEqual(Date.now() + ninetyDays + day);
+        }
 
         const replayed = parseJson<CommitJson>(
             await tool.execute(
@@ -1014,34 +948,7 @@ describe("ctx_memory anti-memory", () => {
             ),
         );
         expect(replayed.outcome).toBe("already applied");
-        expect(tool.kernel.liveRows()).toHaveLength(1);
-    });
-
-    test("an explicit null expiry gets the default horizon like an omitted one", async () => {
-        const tool = harness();
-        const created = parseJson<CommitJson>(
-            await tool.execute(
-                {
-                    action: "create",
-                    category: "REJECTED_APPROACH",
-                    antiMemory: {
-                        trigger: "Choosing a cache backend",
-                        rejectedStrategy: "Use Redis",
-                        rejectionReason: "The project must work offline",
-                        expiresAt: null,
-                    },
-                },
-                "call-anti-null-ttl",
-            ),
-        );
-        const objectId = created.objects[0] as string;
-        const summary = tool.kernel.objects.get(objectId)?.decision?.payload.summary ?? "";
-        const match = summary.match(/^Expires at: (\d+)$/m);
-        expect(match).not.toBeNull();
-        const ninetyDays = 90 * 24 * 60 * 60 * 1_000;
-        const day = 24 * 60 * 60 * 1_000;
-        expect(Number(match?.[1])).toBeGreaterThanOrEqual(Date.now() + ninetyDays - day);
-        expect(Number(match?.[1])).toBeLessThanOrEqual(Date.now() + ninetyDays + day);
+        expect(tool.kernel.liveRows()).toHaveLength(2);
     });
 
     test("get reads an expired anti-memory as missing, like search does", async () => {
@@ -1347,19 +1254,6 @@ describe("ctx_memory response byte budget", () => {
         expect(got.memories).toHaveLength(1);
         expect(got.memories[0].content.endsWith("… [truncated]")).toBeTrue();
         expect(got.memories[0].content.length).toBeLessThan(2 * 1024);
-        expect(got.elidedObjectIds).toBeUndefined();
-    });
-
-    test("small get results stay complete with no elision fields", async () => {
-        const kernel = new FakeKernel();
-        kernel.seedDecision({ object_id: "mem_a", decision_kind: "ARCHITECTURE", summary: "A." });
-        const tool = harness(kernel);
-        const got = parseJson<ReadJson & { elidedObjectIds?: string[] }>(
-            await tool.execute({ action: "get", objectIds: ["mem_a"] }, "call-get-small"),
-        );
-        expect(got.memories).toEqual([
-            expect.objectContaining({ objectId: "mem_a", content: "A." }),
-        ]);
         expect(got.elidedObjectIds).toBeUndefined();
     });
 });

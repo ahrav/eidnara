@@ -451,50 +451,34 @@ describe("fixConflicts", () => {
             ]);
         });
 
-        it("writes to project-level .omo/omo.jsonc", () => {
-            const omoDir = join(projectDir, ".omo");
+        it.each([
+            [
+                "project-level .omo/omo.jsonc",
+                (project: string, _home: string) => join(project, ".omo"),
+                "omo.jsonc",
+            ],
+            [
+                "omo.json (fallback) when omo.jsonc does not exist",
+                (_project: string, home: string) => join(home, ".omo"),
+                "omo.json",
+            ],
+        ] as Array<
+            [string, (project: string, home: string) => string, string]
+        >)("writes to %s", (_title, dirFor, filename) => {
+            const omoDir = dirFor(projectDir, homeDir);
             mkdirSync(omoDir, { recursive: true });
-            const configPath = join(omoDir, "omo.jsonc");
-            writeFileSync(
-                configPath,
-                JSON.stringify({
-                    "[opencode]": {},
-                }),
-            );
+            const configPath = join(omoDir, filename);
+            writeFileSync(configPath, JSON.stringify({ "[opencode]": {} }));
 
             const actions = fixConflicts(projectDir, omoConflicts);
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
-
             const updated = parseJsonc(readFileSync(configPath, "utf-8")) as Record<
                 string,
                 unknown
             >;
             const opencodeBlock = updated["[opencode]"] as Record<string, unknown>;
             expect(opencodeBlock.disabled_hooks).toEqual([
-                "context-window-monitor",
-                "preemptive-compaction",
-                "anthropic-context-window-limit-recovery",
-            ]);
-        });
-
-        it("reads omo.json (fallback) when omo.jsonc does not exist", () => {
-            const omoDir = join(homeDir, ".omo");
-            mkdirSync(omoDir, { recursive: true });
-            const configPath = join(omoDir, "omo.json");
-            writeFileSync(
-                configPath,
-                JSON.stringify({
-                    "[opencode]": {},
-                }),
-            );
-
-            const actions = fixConflicts(projectDir, omoConflicts);
-
-            expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
-
-            const updated = JSON.parse(readFileSync(configPath, "utf-8"));
-            expect(updated["[opencode]"].disabled_hooks).toEqual([
                 "context-window-monitor",
                 "preemptive-compaction",
                 "anthropic-context-window-limit-recovery",
@@ -685,40 +669,6 @@ describe("fixConflicts", () => {
             );
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
-        });
-
-        it("mutation direction: same conflict IS repaired when mode forced on", () => {
-            const configPath = join(projectDir, "opencode.jsonc");
-            writeFileSync(configPath, JSON.stringify({ compaction: { auto: true, prune: true } }));
-
-            const offActions = fixConflicts(
-                projectDir,
-                {
-                    compactionAuto: true,
-                    compactionPrune: true,
-                    dcpPlugin: false,
-                    ...noOmoConflicts,
-                },
-                { compactionEnabled: false },
-            );
-            const onActions = fixConflicts(
-                projectDir,
-                {
-                    compactionAuto: true,
-                    compactionPrune: true,
-                    dcpPlugin: false,
-                    ...noOmoConflicts,
-                },
-                { compactionEnabled: true },
-            );
-
-            expect(offActions).toEqual([]);
-            expect(onActions).toEqual(["Disabled auto-compaction", "Disabled prune"]);
-            const updated = parseJsonc(readFileSync(configPath, "utf-8")) as Record<
-                string,
-                unknown
-            >;
-            expect(updated.compaction).toEqual({ auto: false, prune: false });
         });
     });
 

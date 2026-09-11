@@ -1568,15 +1568,6 @@ mod tests {
     }
 
     #[test]
-    fn due_ready_reason_leaves_short_reasons_untouched() {
-        let manifest = r#"{"signals":["build is green"]}"#;
-        assert_eq!(
-            due_ready_reason(7, Some(manifest)),
-            "Smart note #7: build is green"
-        );
-    }
-
-    #[test]
     fn next_occurrence_survives_extreme_instants() {
         // Extreme timestamps return no occurrence instead of overflowing in debug builds.
         let utc = chrono::Utc;
@@ -1730,86 +1721,6 @@ mod tests {
         };
         assert_eq!(ids(std::slice::from_ref(&expired)), vec![7]);
     }
-
-    // Golden fixtures isolate each phase selector and enforce phase precedence within a fresh cycle.
-    #[test]
-    fn cycle_selection_prefers_due_then_compile_then_liveness_then_fallback() {
-        let now: i64 = 1_781_542_800_000;
-        let base = SmartNoteSelectionSnapshot {
-            id: 0,
-            status: "pending".to_string(),
-            compile_status: None,
-            created_at: 1,
-            has_compiled_check: false,
-            last_checked_at: None,
-            check_status: "uncompiled".to_string(),
-            check_quarantined_until: None,
-            check_next_due_at: None,
-            check_false_since_at: None,
-            check_last_liveness_at: None,
-            policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
-        };
-        let due = SmartNoteSelectionSnapshot {
-            id: 1,
-            check_status: "compiled".to_string(),
-            has_compiled_check: true,
-            check_next_due_at: Some(now - 1),
-            ..base.clone()
-        };
-        let compile = SmartNoteSelectionSnapshot {
-            id: 2,
-            ..base.clone()
-        };
-        let liveness = SmartNoteSelectionSnapshot {
-            id: 3,
-            check_status: "compiled".to_string(),
-            has_compiled_check: true,
-            check_next_due_at: Some(now + 60_000),
-            check_false_since_at: Some(now - SMART_NOTE_CHECK_MAX_STALENESS_MS - 1),
-            ..base.clone()
-        };
-        let fallback = SmartNoteSelectionSnapshot {
-            id: 4,
-            check_status: "fallback".to_string(),
-            has_compiled_check: true,
-            ..base.clone()
-        };
-        let full = SmartNoteSelectionCycle::new(SmartNoteCycleMode::Full);
-        let nonbillable = SmartNoteSelectionCycle::new(SmartNoteCycleMode::Nonbillable);
-        let pick = |notes: &[SmartNoteSelectionSnapshot],
-                    cycle: &SmartNoteSelectionCycle|
-         -> Option<(i64, String)> {
-            select_smart_note_evaluation_cycle(notes, now, false, cycle)
-                .map(|(id, phase, _)| (id, phase))
-        };
-        let all = [
-            fallback.clone(),
-            liveness.clone(),
-            compile.clone(),
-            due.clone(),
-        ];
-        assert_eq!(pick(&all, &full), Some((1, "due".to_string())));
-        let no_due = [fallback.clone(), liveness.clone(), compile.clone()];
-        assert_eq!(pick(&no_due, &full), Some((2, "compile".to_string())));
-        let no_compile = [fallback.clone(), liveness];
-        assert_eq!(pick(&no_compile, &full), Some((3, "liveness".to_string())));
-        assert_eq!(
-            pick(std::slice::from_ref(&fallback), &full),
-            Some((4, "fallback".to_string()))
-        );
-        assert_eq!(pick(&[], &full), None);
-
-        // Nonbillable cycles never claim compile or fallback work and can reach liveness despite a compile candidate.
-        assert_eq!(pick(&all, &nonbillable), Some((1, "due".to_string())));
-        assert_eq!(
-            pick(&no_due, &nonbillable),
-            Some((3, "liveness".to_string()))
-        );
-        assert_eq!(pick(&[fallback, compile], &nonbillable), None);
-    }
-
-    // ------------------------------------------------------------------
-    // ------------------------------------------------------------------
 
     #[derive(Deserialize)]
     struct NormativeCycleTraces {

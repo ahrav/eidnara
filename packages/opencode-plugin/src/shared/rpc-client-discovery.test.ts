@@ -129,9 +129,10 @@ describe("EidnaraRpcClient discovery", () => {
         await closeServer(dead);
         writePortFile(storageDir, directory, port);
 
-        const client = new EidnaraRpcClient(storageDir, directory);
+        // Every discovery pass fails, so the pause between passes only lengthens the test.
+        const client = new EidnaraRpcClient(storageDir, directory, { retryDelayMs: 5 });
         await expect(client.call("value")).rejects.toThrow("Eidnara RPC server not available");
-    }, 20_000);
+    });
 
     test("ignores newer stale pid files and discovers the latest live instance", async () => {
         const storageDir = makeTempDir();

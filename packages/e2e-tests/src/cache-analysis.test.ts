@@ -320,14 +320,6 @@ describe("cache-bust oracle", () => {
                 }),
             ).toBe(false);
         });
-
-        it("accepts a main-agent request", () => {
-            expect(
-                isInternalAgentRequest({
-                    body: { system: EIDNARA_SYSTEM, messages: [] },
-                }),
-            ).toBe(false);
-        });
     });
 
     describe("#given buildSegments over a request", () => {
@@ -360,15 +352,10 @@ describe("isHistorianRequest", () => {
     );
     if (!marker) throw new Error("historian signature missing from production classifier");
 
-    it("detects the marker in a string system prompt", () => {
+    it("detects the marker in string, block-array, and object system prompts, or a chunk envelope in messages", () => {
         expect(isHistorianRequest({ system: `${marker} rest of prompt` })).toBe(true);
-    });
-
-    it("detects the marker in a system block array", () => {
         expect(isHistorianRequest({ system: [{ type: "text", text: marker }] })).toBe(true);
-    });
-
-    it("detects a historian chunk envelope carried only in messages", () => {
+        expect(isHistorianRequest({ system: { type: "text", text: marker } })).toBe(true);
         // Union semantics: some historian requests carry the marker only in
         // the messages payload; a system-only predicate calls them main-agent.
         expect(
@@ -379,15 +366,8 @@ describe("isHistorianRequest", () => {
         ).toBe(true);
     });
 
-    it("detects the marker in a non-array system object", () => {
-        expect(isHistorianRequest({ system: { type: "text", text: marker } })).toBe(true);
-    });
-
-    it("treats an absent system prompt as not historian", () => {
+    it("classifies absent and ordinary system prompts as not historian", () => {
         expect(isHistorianRequest({ messages: [{ role: "user", content: "hi" }] })).toBe(false);
-    });
-
-    it("classifies an ordinary main-agent request as not historian", () => {
         expect(
             isHistorianRequest({
                 system: "You are a helpful coding assistant",

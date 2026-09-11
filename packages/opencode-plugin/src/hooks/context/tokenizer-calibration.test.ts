@@ -8,21 +8,14 @@ import {
 const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0 };
 
 describe("resolveModelCalibration", () => {
-    it("returns neutral ratios for unknown models", () => {
-        const calib = resolveModelCalibration("brand-new-provider", "weird-model-99");
-        expect(calib.systemRatio).toBe(1.0);
-        expect(calib.toolsRatio).toBe(1.0);
-    });
-
-    it("returns neutral when provider or model is missing", () => {
-        expect(resolveModelCalibration(undefined, "x")).toEqual(NEUTRAL);
-        expect(resolveModelCalibration("y", undefined)).toEqual(NEUTRAL);
-    });
-
-    it("matches Anthropic Opus 4.7 outlier ratios", () => {
-        const calib = resolveModelCalibration("anthropic", "claude-opus-4-7");
-        expect(calib.systemRatio).toBeCloseTo(1.51, 2);
-        expect(calib.toolsRatio).toBeCloseTo(1.57, 2);
+    it("returns neutral ratios for unknown models and when provider or model is missing", () => {
+        for (const [provider, model] of [
+            ["brand-new-provider", "weird-model-99"],
+            [undefined, "x"],
+            ["y", undefined],
+        ]) {
+            expect(resolveModelCalibration(provider, model)).toEqual(NEUTRAL);
+        }
     });
 
     it("matches Claude 4.5/4.6 family within range", () => {
@@ -74,9 +67,10 @@ describe("resolveModelCalibration", () => {
         expect(opus47.systemRatio).not.toBe(opus45.systemRatio);
     });
 
-    it("matches Opus 4.7 routed via OpenRouter and GitHub Copilot (regression: A2)", () => {
+    it("matches Anthropic Opus 4.7 outlier ratios directly and routed via OpenRouter and GitHub Copilot (regression: A2)", () => {
         // Without `openrouter/anthropic` and `github-copilot` prefixes, the matcher falls through to `NEUTRAL`.
         const cases = [
+            ["anthropic", "claude-opus-4-7"],
             ["openrouter/anthropic", "claude-opus-4-7"],
             ["openrouter/anthropic", "claude-opus-4.7"],
             ["github-copilot", "claude-opus-4-7"],
