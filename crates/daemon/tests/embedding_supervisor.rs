@@ -661,7 +661,7 @@ async fn a_failed_eligibility_read_is_retried_not_terminal() {
         Arc::new(|| NOW),
         sender,
     );
-    supervisor.fail_next_read_for_test();
+    supervisor.inject_dispatch_fault_for_test(DispatchFault::RefuseEligibilityRead);
     let running = tokio::spawn(Arc::clone(&supervisor).run());
 
     let SliceOutcome::ReadFailed(message) = ended(&mut events, SliceKind::Backfill).await else {
@@ -1244,6 +1244,117 @@ async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
 
     let report = supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
     assert_eq!(report.held_results, 0);
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// Shutdown gives an admitted native call the rest of its grace to exit instead of reporting it unresolved the moment the slices have joined.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn shutdown_waits_the_grace_for_an_admitted_call_to_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("brief", "brief text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        slice_bounds(Duration::from_secs(2)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    assert!(matches!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill { admitted: 1, .. }
+    ));
+    let host_job = row(dir.path(), &occurrence).2.unwrap();
+    assert_eq!(synapse.job_status(&host_job), Some("running"));
+
+    // The call exits well inside the grace, after the slices have joined.
+    let releasing = Arc::clone(&gate);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        TestEngine::release(&releasing);
+    });
+    let asked = Instant::now();
+    let report = supervisor
+        .shutdown(Duration::from_secs(5))
+        .await
+        .expect("a call that exits within the grace resolves shutdown");
+    assert!(asked.elapsed() < Duration::from_secs(5));
+    assert_eq!(synapse.job_status(&host_job), Some("ready"));
+    assert_eq!(
+        report.held_results, 1,
+        "the admitted row still expects the result the host now holds"
+    );
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// A submission whose charge rolled back leaves the row pending with no reference to the host job, so the job's result is nothing the census reports as held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_submission_whose_charge_rolled_back_claims_no_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("uncharged", "uncharged text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    // A long idle keeps the next backfill, which would re-admit the row under the same host job, from running before shutdown.
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        SliceBounds {
+            idle: Duration::from_secs(10),
+            ..slice_bounds(Duration::from_secs(2))
+        },
+        Arc::new(|| NOW),
+        sender,
+    );
+    supervisor.inject_dispatch_fault_for_test(DispatchFault::RefuseChargeStatement);
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    assert_eq!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill {
+            end: None,
+            admitted: 0,
+            published: 0,
+            dispositions: 0,
+        }
+    );
+    let uncharged = row(dir.path(), &occurrence);
+    assert_eq!(
+        (uncharged.0.as_str(), uncharged.1, uncharged.2),
+        ("pending", 0, None)
+    );
+    assert_eq!(engine.calls(), 1, "the host runs the submitted call");
+    assert_eq!(supervisor.tracked_host_jobs_for_test(), 1);
+
+    TestEngine::release(&gate);
+    let settled = Instant::now();
+    while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let report = supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        report.held_results, 0,
+        "no admitted row expects the uncharged submission's result"
+    );
+    assert_eq!(supervisor.tracked_host_jobs_for_test(), 0);
     tokio::time::timeout(Duration::from_secs(5), running)
         .await
         .unwrap()

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::embedding_dispatch::{
-    Blocked, DispatchBounds, DispatchError, DispatchEvent, EmbeddingDispatcher,
+    Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
 };
 use crate::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use crate::search_projection::SearchProjection;
@@ -101,11 +101,14 @@ pub struct Unresolved {
     pub native: usize,
 }
 
+/// How often shutdown re-reads the host's status for calls it still owns.
+const NATIVE_EXIT_POLL: Duration = Duration::from_millis(20);
+
 /// A host job submitted by this supervisor remains shutdown work while the host owns it.
 struct HostJob {
     /// The durable job whose episode submitted this host job; one durable job owns a new host job per episode.
     job_id: String,
-    /// Whether the admitted row still owns this job's result; retried and stopped rows do not.
+    /// Whether an admitted row owns this job's result: set by the `Admitted` that charged it, cleared when the row is retried or stopped. A submission whose charge rolled back or whose row changed underneath never sets it.
     result_expected: bool,
 }
 
@@ -123,7 +126,7 @@ pub struct EmbeddingSupervisor {
     /// Where the next identity sweep resumes its selection; `None` starts a pass over the table.
     sweep_cursor: Mutex<Option<String>>,
     panic_next_slice: AtomicBool,
-    fail_next_read: AtomicBool,
+    dispatch_fault: Mutex<Option<DispatchFault>>,
 }
 
 impl EmbeddingSupervisor {
@@ -145,7 +148,7 @@ impl EmbeddingSupervisor {
             admitted: Mutex::new(BTreeMap::new()),
             sweep_cursor: Mutex::new(None),
             panic_next_slice: AtomicBool::new(false),
-            fail_next_read: AtomicBool::new(false),
+            dispatch_fault: Mutex::new(None),
         })
     }
 
@@ -155,10 +158,13 @@ impl EmbeddingSupervisor {
         self.panic_next_slice.store(true, Ordering::SeqCst);
     }
 
-    /// Makes the next backfill slice's eligibility read fail as if the store were locked.
+    /// Arms `fault` on the next backfill slice's dispatcher.
     #[cfg(feature = "test-support")]
-    pub fn fail_next_read_for_test(&self) {
-        self.fail_next_read.store(true, Ordering::SeqCst);
+    pub fn inject_dispatch_fault_for_test(&self, fault: DispatchFault) {
+        *self
+            .dispatch_fault
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fault);
     }
 
     /// Runs slices until shutdown or a stop. Must run inside a Tokio runtime; each slice is a tracked blocking task, and the loop yields between slices. The loop itself holds a tracker token, so `shutdown` cannot report a drain while a slice could still start.
@@ -247,11 +253,16 @@ impl EmbeddingSupervisor {
         match kind {
             SliceKind::Backfill => {
                 let mut dispatcher = EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.synapse);
-                if self.fail_next_read.swap(false, Ordering::SeqCst) {
+                if let Some(fault) = self
+                    .dispatch_fault
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                {
                     #[cfg(feature = "test-support")]
-                    dispatcher.inject_fault_for_test(
-                        crate::embedding_dispatch::DispatchFault::RefuseEligibilityRead,
-                    );
+                    dispatcher.inject_fault_for_test(fault);
+                    #[cfg(not(feature = "test-support"))]
+                    let _ = fault;
                 }
                 let (mut admitted, mut published, mut dispositions) = (0, 0, 0);
                 let end = dispatcher.run_pass(
@@ -272,11 +283,17 @@ impl EmbeddingSupervisor {
                                 host_job_id,
                                 HostJob {
                                     job_id,
-                                    result_expected: true,
+                                    result_expected: false,
                                 },
                             );
                         }
-                        DispatchEvent::Admitted { .. } => admitted += 1,
+                        // Only a charged admission binds the row to this job's result.
+                        DispatchEvent::Admitted { host_job_id, .. } => {
+                            admitted += 1;
+                            if let Some(job) = self.lock_admitted().get_mut(&host_job_id) {
+                                job.result_expected = true;
+                            }
+                        }
                         DispatchEvent::Published { host_job_id, .. } => {
                             published += 1;
                             self.lock_admitted().remove(&host_job_id);
@@ -341,15 +358,16 @@ impl EmbeddingSupervisor {
         }
     }
 
-    /// Stops admission of new slices, cancels the running slice's budget, and joins every tracked task within `grace`. Repeated calls are idempotent: cancellation is sticky and a task joins once.
+    /// Stops admission of new slices, cancels the running slice's budget, joins every tracked task, and then waits for native calls this supervisor admitted to exit the host, all within one `grace`. Repeated calls are idempotent: cancellation is sticky and a task joins once.
     ///
     /// # Errors
     ///
-    /// Returns [`Unresolved`] when a tracked task is still running after `grace`; its native work keeps every permit, charge, and lease, and a later call may still join it.
+    /// Returns [`Unresolved`] when a tracked task is still running or a native call is still owned after `grace`; native work keeps every permit, charge, and lease, and a later call may still find it settled.
     pub async fn shutdown(&self, grace: Duration) -> Result<DrainReport, Unresolved> {
+        let deadline = Instant::now() + grace;
         self.shutdown.cancel();
         self.tracker.close();
-        if tokio::time::timeout(grace, self.tracker.wait())
+        if tokio::time::timeout_at(deadline.into(), self.tracker.wait())
             .await
             .is_err()
         {
@@ -359,8 +377,17 @@ impl EmbeddingSupervisor {
                 native: self.native_census().0,
             });
         }
-        // Slices are joined; the host still owns whatever native calls they admitted. A running call keeps shutdown unresolved; a ready result is a held lease the next incarnation reconciles.
-        let (native, held_results) = self.native_census();
+        // Slices are joined; the host still owns whatever native calls they admitted. A call has no join handle, so its exit is observed by polling the host until the grace ends; a ready result is a held lease the next incarnation reconciles.
+        let (native, held_results) = loop {
+            let (native, held_results) = self.native_census();
+            if native == 0 || Instant::now() >= deadline {
+                break (native, held_results);
+            }
+            tokio::time::sleep(
+                NATIVE_EXIT_POLL.min(deadline.saturating_duration_since(Instant::now())),
+            )
+            .await;
+        };
         if native > 0 {
             return Err(Unresolved { slices: 0, native });
         }
