@@ -509,6 +509,30 @@ impl KernelStore {
         tx.commit().map_err(map_sqlite)
     }
 
+    /// Returns a registered consumer's durable checkpoint, or `None` for an unregistered `consumer_id`.
+    /// A reader snapshot answers it, so a consumer whose acknowledgement reply
+    /// was lost learns what the kernel committed without taking the writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `consumer_id` is empty.
+    pub fn outbox_consumer_checkpoint(
+        &self,
+        consumer_id: &str,
+    ) -> Result<Option<i64>, KernelError> {
+        let consumer_id = consumer_identity(consumer_id)?;
+        let reader = self.lock_reader()?;
+        // One statement is its own snapshot, so no transaction brackets it.
+        reader
+            .query_row(
+                "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
+                [&consumer_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)
+    }
+
     /// Advances a registered consumer checkpoint monotonically.
     ///
     /// Repeating current checkpoint is idempotent. Barrier completion is checked

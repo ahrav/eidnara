@@ -21,6 +21,8 @@ const PROPAGATION_TARGETS: [&str; 4] = [
     "embeddings",
     "admission_state",
 ];
+/// `source_kind` of the outbox rows that carry an artifact deletion to consumers.
+pub const ARTIFACT_DELETION_SOURCE_KIND: &str = "artifact_deletion";
 const MAX_AUDIT_FIELD_BYTES: usize = 1_024;
 
 /// Selects logical invalidation or irreversible content removal.
@@ -1026,7 +1028,7 @@ fn push_propagation_events(envelope: &mut crate::Envelope<'_>, work: &Propagatio
                 object_id: work.digest.to_string(),
                 object_kind: target_class.to_string(),
                 domain_id: "kernel-control".to_string(),
-                source_kind: "artifact_deletion".to_string(),
+                source_kind: ARTIFACT_DELETION_SOURCE_KIND.to_string(),
                 source_id: work.digest.to_string(),
                 source_revision: envelope.commit_seq,
                 created_commit_seq: envelope.commit_seq,
