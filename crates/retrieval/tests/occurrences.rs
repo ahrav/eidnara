@@ -411,51 +411,75 @@ fn fixture_records_survive_write_close_and_reopen_with_their_expected_identities
 }
 
 #[test]
-fn missing_payload_is_corruption_not_absence() {
+fn missing_or_altered_payload_is_corruption_not_absence() {
     let fixtures = fixtures();
     let record = Owned::from_json(&fixtures["records"][0]);
     let mut empty = Owned::from_json(&fixtures["records"][1]);
     empty.payload.clear();
-    let dir = tempfile::tempdir().unwrap();
-    let outcomes = {
+    let mut valid = Owned::from_json(&fixtures["records"][2]);
+    valid.payload = "intact payload".to_string();
+    let mut altered = record.payload.as_bytes().to_vec();
+    altered[0] ^= 1;
+    assert_eq!(altered.len(), record.payload.len());
+    assert_ne!(altered, record.payload.as_bytes());
+
+    for damaged_payload in [None, Some(altered.as_slice())] {
+        let dir = tempfile::tempdir().unwrap();
+        let outcomes = {
+            let store = open(dir.path());
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(persist_all(conn, &[record.clone(), empty.clone(), valid.clone()]).unwrap())
+                })
+                .unwrap()
+        };
+
+        // Corruption injection uses a raw connection; the guarded store is closed.
+        {
+            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+            let changed = match damaged_payload {
+                Some(bytes) => {
+                    raw.pragma_update(None, "foreign_keys", true).unwrap();
+                    raw.execute(
+                        "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
+                        rusqlite::params![outcomes[0].payload_id, bytes],
+                    )
+                }
+                None => {
+                    raw.pragma_update(None, "foreign_keys", false).unwrap();
+                    raw.execute(
+                        "DELETE FROM payloads WHERE payload_id=?1",
+                        [&outcomes[0].payload_id],
+                    )
+                }
+            };
+            assert_eq!(changed.unwrap(), 1);
+        }
+
         let store = open(dir.path());
-        store
-            .with_conn_fenced(|conn| Ok(persist_all(conn, &[record, empty]).unwrap()))
-            .unwrap()
-    };
-
-    // Corruption injection uses a raw connection; the guarded store is closed.
-    {
-        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
-        raw.pragma_update(None, "foreign_keys", false).unwrap();
         assert_eq!(
-            raw.execute(
-                "DELETE FROM payloads WHERE payload_id=?1",
-                [&outcomes[0].payload_id],
-            )
-            .unwrap(),
-            1
+            row_counts(&store),
+            (3, 2 + i64::from(damaged_payload.is_some()))
         );
+        store
+            .with_conn(|conn| {
+                assert_eq!(read_occurrence(conn, "no-such-occurrence"), Ok(None));
+                for (outcome, expected) in outcomes[1..].iter().zip([&empty, &valid]) {
+                    assert_eq!(
+                        read_occurrence(conn, &outcome.occurrence_id)
+                            .unwrap()
+                            .map(|stored| stored.bytes),
+                        Some(expected.payload.as_bytes().to_vec())
+                    );
+                }
+                assert_eq!(
+                    read_occurrence(conn, &outcomes[0].occurrence_id),
+                    Err(ProjectionError::CorruptRow)
+                );
+                Ok(())
+            })
+            .unwrap();
     }
-
-    let store = open(dir.path());
-    assert_eq!(row_counts(&store), (2, 1));
-    store
-        .with_conn(|conn| {
-            assert_eq!(read_occurrence(conn, "no-such-occurrence"), Ok(None));
-            assert_eq!(
-                read_occurrence(conn, &outcomes[1].occurrence_id)
-                    .unwrap()
-                    .map(|stored| stored.bytes),
-                Some(Vec::new())
-            );
-            assert_eq!(
-                read_occurrence(conn, &outcomes[0].occurrence_id),
-                Err(ProjectionError::CorruptRow)
-            );
-            Ok(())
-        })
-        .unwrap();
 }
 
 #[test]

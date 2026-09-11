@@ -718,5 +718,10 @@ pub fn read_occurrence(
             rusqlite::Error::InvalidQuery => ProjectionError::CorruptRow,
             other => other.into(),
         })?;
+    if let Some(stored) = &stored
+        && payload_id(&stored.bytes) != stored.payload_id
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
     Ok(stored)
 }
