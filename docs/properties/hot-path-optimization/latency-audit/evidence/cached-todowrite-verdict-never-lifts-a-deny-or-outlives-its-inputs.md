@@ -3,11 +3,12 @@
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
 
-Historical reference warning: The discovery trail and initial investigation
-below use pre-implementation line numbers. Those relative source/test links
-are stale against the working tree; the pre-change code is available at
-`ab2ef4156b69454b407bd9682d5617ad13c8372f`. They are not live implementation
-claims. The single-flight investigation at the end has current links.
+All sections from "Discovery trigger" through "Investigation log" describe
+pre-change behavior. Their source, test, and check-inventory links pin commit
+`ab2ef415`; the scope and provenance link remains live. These sections are not
+current implementation claims. The single-flight investigation's source and
+test links pin reviewed commit `ff9679ce`, independent of working-tree line
+changes.
 
 ## Discovery trigger
 
@@ -49,10 +50,15 @@ inputs. Any design that promotes the cache to a source inherits both facts.
   [`capture_todo_state_on_bust`][injection] and
   `advance_injection_from_meta`; `Some(false)` suppresses capture and treats a
   frozen pair as empty. The verdict changes prompt bytes, not authorization.
-- The hung-read tests at [rust-mode-transform.test.ts:466][t466] and
-  [hook-handlers.test.ts:119][t119] use fresh session ids, so the cache is
-  empty and `?? false` yields `todo_tool_present: true`. The agent-deny test at
-  [:440][t440] and the evaluator test at
+- The hung-read test at [rust-mode-transform.test.ts:466][t466] uses a
+  time-based session id and an empty cache. The transform's `?? false` seed
+  yields `todo_tool_present: true` after the timeout.
+- The capture test at [hook-handlers.test.ts:119][t119] uses the fixed,
+  isolated session id `ses-permission-hung`. The failed read finds no cached
+  deny, so the capture hook's `cachedToolPermissionDenied` truth check permits
+  forwarding. The test asserts one forwarded snapshot, not a
+  `todo_tool_present` value.
+- The agent-deny test at [:440][t440] and the evaluator test at
   [ctx-reduce-availability.test.ts:318][t318] show the agent input changes the
   answer.
 
@@ -81,8 +87,9 @@ map verdict; then assert `todo_tool_present: false` on the failed pass. For
 staleness, two passes whose last user messages carry agents with opposite
 `todowrite` rules, comparing the served verdict with `permissionDisabled` over
 the fake's current rules. The [plugin
-checks](../existing-checks.md#plugin-pre-send) pin fail-open on an empty cache
-only; none constructs a cached deny.
+checks](https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/docs/properties/hot-path-optimization/latency-audit/existing-checks.md#plugin-pre-send)
+at `ab2ef415` pinned fail-open on an empty cache; none constructed a
+cached-deny-then-failure sequence.
 
 ## Investigation log
 
@@ -116,38 +123,38 @@ only; none constructs a cached deny.
   is not in this repository.
 - Conclusion: unresolved, needs the SDK event list.
 
-[combined]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L77-L107
-[combinedseed]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L85-L96
-[combinedcatch]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L97-L104
-[activeagent]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L68-L75
-[failclosed]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1056-L1057
-[todowrap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L310-L316
-[permdenied]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L277-L308
-[permdisabled]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L203-L213
-[permkey]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L71-L73
-[permmap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L59
-[clearperm]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L326-L334
-[doc17]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L15-L17
-[doc57]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L58
-[capture]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L270-L292
-[agentset]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L133-L135
-[hookclient]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
-[hookspread]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L318
-[hookclear]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L375
-[evhandler]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L92-L358
-[timeout]: ../../../../../packages/opencode-plugin/src/shared/with-timeout.ts#L2
-[injection]: ../../../../../crates/daemon/src/injection.rs#L195-L230
-[t466]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466
-[t440]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
-[t119]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L119
-[t318]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L318
+[combined]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L77-L107
+[combinedseed]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L85-L96
+[combinedcatch]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L97-L104
+[activeagent]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L68-L75
+[failclosed]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1056-L1057
+[todowrap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L310-L316
+[permdenied]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L277-L308
+[permdisabled]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L203-L213
+[permkey]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L71-L73
+[permmap]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L59
+[clearperm]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L326-L334
+[doc17]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L15-L17
+[doc57]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L57-L58
+[capture]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L270-L292
+[agentset]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L133-L135
+[hookclient]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook.ts#L44-L45
+[hookspread]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook.ts#L318
+[hookclear]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook.ts#L375
+[evhandler]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/event-handler.ts#L92-L358
+[timeout]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/shared/with-timeout.ts#L2
+[injection]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/crates/daemon/src/injection.rs#L195-L230
+[t466]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466
+[t440]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
+[t119]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/hook-handlers.test.ts#L119
+[t318]: https://github.com/ahrav/eidnara/blob/ab2ef4156b69454b407bd9682d5617ad13c8372f/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L318
 
 ## Historical first implementation investigation
 
-This section preserves the first local implementation and its execution
-results. Its `cache-*` relative code locators are stale after the single-flight
-revision, which was not committed as a separate snapshot. The current design
-and retention ledger follow this section; the earlier counts remain history.
+This section preserves notes and reported results from the first local
+implementation. No separate source snapshot is recorded, so its obsolete line
+links are omitted. These notes are unverified history, not evidence of the
+reviewed implementation. The single-flight design and retention ledger follow.
 
 ### Q: What default and freshness contract does the implementation use?
 
@@ -164,24 +171,23 @@ and retention ledger follow this section; the earlier counts remain history.
   subscription. Freshness invalidates on `session.updated`, native
   `session.compacted`, and `/ctx-flush`; deletion clears entries. Invalidation
   must retain the last deny to preserve the P5 witness.
-- Findings: The [resolver][cache-read] owns the timeout and fail-closed
-  outcome for both [transform][cache-transform] and [capture][cache-capture].
-  The frozen tools-map cache and `ctx_reduce` paths remain separate. The
-  `todo_tool_present` wire name and all schemas remain unchanged.
-- Findings: [Keys][cache-keys] encode session separately from the JSON tuple
+- Findings: The resolver owns the timeout and fail-closed outcome for both
+  transform and capture. The frozen tools-map cache and `ctx_reduce` paths
+  remain separate. The `todo_tool_present` wire name and all schemas remain
+  unchanged.
+- Findings: Keys encode session separately from the JSON tuple
   `(toolName, activeAgent ?? null)` using two SHA-256 hex digests. This preserves
   tuple boundaries, including NULs and lone surrogates, without retaining raw
   identifiers. Unknown agent's JSON null is distinct from every string,
   including the empty string. Identity relies on SHA-256 collision resistance.
-- Findings: [Freshness][cache-read] uses `performance.now()` at read start,
+- Findings: Freshness uses `performance.now()` at read start,
   before either SDK request. Hits do not extend expiry. The 2,000 ms timeout
   wraps the live evaluator; only the successful bounded await may publish.
   Every new read replaces its entry object. Invalidation sets a negative
   expiry; deletion and eviction remove the entry. Publication checks both
   identity and expiry. A superseded completion returns deny. The underlying
   SDK promises can finish after timeout but cannot write cache state.
-- Findings: [Session updates][cache-events], [compaction and deletion][cache-compaction],
-  and [flush][cache-flush] invalidate
+- Findings: Session updates, compaction and deletion, and flush invalidate
   only the affected session's permission entries. The scan is bounded by
   2,000 entries and does not refresh LRU order. Failed reads leave the last
   success stale, not fresh; missing-client/API calls produce no success entry.
@@ -189,8 +195,8 @@ and retention ledger follow this section; the earlier counts remain history.
 
 ### Q: What retained-resident state does this cache add or resize?
 
-- Sources examined: [entry and cap][cache-cap], [keys][cache-keys],
-  [bounded map iteration][cache-iteration], and [eviction case][cache-eviction].
+- Sources examined: Entry and cap, keys, bounded map iteration, and eviction
+  case in the 2026-09-10 uncommitted working tree based on `ab2ef415`.
 - Findings: The permission cache replaces the prior 2,000 Boolean entries;
   it is not a second cache. The entry cap stays 2,000 across all sessions,
   tools, and agents. Each key has 129 ASCII code units: two 64-character
@@ -227,9 +233,8 @@ and retention ledger follow this section; the earlier counts remain history.
   their promise continuations drained. Explicit successful SDK fixtures and
   the existing next-tick drain pattern fix those setup errors.
 - Final focused run: 162 passed, 0 failed, 635 assertions on Bun 1.3.14.
-  [Hook cases][cache-hook-tests] cover both consumers and the constant P5
-  marker; [resolver cases][cache-unit-tests] cover identities, TTL, failure
-  states, late completions, and LRU eviction.
+  Hook cases cover both consumers and the constant P5 marker; resolver cases
+  cover identities, TTL, failure states, late completions, and LRU eviction.
 - `bun run --cwd packages/opencode-plugin typecheck` passes.
   `bun run --cwd packages/opencode-plugin lint --diagnostic-level=error`
   passes. An earlier lint run found five formatting errors, corrected by
@@ -244,19 +249,6 @@ and retention ledger follow this section; the earlier counts remain history.
   plugin smoke, independent reviews, and shipping. This campaign is not a
   production-shape latency comparison or a merge verdict.
 - Conclusion: the constructed P1 cases pass under the approved contract.
-
-[cache-read]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L293-L323
-[cache-transform]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L75-L88
-[cache-capture]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L259-L265
-[cache-keys]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L78-L90
-[cache-cap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L59-L66
-[cache-events]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L96-L100
-[cache-compaction]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L322-L349
-[cache-flush]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L395-L400
-[cache-iteration]: ../../../../../packages/opencode-plugin/src/shared/bounded-session-map.ts#L65-L67
-[cache-eviction]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L494-L504
-[cache-hook-tests]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L162-L400
-[cache-unit-tests]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347-L505
 
 ## Single-flight investigation
 
@@ -360,13 +352,13 @@ and retention ledger follow this section; the earlier counts remain history.
 - Conclusion: all required local runtime and package gates pass; the two
   preexisting test-type diagnostics remain explicit.
 
-[singleflight-overlap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L368-L391
-[singleflight-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L408-L465
-[singleflight-resolver]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L295-L351
-[singleflight-reader]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L353-L382
-[singleflight-cap]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L59-L68
-[singleflight-keys]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L80-L91
-[singleflight-lifetime]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347-L604
+[singleflight-overlap]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L368-L391
+[singleflight-hook]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/hook.test.ts#L408-L465
+[singleflight-resolver]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L295-L351
+[singleflight-reader]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L353-L383
+[singleflight-cap]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L59-L68
+[singleflight-keys]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L80-L91
+[singleflight-lifetime]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347-L604
 
 ### Q: How does an empty host agent reach the permission cache?
 
@@ -391,5 +383,5 @@ and retention ledger follow this section; the earlier counts remain history.
 - Conclusion: empty host agent and undefined use session rules and one shared
   key; nonempty real agent names remain distinct.
 
-[host-agent-transform]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L66-L73
-[host-agent-capture]: ../../../../../packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L264-L265
+[host-agent-transform]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L66-L73
+[host-agent-capture]: https://github.com/ahrav/eidnara/blob/ff9679ceb41bbd43b9e169dee210eff7e58c9b26/packages/opencode-plugin/src/hooks/context/hook-handlers.ts#L264-L265

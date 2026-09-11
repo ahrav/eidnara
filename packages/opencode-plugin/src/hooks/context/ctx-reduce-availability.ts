@@ -240,23 +240,27 @@ function appendPermissionRule(
     pattern: unknown,
     action: unknown,
 ): void {
-    if (typeof permission !== "string" || permission.length === 0) return;
+    if (typeof permission !== "string" || permission.length === 0) {
+        throw new Error("OpenCode permission name is malformed");
+    }
     const normalizedAction = actionOf(action);
-    if (!normalizedAction) return;
-    const patterns = Array.isArray(pattern) ? pattern : [pattern ?? "*"];
+    if (!normalizedAction) throw new Error("OpenCode permission action is malformed");
+    const patterns = Array.isArray(pattern) ? pattern : [pattern === undefined ? "*" : pattern];
     for (const candidate of patterns) {
-        if (typeof candidate === "string") {
-            target.push({ permission, pattern: candidate, action: normalizedAction });
+        if (typeof candidate !== "string") {
+            throw new Error("OpenCode permission pattern is malformed");
         }
+        target.push({ permission, pattern: candidate, action: normalizedAction });
     }
 }
 
 /** The normalizer accepts both OpenCode's object shorthand and its already-expanded rules. */
 function permissionRules(value: unknown): PermissionRule[] {
+    if (value === undefined) return [];
     if (Array.isArray(value)) {
         const result: PermissionRule[] = [];
         for (const item of value) {
-            if (!isRecord(item)) continue;
+            if (!isRecord(item)) throw new Error("OpenCode permission rule is malformed");
             appendPermissionRule(
                 result,
                 item.permission ?? item.tool ?? item.name,
@@ -266,10 +270,15 @@ function permissionRules(value: unknown): PermissionRule[] {
         }
         return result;
     }
-    if (!isRecord(value)) return [];
+    if (!isRecord(value)) throw new Error("OpenCode permission payload is malformed");
 
     const result: PermissionRule[] = [];
-    if (Array.isArray(value.rules)) result.push(...permissionRules(value.rules));
+    if (Object.hasOwn(value, "rules")) {
+        if (!Array.isArray(value.rules)) {
+            throw new Error("OpenCode permission rules are malformed");
+        }
+        result.push(...permissionRules(value.rules));
+    }
     for (const [permission, configured] of Object.entries(value)) {
         if (permission === "rules") continue;
         const simpleAction = actionOf(configured);
@@ -278,7 +287,9 @@ function permissionRules(value: unknown): PermissionRule[] {
             appendPermissionRule(result, permission, "*", simpleAction);
             continue;
         }
-        if (!isRecord(configured)) continue;
+        if (!isRecord(configured)) {
+            throw new Error("OpenCode permission configuration is malformed");
+        }
         for (const [pattern, action] of Object.entries(configured)) {
             appendPermissionRule(result, permission, pattern, action);
         }
@@ -290,7 +301,7 @@ function permissionRules(value: unknown): PermissionRule[] {
  * Session rules follow agent rules, so later session rules override agent rules.
  *
  * The caller supplies the active agent for agent-rule lookup; the SDK `Session` payload carries no agent field.
- * An `undefined` agent skips agent rules and evaluates session rules alone.
+ * An `undefined` agent skips the agent-list API and evaluates session rules alone.
  */
 export async function resolveToolPermissionDenied(
     client: PluginContext["client"] | undefined,
@@ -298,7 +309,7 @@ export async function resolveToolPermissionDenied(
     toolName: string,
     activeAgent: string | undefined,
 ): Promise<boolean> {
-    if (!client?.app?.agents || !client?.session?.get) {
+    if (!client?.session?.get || (activeAgent !== undefined && !client.app?.agents)) {
         sessionLog(sessionId, `${toolName} permission APIs are unavailable (fail-closed)`);
         return true;
     }
@@ -357,28 +368,30 @@ async function readToolPermissionDenied(
     activeAgent: string | undefined,
 ): Promise<boolean> {
     const [agentsResponse, sessionResponse] = await Promise.all([
-        client.app.agents(),
+        activeAgent === undefined ? undefined : client.app.agents(),
         client.session.get({ path: { id: sessionId } }),
     ]);
-    const agents = responseData(agentsResponse);
     const session = responseData(sessionResponse);
-    if (
-        !Array.isArray(agents) ||
-        !isRecord(session) ||
-        (isRecord(agentsResponse) && agentsResponse.error != null) ||
-        (isRecord(sessionResponse) && sessionResponse.error != null)
-    ) {
+    if (!isRecord(session) || (isRecord(sessionResponse) && sessionResponse.error != null)) {
         throw new Error("OpenCode permission response is unavailable");
     }
-    const agent =
-        activeAgent !== undefined
-            ? agents.find((candidate) => isRecord(candidate) && candidate.name === activeAgent)
-            : undefined;
-    if (activeAgent !== undefined && !isRecord(agent)) {
-        throw new Error("OpenCode active agent permission evidence is unavailable");
+    let agentRules: PermissionRule[] = [];
+    if (activeAgent !== undefined) {
+        const agents = responseData(agentsResponse);
+        if (!Array.isArray(agents) || (isRecord(agentsResponse) && agentsResponse.error != null)) {
+            throw new Error("OpenCode agent permission response is unavailable");
+        }
+        const agent = agents.find(
+            (candidate) => isRecord(candidate) && candidate.name === activeAgent,
+        );
+        if (!isRecord(agent)) {
+            throw new Error("OpenCode active agent permission evidence is unavailable");
+        }
+        agentRules = permissionRules(agent.permission);
     }
-    const agentRules = permissionRules(isRecord(agent) ? agent.permission : undefined);
-    const sessionRules = permissionRules(session.permission ?? session.permissions);
+    const sessionRules = permissionRules(
+        session.permission === undefined ? session.permissions : session.permission,
+    );
     return permissionDisabled(toolName, [...agentRules, ...sessionRules]);
 }
 
@@ -400,7 +413,7 @@ export function peekToolPermissionDeniedForTest(
         ?.denied;
 }
 
-/** Expires cached verdicts without discarding last successful results. */
+/** Marks one session's cached verdicts stale so the next read fills again instead of serving them. */
 export function invalidateToolPermissionDenied(sessionId: string): void {
     const prefix = `${permissionSessionKey(sessionId)}:`;
     for (const [key, entry] of permissionDeniedBySession.entries()) {
