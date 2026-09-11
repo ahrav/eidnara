@@ -670,6 +670,43 @@ fn seed_pending_unlink(root: &std::path::Path, digest: &str) {
         .unwrap();
 }
 
+#[test]
+fn natural_orphan_reclaim_recovers_without_an_mtime_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    let digest = format!("{:x}", Sha256::digest(b"orphan"));
+    write_object(root.path(), &digest, b"orphan");
+    File::options()
+        .write(true)
+        .open(object_path(root.path(), &digest))
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(
+        store.run_staging_maintenance_with_fault_for_test(
+            2 * HOUR_MS,
+            ArtifactGcFault::AfterReclaiming
+        ),
+        Err(KernelError::Fault)
+    );
+    assert!(object_path(root.path(), &digest).exists());
+    drop(store);
+
+    let _reopened = KernelStore::open(root.path()).unwrap();
+    assert!(!object_path(root.path(), &digest).exists());
+    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_ingestion_reservations",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
 /// Replaces an expected object file with a directory so unlink fails for only
 /// that digest. Parent shard permissions match normal object storage.
 fn poison_object_path(root: &std::path::Path, digest: &str) {

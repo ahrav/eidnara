@@ -13,10 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kernel::source_identity::Occurrence;
 use kernel::{
-    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactIngestRequest,
-    CommitIntent, DomainSpec, HeldCursor, HeldDescriptor, KernelError, KernelStore,
-    MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER, MAX_SOURCE_HOLD_LIFETIME_MS, ProviderEgress,
-    RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorPolicy,
+    ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
+    ArtifactGcFault, ArtifactIngestRequest, CommitIntent, DomainSpec, HeldCursor, HeldDescriptor,
+    KernelError, KernelStore, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER, MAX_SOURCE_HOLD_LIFETIME_MS,
+    ProviderEgress, RemediationTarget, RepositoryProvenance, Sensitivity, SourceDescriptorPolicy,
     SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourceHoldError, SourceHoldInvalidity,
 };
@@ -2392,6 +2392,335 @@ fn replay_evidence_created_after_s_survives_publication_pruning_and_gc_until_ack
         fixture.object_present(&catchup[1].digest),
         "live evidence stays"
     );
+}
+
+#[test]
+fn natural_reclaim_recovery_keeps_unacknowledged_descriptor_evidence() {
+    let mut fixture = Fixture::open();
+    fixture.publish("messages", "reclaiming", 1, "replay after reopen");
+    let evidence = fixture.live_entry("messages", "reclaiming").clone();
+    fixture.delete_evidence(
+        &evidence.evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    let checkpoint = fixture.checkpoint();
+    assert!(checkpoint < evidence.created);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+        0
+    );
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+        0
+    );
+
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    let connection = Connection::open(fixture.root.path().join("kernel.sqlite")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "INSERT INTO artifact_ingestion_reservations(
+                     reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
+                     created_at,heartbeat_at,lease_expires_at,reclaim_started_at
+                 ) SELECT 'gc-'||e.artifact_digest,e.artifact_digest,e.artifact_reference,
+                          'Reclaiming',?1,?2,?2,?2,?2
+                   FROM evidence_meta e JOIN commit_log c ON c.commit_seq=e.invalidated_commit_seq
+                   WHERE e.evidence_id=?3 AND e.retain_until IS NULL AND c.recorded_at+?4<=?2",
+                rusqlite::params![
+                    i64::try_from(fixture.store.lease_epoch()).unwrap(),
+                    far,
+                    evidence.evidence_id,
+                    i64::try_from(14 * DAY_MS).unwrap(),
+                ],
+            )
+            .unwrap(),
+        1,
+        "the stored reclaim decision has passed the reference grace"
+    );
+    drop(connection);
+    assert_eq!(
+        fs::read(fixture.object_path(&evidence.digest)).unwrap(),
+        evidence.text.as_bytes()
+    );
+
+    let fixture = fixture.reopen();
+    assert_eq!(fixture.checkpoint(), checkpoint);
+    assert_eq!(
+        fs::read(fixture.object_path(&evidence.digest))
+            .ok()
+            .as_deref(),
+        Some(evidence.text.as_bytes()),
+        "startup recovery must retain unacknowledged descriptor evidence"
+    );
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE state='Reclaiming'"),
+        0
+    );
+
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, evidence.created, 1)
+        .unwrap();
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 0);
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 1);
+    assert!(!fixture.object_present(&evidence.digest));
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+        0
+    );
+}
+
+#[test]
+fn natural_reclaim_rechecks_historical_hold_extensions_and_purge_overrides_them() {
+    let mut fixture = Fixture::open();
+    let binding = fixture.binding();
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+        .unwrap();
+    fixture.publish("messages", "held-reclaim", 1, "held historical evidence");
+    let evidence = fixture.live_entry("messages", "held-reclaim").clone();
+    fixture.delete_evidence(
+        &evidence.evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, evidence.created, 1)
+        .unwrap();
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .run_staging_maintenance_with_fault_for_test(far, ArtifactGcFault::AfterReclaiming),
+        Err(KernelError::Fault)
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE state='Reclaiming'"),
+        1
+    );
+    let extended = fixture
+        .store
+        .extend_source_hold(&binding, &hold.hold_id, evidence.created, wide_admission())
+        .unwrap();
+    assert_eq!(
+        fixture.pin_refs(&hold.hold_id),
+        std::slice::from_ref(&evidence.evidence_id)
+    );
+    fixture
+        .store
+        .commit(intent("new-lagging-consumer"), |envelope| {
+            envelope.register_outbox_consumer("lagging", 1)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.count(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='lagging'"
+        ),
+        0
+    );
+
+    let swept = fixture.store.run_staging_maintenance(far).unwrap();
+    assert_eq!(
+        swept.artifact_gc.reclaimed_objects, 0,
+        "a historical hold extension protects an already-reclaiming artifact"
+    );
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 0);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+        Ok(extended)
+    );
+    let (_, readmitted_digest) = fixture.retain("readmitted-reclaim", &evidence.text);
+    assert_eq!(readmitted_digest, evidence.digest);
+    assert_eq!(
+        fs::read(fixture.object_path(&readmitted_digest)).unwrap(),
+        evidence.text.as_bytes()
+    );
+
+    fixture
+        .store
+        .delete_artifact_with_fault_for_test(
+            ArtifactDeletionRequest {
+                intent: intent("purge-held-reclaim"),
+                identity: ArtifactDeletionIdentity::Digest(evidence.digest.clone()),
+                kind: ArtifactDeletionKind::Purge,
+                operator_id: Some("operator-1".to_string()),
+                target_locator: Some("incident://1".to_string()),
+                reason: Some("secret".to_string()),
+                deleted_at: wall_ms(),
+            },
+            ArtifactDeletionFault::AfterCommit,
+        )
+        .unwrap_err();
+    assert!(fixture.object_present(&evidence.digest));
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+        1
+    );
+    let fixture = fixture.reopen();
+    assert!(!fixture.object_present(&evidence.digest));
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+        0
+    );
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+        0
+    );
+    assert_eq!(fixture.checkpoint(), evidence.created);
+    assert_eq!(
+        fixture.count(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='lagging'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn reclaim_cleanup_retires_absent_objects_despite_replay_protection() {
+    for active_pin in [false, true] {
+        let mut fixture = Fixture::open();
+        let binding = fixture.binding();
+        let hold = fixture
+            .store
+            .capture_source_hold(&binding, bounds(MAX_SOURCE_HOLD_LIFETIME_MS))
+            .unwrap();
+        fixture.publish("messages", "unlinked", 1, "unlinked evidence");
+        let evidence = fixture.live_entry("messages", "unlinked").clone();
+        fixture.delete_evidence(
+            &evidence.evidence_id,
+            ArtifactDeletionKind::Delete,
+            wall_ms(),
+        );
+        fixture
+            .store
+            .acknowledge_outbox(CONSUMER, evidence.created, 1)
+            .unwrap();
+        let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .run_staging_maintenance_with_fault_for_test(far, ArtifactGcFault::AfterUnlink),
+            Err(KernelError::Fault)
+        );
+        assert!(!fixture.object_present(&evidence.digest));
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE state='Reclaiming'"
+            ),
+            1
+        );
+        if active_pin {
+            fixture
+                .store
+                .extend_source_hold(&binding, &hold.hold_id, evidence.created, wide_admission())
+                .unwrap();
+            assert_eq!(
+                fixture.pin_refs(&hold.hold_id),
+                std::slice::from_ref(&evidence.evidence_id)
+            );
+        } else {
+            fixture
+                .store
+                .commit(intent("lagging-after-unlink"), |envelope| {
+                    envelope.register_outbox_consumer("lagging", 1)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+            assert_eq!(
+                fixture.count(
+                    "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='lagging'"
+                ),
+                0
+            );
+        }
+
+        let swept = fixture.store.run_staging_maintenance(far).unwrap();
+        assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+        assert_eq!(swept.artifact_gc.reclaimed_bytes, 0);
+        assert_eq!(swept.artifact_gc.failed_candidates, 0);
+        assert_eq!(
+            swept.artifact_gc.withheld_for_replay, 0,
+            "absent bytes cannot be withheld for replay"
+        );
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+            0,
+            "completed unlinks retire their reclaim notes despite active pins"
+        );
+        let fixture = fixture.reopen();
+        assert!(!fixture.object_present(&evidence.digest));
+        assert_eq!(fixture.checkpoint(), evidence.created);
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM artifact_ingestion_reservations"),
+            0
+        );
+    }
+}
+
+#[test]
+fn reclaim_cleanup_does_not_treat_an_unreadable_object_as_absent() {
+    let mut fixture = Fixture::open();
+    fixture.publish(
+        "messages",
+        "unreadable-reclaim",
+        1,
+        "protected unreadable bytes",
+    );
+    let evidence = fixture.live_entry("messages", "unreadable-reclaim").clone();
+    fixture.delete_evidence(
+        &evidence.evidence_id,
+        ArtifactDeletionKind::Delete,
+        wall_ms(),
+    );
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, evidence.created, 1)
+        .unwrap();
+    let far = wall_ms() + i64::try_from(15 * DAY_MS).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .run_staging_maintenance_with_fault_for_test(far, ArtifactGcFault::AfterReclaiming),
+        Err(KernelError::Fault)
+    );
+    fixture
+        .store
+        .commit(intent("lagging-with-unreadable-object"), |envelope| {
+            envelope.register_outbox_consumer("lagging", 1)?;
+            Ok(String::new())
+        })
+        .unwrap();
+
+    let object = fixture.object_path(&evidence.digest);
+    let shard = object.parent().unwrap();
+    fs::set_permissions(shard, fs::Permissions::from_mode(0o000)).unwrap();
+    let probe_error = fs::metadata(&object).err();
+    let swept = fixture.store.run_staging_maintenance(far);
+    fs::set_permissions(shard, fs::Permissions::from_mode(0o700)).unwrap();
+    if let Some(error) = probe_error {
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        eprintln!("permission-denied object probe exercised");
+    } else {
+        eprintln!("privileged process bypassed mode bits; unreadable probe not exercised");
+    }
+    let swept = swept.unwrap();
+    assert_eq!(swept.artifact_gc.withheld_for_replay, 1);
+    assert_eq!(swept.artifact_gc.failed_candidates, 0);
+    assert_eq!(swept.artifact_gc.reclaimed_objects, 0);
+    assert_eq!(fs::read(object).unwrap(), evidence.text.as_bytes());
 }
 
 #[test]
