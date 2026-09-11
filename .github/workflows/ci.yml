@@ -44,7 +44,6 @@ jobs:
       shm: ${{ steps.filter.outputs.shm || 'true' }}
       native: ${{ steps.filter.outputs.native || 'true' }}
       ts: ${{ steps.filter.outputs.ts || 'true' }}
-      manifests: ${{ steps.filter.outputs.manifests || 'true' }}
     steps:
       # dorny/paths-filter v4.0.3
       # Pull requests read the file list from the API; no checkout needed.
@@ -100,10 +99,6 @@ jobs:
               - 'bun.lock'
               - 'tsconfig.json'
               - 'crates/*/gen/**'
-            manifests:
-              - *workflow
-              - *cargo
-              - '**/Cargo.toml'
 
   gates:
     name: gates
@@ -746,9 +741,9 @@ jobs:
     name: pinned toolchain with unlocked latest dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: changes
-    # `cargo update` reads only the manifests, so on a pull request this lane reacts to manifest edits; the weekly schedule catches new registry releases.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.manifests == 'true') }}
+    # `cargo update` resolves against the registry at run time, so results
+    # reflect registry state rather than the change under review.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
