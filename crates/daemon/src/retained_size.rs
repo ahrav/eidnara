@@ -240,6 +240,17 @@ pub(crate) fn wire_message_retained_bytes(message: &WireMessage) -> usize {
         .saturating_add(message.original().map_or(0, value_heap_bytes))
 }
 
+/// Charges one shared ingress shell's backing, including its Arc counters.
+/// Each holder charges the whole allocation even when another holder shares it.
+pub(crate) fn ingress_message_retained_bytes(message: &crate::wire::IngressMessage) -> usize {
+    ARC_ALLOCATION_OVERHEAD_BYTES
+        .saturating_add(size_of::<crate::wire::IngressMessage>())
+        .saturating_add(message.mid.capacity())
+        .saturating_add(
+            wire_message_retained_bytes(&message.ck).saturating_sub(size_of::<WireMessage>()),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

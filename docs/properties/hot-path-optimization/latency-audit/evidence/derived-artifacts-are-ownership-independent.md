@@ -235,36 +235,150 @@ Clippy, format, comment-marker, and diff checks passed. Full gates require a
 controller rerun after these edits; earlier execution evidence above remains
 historical.
 
-[shared-expansion]: ../../../../../crates/daemon/src/lib.rs#L4157
+### Shared ingress shells
+
+Verification date: 2026-09-11. Predecessor: `6b2c0c5f`.
+Source links for earlier implementation evidence are pinned to that predecessor
+where the shared-shell work moves their targets. The discovery narrative and
+execution results retain their original scope. Live shared-input anchors in the
+catalog and check inventory point to the shared-shell implementation; the two
+synthetic delta test links also correct stale locations found during verification.
+
+The [request collection][shell-owner] owns `Arc<IngressMessage>` values and
+serializes as the same message array. Its owned `push` preserves the frozen
+differential test interface. No memory-store block type or wire field changes.
+
+The [projection builder][shell-build] owns the replay form. It discards the
+message's original JSON while preserving each block's original JSON and the
+effective synthetic metadata. Already canonical shells are shared directly.
+The [reattachment path][shell-reattach] validates the existing identity and
+frontier conditions and copies handles. Incremental projection retains the
+cached handles; a changed effective synthetic status still forces full
+projection rather than accepting the cached prefix.
+Each [shared block view][shell-block] holds the canonical shell and its block
+index. The private fields prevent callers from changing that pairing. Cloning
+the view retains the shell; equality compares only the referenced wire block.
+
+The projection cache and full-request snapshot cache retain shared shells.
+[Shell accounting][shell-size] charges Arc counters, the inline ingress shell,
+identity string capacity, and wire-message backing through the existing helper.
+Each cache holder charges the full allocation conservatively. Within a projection,
+flat-block views share the shell's backing, so it is charged once through the
+message array, not once per block reference. Derived strings and tool-input
+copies remain independently charged. Request prefix size entries retain
+their conservative charge even when canonicalization removes original message
+JSON; suffix sizes are measured at insertion. No cache or budget is added.
+
+Characterization before production edits passed the unchanged block-original
+versus rebuilt-shell expectations and effective-synthetic-status matrix. The
+[pointer regression][shell-sharing] then failed on the predecessor because two
+reattachments owned different shells. It passes with shared shells, including a
+second projection of canonical input. The allocation test initially failed
+because its expected sum omitted shell backing; the [independent sum][shell-charge]
+now includes that allocation and checks exact equality instead of a tolerance.
+The snapshot-fallback assertion initially selected the projection cache; explicit
+eviction of both caches now proves the intended fallback path.
+
+The large projection cache regression rejected the first implementation: full
+canonical shells beside independent wire-block copies retained 284,143,614
+bytes against the unchanged 201,326,592-byte budget. Sharing block backing
+through the canonical shell reduces the estimate to 173,793,566 bytes, and the
+unchanged cache-fit and second-pass reuse assertions pass. This is allocation
+accounting evidence, not a latency comparison.
+
+Passing focused commands use `cargo test -p daemon --lib --all-features --locked`
+with filters `wire::tests` (14), `prefix` (21), `differential` (8), `native` (35),
+`tail_delta` (7), `synthetic` (24), `lineage` (16), `snapshot` (16), `retained` (8),
+`historian_chunk` (20), `tail_hygiene` (9), `golden` (32), `projection` (17),
+`expand` (5), and `rejects` (37). All groups pass after the shared-block change.
+Filters overlap. Both differential
+checks are enabled by the compiled test setting throughout this campaign.
+All-target/all-feature daemon Clippy with `-D warnings` and the scoped formatter
+pass. The frozen `differential_goldens.rs` is byte-identical to the predecessor;
+its SHA-256 is `193bc3918d1b3d06527a4fcd14bfb760b720afd36895313326ddd9964f4a3792`.
+
+No timing baseline or speedup is claimed. The owner retires the global M0/W1/W2
+measurement gate for this work. Full workspace tests, cross-process campaigns,
+and independent reviews remain controller work. Historical execution evidence
+above is retained; this file exceeds the method's length target to preserve it.
+
+### Shell metadata preservation and review disposition
+
+The [reattachment test][shell-metadata] includes nonempty `origin` and
+`provider_extras`, every non-synthetic `HarnessMeta` field set away from its
+default, an unknown message field, and an unknown block field. It reparses the
+JSON and checks typed field equality, original block retention, and exact
+canonical JSON equality after removing only the unknown message field. Raw
+ingress remains unchanged. The original unknown-field assertions are unchanged.
+
+The [exact allocation fixture][shell-charge] includes nonzero origin strings,
+provider namespace/tree/value allocations, and harness ID and finish strings.
+Its expected sum uses capacities and explicit tree-entry costs, not the retained
+charge helpers. Two temporary production mutations were detected: dropping the
+canonical origin failed the typed origin assertion, and omitting the provider
+extras charge produced 77,861 bytes instead of 78,135. Both mutations were
+removed before the final focused runs.
+
+Review dispositions preserve the ownership boundary. The public native Arc
+fields and copying legacy decoder are unchanged from the predecessor; they are
+not new blockers. The shared block's private index reaches its sole constructor
+from the projection builder's `0..msg.ck.content().len()` loop. Its retained Arc
+prevents another handle's copy-on-write mutation from shortening the referenced
+content, and neither accessor exposes mutation. No checked optional constructor or mutation
+API is needed. A short type comment documents the retained-owner mechanism.
+The collection remains an owned-insertion adapter over shared-shell storage:
+the immutable differential golden requires `push(IngressMessage)`. Deleting
+that adapter would break the bound interface. No generic replacement or codec
+conversion rewrite is introduced. `flatten_block` reads canonical metadata
+without a separate synthetic argument.
+
+The controller reports 14 full gates and six independent reviews before this
+test extension. Local reruns use `cargo test -p daemon --lib --all-features
+--locked` with filters `wire::tests` (14), `reattach` (16), `projection` (17),
+`differential` (8), and `native` (35); all pass, with overlapping coverage.
+All-target/all-feature daemon Clippy with `-D warnings` and the scoped formatter
+also pass. The extension changes tests and documentation, not served behavior;
+the historical evidence and bound golden remain intact.
+
+[shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
+[shell-build]: ../../../../../crates/daemon/src/wire.rs#L546-L565
+[shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
+[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L214-L243
+[shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L243-L253
+[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1745
+[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L950
+[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1704
+
+[shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4157
 [shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L56
-[shared-ingress]: ../../../../../crates/daemon/src/lib.rs#L13028-L13080
-[shared-replay-check]: ../../../../../crates/daemon/src/lib.rs#L20654
-[shared-ingress-check]: ../../../../../crates/daemon/src/lib.rs#L20873
+[shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
+[shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20654
+[shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20873
 [shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L71
-[raw-allocation-check]: ../../../../../crates/daemon/src/lib.rs#L20984
+[raw-allocation-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20984
 
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
-[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
-[flatproj]: ../../../../../crates/daemon/src/wire.rs#L114-L127
-[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L141-L144
-[reattach]: ../../../../../crates/daemon/src/wire.rs#L145-L186
-[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L680-L743
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L833-L842
+[flatblock]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L36-L64
+[flatproj]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L114-L127
+[reattach-doc]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L141-L144
+[reattach]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L145-L186
+[diff-bytes]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L329-L337
+[flatten]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L680-L743
+[fp-reuse]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011
 [assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
-[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2910-L2912
-[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6352
-[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16629
-[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13027-L13071
-[chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13058
-[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13073-L13080
-[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13316-L13333
-[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14428-L14443
-[segments]: ../../../../../crates/daemon/src/lib.rs#L14448-L14454
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20954
+[prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
+[sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
+[sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16629
+[ingress-chunks]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13027-L13071
+[chunk-eq]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13058
+[gate-native]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13073-L13080
+[native-diff]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13316-L13333
+[segments-take]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14428-L14443
+[segments]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14448-L14454
+[t-astro]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20954
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L302
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L278-L300
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73

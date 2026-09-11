@@ -1654,7 +1654,7 @@ impl TransformRequest {
     ) -> usize {
         use crate::retained_size::{
             ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
-            cloned_string_retained_bytes, value_heap_bytes, wire_message_retained_bytes,
+            cloned_string_retained_bytes, value_heap_bytes,
         };
         use std::mem::size_of;
 
@@ -1727,16 +1727,11 @@ impl TransformRequest {
         let messages = message_charge.unwrap_or_else(|| {
             self.messages
                 .capacity()
-                .saturating_mul(size_of::<wire::IngressMessage>())
+                .saturating_mul(size_of::<Arc<wire::IngressMessage>>())
                 .saturating_add(
                     self.messages
                         .iter()
-                        .map(|message| {
-                            message.mid.capacity().saturating_add(
-                                wire_message_retained_bytes(&message.ck)
-                                    .saturating_sub(size_of::<wire::WireMessage>()),
-                            )
-                        })
+                        .map(|message| retained_size::ingress_message_retained_bytes(message))
                         .sum::<usize>(),
                 )
         });
@@ -4197,7 +4192,7 @@ impl Handler {
             .or_else(|| {
                 let request = fallback_request.as_ref()?;
                 (replace_from <= request.messages.len())
-                    .then(|| request.messages[..replace_from].to_vec())
+                    .then(|| wire::IngressMessages(request.messages[..replace_from].to_vec()))
             })?;
         let mut current_messages = std::mem::take(&mut parsed.messages);
         messages.append(&mut current_messages);
@@ -4290,7 +4285,7 @@ impl Handler {
     /// The most recent full transform request retains raw CK parts until its bounded snapshot is evicted.
     /// `ctx_expand` uses raw CK parts only for a same-session recovery view.
     /// persisted historian transcripts remain the durable fallback for the default view.
-    fn cached_expand_messages(&self, session_id: &str) -> Option<Vec<wire::IngressMessage>> {
+    fn cached_expand_messages(&self, session_id: &str) -> Option<wire::IngressMessages> {
         self.transform_snapshots
             .lock()
             .expect("transform snapshots mutex")
@@ -4316,16 +4311,15 @@ impl Handler {
             .map(|cache| cache.message_retained_bytes[..reusable_prefix].to_vec())
             .unwrap_or_default();
         message_retained_bytes.reserve(request.messages.len().saturating_sub(reusable_prefix));
-        message_retained_bytes.extend(request.messages[reusable_prefix..].iter().map(|message| {
-            message.mid.capacity().saturating_add(
-                crate::retained_size::wire_message_retained_bytes(&message.ck)
-                    .saturating_sub(std::mem::size_of::<wire::WireMessage>()),
-            )
-        }));
+        message_retained_bytes.extend(
+            request.messages[reusable_prefix..]
+                .iter()
+                .map(|message| retained_size::ingress_message_retained_bytes(message)),
+        );
         let request_message_charge = request
             .messages
             .capacity()
-            .saturating_mul(std::mem::size_of::<wire::IngressMessage>())
+            .saturating_mul(std::mem::size_of::<Arc<wire::IngressMessage>>())
             .saturating_add(message_retained_bytes.iter().copied().sum::<usize>());
         self.projections
             .lock()
@@ -15770,14 +15764,13 @@ fn render_range_expand(
     truncate_expand_output(output)
 }
 
-fn durable_expand_messages(transcripts: &[StoredChunkTranscript]) -> Vec<wire::IngressMessage> {
+fn durable_expand_messages(transcripts: &[StoredChunkTranscript]) -> wire::IngressMessages {
     let mut messages = BTreeMap::new();
     for transcript in transcripts {
         let Some(raw_messages) = transcript.raw_messages_json.as_deref() else {
             continue;
         };
-        let Ok(raw_messages) = serde_json::from_str::<Vec<wire::IngressMessage>>(raw_messages)
-        else {
+        let Ok(raw_messages) = serde_json::from_str::<wire::IngressMessages>(raw_messages) else {
             continue;
         };
         for message in raw_messages {
@@ -15792,7 +15785,11 @@ fn durable_expand_messages(transcripts: &[StoredChunkTranscript]) -> Vec<wire::I
     messages.into_values().collect()
 }
 
-fn render_durable_range_expand(start: i64, end: i64, messages: &[wire::IngressMessage]) -> String {
+fn render_durable_range_expand(
+    start: i64,
+    end: i64,
+    messages: &[Arc<wire::IngressMessage>],
+) -> String {
     let messages = messages
         .iter()
         .filter(|message| {
@@ -15903,7 +15900,7 @@ struct VerboseRangeExpand {
 }
 
 fn render_verbose_range_expand(
-    messages: &[wire::IngressMessage],
+    messages: &[Arc<wire::IngressMessage>],
     start: i64,
     end: i64,
 ) -> VerboseRangeExpand {
@@ -15911,7 +15908,7 @@ fn render_verbose_range_expand(
 }
 
 fn render_verbose_range_expand_with_budget(
-    messages: &[wire::IngressMessage],
+    messages: &[Arc<wire::IngressMessage>],
     start: i64,
     end: i64,
     token_budget: usize,
@@ -16533,7 +16530,7 @@ fn historian_status_summary(state: &memory_store::HistorianDurableState) -> Stri
 }
 
 fn wrapup_has_remaining_messages(
-    messages: &[crate::wire::IngressMessage],
+    messages: &[Arc<crate::wire::IngressMessage>],
     last_compartment_end: Option<u64>,
     protected_start: u64,
 ) -> bool {
@@ -20738,7 +20735,8 @@ mod tests {
             NativeCacheKeyMode::Normal,
         );
         let fresh_request = serde_json::to_value(&second_request).unwrap();
-        second_request.messages = second_request.messages.split_off(4);
+        let fresh_projection = wire::project_messages(&second_request.messages).unwrap();
+        second_request.messages = wire::IngressMessages(second_request.messages.split_off(4));
         second_request.native_messages =
             Some(second_request.native_messages.take().unwrap().split_off(2));
         second_request.tail_delta = Some(json!({
@@ -20752,6 +20750,68 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&second_request).unwrap(),
             fresh_request
+        );
+        let cached_projection = frontier.projection_cache.as_ref().unwrap();
+        let prefix = cached_projection
+            .projection
+            .reattach_messages_prefix(4)
+            .unwrap();
+        for (reattached, cached) in second_request.messages.iter().zip(&prefix) {
+            assert!(Arc::ptr_eq(reattached, cached));
+        }
+        let incremental_projection = wire::project_messages_incremental(
+            &second_request.messages,
+            &cached_projection.projection,
+            4,
+        )
+        .unwrap();
+        transform::assert_prefix_projection_equivalent(
+            &incremental_projection,
+            &second_request.messages,
+        )
+        .unwrap();
+        assert_eq!(incremental_projection, fresh_projection);
+        let shared_request = second_request.clone();
+        assert!(Arc::ptr_eq(
+            &shared_request.messages[0],
+            &second_request.messages[0]
+        ));
+        assert_eq!(
+            wire::project_messages(&shared_request.messages).unwrap(),
+            fresh_projection
+        );
+        let cold_charge = second_request.messages.capacity()
+            * std::mem::size_of::<Arc<IngressMessage>>()
+            + second_request
+                .messages
+                .iter()
+                .map(|message| {
+                    std::mem::size_of::<usize>() * 2
+                        + std::mem::size_of::<IngressMessage>()
+                        + message.mid.capacity()
+                        + retained_size::wire_message_retained_bytes(&message.ck)
+                        - std::mem::size_of::<WireMessage>()
+                })
+                .sum::<usize>();
+        assert_eq!(
+            second_request.retained_bytes()
+                - second_request.retained_bytes_with_charges(None, Some(0)),
+            cold_charge
+        );
+        let warm_charge = handler.store_projection_cache(
+            &second_request,
+            0,
+            Arc::new(incremental_projection),
+            Some(cached_projection),
+        );
+        assert!(warm_charge >= cold_charge);
+        assert_eq!(
+            warm_charge,
+            second_request.messages.capacity() * std::mem::size_of::<Arc<IngressMessage>>()
+                + cached_projection.message_retained_bytes[..4]
+                    .iter()
+                    .sum::<usize>()
+                + retained_size::ingress_message_retained_bytes(&second_request.messages[4])
         );
         for (reattached, cached) in second_request
             .native_messages
@@ -20773,12 +20833,22 @@ mod tests {
         );
         assert_eq!(decoded_shared, decoded_fresh);
         assert_eq!(
-            crate::wire::project_messages(&decoded_shared.messages)
-                .unwrap()
-                .differential_bytes(),
-            crate::wire::project_messages(&decoded_fresh.messages)
-                .unwrap()
-                .differential_bytes(),
+            crate::wire::project_messages(
+                &decoded_shared
+                    .messages
+                    .into_iter()
+                    .collect::<wire::IngressMessages>()
+            )
+            .unwrap()
+            .differential_bytes(),
+            crate::wire::project_messages(
+                &decoded_fresh
+                    .messages
+                    .into_iter()
+                    .collect::<wire::IngressMessages>()
+            )
+            .unwrap()
+            .differential_bytes(),
         );
         let mut second = transform::TransformResponse::passthrough(
             served,
@@ -20853,6 +20923,21 @@ mod tests {
         );
         assert_eq!(shared_stats.encoded_messages, 0);
         assert_eq!(shared_replay.native_messages, second.native_messages);
+        assert_eq!(
+            serde_json::to_vec(shared_replay.messages()).unwrap(),
+            serde_json::to_vec(second.messages()).unwrap()
+        );
+        let mut edited_output = shared_replay.native_messages.clone().unwrap();
+        let original_output = serde_json::to_vec(&shared_replay.native_messages).unwrap();
+        Arc::make_mut(&mut edited_output[0])["alias_mutation"] = json!(true);
+        assert!(!Arc::ptr_eq(
+            &edited_output[0],
+            &second.native_messages.as_ref().unwrap()[0]
+        ));
+        assert_eq!(
+            serde_json::to_vec(&second.native_messages).unwrap(),
+            original_output
+        );
         let native = second.native_messages.expect("incremental native output");
         let encoded = serde_json::to_string(&native).unwrap();
         assert!(encoded.contains("syntheticTodoMarker"));
@@ -20957,6 +21042,11 @@ mod tests {
 
         cache.remove("native-prefix-core");
         drop(cache);
+        handler
+            .projections
+            .lock()
+            .unwrap()
+            .remove("native-prefix-core");
         let mut delta = native_cache_request(
             "native-prefix-core",
             vec![ck("core-4", 4, "four")],
@@ -20971,6 +21061,10 @@ mod tests {
         let frontier = handler
             .expand_transform_tail_delta(&mut delta)
             .expect("full snapshot must supply the evicted native prefix");
+        assert!(frontier.projection_cache.is_none());
+        for (reattached, original) in delta.messages.iter().zip(&request.messages) {
+            assert!(Arc::ptr_eq(reattached, original));
+        }
         let reattached = delta.native_messages.as_ref().unwrap();
         for (index, original) in native.iter().enumerate() {
             assert!(Arc::ptr_eq(&reattached[index], original));
@@ -21176,9 +21270,9 @@ mod tests {
         )
         .expect("giant suffix projection");
         assert_eq!(incremental.message_count(), GIANT_MESSAGE_COUNT + 1);
-        assert!(Arc::ptr_eq(
-            &incremental.blocks[0].wire,
-            &projection.blocks[0].wire
+        assert!(std::ptr::eq(
+            incremental.blocks[0].wire.as_ref(),
+            projection.blocks[0].wire.as_ref()
         ));
 
         let mut response = transform::TransformResponse::passthrough(
@@ -21781,7 +21875,10 @@ mod tests {
         generation_3_native.push(native_text_message("shell-user-3", "user", "third"));
         let mut generation_3 = native_cache_request(
             "native-shell-rematch",
-            generation_3_messages,
+            generation_3_messages
+                .iter()
+                .map(|message| message.as_ref().clone())
+                .collect(),
             generation_3_native,
             "shell-fp-3",
         );
@@ -21984,7 +22081,7 @@ mod tests {
         );
 
         let mut edited_request = baseline_request.clone();
-        edited_request.messages[1] = ck("frontier-2", 2, "ccc");
+        edited_request.messages[1] = Arc::new(ck("frontier-2", 2, "ccc"));
         let edited_native = Arc::make_mut(&mut edited_request.native_messages.as_mut().unwrap()[1]);
         edited_native["info"]["meta"] = json!("ccc");
         edited_native["parts"][0]["text"] = json!("ccc");
@@ -22521,7 +22618,7 @@ mod tests {
             ),
         };
         let mut changed = request;
-        changed.messages[1] = ck("p2", 2, "changed");
+        changed.messages[1] = Arc::new(ck("p2", 2, "changed"));
         changed.full_array_fingerprint = Some("projection-fp-2".to_string());
         let corrupt = validated_projection_cache_input(
             &changed,
@@ -22919,7 +23016,7 @@ mod tests {
         let replace_from = previous.messages.len() - 1;
         let mut delta = native_cache_request(
             session,
-            vec![previous.messages[replace_from].clone()],
+            vec![previous.messages[replace_from].as_ref().clone()],
             Vec::new(),
             "boundary-recut-fp-2",
         );
@@ -23234,8 +23331,14 @@ mod tests {
             full_second.messages.extend(delta.messages.iter().cloned());
             let mut flagged_second: TransformRequest =
                 serde_json::from_value(serde_json::to_value(&full_second).unwrap()).unwrap();
-            flagged_second.messages[82].ck.meta.synthetic = true;
-            flagged_second.messages[83].ck.meta.synthetic = true;
+            Arc::make_mut(&mut flagged_second.messages[82])
+                .ck
+                .meta
+                .synthetic = true;
+            Arc::make_mut(&mut flagged_second.messages[83])
+                .ck
+                .meta
+                .synthetic = true;
             let baseline_projection =
                 crate::wire::project_messages(&flagged_second.messages).unwrap();
             let response =
@@ -23301,8 +23404,8 @@ mod tests {
                 "replay-call" | "replay-result"
             )));
             let mut raw_full = reference.clone();
-            raw_full.messages[82].ck.meta.synthetic = false;
-            raw_full.messages[83].ck.meta.synthetic = false;
+            Arc::make_mut(&mut raw_full.messages[82]).ck.meta.synthetic = false;
+            Arc::make_mut(&mut raw_full.messages[83]).ck.meta.synthetic = false;
             let raw_boundary = boundary_messages(&raw_full, &projection, &handler.boundary_tokens);
             assert_eq!(raw_boundary.messages.len(), boundary.messages.len() + 2);
             assert!(
@@ -27333,6 +27436,7 @@ mod tests {
             },
         ];
 
+        let messages: wire::IngressMessages = messages.into_iter().collect();
         let rendered = render_verbose_range_expand(&messages, 10, 11);
         assert!(rendered.text.contains("[10] A (assistant)"));
         assert!(rendered.text.contains("[11] U (user)"));
@@ -33857,7 +33961,7 @@ mod tests {
         );
 
         let mut malformed = transform_request(wrapup_messages(20, 40), 0, 200_000);
-        malformed.messages[0].mid = "reserved#mid".to_string();
+        Arc::make_mut(&mut malformed.messages[0]).mid = "reserved#mid".to_string();
         let generation = handler
             .transform_snapshots
             .lock()
@@ -36775,9 +36879,9 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
         );
         if pass == 2 {
             let cache = cached.as_ref().unwrap();
-            assert!(Arc::ptr_eq(
-                &result.projection.blocks[0].wire,
-                &cache.projection.blocks[0].wire,
+            assert!(std::ptr::eq(
+                result.projection.blocks[0].wire.as_ref(),
+                cache.projection.blocks[0].wire.as_ref(),
             ));
         }
         handler.store_projection_cache(

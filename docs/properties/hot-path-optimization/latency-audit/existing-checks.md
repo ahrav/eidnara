@@ -50,10 +50,13 @@ not the handler.
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
 | [`assert_message_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; production calls run under [`prefix_projection_differential_enabled`][gate-prefix], which is enabled in tests or by `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1`. The test-only slice adapter `assert_prefix_projection_equivalent` delegates to this shared check. | unaudited |
-| [`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`][t-inc] | Reattached prefix equals `from_parts` inputs; incremental equals full; prefix `Arc`s are pointer-shared. | unaudited |
-| [`incremental_projection_checks_effective_synthetic_status`][t-synthetic-status] | Across all four cached/current effective synthetic-flag pairs, incremental and full projections agree; prefix `wire` and `bytes` `Arc`s are shared exactly when flags agree. | unaudited |
+| [`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`][t-inc] | Reattached prefix equals `from_parts` inputs; incremental equals full; prefix block backing and byte allocations are pointer-shared. | unaudited |
+| [`incremental_projection_checks_effective_synthetic_status`][t-synthetic-status] | Across all four cached/current effective synthetic-flag pairs, incremental and full projections agree; prefix block backing, shell Arcs, and byte allocations are shared exactly when flags agree. | unaudited |
 | [`compaction_mode_projection_cache_reclassifies_synthetic_prefix`][t-compaction-cache] | Direct off/on/on/off/on changes to `ProducerContext.compaction_enabled` drive real transforms and the handler's cache lookup/store helpers. Checks full-projection equality, reattached flags, prefix `wire` reuse on the repeated on pass, and unchanged ingress bytes. On enabled passes, `(projection_reused_messages, projection_projected_messages)` is `(0, 4)` after a mode change and `(4, 0)` on stable reuse. No route binding or config reload. | unaudited |
-| [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach] | An unknown message-level field is dropped; a block-level field is kept. | unaudited |
+| [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach] | Reparsed input has nonempty origin and provider extras plus non-default, non-synthetic harness metadata. Replay drops only the unknown message-level field; transport identity, all known shell fields, and block originals remain equal. The original unknown-field expectations are retained. | unaudited |
+| [Repeated canonical-shell reattachment][shell-sharing] | Reattachment, cloned requests, full projection of canonical input, and incremental projection preserve pointers, projection bytes, digests, and identities. Unknown message fields are discarded without changing raw ingress; block originals survive. Copy-on-write edits leave the cached shell unchanged. | unaudited |
+| [Shared ingress decode and mobility][shell-decode] | Request messages and projections satisfy `Send + 'static`; malformed message arrays return the same errors as owned ingress arrays. | unaudited |
+| [Projection shell allocation accounting][shell-charge] | An independent sum covers shell and block backing, retained block JSON, Arc counters, content capacity, identities, and frontiers with exact equality. Nonzero origin, provider namespace/tree/value, and harness metadata heap terms are computed without the cached-charge helper. | unaudited |
 | [`projection_differential_catches_corrupt_first_changed_position`][t-projdiff] | A corrupt frontier is caught by the differential. | unaudited |
 | [`astro_scale_projection_cache_reuses_on_the_second_pass`][t-astro] | The second pass reuses the cached projection. | unaudited |
 | [`pending_rewrite_passes_isolate_ingress_meta_usage_and_reconcile`][t-pending] | Pass reads of ingress meta are isolated. | unaudited |
@@ -88,6 +91,14 @@ unchanged after a pass whose mint commit
 fails; a test that runs either differential gate from `crates/daemon/tests/`
 or `crates/daemon/benches/` (`cfg!(test)` is false there and no file sets the
 variables).
+
+The shared-shell campaign extends the complex native replay with request-shell
+pointer checks, fresh/reattached/shared projection equality, served-byte equality,
+native-output copy-on-write isolation, and independent cold-shell accounting.
+The warm charge keeps cached prefix sizes and measures the suffix. The
+ingress-core test evicts both projection and native entries to prove that the
+snapshot fallback shares raw ingress shells. These are local test observations,
+not performance measurements or a full-workspace gate.
 
 ## Cache-state load, pass trace, side channel, and meta preparation
 
@@ -382,35 +393,38 @@ not a claim that no related check exists anywhere in the repository.
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503
 
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
-[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2036
-[t-inc]: ../../../../crates/daemon/src/wire.rs#L1418
-[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1617
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36677
-[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1603
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22503
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L21222
-[t-pending]: ../../../../crates/daemon/src/transform.rs#L19168
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23125
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
-[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27831
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22858
-[t-parked]: ../../../../crates/daemon/src/transform.rs#L13746
-[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13616
+[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2021-L2036
+[t-inc]: ../../../../crates/daemon/src/wire.rs#L1517
+[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1814
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36781
+[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1704
+[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1745
+[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1792
+[shell-charge]: ../../../../crates/daemon/src/wire.rs#L950
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22600
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L21316
+[t-pending]: ../../../../crates/daemon/src/transform.rs#L19197
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27959
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27710
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23503
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L29040
+[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27890
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23230
+[t-parked]: ../../../../crates/daemon/src/transform.rs#L13747
+[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13617
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20654
-[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L20873
-[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L20984
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L22030
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21959
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L22547
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20651
+[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L20958
+[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21078
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L22127
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L22056
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L22644
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
-[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22512
-[t-poison]: ../../../../crates/daemon/src/transform.rs#L22581
-[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22614
-[t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L795
-[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L1104
+[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22550
+[t-poison]: ../../../../crates/daemon/src/transform.rs#L22619
+[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22652
+[t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L796
+[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L1105
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8224-L8232
@@ -517,7 +531,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L249
 [t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L266
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24264
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24517
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24555
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24318
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24453
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21408

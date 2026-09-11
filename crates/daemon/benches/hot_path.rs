@@ -68,7 +68,10 @@ fn bench_tokenizer(c: &mut Criterion) {
 fn bench_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("projection/full");
     for &count in MESSAGE_COUNTS {
-        let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
+        let messages: daemon::wire::IngressMessages =
+            corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED)
+                .into_iter()
+                .collect();
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
             &messages,
@@ -91,7 +94,10 @@ fn bench_tail_hygiene(c: &mut Criterion) {
     let core = CoreState::empty();
     let protected: HashSet<String> = HashSet::new();
     for &count in MESSAGE_COUNTS {
-        let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
+        let messages: daemon::wire::IngressMessages =
+            corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED)
+                .into_iter()
+                .collect();
         let projection = project_messages(&messages).expect("projection");
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),

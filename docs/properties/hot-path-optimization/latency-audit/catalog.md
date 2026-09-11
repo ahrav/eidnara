@@ -316,6 +316,15 @@ replay also checks the warm request charge against its own allocation sizes.
 The [cache-charge check][native-charge-floor] preserves an allocation-based
 charge alongside the sidecar's smaller serialized-size estimate. Broader
 projection and served-segment comparisons remain in the shared-input suites.
+The [canonical-shell check][shell-sharing] proves repeated reattachment and
+incremental projection retain shell pointers without mutating raw ingress.
+The [decode check][shell-decode] asserts `Send + 'static` and unchanged malformed
+input errors. The complex replay also compares fresh, reattached, and shared
+projections, served bytes, shell pointers, and cold and warm shell charges.
+The [shell metadata check][shell-metadata] reparses nonempty origin and provider
+extras with non-default, non-synthetic harness metadata. It checks that replay
+drops only the unknown message field while retaining every block and known
+shell field. The exact allocation oracle includes nonzero metadata heap terms.
 Guarantee: The projection, the native attachment, and the served message
 bytes depend only on message values, never on which allocation holds them or
 which lane assembled them.
@@ -323,7 +332,11 @@ Check: `always` - For every pass, three artifact families agree with their
 value-only construction. Projection: `project_messages(&msgs)` is equal under
 [`FlatProjection`][flatproj]'s derived `PartialEq` whether the slice is the
 fresh request, the normalized clone, a reattached prefix plus suffix, or a
-shared view; per block `content_hash == sha256(bytes)`, `bytes ==
+shared view. The projection owns canonical replay shells: unknown top-level
+message fields are discarded once, original block JSON survives, and effective
+synthetic metadata is retained. Flat blocks hold an immutable shell and block
+index, not an independent copy of the wire block. Reattached requests share those shells rather
+than raw ingress shells; per block `content_hash == sha256(bytes)`, `bytes ==
 to_string(wire)`, and `tool_input` equals the `input` inside `wire.kind()`;
 and `project_messages_incremental(msgs, cached, k) == project_messages(msgs)`
 with equal [`differential_bytes`][diff-bytes]. Native attachment: under
@@ -347,8 +360,8 @@ exactly `canonical_bytes` per [`Served` segment][segment-served]
 `WireBlock`'s derived equality, which includes `original`. `always` because
 every pass projects and serves, every plugin turn attaches, and every
 downstream digest keys on these fields.
-Fault/timing angle: None in time. A projector that reuses an ingress
-`Arc<WireBlock>` and computes `bytes` from another serialization; a consumer
+Fault/timing angle: None in time. A projector that shares block backing but
+computes `bytes` from another serialization; a consumer
 reading `tool_input` and `wire.kind()` from blocks no longer built together
 ([`sel_item_from_flat`][sel-item] and
 [`sel_kind_for_flat`][sel-kind] both borrow the wire input); chunk reuse decided by
@@ -373,7 +386,11 @@ sorted-key cause, and the segment writer are source-verified.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
 include both differentials, fingerprint reuse, pinned fingerprint IDs, the
 selection-sharing check, sidecar order/pin equality, native prefix sharing,
-and fresh/full native byte equality. Dedicated served-segment write oracles
+and fresh/full native byte equality. Projection and request snapshot caches
+charge shell backing, content capacity, retained block JSON, and Arc counters
+using the existing conservative full-charge-per-holder rule. Cached prefix
+charges can exceed the canonical shell's smaller footprint; only suffix sizes
+are recomputed. Cache budgets are unchanged. Dedicated served-segment write oracles
 remain outside this change; all checks remain unaudited for adequacy.
 Impact: Output identity, served fingerprints, token caches, tag mint, and the
 plugin's replay source can drift from the message values.
@@ -2434,20 +2451,20 @@ evaluation of this area and its disposition are recorded in
 [store-pc]: ../../../../crates/daemon/src/lib.rs#L4303-L4346
 [historian-fire]: ../../../../crates/daemon/src/lib.rs#L4995
 [assemble]: ../../../../crates/daemon/src/lib.rs#L5235-L5239
-[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13028-L13080
-[gate-native]: ../../../../crates/daemon/src/lib.rs#L13084-L13089
+[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13022
+[gate-native]: ../../../../crates/daemon/src/lib.rs#L13078-L13083
 [native-attach]: ../../../../crates/daemon/src/lib.rs#L13092-L13106
-[native-diff]: ../../../../crates/daemon/src/lib.rs#L13325-L13342
-[segments-take]: ../../../../crates/daemon/src/lib.rs#L14431-L14446
-[segments]: ../../../../crates/daemon/src/lib.rs#L14451-L14458
+[native-diff]: ../../../../crates/daemon/src/lib.rs#L13319-L13336
+[segments-take]: ../../../../crates/daemon/src/lib.rs#L14425-L14440
+[segments]: ../../../../crates/daemon/src/lib.rs#L14445-L14452
 [cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16632
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16629
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2028-L2050
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2116-L2132
-[sel-item]: ../../../../crates/daemon/src/transform.rs#L6352
+[sel-item]: ../../../../crates/daemon/src/transform.rs#L6353
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
 [tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
@@ -2461,11 +2478,14 @@ evaluation of this area and its disposition are recorded in
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
-[flatproj]: ../../../../crates/daemon/src/wire.rs#L114-L127
-[reattach]: ../../../../crates/daemon/src/wire.rs#L145-L186
-[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../crates/daemon/src/wire.rs#L680-L743
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L833-L844
+[flatproj]: ../../../../crates/daemon/src/wire.rs#L188-L200
+[reattach]: ../../../../crates/daemon/src/wire.rs#L216-L243
+[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L373-L381
+[flatten]: ../../../../crates/daemon/src/wire.rs#L731-L796
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L886-L895
+[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1745
+[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1792
+[shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1704
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264
@@ -2692,11 +2712,11 @@ evaluation of this area and its disposition are recorded in
 [ao-sig]: ../../../../crates/daemon/src/transform.rs#L2865
 [soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6315
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24264
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24517
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24555
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20654
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20873
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L20984
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20651
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20958
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21078
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L24293
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24318
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24453
