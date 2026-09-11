@@ -75,6 +75,7 @@ fn wide_admission() -> SourceHoldAdmission {
 fn bounds(expiry_ms: u64) -> SourceHoldBounds {
     SourceHoldBounds {
         admission: wide_admission(),
+        max_descriptor_rows: NonZeroUsize::new(1024).unwrap(),
         expiry_ms: NonZeroU64::new(expiry_ms).unwrap(),
     }
 }
@@ -1066,6 +1067,7 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
     assert_eq!(expected.len(), 10);
     let exact = SourceHoldBounds {
         admission: admission(references, bytes),
+        max_descriptor_rows: NonZeroUsize::new(expected.len()).unwrap(),
         expiry_ms: NonZeroU64::new(HOUR_MS).unwrap(),
     };
     let refs_before = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
@@ -1190,6 +1192,71 @@ fn extension_expiring_during_admission_preserves_hold_and_checkpoint() {
             .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
         Ok(hold)
     );
+}
+
+#[test]
+fn capture_work_is_bounded_independently_of_shared_evidence() {
+    let mut fixture = Fixture::open();
+    let text = "one shared source buffer";
+    let evidence = fixture.retain("shared-work-bound", text);
+    let mut objects = Vec::new();
+    for index in 0..8 {
+        objects.push(fixture.publish_over(
+            "messages",
+            &format!("shared-{index}"),
+            1,
+            text,
+            evidence.clone(),
+        ));
+    }
+    let binding = fixture.binding();
+    let admitted = SourceHoldBounds {
+        max_descriptor_rows: NonZeroUsize::new(8).unwrap(),
+        admission: admission(1, text.len() as u64),
+        ..wide()
+    };
+    for retire_history in [false, true] {
+        if retire_history {
+            for object in &objects[..7] {
+                fixture.retire(object);
+            }
+        }
+        let pins = fixture.count("SELECT COUNT(*) FROM capture_pins");
+        let refs = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
+        let tip = fixture.store.tip().unwrap();
+        let mut reached_reference_admission = false;
+        let result = fixture.store.capture_source_hold_with_hook_for_test(
+            &binding,
+            SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(7).unwrap(),
+                ..admitted
+            },
+            |_| reached_reference_admission = true,
+        );
+        assert_eq!(
+            result,
+            Err(SourceHoldError::CaptureWorkLimitReached {
+                max_descriptor_rows: 7
+            })
+        );
+        assert!(!reached_reference_admission);
+        assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pins"), pins);
+        assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), refs);
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.checkpoint(), 0);
+
+        let hold = fixture
+            .store
+            .capture_source_hold(&binding, admitted)
+            .unwrap();
+        assert_eq!(hold.references, 1);
+        assert_eq!(hold.encoded_bytes, text.len() as u64);
+        assert_eq!(
+            fixture.held_all(&hold, 2).len(),
+            if retire_history { 1 } else { 8 }
+        );
+        assert_hold_matches_ledger(&fixture, &hold, 2);
+    }
 }
 
 #[test]
@@ -1691,6 +1758,23 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
         "the cut extension's references survive until reconciliation"
     );
 
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&old_binding, &old.hold_id, old.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
+    assert_eq!(
+        fixture.first_page(&old_binding, &old.hold_id, old.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .release_source_hold(&old_binding, &old.hold_id, old.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
+
     // The old hold cannot be used under the new incarnation.
     assert_eq!(
         fixture
@@ -1735,8 +1819,18 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
             "references released with the pin"
         );
     }
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM capture_pins WHERE released_at IS NOT NULL"),
+        2
+    );
     // The other consumer's old hold is untouched and still pins the deleted evidence.
     assert!(!fixture.pin_released(&other.hold_id));
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&other_binding, &other.hold_id, other.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
     assert!(fixture.pin_refs(&other.hold_id).contains(&doomed));
 
     // A new S is captured fresh; the old cursor is not resumed, and the
