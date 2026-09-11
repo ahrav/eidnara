@@ -1220,6 +1220,23 @@ fn backup_release_refuses_source_holds_without_changing_their_references() {
 }
 
 #[test]
+fn hold_status_expires_while_verifying_objects() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    assert_eq!(
+        fixture.store.source_hold_status_with_hook_for_test(
+            &binding,
+            &hold.hold_id,
+            hold.expires_at - 1,
+            || std::thread::sleep(std::time::Duration::from_millis(2)),
+        ),
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
+    );
+}
+
+#[test]
 fn hold_status_observes_invalidation_during_object_verification() {
     for purge in [true, false] {
         let mut fixture = Fixture::open();
@@ -1442,9 +1459,10 @@ fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the
         .capture_source_hold(&binding, bounds(HOUR_MS / 2))
         .unwrap();
     let fresh = fixture.store.capture_source_hold(&binding, wide()).unwrap();
-    assert_eq!(
-        status(&fixture, &expiring, expiring.expires_at - 1),
-        Ok(expiring.clone())
+    assert!(
+        fixture
+            .first_page(&binding, &expiring.hold_id, expiring.expires_at - 1)
+            .is_ok()
     );
     assert_eq!(
         status(&fixture, &expiring, expiring.expires_at),
