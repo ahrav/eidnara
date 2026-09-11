@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Database } from "../../shared/sqlite";
+import { Database, type SqliteReader } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     frozenIsMidTurnFromOpenCodeDb,
@@ -141,6 +141,54 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(db.prepare("SELECT COUNT(*) AS n FROM message").get()).toEqual({ n: 1 });
     });
 
+    it("bounds candidate reads and stops after the first real user message", () => {
+        let candidateSql = "";
+        const partMessageIds: unknown[] = [];
+        const db = {
+            prepare(sql: string) {
+                if (sql.includes("FROM message m")) {
+                    candidateSql = sql;
+                    return {
+                        get: () => null,
+                        all: () =>
+                            sql.includes("JOIN part")
+                                ? [
+                                      {
+                                          id: "user-1",
+                                          data: JSON.stringify({ type: "text", text: "prompt" }),
+                                          hasPart: 1,
+                                      },
+                                      {
+                                          id: "user-2",
+                                          data: JSON.stringify({ type: "text", text: "later" }),
+                                          hasPart: 1,
+                                      },
+                                  ]
+                                : [
+                                      { id: "user-1", timeCreated: 100 },
+                                      { id: "user-2", timeCreated: 200 },
+                                  ],
+                    };
+                }
+                if (sql === "SELECT data FROM part WHERE session_id = ? AND message_id = ?") {
+                    return {
+                        get: () => null,
+                        all: (_sessionId: unknown, messageId: unknown) => {
+                            partMessageIds.push(messageId);
+                            return [{ data: JSON.stringify({ type: "text", text: "prompt" }) }];
+                        },
+                    };
+                }
+                return { get: () => null, all: () => [] };
+            },
+        } as SqliteReader;
+
+        expect(candidateIsMidTurn(db, "session-1")).toBe(true);
+        expect(candidateSql).toContain("LIMIT ?");
+        expect(candidateSql).not.toContain("JOIN part");
+        expect(partMessageIds).toEqual(["user-1"]);
+    });
+
     it.each([
         ["partless", undefined, true],
         ["SQL NULL", null, false],
@@ -241,7 +289,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(candidateIsMidTurn(db, "session-1")).toBe(false);
     });
 
-    it("uses at most one statement per candidate class regardless of user count", () => {
+    it("reuses one statement per candidate class while reading each message separately", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         for (let i = 0; i < 20; i++) {
@@ -257,9 +305,9 @@ describe("isMidTurnFromOpenCodeDb", () => {
         }) as Database["prepare"]);
         try {
             expect(candidateIsMidTurn(db, "session-1")).toBe(false);
-            // Assistant row, the single user-candidate statement, and the completed assistant's parts.
-            expect(prepare.mock.calls.length).toBeLessThanOrEqual(3);
-            expect(reads.reduce((count, read) => count + read.mock.calls.length, 0)).toBe(3);
+            // The query count covers the assistant row, candidate page, candidate parts, and completed assistant parts.
+            expect(prepare.mock.calls.length).toBeLessThanOrEqual(4);
+            expect(reads.reduce((count, read) => count + read.mock.calls.length, 0)).toBe(23);
             for (const read of reads.splice(0)) read.mockRestore();
             expect(frozenIsMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
             expect(reads.reduce((count, read) => count + read.mock.calls.length, 0)).toBe(23);
@@ -817,6 +865,26 @@ describe("isMidTurnFromOpenCodeDb", () => {
         insertPart(db, "session-1", "user-1", "part-2", { type: "text", text: "Summarize." });
         insertUser(db, "session-1", "user-2", { content: "next task" }, 300);
         insertPart(db, "session-1", "user-2", "part-3", { type: "text", text: "next task" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("finds a real user message after a full candidate page", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        for (let index = 0; index < 64; index++) {
+            const messageId = `user-${index.toString().padStart(2, "0")}`;
+            insertUser(db, "session-1", messageId, {}, 200 + index);
+            insertPart(db, "session-1", messageId, `part-${index}`, {
+                type: "text",
+                ignored: true,
+            });
+        }
+        insertUser(db, "session-1", "user-real", {}, 300);
+        insertPart(db, "session-1", "user-real", "part-real", {
+            type: "text",
+            text: "next task",
+        });
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });

@@ -22,6 +22,11 @@ interface PartDataRow {
     data?: unknown;
 }
 
+interface UserMessageCursorRow {
+    id?: unknown;
+    timeCreated?: unknown;
+}
+
 function getOpenCodeDbPath(): string {
     // `OPENCODE_DB` is OpenCode's own override, so the plugin reads the database OpenCode selected.
     const override = process.env.OPENCODE_DB;
@@ -301,35 +306,53 @@ function hasNewerRealUserMessage(
     // "Newer" is the `(time_created, id)` tuple ordering, so a user row that shares the
     // assistant's millisecond still counts when its id sorts after the assistant's.
     // A `compaction` part excludes the whole message.
-    const candidates = db
-        .prepare(
-            `SELECT m.id, p.data, p.message_id IS NOT NULL AS hasPart
-             FROM message m
-             LEFT JOIN part p ON p.session_id = m.session_id AND p.message_id = m.id
-             WHERE m.session_id = ?
-               AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
-               AND ${jsonField("m.data", "$.role")} = 'user'
-               AND NOT EXISTS (
-                 SELECT 1 FROM part c
-                 WHERE c.session_id = m.session_id AND c.message_id = m.id
-                   AND ${jsonField("c.data", "$.type")} = 'compaction'
-               )
-             ORDER BY m.time_created ASC, m.id ASC`,
-        )
-        .all(
-            sessionId,
-            latestAssistantTimeCreated,
-            latestAssistantTimeCreated,
-            latestAssistantId,
-        ) as (PartDataRow & { id?: unknown; hasPart: number })[];
+    const candidateBatchSize = 64;
+    const selectCandidates = db.prepare(
+        `SELECT m.id, m.time_created AS timeCreated
+         FROM message m
+         WHERE m.session_id = ?
+           AND (m.time_created > ? OR (m.time_created = ? AND m.id > ?))
+           AND ${jsonField("m.data", "$.role")} = 'user'
+           AND NOT EXISTS (
+             SELECT 1 FROM part c
+             WHERE c.session_id = m.session_id AND c.message_id = m.id
+               AND ${jsonField("c.data", "$.type")} = 'compaction'
+           )
+         ORDER BY m.time_created ASC, m.id ASC
+         LIMIT ?`,
+    );
+    const selectParts = db.prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?");
+    let cursorTimeCreated: unknown = latestAssistantTimeCreated;
+    let cursorId: unknown = latestAssistantId;
 
-    return candidates.some((row) => {
-        if (typeof row.id !== "string") return false;
-        // A partless user message counts as real; NULL data on an existing part does not.
-        if (row.hasPart === 0) return true;
-        const part = parsePart(row);
-        return part !== null && isRealUserPart(part);
-    });
+    while (true) {
+        const candidates = selectCandidates.all(
+            sessionId,
+            cursorTimeCreated,
+            cursorTimeCreated,
+            cursorId,
+            candidateBatchSize,
+        ) as UserMessageCursorRow[];
+        for (const candidate of candidates) {
+            if (typeof candidate.id !== "string") continue;
+            const partRows = selectParts.all(sessionId, candidate.id) as PartDataRow[];
+            // A partless user message counts as real; NULL data on an existing part does not.
+            if (partRows.length === 0) return true;
+            if (
+                partRows.some((row) => {
+                    const part = parsePart(row);
+                    return part !== null && isRealUserPart(part);
+                })
+            ) {
+                return true;
+            }
+        }
+        if (candidates.length < candidateBatchSize) return false;
+        const last = candidates[candidates.length - 1];
+        if (!last || typeof last.id !== "string") return false;
+        cursorTimeCreated = last.timeCreated;
+        cursorId = last.id;
+    }
 }
 
 /**
