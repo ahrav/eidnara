@@ -8,6 +8,12 @@ plan or incident report is supplied. No fault campaign runs here. This is a
 working-tree supplement, not part of the source baseline commit. The parent's
 [fault map](../fault-map.md) remains authoritative for K, E, S, H, and R.
 
+The P1/P5 entries include a subsequent 2026-09-10 local hook campaign on
+`ab2ef4156b69454b407bd9682d5617ad13c8372f` plus working-tree changes. Its
+executed evidence and user-approved default/freshness decision are appended
+to the [P1 investigation](evidence/cached-todowrite-verdict-never-lifts-a-deny-or-outlives-its-inputs.md).
+The discovery statement above does not describe this later campaign.
+
 ## Fault availability
 
 | Class | Construction and availability | Limit |
@@ -18,7 +24,7 @@ working-tree supplement, not part of the source baseline commit. The parent's
 | Mint commit failure | A CAS conflict on the tag mint commit leaves speculative rows uncommitted while the baseline entry is warm. | Requires a concurrent writer or an injected conflict at the commit. |
 | Post-commit interleaving and abort | The `#[cfg(test)]` [`between_transform_and_prepare`][hook] runs between the transform and `prepare_historian_fire`. | The hook is test-only; the Emergency95 awaits at `:8263`, `:8289`, and `:8315` are the only production windows. |
 | Trace and drain faults | An outbox delivery failure is injectable at the store (`fail_next_historian_side_channel_for_test`); two drainers exist in production (pass and publish task). | No seam injects a `pass_trace` upsert failure (the store's four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928` do not cover it); no fault point exists for a crash between the mark commit and the delete commit; SIGKILL at that point needs a child process. |
-| SDK read failure and agent switch | An SDK fake can store a deny then reject or hang past [2000 ms][timeout]; `info.agent` changes per message. | Whether OpenCode emits a permission-change event is unresolved. |
+| SDK read failure and agent switch | The [hook campaign][permission-campaign] stores a deny, invalidates freshness or advances the 30 s TTL, then rejects or hangs past [2000 ms][timeout]. SDK mocks and fake timers also schedule late completions across invalidation and deletion. | No permission-change subscription exists. The user accepts silent edits remaining unobserved for at most the 30 s freshness window. |
 | Second-session rows and read errors | Fixtures can seed two sessions in one database and make the file unreadable; `closeReadOnlySessionDb` is exported, and a test can rename a second database over the cached path. | OpenCode's real indexes are not in this repository; whether OpenCode ever replaces its database file in place is not stated here. |
 | Byte-measure boundary | A lone surrogate in a string field takes the escape path; a body within a few bytes of 512 KiB under `JSON.stringify` may measure differently under `serde_json`. | Whether any real body crosses the boundary is unresolved. |
 | Ring residency and direct frames | A released run of at least one batch on an idle ring, a wrapped run, and an aborted reservation are constructible in-crate; `publish_direct` accepts an injected serializer and deadline. | The direct path has no production sender; the [`direct_fill` fixture arm][fixture-arm] is the only entry. |
@@ -46,11 +52,11 @@ working-tree supplement, not part of the source baseline commit. The parent's
 | [C4][c4] | Duplicate names, `BTreeMap`-key and integrity-field secrets, a container under a protected key, a clean `meta`. | Stored column bytes and the recorded scan compared with an independent walk. |
 | [C5][c5] | A concurrent publish or recut through a second handle in the post-commit window. | Committed and observed `row_version` recorded separately. |
 | [C6][c6] | A firing with all three kinds; a failed inline delivery per kind through the `test-support` seam, or a reopen between publish and drain; a pass at or past the 1000 ms backoff. | The outbox rows and their `next_attempt_at_ms` read before the drain delivers, against the drain's `now_ms`. |
-| [P1][p1] | A stored deny then a failing read; two passes with different `info.agent`; a permission edit between passes. | The live evaluator's answer for the same inputs. |
+| [P1][p1] | A stored deny then a failed refresh; empty-cache and expired-allow failure; missing named agent and malformed SDK payload; session/agent switches; TTL expiry at settlement; session update, compaction, flush, deletion, pending eviction, and overlapping reads. | Live-equivalent values at the last invalidation-free read; absent on failure; one SDK fill for overlapping same-key allows; the first fill's deadline shared by followers; invalidated fills cannot publish or return allow. |
 | [P2][p2] | The fixture states, second-session rows, a read error, a connection replacement with cached statements, a file replaced at the same path while the connection is cached. | The frozen reference predicate as the oracle; the connection identity per statement; the file identity (`st_dev`, `st_ino`) before and after. |
 | [P3][p3] | A lone-surrogate body, a paged body, and a boundary body with `f64` fields. | `writeUtf8`'s emitted count and the host's `serde_json` length. |
 | [P4][p4] | Control characters and newlines in fields; a planted symlink; a foreign-uid directory. | The written file's bytes, mode, and the swallow counter. |
-| [P5][p5] | An SDK fake answering `deny` once then failing. | Cache state at verdict entry and the read outcome. |
+| [P5][p5] | An SDK fake answers deny, then freshness expires without deleting the deny, then a live read rejects or times out. Both variants execute for transform and capture. | Cached deny at resolver entry, live SDK invocation, and the observed Error or TimeoutError; the constant marker does not depend on the served outcome. |
 | [T1][t1] | Over-quotient `max_connections`; a released batch on an idle ring; an aborted reservation; a wrapped run. | Admission outcome; `arena_reclaimed - punched`; `mincore` residency of the aborted range. |
 | [T2][t2] | A concurrent same-shape writer; mismatched span lengths; each word offset. | Byte-for-byte agreement of per-byte and bulk reads; no uninitialized byte in the returned `Vec`. |
 | [T3][t3] | Underfill, overflow, error, and panic serializers; a wrapped body; an expired deadline; slow egress; generation retirement. | Ring frame visibility, header length, and the egress charge before and after commit. |
@@ -92,7 +98,10 @@ scheduling preconditions, never the defect:
 - C6 asserts a due outbox row per kind at the pass drain, not the delivery.
 - G3 asserts a non-zero independent byte delta per path, not counter
   agreement.
-- P5 asserts a cached deny and a failed read, not the served verdict.
+- P5 is implemented by the [hook campaign][permission-campaign]. It asserts
+  a cached deny and a failed live read, not the served verdict. Expiry or
+  freshness invalidation forces the read while preserving the deny. This
+  witness does not claim the cached deny changes the fail-closed result.
 - T4 asserts queueing, handler completion, and uncommitted publication, not
   the charge accounting.
 - W1 asserts a recorded run at production shape per stage, not a speed
@@ -118,6 +127,8 @@ callers for W7. Missing case accounting remains missing evidence even if
 assertions pass.
 
 ## Cheapest valid oracle first
+
+[permission-campaign]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L166-L243
 
 1. A2, B4, C4, P2, P3, W5, W6, and W9 have a pure-function reference at HEAD
    (the current reader, digest, stepper, predicate, or frozen differential).

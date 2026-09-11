@@ -80,6 +80,10 @@ const makeMessages = (sessionId: string): MessageLike[] =>
 
 function makeDeps(): RustModeTransformDeps {
     return {
+        client: {
+            app: { agents: async () => ({ data: [] }) },
+            session: { get: async () => ({ data: { directory: "/tmp/project" } }) },
+        } as never,
         contextUsageMap: new BoundedSessionMap(8),
         protectedTags: 4,
         clearReasoningAge: 50,
@@ -463,7 +467,7 @@ describe("Rust mode transform request", () => {
         expect(bodies[0]?.todo_tool_present).toBe(false);
     });
 
-    it("keeps the cached todowrite verdict when the live permission read never settles", async () => {
+    it("sends todowrite absent when an empty-cache permission read never settles", async () => {
         const sessionId = `rust-todo-permission-hang-${Date.now()}`;
         installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
@@ -479,6 +483,7 @@ describe("Rust mode transform request", () => {
         const transform = createRustModeTransform(deps, { moduleClient: client });
         const messages = makeMessages(sessionId);
         (messages[0]!.info as { tools?: Record<string, boolean> }).tools = {};
+        (messages[0]!.info as { agent?: string }).agent = "build";
 
         const startedAt = performance.now();
         await transform.run(sessionId, messages, { messages: messages as unknown[] });
@@ -486,7 +491,7 @@ describe("Rust mode transform request", () => {
 
         expect(agents).toHaveBeenCalledTimes(1);
         expect(bodies).toHaveLength(1);
-        expect(bodies[0]?.todo_tool_present).toBe(true);
+        expect(bodies[0]?.todo_tool_present).toBe(false);
         expect(elapsedMs).toBeGreaterThanOrEqual(1_500);
         expect(elapsedMs).toBeLessThan(10_000);
     });

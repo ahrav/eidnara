@@ -11,9 +11,7 @@ import {
 } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
-import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import {
-    cachedToolPermissionDenied,
     resolveCtxReduceAvailability,
     resolveCtxReduceAvailabilityFromMessages,
     resolveTodowriteAvailability,
@@ -82,28 +80,11 @@ async function resolveCombinedTodowriteVerdict(
 ): Promise<boolean> {
     if (!availability.frozen || !availability.callable || deps.compactionOff === true) return false;
 
-    let permissionDenied = cachedToolPermissionDenied(sessionId, "todowrite") ?? false;
-    if (deps.client) {
-        try {
-            permissionDenied = await withTimeout(
-                todowritePermissionDenied(
-                    deps.client,
-                    sessionId,
-                    activeAgentFromMessages(messages),
-                ),
-                HOST_SDK_READ_TIMEOUT_MS,
-                "todowrite permission read timed out",
-            );
-        } catch (error) {
-            // A failed or slow SDK read leaves the last in-memory verdict unchanged until a later read obtains authoritative data.
-            sessionLog(
-                sessionId,
-                "todowrite permission read failed; retaining the last successful verdict:",
-                error,
-            );
-        }
-    }
-    return !permissionDenied;
+    return !(await todowritePermissionDenied(
+        deps.client,
+        sessionId,
+        activeAgentFromMessages(messages),
+    ));
 }
 
 export interface RustModeModuleClient {

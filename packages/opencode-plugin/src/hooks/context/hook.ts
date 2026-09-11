@@ -16,7 +16,7 @@ import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { createEidnaraCommandHandler } from "./command-handler";
-import { clearToolPermissionDenied } from "./ctx-reduce-availability";
+import { invalidateToolPermissionDenied } from "./ctx-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
 import {
     createChatMessageHook,
@@ -372,7 +372,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             closeKernelSession(deps.config, sessionId);
             systemPromptHash.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
-            clearToolPermissionDenied(sessionId);
             variantBySession.delete(sessionId);
             liveModelBySession.delete(sessionId);
             agentBySession.delete(sessionId);
@@ -394,6 +393,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         },
         // /ctx-flush signals history rebuild, system-prompt adjuncts, and forced materialization.
         onFlush: (sessionId) => {
+            invalidateToolPermissionDenied(sessionId);
             historyRefreshSessions.add(sessionId);
             systemPromptRefreshSessions.add(sessionId);
             pendingMaterializationSessions.add(sessionId);
