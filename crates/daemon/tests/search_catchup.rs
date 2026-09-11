@@ -1711,6 +1711,79 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
     );
 }
 
+#[test]
+fn a_quarantine_entered_after_the_local_commit_stops_the_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let search = search_path(dir.path());
+    let mut quarantined = false;
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |event| {
+            if let EpisodeEvent::LocalReleased { .. } = event
+                && !quarantined
+            {
+                quarantined = true;
+                mutate(&search)
+                    .execute_batch(
+                        "ALTER TABLE embedding_jobs RENAME TO embedding_jobs_unavailable",
+                    )
+                    .unwrap();
+                let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+                let project = ProjectScope::new(&"a".repeat(64)).unwrap();
+                let generation = generation();
+                let mut vector = vec![0.0f32; 8];
+                vector[0] = 1.0;
+                let refused = publisher.publish(
+                    &VectorPublication {
+                        expectation: CurrentInputExpectation {
+                            object_id: "srcdesc:never:1".to_string(),
+                            source_revision: 1,
+                            occurrence_id: "never".to_string(),
+                            payload_id: format!("{:x}", Sha256::digest(b"payload")),
+                            artifact_digest: format!("{:x}", Sha256::digest(b"artifact")),
+                        },
+                        generation: &generation,
+                        vector: &vector,
+                        input_bytes: 1,
+                        input_tokens: 1,
+                    },
+                    EligibilityBinding {
+                        project: &project,
+                        destination: ArtifactDestination::Local,
+                    },
+                    std::time::Instant::now() + Duration::from_secs(5),
+                    4,
+                    &mut |_| {},
+                );
+                assert!(
+                    matches!(refused, Err(PublicationError::Quarantined(_))),
+                    "{refused:?}"
+                );
+                mutate(&search)
+                    .execute_batch(
+                        "ALTER TABLE embedding_jobs_unavailable RENAME TO embedding_jobs",
+                    )
+                    .unwrap();
+            }
+        })
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Storage);
+    assert!(quarantined, "the publisher ran inside the window");
+    assert_eq!(
+        corpus.kernel_checkpoint(),
+        hold.snapshot,
+        "the acknowledgement must not advance past a doubted projection"
+    );
+}
+
 // ---- Named-boundary process crashes ----------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

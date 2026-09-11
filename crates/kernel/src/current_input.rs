@@ -16,7 +16,7 @@ use super::eligibility::{
 };
 use super::envelope::check_fence;
 use super::open::AcquireLimit;
-use super::source_descriptor::{descriptor_object_id, stored_detail};
+use super::source_descriptor::{descriptor_object_id, reencoded_identity, stored_detail};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
 /// The descriptor a consumer believes it is publishing work for, as it read it when the work began.
@@ -149,21 +149,21 @@ fn revalidate(
         }
         verdict => return Ok(Err(StaleInput::Ineligible(*verdict))),
     }
-    let payload: Vec<u8> = tx
+    let (payload, evidence_id): (Vec<u8>, Option<String>) = tx
         .query_row_cached(
-            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            "SELECT observation_payload, evidence_id FROM observations WHERE object_id=?1",
             [&expected.object_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(map_sqlite)?
         .ok_or(KernelError::CorruptCanonicalRow)?;
     let detail = stored_detail(&payload)?;
-    // Publication derives the object id from lineage and revision and gives a
-    // whole-buffer descriptor its artifact digest as payload id, so a mismatch is
-    // corruption, not staleness.
+    // Mismatches indicate canonical-row corruption, not staleness.
     if descriptor_object_id(&detail.lineage_id, &detail.revision) != expected.object_id
         || detail.revision != expected.source_revision.to_string()
+        || evidence_id.as_deref() != Some(detail.evidence_id.as_str())
+        || reencoded_identity(&detail).is_none()
         || (detail.span.is_none() && detail.payload_id != detail.artifact_digest)
     {
         return Err(KernelError::CorruptCanonicalRow);

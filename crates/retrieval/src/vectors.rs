@@ -70,7 +70,7 @@ pub enum CompletionPhase {
 ///
 /// # Errors
 ///
-/// In the order checked: [`ProjectionError::InvalidVector`] when the vector is not `vector_dimension` finite values, [`ProjectionError::UnknownGeneration`], [`ProjectionError::IdentityMismatch`], or [`ProjectionError::RetiredGeneration`] when the generation is missing, registered under another identity, or retired, [`ProjectionError::UnknownOccurrence`] when the occurrence is not stored, [`ProjectionError::NoPendingWork`] when no job is open for the pair, and [`ProjectionError::VectorConflict`] when a different vector is already durable for the pair.
+/// In the order checked: [`ProjectionError::InvalidVector`] when the vector is not `vector_dimension` finite values, [`ProjectionError::UnknownGeneration`], [`ProjectionError::IdentityMismatch`], or [`ProjectionError::RetiredGeneration`] when the generation is missing, registered under another identity, or retired, [`ProjectionError::UnknownOccurrence`] when the occurrence is not stored, [`ProjectionError::NoPendingWork`] when no job is open for the pair, [`ProjectionError::VectorConflict`] when a different vector is already durable for the pair, and [`ProjectionError::CorruptRow`] when a completed job has no durable vector.
 pub fn complete_embedding_observed(
     conn: &GuardedConn<'_>,
     completion: &VectorCompletion<'_>,
@@ -159,11 +159,9 @@ pub fn complete_embedding_observed(
                 occurrence_id: completion.occurrence_id.to_owned(),
             });
         }
-        // A completed job whose vector is gone is inconsistent, not open; it accepts no new vector.
+        // A completed job requires a vector.
         None if !open => {
-            return Err(ProjectionError::NoPendingWork {
-                occurrence_id: completion.occurrence_id.to_owned(),
-            });
+            return Err(ProjectionError::CorruptRow);
         }
         None => {}
     }

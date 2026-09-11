@@ -430,6 +430,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<(), Stop> {
+        self.refuse_if_quarantined()?;
         observer(EpisodeEvent::HoldExtensionRequested { through });
         let hold = self
             .kernel
@@ -562,6 +563,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<(), Stop> {
+        self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
         let mut acknowledged = self.kernel.acknowledge_through_source_hold(
             &consumer.binding,
@@ -601,6 +603,15 @@ impl<'a> SearchCatchUp<'a> {
             _ => QuarantineKind::Storage,
         };
         self.enter_quarantine(kind, &error)
+    }
+
+    /// Another writer can quarantine the projection while an episode runs, so
+    /// `refuse_if_quarantined` re-reads shared state.
+    fn refuse_if_quarantined(&self) -> Result<(), Stop> {
+        match self.projection.quarantine() {
+            Some(quarantine) => Err(CatchUpError::Quarantined(quarantine).into()),
+            None => Ok(()),
+        }
     }
 
     fn enter_quarantine(

@@ -360,6 +360,30 @@ fn a_corrupt_stored_descriptor_is_refused_rather_than_granted() {
     for (label, field, value) in [
         ("lineage", "lineage_id", serde_json::json!("tampered")),
         ("revision", "revision", serde_json::json!("7")),
+        ("tuple", "occurrence_tuple", serde_json::json!([1, 2, 3])),
+        ("span", "span", serde_json::json!([0, 3])),
+        ("evidence", "evidence_id", serde_json::json!("evidence-x")),
+        (
+            "representation",
+            "representation",
+            serde_json::json!("bytes"),
+        ),
+        (
+            "identity",
+            "identity",
+            serde_json::json!([
+                ["project_id", "proj-x"],
+                ["harness", "opencode"],
+                ["session_id", "sess-01"],
+                ["message_id", "msg-a"],
+                ["block_index", "0"]
+            ]),
+        ),
+        (
+            "policy",
+            "source_policy",
+            serde_json::json!({"kind": "git", "version": "1"}),
+        ),
     ] {
         let mut stored: serde_json::Value = serde_json::from_slice(&pristine).unwrap();
         let mut detail: serde_json::Value =

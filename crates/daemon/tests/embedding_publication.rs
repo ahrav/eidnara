@@ -1625,6 +1625,51 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
     );
 }
 
+#[test]
+fn a_completed_job_missing_its_vector_quarantines_instead_of_refusing() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = unit(8);
+    let row = row_for(&rows, &object);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    assert_eq!(result.unwrap(), Publication::Embedded);
+
+    // An `embedded` job whose durable vector is gone contradicts itself; a
+    // redelivery must quarantine the projection rather than report ordinary
+    // missing work.
+    let deleted = mutate(&search_path(dir.path()))
+        .execute(
+            "DELETE FROM occurrence_vectors WHERE occurrence_id=?1",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    assert_eq!(deleted, 1);
+    let (again, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = again else {
+        panic!("{again:?}");
+    };
+    assert_eq!(
+        quarantine.kind,
+        daemon::search_writer::QuarantineKind::Integrity
+    );
+    assert_eq!(publisher.quarantine(), Some(quarantine));
+    assert_kernel_writable(&corpus, "after-vector-loss");
+}
+
 // ---- Named-boundary process crashes ----------------------------------------
 // The child is killed with SIGKILL, so these cuts model a process crash with the
 // operating system's page cache intact. They say nothing about a lost fsync, a
