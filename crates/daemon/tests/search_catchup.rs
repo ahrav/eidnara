@@ -10,7 +10,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use daemon::embedding_publication::{EmbeddingPublisher, PublicationError, VectorPublication};
 use daemon::search_catchup::{
@@ -468,9 +468,12 @@ impl Corpus {
             ExportWindow::Snapshot,
         );
         let projection = SearchProjection::open(data_home).unwrap();
-        let kernel_incarnation_id = self
-            .kernel
-            .database_incarnation_id(Instant::now() + Duration::from_secs(5))
+        let kernel_incarnation_id: String = inspect(&self.kernel_db())
+            .query_row(
+                "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         projection
             .write(|conn| {
@@ -1715,26 +1718,46 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
 }
 
 #[test]
-fn a_missing_projection_fence_quarantines_catch_up() {
+fn quarantine_between_ack_request_and_kernel_write_preserves_the_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);
     let (projection, consumer, hold) = corpus.bootstrap(dir.path());
     grow(&corpus, true);
-    assert_eq!(
-        mutate(&search_path(dir.path()))
-            .execute("DELETE FROM fence", [])
-            .unwrap(),
-        1,
-    );
+    let mut quarantined = false;
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |event| {
+            if matches!(event, EpisodeEvent::AcknowledgementRequested { .. }) && !quarantined {
+                projection.enter_quarantine_for_test(QuarantineKind::Integrity, "checkpoint doubt");
+                quarantined = true;
+            }
+        })
+        .unwrap_err();
+    assert!(matches!(error, CatchUpError::Quarantined(_)));
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
+fn a_superseded_projection_writer_quarantines_catch_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    mutate(&search_path(dir.path()))
+        .execute("UPDATE fence SET epoch=epoch+1 WHERE id=0", [])
+        .unwrap();
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
 
     let error = driver
         .run_episode(&consumer, &bounds(), 3, &mut |_| {})
         .unwrap_err();
     let CatchUpError::Quarantined(quarantine) = error else {
-        panic!("a missing fence row must quarantine catch-up");
+        panic!("a superseded writer must quarantine catch-up: {error:?}");
     };
     assert_eq!(quarantine.kind, QuarantineKind::Integrity);
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
@@ -2005,8 +2028,12 @@ fn crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_earl
                     source_policy_version: POLICY.to_string(),
                 },
                 hold_id: hold_id.clone(),
-                kernel_incarnation_id: kernel
-                    .database_incarnation_id(Instant::now() + Duration::from_secs(5))
+                kernel_incarnation_id: inspect(&dir.path().join("kernel/kernel.sqlite"))
+                    .query_row(
+                        "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                        [],
+                        |row| row.get(0),
+                    )
                     .unwrap(),
                 generation_id: Some(GENERATION.to_string()),
             };

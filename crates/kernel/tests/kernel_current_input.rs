@@ -245,7 +245,8 @@ fn the_guard_excludes_canonical_mutations_until_it_drops_and_times_out_behind_a_
             .store
             .guard_current_input(&other, binding(&project), soon())
             .unwrap()
-            .err(),
+            .err()
+            .map(|stale| stale.into_parts().0),
         Some(StaleInput::Retracted)
     );
     // Reading under a fresh guard succeeds again; the earlier deadline granted nothing.
@@ -273,6 +274,14 @@ fn every_stale_dimension_is_named_and_releases_the_writer_at_once() {
     let unscoped = fixture.publish("c", "msg-c", "1", "third message", false, true);
     let unadmitted = fixture.publish("d", "msg-d", "1", "fourth message", true, false);
     let current = fixture.publish("e", "msg-e", "1", "fifth message", true, true);
+    let current_incarnation = {
+        let guard = fixture
+            .store
+            .guard_current_input(&current, binding(&project), soon())
+            .unwrap()
+            .expect("the descriptor is current");
+        guard.database_incarnation_id().to_string()
+    };
     let wrong_revision = CurrentInputExpectation {
         source_revision: 7,
         ..current.clone()
@@ -325,7 +334,10 @@ fn every_stale_dimension_is_named_and_releases_the_writer_at_once() {
             .store
             .guard_current_input(expectation, binding(&project), soon())
             .unwrap();
-        assert_eq!(judged.err(), Some(stale), "{label}");
+        let stale_input = judged.expect_err(label);
+        let (reason, incarnation_id) = stale_input.into_parts();
+        assert_eq!(reason, stale, "{label}");
+        assert_eq!(incarnation_id, current_incarnation, "{label}");
         // A refusal holds nothing: a bounded commit goes straight through.
         fixture
             .store
@@ -368,7 +380,8 @@ fn a_descriptor_whose_cited_evidence_was_logically_deleted_is_retracted() {
             .store
             .guard_current_input(&expectation, local, soon())
             .unwrap()
-            .err(),
+            .err()
+            .map(|stale| stale.into_parts().0),
         Some(StaleInput::Retracted),
         "the guard granted a descriptor whose evidence was canonically deleted",
     );

@@ -123,6 +123,28 @@ mod sqlite_backend {
     /// `Mutex::lock` has no timeout, so a bounded acquisition polls at this interval.
     const CONN_ACQUIRE_POLL: Duration = Duration::from_millis(1);
 
+    #[cfg(test)]
+    thread_local! {
+        static BEFORE_NEXT_BUSY_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    #[cfg(test)]
+    pub(super) fn before_next_busy_wait_for_test(observer: impl FnOnce() + 'static) {
+        BEFORE_NEXT_BUSY_WAIT.with(|slot| {
+            assert!(slot.borrow_mut().replace(Box::new(observer)).is_none());
+        });
+    }
+
+    #[cfg(test)]
+    fn observe_busy_wait_for_test() {
+        BEFORE_NEXT_BUSY_WAIT.with(|slot| {
+            if let Some(observer) = slot.borrow_mut().take() {
+                observer();
+            }
+        });
+    }
+
     /// `PRAGMA application_id` of every Eidnara-owned SQLite file (`EIDN` in ASCII).
     pub const APPLICATION_ID: u32 = 0x4549_444E;
     /// `PRAGMA user_version` of every Eidnara-owned SQLite file.
@@ -428,6 +450,8 @@ mod sqlite_backend {
             return Err(StoreError::Deadline);
         }
         conn.busy_timeout(remaining).map_err(backend_error)?;
+        #[cfg(test)]
+        observe_busy_wait_for_test();
         let result = f(conn);
         let restored = conn.busy_timeout(BUSY_TIMEOUT).map_err(backend_error);
         with_cleanup_failure(result, restored)
@@ -1837,8 +1861,8 @@ pub use sqlite_backend::{
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        ExpectedIdentity, FileState, InspectionCopy, claim_fence, claim_fence_strict,
-        create_database_file_owner_only, immutable_uri, open_claimed,
+        ExpectedIdentity, FileState, InspectionCopy, before_next_busy_wait_for_test, claim_fence,
+        claim_fence_strict, create_database_file_owner_only, immutable_uri, open_claimed,
     };
     use super::*;
     use lease::FileIdentity;
@@ -4211,31 +4235,69 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM fence", [], |row| row.get(0))
             .expect("take shared lock");
 
-        // SQLite retries EXCLUSIVE until its 400 ms busy timeout, holding PENDING.
-        // SQLite's PENDING lock delays the fence read before the durability pin starts.
+        static BUSY_HANDLER_ENTERED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static RELEASE_BUSY_HANDLER: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        fn controlled_busy_handler(_: i32) -> bool {
+            BUSY_HANDLER_ENTERED.store(true, std::sync::atomic::Ordering::Release);
+            if RELEASE_BUSY_HANDLER.load(std::sync::atomic::Ordering::Acquire) {
+                false
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+                true
+            }
+        }
+
+        BUSY_HANDLER_ENTERED.store(false, std::sync::atomic::Ordering::Release);
+        RELEASE_BUSY_HANDLER.store(false, std::sync::atomic::Ordering::Release);
         let blocker_path = path.clone();
-        let (armed, is_armed) = std::sync::mpsc::channel::<()>();
         let blocker = std::thread::spawn(move || {
             let connection = rusqlite::Connection::open(&blocker_path).expect("pending holder");
             connection
-                .busy_timeout(Duration::from_millis(400))
-                .expect("timeout");
-            armed.send(()).expect("signal");
+                .busy_handler(Some(controlled_busy_handler))
+                .expect("controlled busy handler");
             assert!(
                 connection.execute_batch("BEGIN EXCLUSIVE").is_err(),
                 "the reader's shared lock must refuse EXCLUSIVE",
             );
         });
-        is_armed.recv().expect("the pending holder is armed");
-        std::thread::sleep(Duration::from_millis(30));
+        let pending_deadline = Instant::now() + Duration::from_secs(1);
+        while !BUSY_HANDLER_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                Instant::now() < pending_deadline,
+                "the EXCLUSIVE attempt never reached its busy handler",
+            );
+            std::thread::yield_now();
+        }
 
+        let wait_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wait_signal = std::sync::Arc::clone(&wait_started);
+        before_next_busy_wait_for_test(move || {
+            wait_signal.store(true, std::sync::atomic::Ordering::Release);
+        });
         let started = Instant::now();
+        let release_deadline = Instant::now() + Duration::from_secs(2);
+        let release = std::thread::spawn(move || {
+            while !wait_started.load(std::sync::atomic::Ordering::Acquire) {
+                if Instant::now() >= release_deadline {
+                    RELEASE_BUSY_HANDLER.store(true, std::sync::atomic::Ordering::Release);
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(400));
+            RELEASE_BUSY_HANDLER.store(true, std::sync::atomic::Ordering::Release);
+            true
+        });
         let result = store.with_conn_fenced_within(started + Duration::from_millis(1_200), |tx| {
             tx.execute("INSERT INTO kv (k, v) VALUES ('blocked', '1')", [])
         });
         let waited = started.elapsed();
+        let wait_was_observed = release.join().expect("release timer thread");
         blocker.join().expect("pending holder thread");
 
+        assert!(wait_was_observed, "the bounded wait hook did not run");
         assert!(matches!(result, Err(StoreError::Deadline)), "{result:?}");
         let synchronous: i64 = store
             .with_conn_unfenced(|conn| conn.query_row("PRAGMA synchronous", [], |row| row.get(0)))

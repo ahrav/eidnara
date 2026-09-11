@@ -69,7 +69,7 @@ pub use commit_read::{
     CommitReadTarget, CompleteCommit, PageEnd,
 };
 pub use current_input::{
-    CurrentInputExpectation, CurrentInputGuard, EligibilityBinding, StaleInput,
+    CurrentInputExpectation, CurrentInputGuard, EligibilityBinding, StaleCurrentInput, StaleInput,
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,

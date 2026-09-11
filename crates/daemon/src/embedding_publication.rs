@@ -13,8 +13,8 @@ use kernel::{
 };
 use retrieval::batch::VectorGeneration;
 use retrieval::vectors::{
-    CompletionOutcome, CompletionPhase, Obsoletion, VectorCompletion, complete_embedding_observed,
-    completion_status, obsolete_embedding,
+    CompletionOutcome, CompletionPhase, ObsoleteReason, Obsoletion, VectorCompletion,
+    complete_embedding_observed, completion_status, obsolete_embedding,
 };
 use retrieval::{ProjectionError, read_identity};
 
@@ -57,6 +57,10 @@ pub enum PublicationEvent {
 pub enum ObsoleteCause {
     /// The kernel's descriptor no longer matches the expectation.
     Canonical(StaleInput),
+    /// The projection's own row disagrees with the vector's identity.
+    Projected(ObsoleteReason),
+    /// Reconciliation found an obsolete job whose exact cause was not stored.
+    ProjectedReconciled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,9 +90,6 @@ pub enum PublicationError {
     /// The search connection or its write lock stayed held past the deadline; nothing was written and the result lease is retained.
     #[error("the search write lock was not acquired before the deadline")]
     SearchDeadline,
-    /// A newer search-projection writer fenced this publisher out.
-    #[error("the search projection writer was superseded")]
-    Superseded,
     /// The search transaction may or may not have committed and the durable rows do not show its effect; the result lease is retained.
     #[error("the local commit outcome is unresolved")]
     LocalCommitUnresolved,
@@ -106,6 +107,11 @@ enum Settled {
     Published(Publication),
     /// The commit reply was lost; the durable rows decide once the guard is released.
     Unresolved,
+    /// Quarantine synchronization waits until after the kernel guard is released.
+    Quarantine {
+        kind: QuarantineKind,
+        detail: String,
+    },
 }
 
 /// Publishes vectors for one projection against one kernel.
@@ -203,17 +209,22 @@ impl<'a> EmbeddingPublisher<'a> {
             {
                 Ok(Ok(guard)) => guard,
                 // Every other stale verdict is a fact about the input; this one is a fact about the binding.
-                Ok(Err(StaleInput::Ineligible(EligibilityVerdict::WrongScope))) => {
+                Ok(Err(stale))
+                    if matches!(
+                        stale.reason(),
+                        StaleInput::Ineligible(EligibilityVerdict::WrongScope)
+                    ) =>
+                {
                     return Err(PublicationError::WrongScope);
                 }
                 Ok(Err(stale)) => {
-                    let kernel_incarnation_id = self.kernel.database_incarnation_id(deadline)?;
+                    let (reason, kernel_incarnation_id) = stale.into_parts();
                     return self.obsolete(
                         publication,
                         &kernel_incarnation_id,
                         deadline,
                         now,
-                        stale,
+                        reason,
                     );
                 }
                 Err(KernelError::Deadline) => return Err(PublicationError::GuardDeadline),
@@ -231,6 +242,7 @@ impl<'a> EmbeddingPublisher<'a> {
         observer(PublicationEvent::GuardReleased);
         match outcome {
             Ok(Settled::Published(publication)) => Ok(publication),
+            Ok(Settled::Quarantine { kind, detail }) => Err(self.enter_quarantine(kind, &detail)),
             // The store failed between BEGIN and COMMIT; the durable vector, not the error, says whether COMMIT took effect, and reading it needs no guard.
             Ok(Settled::Unresolved) => {
                 observer(PublicationEvent::Reconciling);
@@ -245,8 +257,9 @@ impl<'a> EmbeddingPublisher<'a> {
                     Ok(status) if status.has_durable_vector(publication.vector) => {
                         Ok(Publication::Embedded)
                     }
-                    Ok(status) if status.job_state.as_deref() == Some("obsolete") => Err(self
-                        .enter_quarantine(QuarantineKind::Integrity, &ProjectionError::CorruptRow)),
+                    Ok(status) if status.job_state.as_deref() == Some("obsolete") => {
+                        Ok(Publication::Obsolete(ObsoleteCause::ProjectedReconciled))
+                    }
                     Ok(_) => Err(PublicationError::LocalCommitUnresolved),
                     Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
                 }
@@ -288,7 +301,9 @@ impl<'a> EmbeddingPublisher<'a> {
             let published = match outcome {
                 CompletionOutcome::Embedded => Publication::Embedded,
                 CompletionOutcome::Replayed => Publication::Replayed,
-                CompletionOutcome::Obsolete(_) => return Err(ProjectionError::CorruptRow),
+                CompletionOutcome::Obsolete(reason) => {
+                    Publication::Obsolete(ObsoleteCause::Projected(reason))
+                }
             };
             if roll_back {
                 // A refusal from the closure rolls the transaction back; the reply is replaced below.
@@ -310,35 +325,46 @@ impl<'a> EmbeddingPublisher<'a> {
         match applied {
             Ok(published) => Ok(Settled::Published(published)),
             // The store returned before COMMIT, so nothing of the completion is durable.
-            Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
+            Err(SearchProjectionError::Projection(error)) => match classify(&error) {
                 Refusal::OperatorRepair => match error {
-                    ProjectionError::VectorConflict { .. } => PublicationError::IdempotencyConflict,
-                    ProjectionError::InvalidVector { reason } => {
-                        PublicationError::InvalidVector(reason.to_owned())
+                    ProjectionError::VectorConflict { .. } => {
+                        Err(PublicationError::IdempotencyConflict)
                     }
-                    error => PublicationError::Refused(error),
+                    ProjectionError::InvalidVector { reason } => {
+                        Err(PublicationError::InvalidVector(reason.to_owned()))
+                    }
+                    error => Err(PublicationError::Refused(error)),
                 },
-                Refusal::Admission | Refusal::Identity => PublicationError::Refused(error),
+                Refusal::Admission | Refusal::Identity => Err(PublicationError::Refused(error)),
                 // A completion may reference an occurrence that was never queued;
                 // classify it as refusal, not projection corruption.
                 Refusal::Integrity => match error {
-                    ProjectionError::UnknownOccurrence { .. } => PublicationError::Refused(error),
-                    error => self.enter_quarantine(QuarantineKind::Integrity, &error),
+                    ProjectionError::UnknownOccurrence { .. } => {
+                        Err(PublicationError::Refused(error))
+                    }
+                    error => Ok(Settled::Quarantine {
+                        kind: QuarantineKind::Integrity,
+                        detail: error.to_string(),
+                    }),
                 },
-                Refusal::Storage => self.enter_quarantine(QuarantineKind::Storage, &error),
-            }),
+                Refusal::Storage => Ok(Settled::Quarantine {
+                    kind: QuarantineKind::Storage,
+                    detail: error.to_string(),
+                }),
+            },
             Err(SearchProjectionError::Quarantined(quarantine)) => {
                 Err(PublicationError::Quarantined(quarantine))
             }
-            Err(SearchProjectionError::Connection(error)) => {
-                Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
-            }
+            Err(SearchProjectionError::Connection(error)) => Ok(Settled::Quarantine {
+                kind: QuarantineKind::Integrity,
+                detail: error,
+            }),
             Err(SearchProjectionError::Store(error)) => match classify_store_failure(&error) {
                 StoreFailure::Deadline => Err(PublicationError::SearchDeadline),
-                StoreFailure::Integrity => {
-                    Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
-                }
-                StoreFailure::Superseded => Err(PublicationError::Superseded),
+                StoreFailure::Integrity => Ok(Settled::Quarantine {
+                    kind: QuarantineKind::Integrity,
+                    detail: error.to_string(),
+                }),
                 StoreFailure::Unknown => Ok(Settled::Unresolved),
             },
         }
@@ -364,6 +390,8 @@ impl<'a> EmbeddingPublisher<'a> {
                 occurrence_id,
                 generation_id,
                 &publication.expectation.object_id,
+                &publication.expectation.artifact_digest,
+                &publication.expectation.payload_id,
                 now,
             )
         });
@@ -409,7 +437,6 @@ impl<'a> EmbeddingPublisher<'a> {
                 StoreFailure::Integrity => {
                     Err(self.enter_quarantine(QuarantineKind::Integrity, &error))
                 }
-                StoreFailure::Superseded => Err(PublicationError::Superseded),
                 StoreFailure::Unknown => unreachable!("unknown store failures reconcile above"),
             },
         }

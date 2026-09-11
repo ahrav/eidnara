@@ -52,6 +52,23 @@ pub enum StaleInput {
     Ineligible(EligibilityVerdict),
 }
 
+/// Carries the incarnation from the same read transaction as the verdict, so a consumer can fence another store without reopening the kernel after the writer is released.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleCurrentInput {
+    reason: StaleInput,
+    database_incarnation_id: String,
+}
+
+impl StaleCurrentInput {
+    pub fn reason(&self) -> &StaleInput {
+        &self.reason
+    }
+
+    pub fn into_parts(self) -> (StaleInput, String) {
+        (self.reason, self.database_incarnation_id)
+    }
+}
+
 /// One kernel instance's writer, held until dropped. No canonical mutation through that instance can begin while it lives.
 ///
 /// The holder must call nothing on the [`KernelStore`] until the guard drops: the writer mutex is not reentrant, and a bounded kernel call would burn its whole deadline before failing.
@@ -83,7 +100,7 @@ impl CurrentInputGuard<'_> {
 impl KernelStore {
     /// Takes the kernel writer within `deadline` and, under it, judges whether `expected` still names the current, eligible descriptor.
     /// `Ok(Ok(guard))` means every field agreed at the moment the writer was taken and no canonical mutation through this kernel instance can begin until the guard drops.
-    /// `Ok(Err(stale))` names the first disagreement and has already released the writer.
+    /// `Ok(Err(stale))` names the first disagreement and the database incarnation that judged it, and has already released the writer.
     ///
     /// # Errors
     ///
@@ -93,7 +110,7 @@ impl KernelStore {
         expected: &CurrentInputExpectation,
         eligibility: EligibilityBinding<'_>,
         deadline: Instant,
-    ) -> Result<Result<CurrentInputGuard<'_>, StaleInput>, KernelError> {
+    ) -> Result<Result<CurrentInputGuard<'_>, StaleCurrentInput>, KernelError> {
         let candidate = EligibilityCandidate {
             object_id: expected.object_id.clone(),
             source_revision: expected.source_revision,
@@ -124,7 +141,7 @@ fn revalidate(
     expected: &CurrentInputExpectation,
     candidate: &EligibilityCandidate,
     eligibility: EligibilityBinding<'_>,
-) -> Result<Result<(i64, String), StaleInput>, KernelError> {
+) -> Result<Result<(i64, String), StaleCurrentInput>, KernelError> {
     let tx = writer
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(map_sqlite)?;
@@ -135,6 +152,11 @@ fn revalidate(
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
+    let database_incarnation_id = database_incarnation_id_via(&tx)?;
+    let stale = |reason| StaleCurrentInput {
+        reason,
+        database_incarnation_id: database_incarnation_id.clone(),
+    };
     let verdicts = judge_in_tx(
         &tx,
         tip,
@@ -144,8 +166,8 @@ fn revalidate(
     )?;
     match verdicts.first().ok_or(KernelError::CorruptCanonicalRow)? {
         EligibilityVerdict::Ok => {}
-        EligibilityVerdict::Retracted => return Ok(Err(StaleInput::Retracted)),
-        EligibilityVerdict::Superseded => return Ok(Err(StaleInput::Superseded)),
+        EligibilityVerdict::Retracted => return Ok(Err(stale(StaleInput::Retracted))),
+        EligibilityVerdict::Superseded => return Ok(Err(stale(StaleInput::Superseded))),
         EligibilityVerdict::Stale => {
             let current: i64 = tx
                 .query_row_cached(
@@ -154,9 +176,9 @@ fn revalidate(
                     |row| row.get(0),
                 )
                 .map_err(map_sqlite)?;
-            return Ok(Err(StaleInput::RevisionChanged { current }));
+            return Ok(Err(stale(StaleInput::RevisionChanged { current })));
         }
-        verdict => return Ok(Err(StaleInput::Ineligible(*verdict))),
+        verdict => return Ok(Err(stale(StaleInput::Ineligible(*verdict)))),
     }
     let (payload, evidence_id): (Vec<u8>, Option<String>) = tx
         .query_row_cached(
@@ -188,14 +210,14 @@ fn revalidate(
         .map_err(map_sqlite)?;
     match evidence {
         Some((digest, None)) if digest == detail.artifact_digest => {}
-        Some((_, Some(_))) => return Ok(Err(StaleInput::Retracted)),
+        Some((_, Some(_))) => return Ok(Err(stale(StaleInput::Retracted))),
         Some((_, None)) | None => return Err(KernelError::CorruptCanonicalRow),
     }
     if detail.occurrence_id != expected.occurrence_id
         || detail.payload_id != expected.payload_id
         || detail.artifact_digest != expected.artifact_digest
     {
-        return Ok(Err(StaleInput::InputChanged));
+        return Ok(Err(stale(StaleInput::InputChanged)));
     }
-    Ok(Ok((tip, database_incarnation_id_via(&tx)?)))
+    Ok(Ok((tip, database_incarnation_id)))
 }

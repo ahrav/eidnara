@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
@@ -52,7 +53,6 @@ pub enum SearchProjectionError {
 pub(crate) enum StoreFailure {
     Deadline,
     Integrity,
-    Superseded,
     Unknown,
 }
 
@@ -62,8 +62,8 @@ pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
         StoreError::Baseline(_)
         | StoreError::FenceCorrupt { .. }
         | StoreError::FenceMissing
-        | StoreError::FenceExhausted { .. } => StoreFailure::Integrity,
-        StoreError::Fenced { .. } => StoreFailure::Superseded,
+        | StoreError::FenceExhausted { .. }
+        | StoreError::Fenced { .. } => StoreFailure::Integrity,
         StoreError::Lease(_)
         | StoreError::UnsupportedBackend(_)
         | StoreError::Backend(_)
@@ -76,6 +76,7 @@ pub struct SearchProjection {
     path: PathBuf,
     /// Shares one quarantine among the projection's writers.
     quarantine: Mutex<Option<Quarantine>>,
+    quarantined: AtomicBool,
 }
 
 impl SearchProjection {
@@ -117,6 +118,7 @@ impl SearchProjection {
             store,
             path,
             quarantine: Mutex::new(None),
+            quarantined: AtomicBool::new(false),
         };
         projection.pin_connection()?;
         projection.verify_connection()?;
@@ -128,6 +130,9 @@ impl SearchProjection {
     }
 
     pub fn quarantine(&self) -> Option<Quarantine> {
+        if !self.quarantined.load(Ordering::Acquire) {
+            return None;
+        }
         self.quarantine
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -141,15 +146,13 @@ impl SearchProjection {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> Quarantine {
-        let mut quarantine = None;
-        let synchronized = self.store.with_conn_unfenced(|_| {
-            quarantine = Some(self.record_quarantine(kind, error));
-            Ok(())
-        });
-        if synchronized.is_ok() {
-            return quarantine.expect("the synchronized callback records quarantine");
-        }
-        self.record_quarantine(kind, error)
+        let quarantine = self.record_quarantine(kind, error);
+        // `quarantined` stays false while an acknowledgement holds an empty gate.
+        // Kernel-to-projection writers therefore skip the gate mutex.
+        self.quarantined.store(true, Ordering::Release);
+        // Wait for active transactions so their final quarantine checks can roll back their writes.
+        let _ = self.store.with_conn_unfenced(|_| Ok(()));
+        quarantine
     }
 
     fn record_quarantine(&self, kind: QuarantineKind, error: &dyn std::fmt::Display) -> Quarantine {
@@ -158,6 +161,18 @@ impl SearchProjection {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_or_insert_with(|| Quarantine::new(kind, error))
             .clone()
+    }
+
+    /// Serializes an external mutation with quarantine entry without taking the projection connection and inverting the kernel-to-projection lock order.
+    pub(crate) fn with_quarantine_gate<T>(&self, f: impl FnOnce() -> T) -> Result<T, Quarantine> {
+        let quarantine = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match quarantine.as_ref() {
+            Some(quarantine) => Err(quarantine.clone()),
+            None => Ok(f()),
+        }
     }
 
     /// Forces quarantine without constructing a storage failure, so tests can
@@ -350,4 +365,46 @@ enum Access {
     Write,
     WriteWithin(Instant),
     Read,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::SearchProjection;
+
+    #[test]
+    fn an_unquarantined_write_does_not_wait_on_the_external_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let projection = SearchProjection::open(root.path()).unwrap();
+        std::thread::scope(|scope| {
+            let (gate_entered, gate_is_entered) = std::sync::mpsc::channel();
+            let (release_gate, gate_is_released) = std::sync::mpsc::channel();
+            let projection_ref = &projection;
+            let gate = scope.spawn(move || {
+                projection_ref
+                    .with_quarantine_gate(|| {
+                        gate_entered.send(()).unwrap();
+                        gate_is_released.recv().unwrap();
+                    })
+                    .unwrap();
+            });
+            gate_is_entered.recv().unwrap();
+
+            let (write_entered, write_is_entered) = std::sync::mpsc::channel();
+            let projection_ref = &projection;
+            let writer = scope.spawn(move || {
+                projection_ref.write(|conn| {
+                    write_entered.send(()).unwrap();
+                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+                    Ok(())
+                })
+            });
+            let entered = write_is_entered.recv_timeout(Duration::from_millis(500));
+            release_gate.send(()).unwrap();
+            gate.join().unwrap();
+            writer.join().unwrap().unwrap();
+            assert!(entered.is_ok(), "the projection write waited on the gate");
+        });
+    }
 }

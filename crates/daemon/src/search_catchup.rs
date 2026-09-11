@@ -489,11 +489,6 @@ impl<'a> SearchCatchUp<'a> {
                     .enter_quarantine(QuarantineKind::Integrity, &error)
                     .into())
             }
-            Err(SearchProjectionError::Store(error))
-                if classify_store_failure(&error) == StoreFailure::Superseded =>
-            {
-                Err(Blocked::ProjectionIdentity.into())
-            }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
             Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(&batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
@@ -585,12 +580,17 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), Stop> {
         self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
-        let mut acknowledged = self.kernel.acknowledge_through_source_hold(
-            &consumer.binding,
-            &consumer.hold_id,
-            through,
-            now,
-        );
+        let mut acknowledged = match self.projection.with_quarantine_gate(|| {
+            self.kernel.acknowledge_through_source_hold(
+                &consumer.binding,
+                &consumer.hold_id,
+                through,
+                now,
+            )
+        }) {
+            Ok(acknowledged) => acknowledged,
+            Err(quarantine) => return Err(CatchUpError::Quarantined(quarantine).into()),
+        };
         if self.fault == Some(EpisodeFault::LoseAcknowledgementReply) && acknowledged.is_ok() {
             acknowledged = Err(SourceHoldError::Kernel(KernelError::Io));
         }

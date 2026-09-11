@@ -248,6 +248,8 @@ pub fn obsolete_embedding(
     occurrence_id: &str,
     generation_id: &str,
     source_object_id: &str,
+    source_artifact_digest: &str,
+    payload_id: &str,
     now: i64,
 ) -> Result<Obsoletion, ProjectionError> {
     let job_exists: bool = conn.query_row(
@@ -260,17 +262,27 @@ pub fn obsolete_embedding(
     if !job_exists {
         return Ok(Obsoletion::NoJob);
     }
-    let Some(stored_source_object_id) = conn
+    let Some((stored_object_id, stored_artifact_digest, stored_payload_id)) = conn
         .query_row(
-            "SELECT source_object_id FROM occurrences WHERE occurrence_id=?1",
+            "SELECT source_object_id,source_artifact_digest,payload_id
+             FROM occurrences WHERE occurrence_id=?1",
             [occurrence_id],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?
     else {
         return Err(ProjectionError::CorruptRow);
     };
-    if stored_source_object_id != source_object_id {
+    if stored_object_id != source_object_id
+        || stored_artifact_digest != source_artifact_digest
+        || stored_payload_id != payload_id
+    {
         return Err(ProjectionError::IdentityMismatch);
     }
     let changed = conn.execute(

@@ -426,12 +426,6 @@ impl KernelStore {
         self.lease_epoch
     }
 
-    /// Returns the database incarnation recorded by the immutable format marker.
-    pub fn database_incarnation_id(&self, deadline: Instant) -> Result<String, KernelError> {
-        let reader = self.lock_reader_within(&AcquireLimit::until(deadline))?;
-        database_incarnation_id_via(&reader)
-    }
-
     /// A panic in a caller's closure drops the guard mid-unwind and poisons the
     /// mutex, so recovering the guard keeps one caught panic from disabling every
     /// later write. Dropping a rusqlite `Transaction` rolls it back, so the

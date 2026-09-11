@@ -100,7 +100,7 @@ fn a_damaged_projection_fence_quarantines_the_completion() {
 }
 
 #[test]
-fn a_superseded_projection_writer_does_not_reconcile_old_rows() {
+fn a_superseded_projection_writer_quarantines_without_reconciling_old_rows() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -119,7 +119,10 @@ fn a_superseded_projection_writer_does_not_reconcile_old_rows() {
         &publication(row, &generation, &unit(8)),
         &project,
     );
-    assert!(matches!(result, Err(PublicationError::Superseded)));
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a superseded writer must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("pending".to_string()), None),
@@ -420,7 +423,13 @@ impl Corpus {
     ) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
-        let kernel_incarnation_id = self.kernel.database_incarnation_id(deadline()).unwrap();
+        let kernel_incarnation_id: String = inspect(&data_home.join("kernel/kernel.sqlite"))
+            .query_row(
+                "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         projection
             .write(|conn| {
                 install_identity(
@@ -984,7 +993,7 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
 }
 
 #[test]
-fn a_stale_object_cannot_obsolete_another_descriptors_live_job() {
+fn a_stale_verdict_cannot_obsolete_a_different_live_input() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -993,20 +1002,34 @@ fn a_stale_object_cannot_obsolete_another_descriptors_live_job() {
     let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
     let project = ProjectScope::new(PROJECT).unwrap();
     let vector = unit(8);
-    let mut forged = publication(row_for(&rows, &victim), &generation, &vector);
-    forged.expectation.object_id = "srcdesc:never:1".to_string();
+    let publication = publication(row_for(&rows, &victim), &generation, &vector);
+    let mut wrong_object = publication.clone();
+    wrong_object.expectation.object_id = "srcdesc:never:1".to_string();
+    let mut wrong_artifact = publication.clone();
+    wrong_artifact.expectation.artifact_digest = "0".repeat(64);
+    let mut wrong_payload = publication.clone();
+    wrong_payload.expectation.payload_id = "1".repeat(64);
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
 
-    let (result, _) = publish_once(&mut publisher, &forged, &project);
-    assert!(matches!(
-        result,
-        Err(PublicationError::Refused(ProjectionError::IdentityMismatch)),
-    ));
-    assert_eq!(
-        durable(dir.path(), &forged.expectation.occurrence_id),
-        (Some("pending".to_string()), None),
-        "a stale verdict about another object obsoleted the live job: {result:?}",
-    );
+    for (label, forged) in [
+        ("object", wrong_object),
+        ("artifact", wrong_artifact),
+        ("payload", wrong_payload),
+    ] {
+        let (result, _) = publish_once(&mut publisher, &forged, &project);
+        assert!(
+            matches!(
+                result,
+                Err(PublicationError::Refused(ProjectionError::IdentityMismatch)),
+            ),
+            "{label}: {result:?}",
+        );
+        assert_eq!(
+            durable(dir.path(), &forged.expectation.occurrence_id),
+            (Some("pending".to_string()), None),
+            "a stale verdict about another {label} obsoleted the live job: {result:?}",
+        );
+    }
 }
 
 #[test]
@@ -1902,7 +1925,7 @@ fn a_completed_job_missing_its_vector_quarantines_instead_of_refusing() {
 }
 
 #[test]
-fn projection_only_staleness_quarantines_guarded_publication() {
+fn projection_only_staleness_obsoletes_guarded_publication() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -1925,13 +1948,52 @@ fn projection_only_staleness_quarantines_guarded_publication() {
         &publication(row, &generation, &unit(8)),
         &project,
     );
-    let Err(PublicationError::Quarantined(quarantine)) = result else {
-        panic!("projection-only staleness must quarantine guarded publication: {result:?}");
-    };
-    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        result.unwrap(),
+        Publication::Obsolete(ObsoleteCause::Projected(ObsoleteReason::Tombstoned)),
+    );
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
-        (Some("pending".to_string()), None),
+        (Some("obsolete".to_string()), None),
+    );
+}
+
+#[test]
+fn a_committed_projected_obsoletion_is_reconciled_after_a_lost_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 4)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let result = publisher.publish_with_fault_for_test(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |_| {},
+        PublicationFault::LoseLocalCommitReply,
+    );
+    assert_eq!(
+        result.unwrap(),
+        Publication::Obsolete(ObsoleteCause::ProjectedReconciled),
+    );
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("obsolete".to_string()), None),
     );
 }
 
