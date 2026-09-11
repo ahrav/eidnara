@@ -955,6 +955,47 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn maintenance_releases_expired_obligations_before_capture_admission_recovers() {
+    let mut fixture = Fixture::open();
+    fixture.publish("messages", "expired-cap", 1, "held until released");
+    let binding = fixture.binding();
+    let holds: Vec<_> = (0..MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER)
+        .map(|_| {
+            fixture
+                .store
+                .capture_source_hold(&binding, bounds(1))
+                .unwrap()
+        })
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let now = wall_ms();
+    for hold in &holds {
+        assert_eq!(
+            fixture
+                .store
+                .source_hold_status(&binding, &hold.hold_id, now),
+            Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
+        );
+        assert_eq!(fixture.pin_refs(&hold.hold_id).len(), 1);
+    }
+    assert_eq!(
+        fixture.store.capture_source_hold(&binding, wide()),
+        Err(SourceHoldError::HoldLimitReached)
+    );
+    fixture.store.run_capture_pin_maintenance(now).unwrap();
+    for hold in &holds {
+        assert!(fixture.pin_refs(&hold.hold_id).is_empty());
+    }
+    let fresh = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    assert_eq!(fresh.references, 1);
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM capture_pins WHERE released_at IS NULL"),
+        1
+    );
+    assert_eq!(fixture.checkpoint(), 0);
+}
+
+#[test]
 fn delayed_maintenance_reclaims_from_the_stored_hold_deadline() {
     let mut fixture = Fixture::open();
     fixture.seed_five_classes();
