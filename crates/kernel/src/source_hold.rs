@@ -18,6 +18,10 @@ use super::source_descriptor::SOURCE_DESCRIPTOR_KIND;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 const SOURCE_HOLD_KIND: &str = "source_hold";
+const CAPTURE_DESCRIPTOR_WORK_SQL: &str = "SELECT COUNT(*) FROM (
+         SELECT 1 FROM object_registry INDEXED BY idx_objects_source_descriptor_page
+         WHERE object_id GLOB 'srcdesc:*' LIMIT ?1
+     )";
 
 /// Admission bounds each capture; this limit bounds the evidence that repeated
 /// captures by one consumer can pin together.
@@ -38,7 +42,7 @@ const OWNER_SEPARATOR: char = '\u{1f}';
 pub struct SourceHoldBinding {
     pub consumer_id: String,
     pub lease_epoch: u64,
-    /// The frozen source-policy version the descriptors were published under.
+    /// Identifies the caller's frozen source contract and must match on reuse; it does not select Git policy versions.
     pub source_policy_version: String,
 }
 
@@ -46,6 +50,8 @@ pub struct SourceHoldBinding {
 /// any reference row exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceHoldBounds {
+    /// Maximum descriptor registry rows in the capture scan, including invalidated revisions.
+    pub max_descriptor_rows: NonZeroUsize,
     pub max_references: NonZeroUsize,
     pub max_encoded_bytes: NonZeroU64,
     /// Finite lifetime of the hold from capture, in the store's millisecond clock.
@@ -128,6 +134,8 @@ pub enum SourceHoldError {
         "source hold consumer already has {MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER} unreleased holds"
     )]
     HoldLimitReached,
+    #[error("source hold descriptor scan exceeds {max_descriptor_rows} rows")]
+    CaptureWorkLimitReached { max_descriptor_rows: usize },
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
     #[error("source hold is not valid: {0:?}")]
@@ -235,6 +243,10 @@ impl KernelStore {
         }
         let expiry =
             i64::try_from(bounds.expiry_ms.get()).map_err(|_| SourceHoldError::InvalidRequest)?;
+        let descriptor_limit = i64::try_from(bounds.max_descriptor_rows.get())
+            .ok()
+            .and_then(|limit| limit.checked_add(1))
+            .ok_or(SourceHoldError::InvalidRequest)?;
         if binding.lease_epoch != self.lease_epoch() {
             return Err(SourceHoldError::IncarnationMismatch);
         }
@@ -264,6 +276,16 @@ impl KernelStore {
             .map_err(sqlite)?;
         if usize::try_from(active).map_err(corrupt)? >= MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER {
             return Err(SourceHoldError::HoldLimitReached);
+        }
+        let descriptor_rows: i64 = tx
+            .query_row_cached(CAPTURE_DESCRIPTOR_WORK_SQL, [descriptor_limit], |row| {
+                row.get(0)
+            })
+            .map_err(sqlite)?;
+        if descriptor_rows >= descriptor_limit {
+            return Err(SourceHoldError::CaptureWorkLimitReached {
+                max_descriptor_rows: bounds.max_descriptor_rows.get(),
+            });
         }
         let snapshot: i64 = tx
             .query_row_cached(
@@ -730,12 +752,13 @@ struct StoredPin {
 mod tests {
     use rusqlite::{Connection, StatementStatus, params};
 
-    use super::held_descriptors_sql;
+    use super::{CAPTURE_DESCRIPTOR_WORK_SQL, held_descriptors_sql};
     use crate::schema::apply_kernel_schema;
 
     #[test]
     fn held_pages_seek_without_sorting_the_inventory() {
         let mut baseline_steps = None;
+        let mut baseline_work_steps = None;
         for count in [32, 512] {
             let mut conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -777,6 +800,12 @@ mod tests {
                 }
             }
             tx.commit().unwrap();
+            let mut work = conn.prepare(CAPTURE_DESCRIPTOR_WORK_SQL).unwrap();
+            let inspected: i64 = work.query_row([9], |row| row.get(0)).unwrap();
+            assert_eq!(inspected, 9);
+            let work_steps = work.get_status(StatementStatus::VmStep);
+            eprintln!("capture work: count={count}, inspected={inspected}, steps={work_steps}");
+            assert_eq!(work_steps, *baseline_work_steps.get_or_insert(work_steps));
             for after in [0, count / 2, count - 10] {
                 let mut statement = conn.prepare(&held_descriptors_sql()).unwrap();
                 let rows = statement

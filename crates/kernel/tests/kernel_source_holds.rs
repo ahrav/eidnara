@@ -63,6 +63,7 @@ fn audit(kind: ArtifactDeletionKind, value: &str) -> Option<String> {
 
 fn bounds(expiry_ms: u64) -> SourceHoldBounds {
     SourceHoldBounds {
+        max_descriptor_rows: NonZeroUsize::new(1024).unwrap(),
         max_references: NonZeroUsize::new(1024).unwrap(),
         max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
         expiry_ms: NonZeroU64::new(expiry_ms).unwrap(),
@@ -888,6 +889,7 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
     let (expected, references, bytes) = fixture.expected_at(fixture.store.tip().unwrap());
     assert_eq!(expected.len(), 10);
     let exact = SourceHoldBounds {
+        max_descriptor_rows: NonZeroUsize::new(expected.len()).unwrap(),
         max_references: NonZeroUsize::new(references).unwrap(),
         max_encoded_bytes: NonZeroU64::new(bytes).unwrap(),
         expiry_ms: NonZeroU64::new(HOUR_MS).unwrap(),
@@ -947,6 +949,72 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
         refs_before
     );
     assert_eq!(fixture.checkpoint(), 0);
+}
+
+#[test]
+fn capture_work_is_bounded_independently_of_shared_evidence() {
+    let mut fixture = Fixture::open();
+    let text = "one shared source buffer";
+    let evidence = fixture.retain("shared-work-bound", text);
+    let mut objects = Vec::new();
+    for index in 0..8 {
+        objects.push(fixture.publish_over(
+            "messages",
+            &format!("shared-{index}"),
+            1,
+            text,
+            evidence.clone(),
+        ));
+    }
+    let binding = fixture.binding();
+    let admitted = SourceHoldBounds {
+        max_descriptor_rows: NonZeroUsize::new(8).unwrap(),
+        max_references: NonZeroUsize::new(1).unwrap(),
+        max_encoded_bytes: NonZeroU64::new(text.len() as u64).unwrap(),
+        ..wide()
+    };
+    for retire_history in [false, true] {
+        if retire_history {
+            for object in &objects[..7] {
+                fixture.retire(object);
+            }
+        }
+        let pins = fixture.count("SELECT COUNT(*) FROM capture_pins");
+        let refs = fixture.count("SELECT COUNT(*) FROM capture_pin_refs");
+        let tip = fixture.store.tip().unwrap();
+        let mut reached_reference_admission = false;
+        let result = fixture.store.capture_source_hold_with_hook_for_test(
+            &binding,
+            SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(7).unwrap(),
+                ..admitted
+            },
+            |_| reached_reference_admission = true,
+        );
+        assert_eq!(
+            result,
+            Err(SourceHoldError::CaptureWorkLimitReached {
+                max_descriptor_rows: 7
+            })
+        );
+        assert!(!reached_reference_admission);
+        assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pins"), pins);
+        assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), refs);
+        assert_eq!(fixture.store.tip().unwrap(), tip);
+        assert_eq!(fixture.checkpoint(), 0);
+
+        let hold = fixture
+            .store
+            .capture_source_hold(&binding, admitted)
+            .unwrap();
+        assert_eq!(hold.references, 1);
+        assert_eq!(hold.encoded_bytes, text.len() as u64);
+        assert_eq!(
+            fixture.held_all(&hold, 2).len(),
+            if retire_history { 1 } else { 8 }
+        );
+        assert_hold_matches_ledger(&fixture, &hold, 2);
+    }
 }
 
 #[test]
