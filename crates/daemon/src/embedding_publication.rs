@@ -110,6 +110,8 @@ enum Settled {
 
 /// Publishes vectors for one projection against one kernel.
 ///
+/// The caller must hold the daemon's process-lifetime instance fence while this publisher can run. The current-input guard excludes mutations through its `KernelStore`; the instance fence excludes a successor store that could otherwise advance the durable writer fence through a replaced lease namespace.
+///
 /// `publish` blocks on the kernel writer and the search connection and cannot be cancelled between `GuardAcquired` and `GuardReleased`, so it belongs on a blocking thread.
 /// The observer runs on that thread while the guard, and at the staged events the search connection too, is held; it must call neither the kernel nor the projection.
 pub struct EmbeddingPublisher<'a> {
@@ -128,6 +130,7 @@ pub enum PublicationFault {
 }
 
 impl<'a> EmbeddingPublisher<'a> {
+    /// The daemon's process-lifetime instance fence must remain held for the returned publisher's lifetime.
     pub fn new(kernel: &'a KernelStore, projection: &'a SearchProjection) -> Self {
         Self {
             kernel,

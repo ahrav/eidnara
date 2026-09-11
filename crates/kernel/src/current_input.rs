@@ -3,7 +3,7 @@
 //! Every canonical mutation through that instance runs under the writer mutex: source publication and retirement, artifact classification, remediation, and restore.
 //! Taking that mutex excludes those mutations for as long as the guard lives, and revalidating the descriptor under it makes the comparison and the exclusion one step.
 //! The guard opens no kernel transaction, so the consumer may commit to its own store while holding it without two transactions ever overlapping.
-//! A successor kernel instance can advance the durable writer fence while this process still holds its instance-local mutex; cross-store consumers need their own fencing protocol to reject work from the superseded instance.
+//! A successor kernel instance can advance the durable writer fence while this process still holds its instance-local mutex. The daemon excludes that topology with its process-lifetime instance fence; standalone cross-store consumers must provide equivalent lifetime ownership.
 //! Acquisition is bounded by a deadline, and the guard performs no work of its own: what the consumer does under it is the consumer's bound.
 
 use std::sync::MutexGuard;
@@ -64,7 +64,7 @@ pub struct CurrentInputGuard<'a> {
 }
 
 impl CurrentInputGuard<'_> {
-    /// The commit-log tip the descriptor was judged current at; nothing can move it while the guard lives.
+    /// The commit-log tip the descriptor was judged current at; no writer through this kernel instance can move it while the guard lives.
     pub fn tip(&self) -> i64 {
         self.tip
     }
@@ -82,7 +82,7 @@ impl CurrentInputGuard<'_> {
 
 impl KernelStore {
     /// Takes the kernel writer within `deadline` and, under it, judges whether `expected` still names the current, eligible descriptor.
-    /// `Ok(Ok(guard))` means every field agreed at the moment the writer was taken and nothing canonical can change until the guard drops.
+    /// `Ok(Ok(guard))` means every field agreed at the moment the writer was taken and no canonical mutation through this kernel instance can begin until the guard drops.
     /// `Ok(Err(stale))` names the first disagreement and has already released the writer.
     ///
     /// # Errors
