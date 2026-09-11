@@ -10,8 +10,8 @@ use kernel::{
     SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourcePageBounds, SourceRow,
 };
 use retrieval::{
-    OccurrenceRecord, PersistBounds, ProjectionError, ProjectionIdentity, install_identity,
-    persist_occurrences, read_identity, read_occurrence,
+    OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity,
+    install_identity, persist_occurrences, read_identity, read_occurrence,
 };
 use sha2::{Digest, Sha256};
 
@@ -50,7 +50,7 @@ fn message<'a>(
             representation: "text",
             span: None,
         },
-        buffer: text,
+        payload: Payload::Whole(text),
         domain_id: "domain-stable-id",
         sensitivity: Sensitivity::Normal,
         source_object_id: key,
@@ -315,8 +315,6 @@ fn intent(key: &str) -> CommitIntent {
     }
 }
 
-/// Exported text is already selected, but descriptor spans refer to the
-/// original fixture buffer that persistence requires.
 fn persist_fixture_rows(
     projection: &SearchProjection,
     rows: &[SourceRow],
@@ -353,7 +351,7 @@ fn persist_fixture_rows(
                             representation: &row.detail.representation,
                             span,
                         },
-                        buffer: source_buffer,
+                        payload: Payload::Selected(row.text.as_deref().unwrap()),
                         domain_id: "domain",
                         sensitivity: Sensitivity::Normal,
                         source_object_id: &row.object_id,
@@ -567,4 +565,470 @@ fn a_name_only_remediation_changes_no_persisted_input() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_no_acknowledgement()
+{
+    use kernel::source_identity::OccurrenceClass;
+    use retrieval::batch::{
+        BatchBounds, BatchStatus, Invalidation, MutationIdentity, ProjectionBatch,
+        VectorGeneration, batch_from_rows, register_generation, row_identities,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = KernelStore::open(dir.path().join("kernel")).unwrap();
+    kernel
+        .commit(intent("seed"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: "domain".to_string(),
+                object_id: "domain-object".to_string(),
+                name: "Name".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            envelope.register_outbox_consumer("search", 1)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // One dense-eligible message and one raw tool span, each over its own bytes.
+    let publish = |class: &str,
+                   identity: &[(&str, &str)],
+                   representation: &str,
+                   revision: &str,
+                   key: &str,
+                   text: &str| {
+        let handle = kernel
+            .ingest_exact_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("artifact-{key}")),
+                payload: text.as_bytes().to_vec(),
+                evidence_id: format!("evidence-{key}"),
+                object_id: format!("evidence-object-{key}"),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: "tool_output".to_string(),
+                source_id: format!("native/{key}"),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: Some(RepositoryProvenance {
+                    repository_id: "repo".to_string(),
+                    revision: "abc123".to_string(),
+                }),
+            })
+            .unwrap();
+        kernel
+            .commit(intent(&format!("publish-{key}")), |envelope| {
+                envelope
+                    .publish_source_descriptor(&SourceDescriptorRequest {
+                        source_policy: kernel::SourceDescriptorPolicy::Native,
+                        occurrence: Occurrence {
+                            class,
+                            identity,
+                            revision,
+                            representation,
+                            span: None,
+                        },
+                        domain_id: "domain",
+                        scope_id: None,
+                        evidence_id: &handle.evidence_id,
+                        artifact_digest: &handle.digest,
+                        buffer: text,
+                        sensitivity: Sensitivity::Normal,
+                        observed_at: 1,
+                    })
+                    .unwrap();
+                Ok(String::new())
+            })
+            .unwrap();
+    };
+    publish("messages", MSG_A, "text", "1", "m", "dense message");
+    const TOOL: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("harness", "pi"),
+        ("session_id", "sess-01"),
+        ("parent_message_id", "msg-2"),
+        ("tool_call_id", "call-1"),
+        ("result_revision", "1"),
+        ("block_index", "0"),
+    ];
+    publish(
+        "raw_tool_spans",
+        TOOL,
+        "tool_output",
+        "1",
+        "t",
+        "lexical only tool output",
+    );
+    let binding = SourceHoldBinding {
+        consumer_id: "search".to_string(),
+        lease_epoch: kernel.lease_epoch(),
+        source_policy_version: "source-policy.v1".to_string(),
+    };
+    let hold = kernel
+        .capture_source_hold(
+            &binding,
+            SourceHoldBounds {
+                max_descriptor_rows: NonZeroUsize::new(64).unwrap(),
+                admission: SourceHoldAdmission {
+                    max_references: NonZeroUsize::new(64).unwrap(),
+                    max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                },
+                expiry_ms: NonZeroU64::new(60 * 60 * 1000).unwrap(),
+            },
+        )
+        .unwrap();
+    let page = kernel
+        .export_source_page(
+            &binding,
+            &hold.hold_id,
+            hold.captured_at,
+            ExportWindow::Snapshot,
+            None,
+            SourcePageBounds {
+                max_rows: NonZeroUsize::new(64).unwrap(),
+                max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
+            },
+        )
+        .unwrap();
+    assert_eq!(page.rows.len(), 2);
+    assert!(
+        page.next.is_none(),
+        "the batch requires the entire snapshot"
+    );
+    let kernel_checkpoint = || -> i64 {
+        rusqlite::Connection::open_with_flags(
+            dir.path().join("kernel").join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id='search'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let checkpoint_before = kernel_checkpoint();
+
+    let projection = SearchProjection::open(dir.path()).unwrap();
+    let generation = VectorGeneration {
+        generation_id: "gen-1".to_string(),
+        embedding_model: "model-a".to_string(),
+        tokenizer_fingerprint: "fp-a".to_string(),
+        vector_dimension: 8,
+        generation_epoch: 1,
+    };
+    projection
+        .write(|conn| {
+            install_identity(conn, &identity("kernel-1"), 1)?;
+            register_generation(conn, &generation, 1)?;
+            Ok(())
+        })
+        .unwrap();
+    let identities = row_identities(&page.rows);
+    let mutation = MutationIdentity {
+        kernel_incarnation_id: "kernel-1".to_string(),
+        hold_id: hold.hold_id.clone(),
+        snapshot_commit_seq: hold.snapshot,
+        through_commit_seq: hold.snapshot,
+    };
+    let batch = batch_from_rows(&page.rows, &identities, mutation.clone(), Some("gen-1")).unwrap();
+    assert_eq!(batch.records.len(), 2);
+    assert!(batch.invalidations.is_empty());
+    let bounds = BatchBounds {
+        persist: PersistBounds {
+            max_records: NonZeroUsize::new(64).unwrap(),
+            max_payload_bytes: NonZeroUsize::new(1 << 16).unwrap(),
+            max_tuple_bytes: NonZeroUsize::new(2048).unwrap(),
+        },
+        max_source_bytes: NonZeroUsize::new(1 << 16).unwrap(),
+        max_local_mutations: NonZeroUsize::new(64).unwrap(),
+        max_pending: NonZeroUsize::new(64).unwrap(),
+    };
+    assert_eq!(
+        projection.batch_status(&batch).unwrap(),
+        BatchStatus::NotApplied
+    );
+    let hold_before = kernel
+        .source_hold_status(&binding, &hold.hold_id, hold.captured_at)
+        .unwrap();
+    let outcome = projection.apply_batch(&batch, bounds, 2).unwrap();
+    assert_eq!(
+        kernel
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at)
+            .unwrap(),
+        hold_before,
+        "the hold is neither released nor extended by the primitive"
+    );
+    assert_eq!((outcome.rows_inserted, outcome.pending_created), (2, 1));
+    assert_eq!(outcome.checkpoint_commit_seq, hold.snapshot);
+    assert_eq!(
+        projection.batch_status(&batch).unwrap(),
+        BatchStatus::Applied
+    );
+    let message_row = page
+        .rows
+        .iter()
+        .find(|row| row.detail.class == OccurrenceClass::Messages.code())
+        .unwrap();
+    projection
+        .read(|conn| {
+            let mut statement =
+                conn.prepare("SELECT occurrence_id FROM embedding_jobs WHERE state='pending'")?;
+            let pending = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0], message_row.detail.occurrence_id);
+            let tool = page
+                .rows
+                .iter()
+                .find(|row| row.detail.class == "raw_tool_spans")
+                .unwrap();
+            let stored = read_occurrence(conn, &tool.detail.occurrence_id)?.unwrap();
+            assert_eq!(stored.bytes, b"lexical only tool output");
+            assert_eq!(stored.domain_id, "domain");
+            Ok(())
+        })
+        .unwrap();
+    // The primitive acknowledged nothing to the kernel.
+    assert_eq!(kernel_checkpoint(), checkpoint_before);
+    // Replaying the same export changes nothing.
+    let replay = projection.apply_batch(&batch, bounds, 3).unwrap();
+    assert_eq!(
+        (
+            replay.rows_inserted,
+            replay.rows_replayed,
+            replay.pending_created
+        ),
+        (0, 2, 0)
+    );
+    // A catch-up window: the message is superseded, the tool span retired, and
+    // a tool row over a sub-span of a new buffer is created. The exported
+    // selection persists under the kernel's own occurrence identity, and each
+    // invalidation carries its real reason.
+    publish("messages", MSG_A, "text", "2", "m2", "dense message v2");
+    let tool_row = page
+        .rows
+        .iter()
+        .find(|row| row.detail.class == "raw_tool_spans")
+        .unwrap()
+        .clone();
+    kernel
+        .commit(intent("retire-tool"), |envelope| {
+            envelope.retire_observation(&tool_row.object_id)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let spanned_buffer = "prefix|selected part|suffix";
+    let handle = kernel
+        .ingest_exact_artifact(ArtifactIngestRequest {
+            intent: intent("artifact-span"),
+            payload: spanned_buffer.as_bytes().to_vec(),
+            evidence_id: "evidence-span".to_string(),
+            object_id: "evidence-object-span".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "tool_output".to_string(),
+            source_id: "native/span".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: Some(RepositoryProvenance {
+                repository_id: "repo".to_string(),
+                revision: "abc123".to_string(),
+            }),
+        })
+        .unwrap();
+    const TOOL_SPAN: &[(&str, &str)] = &[
+        ("project_id", "proj-a"),
+        ("harness", "pi"),
+        ("session_id", "sess-01"),
+        ("parent_message_id", "msg-2"),
+        ("tool_call_id", "call-span"),
+        ("result_revision", "1"),
+        ("block_index", "0"),
+    ];
+    kernel
+        .commit(intent("publish-span"), |envelope| {
+            envelope
+                .publish_source_descriptor(&SourceDescriptorRequest {
+                    source_policy: kernel::SourceDescriptorPolicy::Native,
+                    occurrence: Occurrence {
+                        class: "raw_tool_spans",
+                        identity: TOOL_SPAN,
+                        revision: "1",
+                        representation: "tool_output",
+                        span: Some(Span { start: 7, end: 20 }),
+                    },
+                    domain_id: "domain",
+                    scope_id: None,
+                    evidence_id: &handle.evidence_id,
+                    artifact_digest: &handle.digest,
+                    buffer: spanned_buffer,
+                    sensitivity: Sensitivity::Normal,
+                    observed_at: 1,
+                })
+                .unwrap();
+            Ok(String::new())
+        })
+        .unwrap();
+    let through = kernel.tip().unwrap();
+    kernel
+        .extend_source_hold(
+            &binding,
+            &hold.hold_id,
+            through,
+            SourceHoldAdmission {
+                max_references: NonZeroUsize::new(64).unwrap(),
+                max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+            },
+        )
+        .unwrap();
+    let catch_up = kernel
+        .export_source_page(
+            &binding,
+            &hold.hold_id,
+            hold.captured_at,
+            ExportWindow::CatchUp { through },
+            None,
+            SourcePageBounds {
+                max_rows: NonZeroUsize::new(64).unwrap(),
+                max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+                max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
+            },
+        )
+        .unwrap();
+    let identities = row_identities(&catch_up.rows);
+    assert!(
+        catch_up.next.is_none(),
+        "the batch requires the entire window"
+    );
+    let mutation = MutationIdentity {
+        through_commit_seq: through,
+        ..mutation
+    };
+    let batch =
+        batch_from_rows(&catch_up.rows, &identities, mutation.clone(), Some("gen-1")).unwrap();
+    assert_eq!(
+        batch.records.len(),
+        2,
+        "the new message revision and the spanned tool row"
+    );
+    assert_eq!(
+        batch.invalidations.len(),
+        2,
+        "the old message and the retired tool row"
+    );
+    let outcome = projection.apply_batch(&batch, bounds, 4).unwrap();
+    assert_eq!(
+        (
+            outcome.rows_inserted,
+            outcome.tombstones_recorded,
+            outcome.pending_created,
+            outcome.pending_obsoleted,
+            outcome.checkpoint_commit_seq
+        ),
+        (2, 2, 1, 1, through)
+    );
+    let spanned = catch_up
+        .rows
+        .iter()
+        .find(|row| row.detail.span.is_some())
+        .unwrap();
+    projection
+        .read(|conn| {
+            let stored = read_occurrence(conn, &spanned.detail.occurrence_id)?
+                .expect("the spanned row persists under the kernel's occurrence id");
+            assert_eq!(stored.bytes, b"selected part");
+            assert_eq!(stored.span, Some((7, 20)));
+            let old_message = read_occurrence(conn, &message_row.detail.occurrence_id)?.unwrap();
+            assert_eq!(
+                old_message.tombstone.map(|t| t.reason),
+                Some(retrieval::TombstoneReason::Superseded)
+            );
+            let old_tool = read_occurrence(conn, &tool_row.detail.occurrence_id)?.unwrap();
+            assert_eq!(
+                old_tool.tombstone.map(|t| t.reason),
+                Some(retrieval::TombstoneReason::Retired)
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        kernel_checkpoint(),
+        checkpoint_before,
+        "still no acknowledgement"
+    );
+
+    let deleted = kernel
+        .delete_artifact(kernel::ArtifactDeletionRequest {
+            intent: intent("delete-message-evidence"),
+            identity: kernel::ArtifactDeletionIdentity::EvidenceId("evidence-m2".to_string()),
+            kind: kernel::ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: hold.captured_at,
+        })
+        .unwrap();
+    let deleted_occurrence = &catch_up
+        .rows
+        .iter()
+        .find(|row| row.detail.artifact_digest == deleted.digest)
+        .unwrap()
+        .detail
+        .occurrence_id;
+    let tombstone = retrieval::Tombstone {
+        invalidated_commit_seq: deleted.commit_seq,
+        reason: retrieval::TombstoneReason::EvidenceInvalidated,
+    };
+    // The fixture supplies artifact deletion as a canonical control fact, separate from descriptor retirement.
+    let deletion_batch = ProjectionBatch {
+        identity: MutationIdentity {
+            through_commit_seq: deleted.commit_seq,
+            ..mutation
+        },
+        records: vec![],
+        invalidations: vec![Invalidation {
+            occurrence_id: deleted_occurrence.clone(),
+            tombstone,
+        }],
+        generation_id: None,
+    };
+    let outcome = projection.apply_batch(&deletion_batch, bounds, 5).unwrap();
+    assert_eq!(outcome.tombstones_recorded, 1);
+    assert_eq!(outcome.pending_obsoleted, 1);
+    assert_eq!(outcome.checkpoint_commit_seq, deleted.commit_seq);
+    let replay = projection.apply_batch(&batch, bounds, 6).unwrap();
+    assert_eq!(replay.rows_inserted, 0);
+    assert_eq!(replay.pending_created, 0);
+    assert_eq!(replay.checkpoint_commit_seq, deleted.commit_seq);
+    drop(projection);
+    let reopened = SearchProjection::open(dir.path()).unwrap();
+    reopened
+        .read(|conn| {
+            let stored = read_occurrence(conn, deleted_occurrence)?.unwrap();
+            assert_eq!(stored.tombstone, Some(tombstone));
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM embedding_jobs WHERE state='pending'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(pending, 0);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(kernel_checkpoint(), checkpoint_before);
 }

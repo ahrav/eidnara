@@ -318,6 +318,18 @@ pub(crate) fn encode_metadata(
     occurrence: &Occurrence<'_>,
     byte_length: u64,
 ) -> Result<EncodedOccurrence, OccurrenceRefusal> {
+    encode_preserving_span(&Occurrence {
+        span: normalize_span_for_length(occurrence.span, byte_length),
+        ..*occurrence
+    })
+}
+
+/// Encodes identity fields without validating or normalizing the span.
+/// The producer must normalize whole-buffer spans and validate their bounds and UTF-8 alignment against the original buffer.
+/// [`encode`] performs these checks when the original buffer is available.
+pub fn encode_preserving_span(
+    occurrence: &Occurrence<'_>,
+) -> Result<EncodedOccurrence, OccurrenceRefusal> {
     let class =
         OccurrenceClass::from_code(occurrence.class).ok_or(OccurrenceRefusal::UnknownClass)?;
     let fields = class.identity_fields();
@@ -367,7 +379,7 @@ pub(crate) fn encode_metadata(
     if !class.representations().contains(&occurrence.representation) {
         return Err(OccurrenceRefusal::UnknownRepresentation);
     }
-    let span = normalize_span_for_length(occurrence.span, byte_length);
+    let span = occurrence.span;
 
     let mut prefix = Vec::new();
     push_str(&mut prefix, class.code());

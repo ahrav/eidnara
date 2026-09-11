@@ -41,7 +41,7 @@ impl Sensitivity {
     }
 
     /// An unrecognized stored class resolves to `Secret`, the strictest handling.
-    pub(super) fn from_stored(value: &str) -> Self {
+    pub fn from_stored(value: &str) -> Self {
         match value {
             "normal" => Self::Normal,
             "sensitive" => Self::Sensitive,

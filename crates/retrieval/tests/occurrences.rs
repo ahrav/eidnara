@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use kernel::Sensitivity;
 use kernel::source_identity::{Occurrence, OccurrenceRefusal, Span};
 use retrieval::{
-    OccurrenceRecord, PersistBounds, PersistedOccurrence, ProjectionError, ProjectionIdentity,
-    Tombstone, TombstoneReason, install_identity, persist_occurrences,
+    OccurrenceRecord, Payload, PersistBounds, PersistedOccurrence, ProjectionError,
+    ProjectionIdentity, Tombstone, TombstoneReason, install_identity, persist_occurrences,
     persist_occurrences_with_digests_for_test, read_identity, read_occurrence,
     tombstone_occurrence,
 };
@@ -156,7 +156,7 @@ impl Owned {
                 representation: &self.representation,
                 span: self.span,
             },
-            buffer: &self.payload,
+            payload: Payload::Whole(&self.payload),
             domain_id: "domain-stable-id",
             sensitivity: Sensitivity::Normal,
             source_object_id: &self.source_id,
@@ -1160,6 +1160,97 @@ fn malformed_and_oversized_records_refuse_before_anything_is_written() {
             OccurrenceRefusal::SpanNotUtf8Aligned
         ))
     );
+
+    let mut results = Vec::new();
+    let mut counts = Vec::new();
+    for (span, text) in [
+        (Span { start: 2, end: 1 }, ""),
+        (
+            Span {
+                start: i64::MAX as u64,
+                end: i64::MAX as u64 + 1,
+            },
+            "x",
+        ),
+        (
+            Span {
+                start: i64::MAX as u64 + 1,
+                end: i64::MAX as u64 + 1,
+            },
+            "",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let mut selected = good.record(&good_identity);
+        selected.occurrence.span = Some(span);
+        selected.payload = Payload::Selected(text);
+        results.push(
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(persist_occurrences(
+                        conn,
+                        &[good.record(&good_identity), selected],
+                        bounds(),
+                        1,
+                    ))
+                })
+                .unwrap(),
+        );
+        counts.push(
+            store
+                .with_conn(|conn| {
+                    Ok((
+                        conn.query_row("SELECT COUNT(*) FROM occurrences", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?,
+                        conn.query_row("SELECT COUNT(*) FROM payloads", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?,
+                    ))
+                })
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        counts,
+        [(0, 0); 3],
+        "committing a handled span error writes neither the earlier valid row nor any payload"
+    );
+    assert_eq!(
+        results,
+        [
+            Err(ProjectionError::Occurrence(OccurrenceRefusal::SpanReversed)),
+            Err(ProjectionError::CorruptRow),
+            Err(ProjectionError::CorruptRow),
+        ]
+    );
+
+    for span in [
+        Span { start: 0, end: 6 },
+        Span {
+            start: i64::MAX as u64 - 6,
+            end: i64::MAX as u64,
+        },
+    ] {
+        let mut selected = good.record(&good_identity);
+        selected.occurrence.span = Some(span);
+        selected.payload = Payload::Selected("héllo");
+        let expected =
+            kernel::source_identity::encode_preserving_span(&selected.occurrence).unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                let persisted = persist_occurrences(conn, &[selected], bounds(), 1).unwrap();
+                assert_eq!(persisted[0].occurrence_id, expected.occurrence_id);
+                let stored = read_occurrence(conn, &expected.occurrence_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.span, Some((span.start, span.end)));
+                assert_eq!(stored.bytes, "héllo".as_bytes());
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]
@@ -1259,7 +1350,10 @@ fn replay_with_different_immutable_metadata_is_a_collision_not_a_noop() {
         }
         for (index, variant) in variants.iter().enumerate() {
             assert_eq!(variant.occurrence, original.occurrence);
-            assert_eq!(variant.buffer, original.buffer);
+            assert!(matches!(
+                (variant.payload, original.payload),
+                (Payload::Whole(a), Payload::Whole(b)) if a == b
+            ));
             let mut requests = vec![fresh.record(&fresh_identity)];
             if !stored {
                 requests.push(original.clone());

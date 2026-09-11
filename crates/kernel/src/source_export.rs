@@ -27,7 +27,7 @@ use super::source_hold::{
 use super::source_identity::{
     Occurrence, Span, encode_metadata, payload_id, select, validate_span,
 };
-use super::{KernelError, KernelStore, map_sqlite};
+use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 
 #[cfg(feature = "test-support")]
 thread_local! {
@@ -81,10 +81,15 @@ pub struct SourceRow {
     pub revision: i64,
     /// A spanned invalidation-only row carries a format-checked `payload_id`; its absent payload bytes cannot be verified.
     pub detail: SourceDescriptorDetail,
+    /// The stable domain identifier the descriptor row belongs to.
+    pub domain_id: String,
+    pub sensitivity: Sensitivity,
     pub created_commit_seq: i64,
     /// The invalidating commit at or before the export window's end, or `None`
     /// if the descriptor is live at that boundary.
     pub invalidated_commit_seq: Option<i64>,
+    /// The newer revision that superseded this descriptor at or before the export window's end, or `None` for a retirement or a descriptor live at that boundary.
+    pub superseded_by: Option<String>,
     /// The exact UTF-8 text the descriptor's span selects, present exactly
     /// when the row's creation lies inside the exported window.
     /// Payload bytes are read and verified only for rows that export text.
@@ -105,8 +110,11 @@ impl std::fmt::Debug for SourceRow {
             .field("object_id", &self.object_id)
             .field("revision", &self.revision)
             .field("detail", &self.detail)
+            .field("domain_id", &self.domain_id)
+            .field("sensitivity", &self.sensitivity)
             .field("created_commit_seq", &self.created_commit_seq)
             .field("invalidated_commit_seq", &self.invalidated_commit_seq)
+            .field("superseded_by", &self.superseded_by)
             .field("text_bytes", &self.text.as_ref().map(String::len))
             .finish()
     }
@@ -268,6 +276,9 @@ impl KernelStore {
                         invalidated: row.get(8)?,
                         observation_created: row.get(9)?,
                         observation_invalidated: row.get(10)?,
+                        domain_id: row.get(11)?,
+                        sensitivity: row.get(12)?,
+                        superseded_by: row.get(13)?,
                     })
                 },
             )?;
@@ -339,6 +350,9 @@ struct RawRow {
     payload: Vec<u8>,
     created: i64,
     invalidated: Option<i64>,
+    domain_id: String,
+    sensitivity: String,
+    superseded_by: Option<String>,
     observation_created: i64,
     observation_invalidated: Option<i64>,
 }
@@ -346,7 +360,8 @@ struct RawRow {
 const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence_id,
      e.artifact_digest,e.byte_length,b.observation_payload,
      o.created_commit_seq,o.invalidated_commit_seq,
-     b.created_commit_seq,b.invalidated_commit_seq";
+     b.created_commit_seq,b.invalidated_commit_seq,o.domain_id,b.sensitivity_class,
+     o.superseded_by";
 
 /// The catch-up window as one row source: the descriptors created in
 /// `(S, through]` exactly as the hold pins them, or the descriptors live at S
@@ -501,14 +516,18 @@ fn preflight(
         ExportWindow::Snapshot => (true, snapshot),
         ExportWindow::CatchUp { through } => (raw.created > snapshot, through),
     };
+    let invalidated = raw.invalidated.filter(|at| *at <= end);
     Ok(Preflight {
         span,
         row: SourceRow {
             object_id,
             revision: raw.revision,
             detail,
+            domain_id: raw.domain_id,
+            sensitivity: Sensitivity::from_stored(&raw.sensitivity),
             created_commit_seq: raw.created,
-            invalidated_commit_seq: raw.invalidated.filter(|at| *at <= end),
+            invalidated_commit_seq: invalidated,
+            superseded_by: raw.superseded_by.filter(|_| invalidated.is_some()),
             text: None,
         },
         digest: raw.digest,

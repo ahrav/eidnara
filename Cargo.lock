@@ -2661,6 +2661,7 @@ dependencies = [
  "retrieval",
  "rusqlite",
  "serde_json",
+ "sha2",
  "storage",
  "tempfile",
  "thiserror",

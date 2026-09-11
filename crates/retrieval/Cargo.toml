@@ -12,6 +12,7 @@ description = "Search projection: the baseline schema of search.sqlite and the p
 kernel = { workspace = true }
 storage = { workspace = true, features = ["sqlite"] }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
