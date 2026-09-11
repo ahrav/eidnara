@@ -32,7 +32,7 @@ impl Sensitivity {
     /// The whole vocabulary, in increasing strictness.
     pub const ALL: &'static [Self] = &[Self::Normal, Self::Sensitive, Self::Secret];
 
-    pub(super) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
             Self::Sensitive => "sensitive",

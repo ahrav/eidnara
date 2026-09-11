@@ -193,10 +193,13 @@ fn push_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(text.as_bytes());
 }
 
-/// Lowercase SHA-256 hex of the exact payload bytes: the payload identifier.
-pub fn payload_id(bytes: &[u8]) -> String {
+/// Lowercase SHA-256 hex of the exact input bytes.
+pub fn identity_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+/// The digest of exact payload bytes is the payload identifier.
+pub use identity_digest as payload_id;
 
 /// Validates the span against the buffer it selects. `MalformedSpan` covers a
 /// span that cannot be a byte range at all; the other three name which rule a
@@ -281,6 +284,35 @@ pub fn encode(
     Ok(encoded)
 }
 
+/// Returns the lineage identifier implied by `tuple`, or `None` when the
+/// supplied derived fields disagree with the tuple bytes. Readers use this to
+/// detect a stored tuple-derived column altered independently of the tuple.
+pub fn derived_lineage_id(
+    tuple: &[u8],
+    class_code: &str,
+    revision: i64,
+    representation: &str,
+    span: Option<Span>,
+) -> Option<String> {
+    let mut head = vec![OCCURRENCE_ENCODING_VERSION, ROLE_OCCURRENCE];
+    push_str(&mut head, class_code);
+    // `finish` with an empty prefix yields version + role + tail + span;
+    // stripping the two leading bytes leaves the exact tail encoding.
+    let revision_text = revision.to_string();
+    let tail = &finish(
+        &[],
+        ROLE_OCCURRENCE,
+        &[&revision_text, representation],
+        span,
+    )[2..];
+    let prefix_end = tuple.len().checked_sub(tail.len())?;
+    if prefix_end < head.len() || !tuple.starts_with(&head) || &tuple[prefix_end..] != tail {
+        return None;
+    }
+    let lineage = finish(&tuple[2..prefix_end], ROLE_LINEAGE, &[representation], span);
+    Some(identity_digest(&lineage))
+}
+
 /// Callers validate span bounds and, when bytes are available, UTF-8 alignment.
 pub(crate) fn encode_metadata(
     occurrence: &Occurrence<'_>,
@@ -353,8 +385,8 @@ pub(crate) fn encode_metadata(
     let lineage = finish(&prefix, ROLE_LINEAGE, &[occurrence.representation], span);
     Ok(EncodedOccurrence {
         class,
-        occurrence_id: format!("{:x}", Sha256::digest(&tuple)),
-        lineage_id: format!("{:x}", Sha256::digest(&lineage)),
+        occurrence_id: identity_digest(&tuple),
+        lineage_id: identity_digest(&lineage),
         tuple,
         revision,
         span,

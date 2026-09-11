@@ -30,6 +30,7 @@ pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;
 pub mod scheduler;
+pub mod search_projection;
 pub mod selection;
 pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
