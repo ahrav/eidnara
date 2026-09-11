@@ -473,47 +473,59 @@ questions and their evidence remain in the evidence file.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Cold-versus-cached parity across five passes exists; no
-test asserts the entry is unchanged after a mint pass whose commit fails, and
-none checks `source_bytes` against the projected text outside the mint tests.
+Exercised: partial - Cold, drop, reset, remint, poisoned-refill, and interleaved
+session tests pass. A failed second mint insert leaves the baseline pointer,
+contents, and durable state unchanged. Row-sharing checks fail on the
+deep-copy predecessor. Source equality is exercised on clean text; the
+prepared-field policy for detected secrets remains an open question.
 Guarantee: Pass-local mint rows never become visible through the tag
 baseline cache, and every visible row's `source_bytes` is byte-equal to the
 projected text it tags.
 Check: `always` - After every pass, the [`TagBaselineCacheEntry.tags`][tag-entry]
 for the session equals `store.load_tags_for_session(session)` for the
 `(store_namespace, generation, count, max_tag_number)` the entry records, in
-[`ORDER BY tag_number ASC`][load-order]; the pass-local `tag_rows` after
-[`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
-rows with `tag_number = max + offset + 1` in projection block order; and
+[`ORDER BY tag_number ASC`][load-order]. [`tag_mint_rows`][append-mint]
+creates a pass-owned tail with `tag_number = max + offset + 1` in projection
+block order. The [combined slice][combined-tags] contains baseline row handles
+followed by mint row handles without copying their source allocations; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7195-7200`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([mint capture][mint-input]).
 `always` because the entry is read on the next pass of the same session and
-a stale or speculative row changes the active-tag match at
-[`:7389`][active-match].
-Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
-[`snapshot`][tag-snapshot] holds a second reference. A design that appends
-in place, or stores the pass's `Arc` back before commit, exposes rows the
-store has not numbered; the store numbers from `MAX(tag_number) + 1` and
-skips existing ids, which is the transform catalog's
-[two-authorities record][tc-tagnum]. [`load_cached_tags`][load-tags] appends
-`load_tags_after` only when the summary is unchanged between two reads.
+a stale or speculative row changes the [active-tag match][active-match].
+Fault/timing angle: The cache owns `Arc<[Arc<TagRow>]>`; the pass never
+mutates its entry. The pass retains an [immutable named baseline][tag-baseline]
+for [bootstrap protection][tag-protection], separate from the combined view.
+[Overlay computation][mint-tail] reads the baseline and
+mint tail together before the caller combines their handles. The commit
+reads only the [pass-owned mint tail][commit-mints]. A successful commit
+does not publish those speculative rows to the cache. Only
+[`load_cached_tags`][load-tags] publishes store-read rows, validating the
+summary across an append refill. Store numbering remains independent, as
+the [historical two-authorities record][tc-tagnum] describes.
 Required faults and enabling state: Tagging active (a profile with
 `tool_present`), a warm baseline entry, a pass that mints, then a second pass
-on the same session; for the aliasing arm, a mint batch whose commit CAS
-fails so the speculative rows are never committed.
+on the same session; for the rollback arm, the existing attempt hook installs
+a temporary SQLite trigger that aborts the second mint insert.
 Confidence: high - [Evidence](evidence/tag-baseline-cache-entry-is-never-mutated-by-a-pass.md).
-The cache entry, the snapshot clone, the make_mut copy, the mint append, and
-the store's ordered load are source-verified.
+The shared baseline, mint tail, combined view, hygiene consumers, commit
+inputs, and store-read-only refill are source-verified. Cache accounting
+charges row capacities, row pointers, and row/slice Arc headers in full,
+including shared rows, under the unchanged 64 MiB baseline budget. The
+64-byte allocator allowance remains separate from the Arc counters.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
-cover cold-versus-cached parity, refill after a direct SQL update, and
-session isolation; all unaudited.
+cover cold-versus-cached parity, direct-SQL refill, session isolation,
+failed-commit rollback, source bytes, row sharing, capacity-driven admission
+refusal, protected-orphan iterator parity, and bootstrap protection with mints;
+all unaudited.
 Impact: A speculative or stale row changes which tags are treated as active
 on the next pass.
 Open questions:
-- `source_bytes` pass through the store's prepared-field path
-  ([`write.bytes("source_bytes", ..)`][mint-prepared]); a detection refuses
-  the insert. [R1][r1] owns that policy; this record assumes the bytes that
-  land are unchanged. Is that assumption stated anywhere? (needs human input)
+- The transform commit uses [`write.bytes("tag_source_bytes", ..)`][mint-prepared],
+  whose [content policy][tag-content-policy] substitutes detected secrets.
+  The older evidence cites the separate tag-mint API. How should unconditional
+  source equality apply to redacted inputs? [R1][r1] owns the unchanged
+  prepared-field policy; the clean-text corpus does not settle this conflict.
+  (needs human input)
 
 ### hygiene-digest-is-kind-prefixed-part-content
 
@@ -2306,7 +2318,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [A3][a3] | Construct concurrent parses with a barrier so the shortfall is observable. |
 | [B1][b1] | Selection inputs, native prefix chunks, snapshot fallback, and sidecar order/pins are checked. Extend integration coverage for sorted-key served output. |
 | [B2][b2] | Typed-flag reference and delta comparisons run. Extend the finite observer corpus when new replay shapes appear. |
-| [B3][b3] | Fail a mint commit and inspect the cache entry; compare `source_bytes` with projected text. |
+| [B3][b3] | Failed-commit rollback and clean-source equality are exercised. Resolve equality semantics for detected secrets. |
 | [B4][b4] | State the digest input explicitly against `FlatBlock.content_hash`. |
 | [B5][b5] | The constructed delta-turn witness fires. A production plugin body remains unobserved. |
 | [C1][c1] | Pair a narrow read with `MemoryStore::load` over malformed and defaulted rows; observe the post-commit `row_version`. |
@@ -2465,14 +2477,18 @@ evaluation of this area and its disposition are recorded in
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2116-L2132
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6353
-[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
-[load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7195-L7200
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7300-L7321
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7389
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
+[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6828-L6853
+[tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3034-L3035
+[tag-protection]: ../../../../crates/daemon/src/transform.rs#L3696-L3709
+[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6873-L6878
+[load-tags]: ../../../../crates/daemon/src/transform.rs#L6951-L7013
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7213-L7218
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7317-L7340
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7344-L7371
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7408
+[combined-tags]: ../../../../crates/daemon/src/transform.rs#L3430-L3438
+[mint-tail]: ../../../../crates/daemon/src/transform.rs#L7942-L7950
+[commit-mints]: ../../../../crates/daemon/src/transform.rs#L4951-L4960
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
@@ -2501,7 +2517,8 @@ evaluation of this area and its disposition are recorded in
 [tail-reclaim]: ../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../crates/memory-store/src/lib.rs#L210-L216
-[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L7156-L7164
+[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8234-L8249
+[tag-content-policy]: ../../../../crates/memory-store/src/lib.rs#L2204-L2233
 [load-order]: ../../../../crates/memory-store/src/lib.rs#L7245-L7273
 [serde-features]: ../../../../Cargo.toml#L45
 

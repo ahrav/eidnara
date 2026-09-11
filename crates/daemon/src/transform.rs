@@ -1610,8 +1610,7 @@ struct Channel1Decision {
 #[derive(Debug, Default)]
 struct PendingOverlayDecisions {
     max_seen_ordinal: Option<u64>,
-    tag_mint_start: usize,
-    tag_mint_count: usize,
+    tag_mints: Vec<Arc<TagRow>>,
     tag_mint_candidates: usize,
     tag_mint_tokenized_bytes: usize,
     tag_mint_ms: f64,
@@ -1627,7 +1626,7 @@ struct OverlayComputation<'a, 'ctx> {
     projection: &'a FlatProjection,
     trusted_projection_prefix: Option<(&'a str, usize)>,
     core: &'a CoreState,
-    tag_rows: &'a mut Arc<Vec<TagRow>>,
+    tag_rows: &'a [Arc<TagRow>],
     temporal_rows: &'a mut Vec<TemporalMarkRow>,
     overlay_frontier: Option<u64>,
     tag_mint_enabled: bool,
@@ -1639,7 +1638,7 @@ struct OverlayComputation<'a, 'ctx> {
 impl PendingOverlayDecisions {
     fn is_empty(&self) -> bool {
         self.max_seen_ordinal.is_none()
-            && self.tag_mint_count == 0
+            && self.tag_mints.is_empty()
             && self.temporal_marks.is_empty()
             && self.user_hint.is_none()
             && self.channel1_append.is_none()
@@ -1650,7 +1649,7 @@ struct Channel1NudgeInputs<'a, 'ctx> {
     ctx: &'a ProducerContext<'ctx>,
     core: &'a CoreState,
     projection: &'a FlatProjection,
-    tag_rows: &'a [TagRow],
+    tag_rows: &'a [Arc<TagRow>],
     baseline: Option<&'a TailHygieneBaseline>,
     channel1_appends: &'a [Channel1AppendRow],
     mutation_exempt_mid: Option<&'a str>,
@@ -3032,8 +3031,8 @@ fn apply_once(
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
-    let mut tag_rows = load_cached_tags(store, &req.session_id)?;
-    let hydrated_tag_count = tag_rows.len();
+    let baseline_tag_rows = load_cached_tags(store, &req.session_id)?;
+    let mut tag_rows = Arc::clone(&baseline_tag_rows);
     timings.store_tags = elapsed_ms(tag_hydration_started_at);
     timings.store_temporal = transform_snapshot.timings.temporal_ms;
     timings.store_user_hints = transform_snapshot.timings.user_hints_ms;
@@ -3414,7 +3413,7 @@ fn apply_once(
             projection: &projection,
             trusted_projection_prefix,
             core: &loaded.core,
-            tag_rows: &mut tag_rows,
+            tag_rows: &tag_rows,
             temporal_rows: &mut temporal_marks,
             overlay_frontier,
             tag_mint_enabled: tagging_active || caveman_tagging_requested,
@@ -3423,11 +3422,18 @@ fn apply_once(
             lineage_anchor_mid,
         })?;
         timings.tag_mint_candidates = pending_overlays.tag_mint_candidates;
-        timings.tag_mint_new = pending_overlays.tag_mint_count;
+        timings.tag_mint_new = pending_overlays.tag_mints.len();
         timings.tag_mint_tokenized_bytes = pending_overlays.tag_mint_tokenized_bytes;
         timings.tag_overlay += pending_overlays.tag_mint_ms;
         timings.temporal += pending_overlays.temporal_ms;
         let tag_overlay_started_at = Instant::now();
+        if !pending_overlays.tag_mints.is_empty() {
+            tag_rows = baseline_tag_rows
+                .iter()
+                .chain(&pending_overlays.tag_mints)
+                .cloned()
+                .collect();
+        }
         tag_numbers = tag_number_by_message(&tag_rows);
         timings.tag_overlay += elapsed_ms(tag_overlay_started_at);
     }
@@ -3689,9 +3695,9 @@ fn apply_once(
         );
     let tag_window_protected_block_ids = if tagging_surface_requested {
         let protection_tags = if suppress_bootstrap_reduction_tag_overlay {
-            &tag_rows[..hydrated_tag_count]
+            baseline_tag_rows.as_ref()
         } else {
-            tag_rows.as_slice()
+            tag_rows.as_ref()
         };
         newest_active_tag_block_ids(
             &loaded.core,
@@ -4694,7 +4700,7 @@ fn apply_once(
         &projection,
         &core,
         meta.coverage_ordinal,
-        &hygiene_tag_rows,
+        hygiene_tag_rows.iter().map(Arc::as_ref),
         req.protected_tags,
         &protected_block_ids,
     );
@@ -4942,8 +4948,8 @@ fn apply_once(
     let commit_required =
         state_changed || !consumed_drop_ids.is_empty() || !pending_overlays.is_empty();
     // The store assigns tag numbers and timestamps; it takes the mint inputs alone.
-    let tag_mint_inputs: Vec<TagMintInput> = tag_rows[pending_overlays.tag_mint_start
-        ..pending_overlays.tag_mint_start + pending_overlays.tag_mint_count]
+    let tag_mint_inputs: Vec<TagMintInput> = pending_overlays
+        .tag_mints
         .iter()
         .map(|row| TagMintInput {
             block_id: row.block_id.clone(),
@@ -5681,7 +5687,7 @@ fn caveman_target_depth(position: usize, total: usize) -> u8 {
 fn new_caveman_units(
     core: &CoreState,
     req: &TransformRequest,
-    tag_rows: &[TagRow],
+    tag_rows: &[Arc<TagRow>],
     live: &[&FlatBlock],
     coverage: Option<u64>,
     is_bust_pass: bool,
@@ -6824,7 +6830,7 @@ struct TagBaselineCacheEntry {
     generation: u64,
     count: usize,
     max_tag_number: i64,
-    tags: Arc<Vec<TagRow>>,
+    tags: Arc<[Arc<TagRow>]>,
     retained_bytes: usize,
 }
 
@@ -6909,29 +6915,35 @@ pub(crate) fn tag_baseline_cache_metrics() -> (usize, usize) {
     (cache.retained_bytes, cache.sessions.len())
 }
 
-fn tag_baseline_retained_bytes(tags: &[TagRow]) -> usize {
+fn tag_baseline_retained_bytes(tags: &[Arc<TagRow>]) -> usize {
+    use crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES;
+
+    // Charge each row in full even when a pass or an older snapshot shares it.
+    // The 64-byte allowance covers allocator bookkeeping, not row or Arc headers.
     tags.iter()
-        .map(|tag| {
-            tag.block_id.len()
-                + tag.kind.len()
-                + tag.source_bytes.len()
-                + std::mem::size_of::<TagRow>()
-                + 64
+        .fold(ARC_ALLOCATION_OVERHEAD_BYTES, |bytes, tag| {
+            bytes
+                .saturating_add(std::mem::size_of::<Arc<TagRow>>())
+                .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
+                .saturating_add(std::mem::size_of::<TagRow>())
+                .saturating_add(tag.block_id.capacity())
+                .saturating_add(tag.kind.capacity())
+                .saturating_add(tag.source_bytes.capacity())
+                .saturating_add(64)
         })
-        .sum()
 }
 
 fn tag_baseline_entry(
     store: &MemoryStore,
     summary: TagCacheSummary,
-    tags: Arc<Vec<TagRow>>,
+    tags: Arc<[Arc<TagRow>]>,
 ) -> TagBaselineCacheEntry {
     TagBaselineCacheEntry {
         store_namespace: store.tag_cache_namespace(),
         generation: summary.generation,
         count: summary.count,
         max_tag_number: summary.max_tag_number,
-        retained_bytes: tag_baseline_retained_bytes(tags.as_slice()),
+        retained_bytes: tag_baseline_retained_bytes(&tags),
         tags,
     }
 }
@@ -6939,7 +6951,7 @@ fn tag_baseline_entry(
 fn load_cached_tags(
     store: &MemoryStore,
     session_id: &str,
-) -> Result<Arc<Vec<TagRow>>, TransformError> {
+) -> Result<Arc<[Arc<TagRow>]>, TransformError> {
     let store_namespace = store.tag_cache_namespace();
     loop {
         let summary = store.tag_cache_summary(session_id)?;
@@ -6964,8 +6976,8 @@ fn load_cached_tags(
                 {
                     let mut tags = Vec::with_capacity(summary.count);
                     tags.extend(entry.tags.iter().cloned());
-                    tags.extend(tail);
-                    let tags = Arc::new(tags);
+                    tags.extend(tail.into_iter().map(Arc::new));
+                    let tags = Arc::from(tags);
                     tag_baseline_cache()
                         .lock()
                         .expect("tag baseline cache mutex")
@@ -6979,7 +6991,11 @@ fn load_cached_tags(
             }
         }
 
-        let tags = Arc::new(store.load_tags_for_session(session_id)?);
+        let tags: Arc<[Arc<TagRow>]> = store
+            .load_tags_for_session(session_id)?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
         let observed = store.tag_cache_summary(session_id)?;
         if observed.count == tags.len()
             && observed.max_tag_number == tags.last().map_or(0, |tag| tag.tag_number)
@@ -7298,27 +7314,29 @@ fn tag_mint_frontier_cache() -> &'static Mutex<TagMintFrontierCache> {
     })
 }
 
-fn append_tag_mint_rows(
-    tag_rows: &mut Vec<TagRow>,
+fn tag_mint_rows(
+    tag_rows: &[Arc<TagRow>],
     tag_mints: Vec<TagMintInput>,
     created_at_ms: i64,
-) -> usize {
-    let start = tag_rows.len();
+) -> Vec<Arc<TagRow>> {
+    if tag_mints.is_empty() {
+        return Vec::new();
+    }
     let next_tag = tag_rows.iter().map(|row| row.tag_number).max().unwrap_or(0);
-    tag_rows.extend(
-        tag_mints
-            .into_iter()
-            .enumerate()
-            .map(|(offset, input)| TagRow {
+    tag_mints
+        .into_iter()
+        .enumerate()
+        .map(|(offset, input)| {
+            Arc::new(TagRow {
                 tag_number: next_tag + offset as i64 + 1,
                 block_id: input.block_id,
                 kind: input.kind,
                 token_count: input.token_count.max(0),
                 created_at_ms,
                 source_bytes: input.source_bytes,
-            }),
-    );
-    start
+            })
+        })
+        .collect()
 }
 
 /// The returned span contains exactly what the overlay can prefix.
@@ -7362,7 +7380,7 @@ fn newest_active_tag_block_ids(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    tag_rows: &[TagRow],
+    tag_rows: &[Arc<TagRow>],
     mutation_exempt_mid: Option<&str>,
     protected_tags: usize,
 ) -> HashSet<String> {
@@ -7417,7 +7435,7 @@ fn protected_tail_cutoff_ordinal(
 }
 
 fn tag_overlay_state(
-    tag_rows: &[TagRow],
+    tag_rows: &[Arc<TagRow>],
     temporal_marks: &[TemporalMarkRow],
     user_hints: &[UserHintRow],
     appends: &[Channel1AppendRow],
@@ -7921,14 +7939,13 @@ fn compute_active_overlay_decisions(
     };
     let tag_mint_candidates = tag_mint_work.candidate_count;
     let tag_mint_tokenized_bytes = tag_mint_work.tokenized_bytes;
-    let tag_mint_count = tag_mint_work.inputs.len();
-    let tag_mint_start =
-        append_tag_mint_rows(Arc::make_mut(tag_rows), tag_mint_work.inputs, ctx.now_ms);
+    let tag_mints = tag_mint_rows(tag_rows, tag_mint_work.inputs, ctx.now_ms);
     let tag_mint_ms = elapsed_ms(tag_mint_started_at);
     let temporal_started_at = Instant::now();
 
     let mint_by_block = tag_rows
         .iter()
+        .chain(&tag_mints)
         .map(|row| (row.block_id.as_str(), row.created_at_ms))
         .collect::<HashMap<_, _>>();
     let mut decided_temporal = temporal_rows
@@ -8044,8 +8061,7 @@ fn compute_active_overlay_decisions(
 
     Ok(PendingOverlayDecisions {
         max_seen_ordinal,
-        tag_mint_start,
-        tag_mint_count,
+        tag_mints,
         tag_mint_candidates,
         tag_mint_tokenized_bytes,
         tag_mint_ms,
@@ -8475,10 +8491,10 @@ fn maybe_append_channel1_nudge(
 
 fn tag_rows_for_hygiene(
     projection: &FlatProjection,
-    stored_rows: &[TagRow],
+    stored_rows: &[Arc<TagRow>],
     overlay: &TagOverlayState,
     derive_when_empty: bool,
-) -> Vec<TagRow> {
+) -> Vec<Arc<TagRow>> {
     let projected_ids = projection
         .blocks
         .iter()
@@ -8506,14 +8522,14 @@ fn tag_rows_for_hygiene(
         let Some(kind) = taggable_kind(block) else {
             continue;
         };
-        rows.push(TagRow {
+        rows.push(Arc::new(TagRow {
             tag_number: *tag_number,
             block_id: block_id.clone(),
             kind: kind.as_store_kind().to_string(),
             token_count: 0,
             created_at_ms: 0,
             source_bytes: Vec::new(),
-        });
+        }));
     }
     if rows.is_empty() && derive_when_empty {
         for (index, block) in projection
@@ -8522,7 +8538,7 @@ fn tag_rows_for_hygiene(
             .filter(|block| taggable_kind(block).is_some())
             .enumerate()
         {
-            rows.push(TagRow {
+            rows.push(Arc::new(TagRow {
                 tag_number: index.saturating_add(1) as i64,
                 block_id: block.id.clone(),
                 kind: taggable_kind(block)
@@ -8532,7 +8548,7 @@ fn tag_rows_for_hygiene(
                 token_count: 0,
                 created_at_ms: 0,
                 source_bytes: Vec::new(),
-            });
+            }));
         }
     }
     rows.sort_by_key(|row| row.tag_number);
@@ -8543,7 +8559,7 @@ fn active_tags_for_nudge(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    tag_rows: &[TagRow],
+    tag_rows: &[Arc<TagRow>],
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<ActiveTagForNudge> {
     let tag_by_block = tag_rows
@@ -8574,7 +8590,7 @@ fn active_tags_for_channel2(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    tag_rows: &[TagRow],
+    tag_rows: &[Arc<TagRow>],
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<ActiveTagForNudge> {
     let stored = active_tags_for_nudge(core, meta, projection, tag_rows, mutation_exempt_mid);
@@ -8606,7 +8622,7 @@ fn active_tags_for_channel2(
 struct Channel2DirectiveInput<'a> {
     core: &'a CoreState,
     projection: &'a FlatProjection,
-    tag_rows: &'a [TagRow],
+    tag_rows: &'a [Arc<TagRow>],
     baseline: Option<&'a TailHygieneBaseline>,
     mutation_exempt_mid: Option<&'a str>,
     protected_tags: usize,
@@ -9439,7 +9455,7 @@ fn inline_thinking_replacement(text: &str) -> String {
         .into_owned()
 }
 
-fn tag_number_by_message(tags: &[TagRow]) -> BTreeMap<String, u64> {
+fn tag_number_by_message(tags: &[Arc<TagRow>]) -> BTreeMap<String, u64> {
     let mut output = BTreeMap::new();
     for tag in tags {
         let message_id = tag
@@ -11804,14 +11820,14 @@ pub(crate) mod tests {
     };
 
     fn tag_baseline_test_entry() -> TagBaselineCacheEntry {
-        let tags = vec![TagRow {
+        let tags = vec![Arc::new(TagRow {
             tag_number: 1,
             block_id: "b1".to_string(),
             kind: "message".to_string(),
             token_count: 1,
             created_at_ms: 0,
             source_bytes: Vec::new(),
-        }];
+        })];
         // Charge through the production sizing function so the pinned budgets
         // track the real retention envelope.
         let retained_bytes = tag_baseline_retained_bytes(&tags);
@@ -11820,7 +11836,7 @@ pub(crate) mod tests {
             generation: 1,
             count: 1,
             max_tag_number: 1,
-            tags: Arc::new(tags),
+            tags: Arc::from(tags),
             retained_bytes,
         }
     }
@@ -11829,10 +11845,58 @@ pub(crate) mod tests {
     fn tag_baseline_cache_refuses_an_insert_larger_than_its_budget() {
         let entry = tag_baseline_test_entry();
         let mut cache = TagBaselineCache::new(entry.retained_bytes - 1);
-        cache.replace("s1", entry);
+        cache.replace("s1", entry.clone());
         assert!(cache.sessions.is_empty());
         assert_eq!(cache.retained_bytes, 0);
         assert!(cache.lru.is_empty());
+
+        let mut cache = TagBaselineCache::new(entry.retained_bytes + 32);
+        cache.replace("s1", entry.clone());
+        assert!(cache.snapshot("s1").is_some());
+        let mut row = entry.tags[0].as_ref().clone();
+        row.source_bytes.extend_from_slice(b"loaded");
+        row.source_bytes.reserve(cache.max_retained_bytes);
+        let loaded: Arc<[Arc<TagRow>]> = vec![Arc::new(row)].into();
+        let retained_bytes = tag_baseline_retained_bytes(&loaded);
+        assert!(retained_bytes > cache.max_retained_bytes);
+        cache.replace(
+            "s1",
+            TagBaselineCacheEntry {
+                generation: 2,
+                tags: Arc::clone(&loaded),
+                retained_bytes,
+                ..entry.clone()
+            },
+        );
+        assert!(cache.snapshot("s1").is_none());
+        assert_eq!(cache.retained_bytes, 0);
+        assert!(cache.lru.is_empty());
+        assert_eq!(loaded[0].source_bytes, b"loaded");
+        assert_eq!(loaded[0].tag_number, 1);
+        cache.replace("s1", entry.clone());
+        assert_eq!(cache.retained_bytes, entry.retained_bytes);
+        assert_eq!(cache.lru.len(), 1);
+    }
+
+    #[test]
+    fn tag_baseline_charge_counts_capacity_and_shared_row_headers() {
+        let mut row = tag_baseline_test_entry().tags[0].as_ref().clone();
+        row.block_id.reserve(128);
+        row.kind.reserve(64);
+        row.source_bytes.reserve(256);
+        let row = Arc::new(row);
+        let rows = [Arc::clone(&row), Arc::clone(&row)];
+        let header = 2 * std::mem::size_of::<usize>();
+        let row_bytes = std::mem::size_of::<Arc<TagRow>>()
+            + header
+            + std::mem::size_of::<TagRow>()
+            + row.block_id.capacity()
+            + row.kind.capacity()
+            + row.source_bytes.capacity()
+            + 64;
+        assert_eq!(tag_baseline_retained_bytes(&[]), header);
+        assert_eq!(tag_baseline_retained_bytes(&rows), header + 2 * row_bytes);
+        assert!(row.source_bytes.capacity() > row.source_bytes.len());
     }
 
     #[test]
@@ -21454,12 +21518,7 @@ pub(crate) mod tests {
         assert_eq!(all_work.inputs.len(), MESSAGE_COUNT);
 
         let existing_count = all_work.inputs.len() - NEW_TAG_COUNT;
-        let mut mature_rows = Vec::new();
-        append_tag_mint_rows(
-            &mut mature_rows,
-            all_work.inputs[..existing_count].to_vec(),
-            100,
-        );
+        let mature_rows = tag_mint_rows(&[], all_work.inputs[..existing_count].to_vec(), 100);
         let existing_ids = mature_rows
             .iter()
             .map(|row| row.block_id.as_str())
@@ -21486,9 +21545,9 @@ pub(crate) mod tests {
         );
 
         let mut legacy_rows = mature_rows.clone();
-        append_tag_mint_rows(&mut legacy_rows, legacy.inputs, 200);
+        legacy_rows.extend(tag_mint_rows(&legacy_rows, legacy.inputs, 200));
         let mut optimized_rows = mature_rows;
-        append_tag_mint_rows(&mut optimized_rows, optimized.inputs, 200);
+        optimized_rows.extend(tag_mint_rows(&optimized_rows, optimized.inputs, 200));
         assert_eq!(optimized_rows, legacy_rows);
 
         let meta = ModuleMeta::default();
@@ -22646,6 +22705,8 @@ pub(crate) mod tests {
 
         let refilled = load_cached_tags(&store, session).unwrap();
         assert_eq!(refilled[0].source_bytes, b"poisoned");
+        assert_eq!(cached[0].source_bytes, b"old");
+        assert!(!Arc::ptr_eq(&cached[0], &refilled[0]));
     }
 
     #[test]
@@ -22669,6 +22730,172 @@ pub(crate) mod tests {
         assert_eq!(a_second[0].source_bytes, b"A");
         assert_eq!(b[0].block_id, "b#0");
         assert_eq!(b[0].source_bytes, b"B");
+        assert!(Arc::ptr_eq(&a_first, &a_second));
+
+        store
+            .execute_tag_sql_for_test(
+                "INSERT INTO tags
+                    (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
+                 VALUES ('tag-cache-a', 2, 'c#0', 'message', 1, 2, X'43')",
+            )
+            .unwrap();
+        let appended = load_cached_tags(&store, "tag-cache-a").unwrap();
+        assert_eq!(appended.len(), 2);
+        assert_eq!(appended[1].source_bytes, b"C");
+        assert_eq!(a_first.len(), 1);
+        assert_eq!(appended[0].source_bytes, a_first[0].source_bytes);
+        assert!(Arc::ptr_eq(&appended[0], &a_first[0]));
+        assert_eq!(
+            appended[0].source_bytes.as_ptr(),
+            a_first[0].source_bytes.as_ptr(),
+            "committed append must share the baseline source allocation"
+        );
+        assert!(Arc::ptr_eq(
+            &b,
+            &load_cached_tags(&store, "tag-cache-b").unwrap()
+        ));
+    }
+
+    #[test]
+    fn tag_mint_tail_and_hygiene_share_baseline_rows() {
+        let request = active_cc_req(
+            "tag-mint-sharing",
+            "cfg0",
+            vec![item("m1", 1, "  α baseline\n"), item("m2", 2, "minted β\n")],
+        );
+        let projection = project_messages(&request.messages).unwrap();
+        let mut work = tag_mint_inputs(&projection, &CoreState::empty(), None, &HashSet::new());
+        let tail = work.inputs.split_off(1);
+        let baseline: Arc<[Arc<TagRow>]> = tag_mint_rows(&[], work.inputs, 10).into();
+        let minted = tag_mint_rows(&baseline, tail, 20);
+        let combined: Arc<[Arc<TagRow>]> = baseline.iter().chain(&minted).cloned().collect();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(combined.len(), 2);
+        assert_eq!(combined[1].tag_number, 2);
+        assert_eq!(combined[1].source_bytes, b"minted \xce\xb2\n");
+        assert_eq!(
+            combined[0].source_bytes.as_ptr(),
+            baseline[0].source_bytes.as_ptr()
+        );
+        assert!(Arc::ptr_eq(&combined[0], &baseline[0]));
+        assert!(Arc::ptr_eq(&combined[1], &minted[0]));
+        let overlay = tag_overlay_state(&combined, &[], &[], &[], &BTreeSet::new());
+        assert_eq!(overlay.tag_by_block_id["m2#0"], 2);
+        let hygiene = tag_rows_for_hygiene(&projection, &combined, &overlay, false);
+        assert_eq!(hygiene.len(), 2);
+        for (observed, original) in hygiene.iter().zip(combined.iter()) {
+            assert_eq!(observed.source_bytes, original.source_bytes);
+            assert_eq!(
+                observed.source_bytes.as_ptr(),
+                original.source_bytes.as_ptr()
+            );
+            assert!(Arc::ptr_eq(observed, original));
+        }
+    }
+
+    #[test]
+    fn failed_tag_mint_commit_preserves_baseline_and_rolls_back_store() {
+        run_active_surface_test(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(store(dir.path()));
+            let session = "tag-baseline-failed-mint";
+            let first = active_cc_req(session, "cfg0", vec![item("m1", 1, "  α source\n")]);
+            run(&store, &first, &spine());
+            run(&store, &first, &spine());
+            let baseline = load_cached_tags(&store, session).unwrap();
+            let baseline_content = baseline
+                .iter()
+                .map(|row| row.as_ref().clone())
+                .collect::<Vec<_>>();
+            let durable = store.load(session).unwrap();
+            let summary = store.tag_cache_summary(session).unwrap();
+            let durable_tags = store.load_tags_for_session(session).unwrap();
+            let temporal = store.load_temporal_marks(session).unwrap();
+            let extended = active_cc_req(
+                session,
+                "cfg0",
+                vec![
+                    item("m1", 1, "  α source\n"),
+                    item("m2", 2, "second source"),
+                    item("m3", 3, "third source"),
+                ],
+            );
+            let hook_store = Arc::clone(&store);
+            let hook_baseline = Arc::clone(&baseline);
+            install_transform_attempt_hook(session, move || {
+                let cached = tag_baseline_cache()
+                    .lock()
+                    .unwrap()
+                    .snapshot(session)
+                    .unwrap();
+                assert!(Arc::ptr_eq(&cached.tags, &hook_baseline));
+                assert_eq!(cached.count, 1);
+                // Failing the second insert rolls back the first mint and cache-state write.
+                hook_store
+                    .execute_tag_sql_for_test(
+                        "CREATE TEMP TRIGGER refuse_tag_mint BEFORE INSERT ON tags
+                     WHEN NEW.session_id = 'tag-baseline-failed-mint' AND NEW.block_id = 'm3#0'
+                     BEGIN SELECT RAISE(ABORT, 'injected tag mint failure'); END;",
+                    )
+                    .unwrap();
+            });
+            let error = transform(&store, &extended, &pctx("git:proj", "/nonexistent-docs", 0))
+                .unwrap_err();
+            assert!(matches!(error, TransformError::Store(_)), "{error:?}");
+            assert!(error.to_string().contains("injected tag mint failure"));
+            let cached = tag_baseline_cache()
+                .lock()
+                .unwrap()
+                .snapshot(session)
+                .unwrap();
+            assert!(Arc::ptr_eq(&cached.tags, &baseline));
+            assert!(Arc::ptr_eq(&cached.tags[0], &baseline[0]));
+            assert!(cached.tags.iter().map(Arc::as_ref).eq(&baseline_content));
+            assert!(cached.matches(store.tag_cache_namespace(), summary));
+            assert_eq!(cached.tags.len(), 1);
+            let after = store.load(session).unwrap();
+            assert_eq!(after.row_version, durable.row_version);
+            assert_eq!(after.core, durable.core);
+            assert_eq!(after.meta, durable.meta);
+            assert_eq!(store.tag_cache_summary(session).unwrap(), summary);
+            assert_eq!(store.load_tags_for_session(session).unwrap(), durable_tags);
+            assert_eq!(store.load_temporal_marks(session).unwrap(), temporal);
+            store
+                .execute_tag_sql_for_test("DROP TRIGGER refuse_tag_mint")
+                .unwrap();
+            let response = run(&store, &extended, &spine());
+            assert_eq!(tail_bytes(&response, "m2"), "§2§ second source");
+            assert_eq!(tail_bytes(&response, "m3"), "§3§ third source");
+            let cached = tag_baseline_cache()
+                .lock()
+                .unwrap()
+                .snapshot(session)
+                .unwrap();
+            assert!(Arc::ptr_eq(&cached.tags, &baseline));
+            assert_eq!(
+                cached.tags.len(),
+                1,
+                "commit does not publish pass-local rows"
+            );
+            let refilled = load_cached_tags(&store, session).unwrap();
+            assert_eq!(refilled.len(), 3);
+            assert!(Arc::ptr_eq(&refilled[0], &baseline[0]));
+            assert_eq!(
+                refilled
+                    .iter()
+                    .map(|row| (
+                        row.tag_number,
+                        row.block_id.as_str(),
+                        row.source_bytes.as_slice(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (1, "m1#0", "  α source\n".as_bytes()),
+                    (2, "m2#0", "second source".as_bytes()),
+                    (3, "m3#0", "third source".as_bytes()),
+                ]
+            );
+        });
     }
 
     #[test]
@@ -23535,16 +23762,17 @@ pub(crate) mod tests {
     fn newest_tag_block_set_isolates_protected_and_applied_pending_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        // The protected set is the newest 20 ACTIVE tags as exact block ids.
+        // Bootstrap protection uses the newest 20 active stored tags as exact block ids.
         // m23#0 has stale provenance, and ghost rows 26–28 are absent from the array.
         // Numeric thresholds based on the active or global maximum select the wrong rows.
         // Ordinal 24 carries two tagged blocks, so counting one block per ordinal shifts the boundary by one.
-        // The 24 active rows have numbers {1..22, 24, 25}; the newest 20 have numbers {5..22, 24, 25}.
+        // The 24 active stored rows have numbers {1..22, 24, 25}; the newest 20 have numbers {5..22, 24, 25}.
         // Number 5 is rank 20 and protected; number 4 is rank 21 and applied.
         let mut messages = (1..=24)
             .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
             .collect::<Vec<_>>();
         messages[23] = two_block_item("m24", 24, "text 24", "attachment 24");
+        messages.push(item("m25", 25, "minted tail"));
 
         let mut tags = (1..=24)
             .map(|ordinal| TagMintInput {
@@ -23590,6 +23818,8 @@ pub(crate) mod tests {
             &spine(),
         );
         assert_eq!(response.action, "HARD");
+        assert_eq!(response.timings.as_ref().unwrap().tag_mint_new, 1);
+        assert_eq!(tail_bytes(&response, "m25"), "§29§ minted tail");
         let loaded = store.load("protected").unwrap();
         // Rank 21 (number 4) is just outside the protected set: applied.
         assert_eq!(frozen_red_payload(&loaded.core, "m4#0"), Some("[dropped]"));
@@ -24893,14 +25123,14 @@ pub(crate) mod tests {
             .iter()
             .filter(|block| !block.synthetic)
             .collect::<Vec<_>>();
-        let tags = vec![TagRow {
+        let tags = vec![Arc::new(TagRow {
             tag_number: 1,
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
             token_count: 10,
             created_at_ms: 0,
             source_bytes: source.as_bytes().to_vec(),
-        }];
+        })];
         let no_units =
             new_caveman_units(&CoreState::empty(), &request, &tags, &live, None, false, 1);
         assert!(no_units.is_empty(), "defer must not mint a cav unit");
@@ -25091,14 +25321,14 @@ pub(crate) mod tests {
             frozen_units: vec![old],
             ..CoreState::empty()
         };
-        let tags = vec![TagRow {
+        let tags = vec![Arc::new(TagRow {
             tag_number: 1,
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
             token_count: 10,
             created_at_ms: 0,
             source_bytes: source.as_bytes().to_vec(),
-        }];
+        })];
         let units = new_caveman_units(&core, &request, &tags, &live, None, true, 1);
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].reset_rule, "3");
@@ -25122,14 +25352,14 @@ pub(crate) mod tests {
             .iter()
             .filter(|block| !block.synthetic)
             .collect::<Vec<_>>();
-        let tag = TagRow {
+        let tag = Arc::new(TagRow {
             tag_number: 1,
             block_id: "m1#0".to_string(),
             kind: "message".to_string(),
             token_count: 10,
             created_at_ms: 0,
             source_bytes: source.as_bytes().to_vec(),
-        };
+        });
         assert!(
             new_caveman_units(
                 &CoreState::empty(),
@@ -28161,12 +28391,8 @@ pub(crate) mod tests {
 
         let all_tag_work = tag_mint_inputs(&projection, &core, None, &HashSet::new());
         let existing_tag_count = all_tag_work.inputs.len() - NEW_TAG_COUNT;
-        let mut mature_tag_rows = Vec::new();
-        append_tag_mint_rows(
-            &mut mature_tag_rows,
-            all_tag_work.inputs[..existing_tag_count].to_vec(),
-            100,
-        );
+        let mature_tag_rows =
+            tag_mint_rows(&[], all_tag_work.inputs[..existing_tag_count].to_vec(), 100);
         let existing_tag_ids = mature_tag_rows
             .iter()
             .map(|row| row.block_id.as_str())
@@ -28180,13 +28406,13 @@ pub(crate) mod tests {
         assert_eq!(optimized_tag_work.inputs, legacy_tag_work.inputs);
         assert_eq!(optimized_tag_work.inputs.len(), NEW_TAG_COUNT);
         let mut legacy_tag_rows = mature_tag_rows.clone();
-        append_tag_mint_rows(&mut legacy_tag_rows, legacy_tag_work.inputs, 200);
+        legacy_tag_rows.extend(tag_mint_rows(&legacy_tag_rows, legacy_tag_work.inputs, 200));
         let mut optimized_tag_rows = mature_tag_rows;
-        append_tag_mint_rows(
-            &mut optimized_tag_rows,
+        optimized_tag_rows.extend(tag_mint_rows(
+            &optimized_tag_rows,
             optimized_tag_work.inputs.clone(),
             200,
-        );
+        ));
         assert_eq!(optimized_tag_rows, legacy_tag_rows);
         eprintln!(
             "tag-mint-work before_ms={legacy_tag_ms:.1} after_ms={optimized_tag_ms:.1} \
