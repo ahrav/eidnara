@@ -86,8 +86,8 @@ raw-row provider, and foreign-owner stat are controlled seams.
 | [W6][w6] | A `Local` zone with DST; unsatisfiable and once-satisfiable expressions; `i64` extremes. | The minute stepper's `Option<i64>`. |
 | [W7][w7] | Tier rewrites with later mtimes; an override edit; two bound project roots. | A fresh merge of the current file contents. |
 | [W8][w8] | A committing pass with a pinned guidance date; an abort in the window (W11); a second pass. | The next pass's `ProducerContext` inputs and the projection cache read directly. |
-| [W9][w9] | SOFT passes at update counts 40 and 41, at the 0.20 budget boundary, and at m0 499 and 500 with the 0.15 ratio boundary; a placeholder m1; no m0 unit. | Direct token counts on the frozen m0 and composed m1 recorded before the candidate runs. |
-| [W10][w10] | More than 40 updates; an m1 over a fifth of a small budget; an m0 of at least 500 tokens with an m1 over 15 percent of it; a pass below all three. | The three inputs measured independently per pass. |
+| [W9][w9] | SOFT passes at the 0.20 budget boundary and at m0 499/500 with the 0.15 ratio boundary; a placeholder m1; no m0 unit at the predicate seam. | Frozen direct-tokenizer reference and injected spy. The dead update-count disjunct is removed by owner decision. |
+| [W10][w10] | An m1 over a fifth of a small budget; an m0 of at least 500 tokens with an m1 over 15 percent of it; neither condition. | Direct counts recorded before the candidate; three constant witnesses. The update-count witness is retired, not covered. |
 | [W11][w11] | The interleave hook or its relocation-era equivalent triggering an abort. | Commit through `row_version` and abort ordering observed separately. |
 | [W12][w12] | A sentinel-bearing panic inside a `kernel_routes::blocking` closure or the relocated transform, in a child process; the same panic on the runtime worker as the control. | The child's stderr bytes and the terminal frame, read by the parent process. |
 | [W13][w13] | A `ScriptedHost` project with a valid cron in `MODULE` authority and a `ManualClock` advanced past the instant; or a user tier with `dreamer_review_user_memories_schedule` set and a bound `MODULE` route. | The project, schedule, `now_ms`, and finite instant recorded at the `next_due` call. |
@@ -95,8 +95,9 @@ raw-row provider, and foreign-owner stat are controlled seams.
 ## Coverage checks to add
 
 A3, B5, C5, C6, G3, P5, T4, W1, W10, W11, and W13 use their slugs as
-constant, globally unique marker names. W10 uses four constant markers
-suffixed `-updates`, `-budget-share`, `-m0-ratio`, and `-below`; C6 uses
+constant, globally unique marker names. W10 uses three constant markers
+suffixed `-budget-share`, `-m0-ratio`, and `-below`; its `-updates` marker is
+retired with the dead disjunct, as recorded in the evidence. C6 uses
 three suffixed `-event`, `-primer`, and `-user-observation`; G3 uses five
 suffixed `-cleanup`, `-recovery`, `-reclaim`, `-purge`, and `-retry`; W1
 uses one per stage the specification enumerates. All are named in full in
@@ -202,7 +203,7 @@ in the records' open questions.
 [b3]: catalog.md#tag-baseline-cache-entry-is-never-mutated-by-a-pass
 [b4]: catalog.md#hygiene-digest-is-kind-prefixed-part-content
 [b5]: catalog.md#replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [c1]: catalog.md#consolidated-cache-state-reads-match-per-consumer-loads
 [c2]: catalog.md#pass-trace-writes-count-every-pass-outside-the-cache-cas
 [c3]: catalog.md#side-channel-drain-delivers-each-row-once-and-keeps-its-schedule

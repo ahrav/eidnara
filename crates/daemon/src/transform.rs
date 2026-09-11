@@ -1760,12 +1760,6 @@ fn compose_m0_for_context(
 
 /// The CAS retry reloads and reclassifies because classification depends on freshly loaded state.
 ///
-/// The real Claude token estimator ([`tokenizer::estimate_tokens`]) is injected into
-/// the m0 compose and the legacy publication-floor backfill. Both are reached ONLY on the
-/// Hard/MigrateHard arm — never SOFT, defer, m1 compose, or the tail splice — so it can
-/// only change bytes during an intentional HARD rematerialization; determinism (the same
-/// text always counts identically, via the vendored+pinned vocab) is what preserves
-/// byte-identical replay between HARDs.
 /// Test entry point; production enters the pipeline only through
 /// `transform_with_projection_cached`.
 #[cfg(test)]
@@ -1854,9 +1848,6 @@ fn pass_scheduler_observation(
     }
 }
 
-/// The retry wrapper around [`apply_once`], parameterized by the token estimator so tests
-/// can inject a panicking/counting one to prove the estimator is HARD-only (never called
-/// on SOFT/defer). Production always passes [`crate::token_cache::cached_estimate_tokens`].
 #[cfg(test)]
 fn apply_once_with_estimator(
     store: &MemoryStore,
@@ -4336,25 +4327,12 @@ fn apply_once(
                     crate::token_cache::cached_estimate_tokens,
                 )?;
                 note_deliveries = m1.note_deliveries.clone();
-                let m0_tokens = core
-                    .frozen_units
-                    .iter()
-                    .find(|unit| unit.key == "m0")
-                    .map(|unit| tokenizer::estimate_tokens(&unit.frozen_payload))
-                    .unwrap_or(0);
-                let m1_has_content = m1.body != M1_PLACEHOLDER;
-                let m1_tokens = if m1_has_content {
-                    tokenizer::estimate_tokens(&m1.body)
-                } else {
-                    0
-                };
-                let pressure_refold = m1.memory_update_count > 40
-                    || (m1_has_content
-                        && m1_tokens as f64 > (ctx.history_budget_tokens * 0.20)
-                        && ctx.history_budget_tokens > 0.0)
-                    || (m1_has_content
-                        && m0_tokens >= 500
-                        && m1_tokens as f64 > m0_tokens as f64 * 0.15);
+                let pressure_refold = soft_pressure_refold(
+                    &core.frozen_units,
+                    &m1.body,
+                    ctx.history_budget_tokens,
+                    estimate_tokens,
+                );
                 if pressure_refold {
                     let compartments_for_fold = store.load_compartments(&req.session_id)?;
                     let coverage_bounds =
@@ -4563,7 +4541,7 @@ fn apply_once(
                         Some(&mut m1_revision_read_timings),
                         ctx,
                     )?;
-                    if m1_has_content || memory_gate_digest_transition {
+                    if m1.body != M1_PLACEHOLDER || memory_gate_digest_transition {
                         meta.m1_revision = applied_m1_signal.revision;
                     }
                     meta.m1_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
@@ -6334,6 +6312,25 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
     }
 }
 
+fn soft_pressure_refold(
+    frozen_units: &[FrozenUnit],
+    m1_body: &str,
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> bool {
+    let m0_tokens = frozen_units
+        .iter()
+        .find(|unit| unit.key == "m0")
+        .map(|unit| estimate_tokens(&unit.frozen_payload))
+        .unwrap_or(0);
+    if m1_body == M1_PLACEHOLDER {
+        return false;
+    }
+    let m1_tokens = estimate_tokens(m1_body);
+    (m1_tokens as f64 > (history_budget_tokens * 0.20) && history_budget_tokens > 0.0)
+        || (m0_tokens >= 500 && m1_tokens as f64 > m0_tokens as f64 * 0.15)
+}
+
 fn render_m1_placeholder() -> FrozenUnit {
     synth_region("m1", M1_PLACEHOLDER.to_string())
 }
@@ -6352,11 +6349,14 @@ fn synth_region(key: &str, payload: String) -> FrozenUnit {
     }
 }
 
-fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usize>) -> SelItem {
+fn sel_item_from_flat<'a>(
+    block: &'a FlatBlock,
+    tag_tokens_by_block: &HashMap<&str, usize>,
+) -> SelItem<'a> {
     let kind = match block.wire.kind() {
         wire::BlockKind::ToolCall { name, input, .. } => SelKind::ToolCall {
             name: name.clone(),
-            input: input.clone(),
+            input: Cow::Borrowed(input),
         },
         wire::BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
             tool_name: tool_name.clone(),
@@ -6383,11 +6383,11 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
     }
 }
 
-fn tail_sel_items(
-    live: &[&FlatBlock],
+fn tail_sel_items<'a>(
+    live: &[&'a FlatBlock],
     coverage: Option<u64>,
     tag_tokens_by_block: &HashMap<&str, usize>,
-) -> Vec<SelItem> {
+) -> Vec<SelItem<'a>> {
     live.iter()
         .filter(|block| is_tail(block.ordinal(), coverage))
         .map(|block| sel_item_from_flat(block, tag_tokens_by_block))
@@ -7196,7 +7196,7 @@ fn tag_mint_inputs_from(
         work.inputs.push(TagMintInput {
             block_id: block.id.clone(),
             kind: kind.as_store_kind().to_string(),
-            token_count: tokenizer::estimate_tokens(source) as i64,
+            token_count: crate::token_cache::cached_estimate_tokens(source) as i64,
             source_bytes: source.as_bytes().to_vec(),
         });
     }
@@ -8595,7 +8595,7 @@ fn active_tags_for_channel2(
         derived.push(ActiveTagForNudge {
             tag_number: next_tag,
             kind: kind.as_store_kind().to_string(),
-            token_count: tokenizer::estimate_tokens(source) as i64,
+            token_count: crate::token_cache::cached_estimate_tokens(source) as i64,
         });
         next_tag = next_tag.saturating_add(1);
     }
@@ -21435,7 +21435,12 @@ pub(crate) mod tests {
             .map(|row| row.block_id.as_str())
             .collect::<HashSet<_>>();
         let legacy = legacy_tag_mint_inputs(&projection, &core, None, &existing_ids);
+        let before = crate::token_cache::local_stats();
         let optimized = tag_mint_inputs(&projection, &core, None, &existing_ids);
+        assert_eq!(
+            crate::token_cache::local_stats().calls - before.calls,
+            NEW_TAG_COUNT as u64
+        );
 
         assert_eq!(optimized.inputs, legacy.inputs);
         assert_eq!(optimized.candidate_count, legacy.candidate_count);
@@ -21455,6 +21460,34 @@ pub(crate) mod tests {
         let mut optimized_rows = mature_rows;
         append_tag_mint_rows(&mut optimized_rows, optimized.inputs, 200);
         assert_eq!(optimized_rows, legacy_rows);
+
+        let meta = ModuleMeta::default();
+        let before = crate::token_cache::local_stats();
+        let stored = active_tags_for_channel2(&core, &meta, &projection, &optimized_rows, None);
+        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
+        let derived = active_tags_for_channel2(&core, &meta, &projection, &[], None);
+        assert_eq!(
+            crate::token_cache::local_stats().calls - before.calls,
+            MESSAGE_COUNT as u64
+        );
+        assert_eq!(stored.len(), derived.len());
+        for (stored, derived) in stored.iter().zip(&derived) {
+            assert_eq!(
+                (stored.tag_number, &stored.kind, stored.token_count),
+                (derived.tag_number, &derived.kind, derived.token_count)
+            );
+        }
+        let existing_ids = optimized_rows
+            .iter()
+            .map(|row| row.block_id.as_str())
+            .collect();
+        let before = crate::token_cache::local_stats();
+        assert!(
+            tag_mint_inputs(&projection, &core, None, &existing_ids)
+                .inputs
+                .is_empty()
+        );
+        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
     }
 
     #[test]
@@ -24228,16 +24261,303 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn protected_floor_has_no_global_estimator_bypass() {
+    fn production_transform_module_has_no_global_estimator_bypass() {
         let source = include_str!("transform.rs");
-        let helper = source
-            .split_once("fn protected_tail_floor_ordinal(")
-            .and_then(|(_, rest)| rest.split_once("fn post_end_revision_inputs_moved"))
-            .map(|(body, _)| body)
-            .expect("protected-tail floor helper source");
+        let (production, _) = source
+            .split_once("\npub(crate) mod tests {")
+            .expect("test module");
+        for required in [
+            "PassPlan::Soft =>",
+            "fn soft_pressure_refold(",
+            "fn cached_or_serialize_output(",
+            "fn tag_mint_inputs_from(",
+            "fn active_tags_for_channel2(",
+        ] {
+            assert!(
+                production.contains(required),
+                "source scan must cover {required}"
+            );
+        }
+        let bypasses = production
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim_start().starts_with("//"))
+            .filter(|(_, line)| line.contains("tokenizer::"))
+            .collect::<Vec<_>>();
         assert!(
-            !helper.contains("tokenizer::estimate_tokens("),
-            "the floor helper must use the injected estimator interface"
+            bypasses.is_empty(),
+            "production transform module must use the injected or cached estimator: {bypasses:?}"
+        );
+    }
+
+    fn frozen_soft_pressure_refold(
+        core: &CoreState,
+        m1: &crate::m1_compose::M1Composition,
+        history_budget_tokens: f64,
+    ) -> bool {
+        let m0_tokens = core
+            .frozen_units
+            .iter()
+            .find(|unit| unit.key == "m0")
+            .map(|unit| tokenizer::estimate_tokens(&unit.frozen_payload))
+            .unwrap_or(0);
+        let m1_has_content = m1.body != M1_PLACEHOLDER;
+        let m1_tokens = if m1_has_content {
+            tokenizer::estimate_tokens(&m1.body)
+        } else {
+            0
+        };
+        m1.memory_update_count > 40
+            || (m1_has_content
+                && m1_tokens as f64 > (history_budget_tokens * 0.20)
+                && history_budget_tokens > 0.0)
+            || (m1_has_content && m0_tokens >= 500 && m1_tokens as f64 > m0_tokens as f64 * 0.15)
+    }
+
+    #[test]
+    fn soft_pressure_classification_matches_frozen_thresholds() {
+        let summaries = {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            bootstrap_covering_a(&s);
+            let meta = s.load("ses").unwrap().meta;
+            [74, 75, 76].map(|target| {
+                let n = (0..100)
+                    .find(|&n| {
+                        s.replace_compartments(
+                            "ses",
+                            &[
+                                comp(1, 1, 1, "a", "SUMMARY"),
+                                comp(2, 2, 2, "b", &" x".repeat(n)),
+                            ],
+                        )
+                        .unwrap();
+                        let m1 = compose_m1(
+                            &s,
+                            "git:proj",
+                            "ses",
+                            &meta,
+                            0,
+                            true,
+                            10_000.0,
+                            true,
+                            tokenizer::estimate_tokens,
+                        )
+                        .unwrap();
+                        tokenizer::estimate_tokens(&m1.body) == target
+                    })
+                    .expect("construct exact composed m1 token count");
+                (target, " x".repeat(n))
+            })
+        };
+        let mut witnessed = [false; 3];
+        for m0_tokens in [499, 500] {
+            for (target_m1_tokens, summary) in &summaries {
+                let target_m1_tokens = *target_m1_tokens;
+                for budget in [0.0, -1.0, 365.0, 370.0, 375.0, 380.0, 385.0, 100_000.0] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let s = store(dir.path());
+                    bootstrap_covering_a(&s);
+                    let mut loaded = s.load("ses").unwrap();
+                    let m0 = loaded
+                        .core
+                        .frozen_units
+                        .iter_mut()
+                        .find(|u| u.key == "m0")
+                        .unwrap();
+                    m0.frozen_payload = " x".repeat(m0_tokens);
+                    assert_eq!(tokenizer::estimate_tokens(&m0.frozen_payload), m0_tokens);
+                    s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                        .unwrap();
+                    s.replace_compartments(
+                        "ses",
+                        &[comp(1, 1, 1, "a", "SUMMARY"), comp(2, 2, 2, "b", summary)],
+                    )
+                    .unwrap();
+                    let m1 = compose_m1(
+                        &s,
+                        "git:proj",
+                        "ses",
+                        &loaded.meta,
+                        0,
+                        true,
+                        10_000.0,
+                        true,
+                        tokenizer::estimate_tokens,
+                    )
+                    .unwrap();
+                    assert_eq!(tokenizer::estimate_tokens(&m1.body), target_m1_tokens);
+                    assert_eq!(m1.memory_update_count, 0);
+                    let expected = frozen_soft_pressure_refold(&loaded.core, &m1, budget);
+                    let budget_pressure = budget > 0.0 && target_m1_tokens as f64 > budget * 0.20;
+                    let ratio_pressure =
+                        m0_tokens >= 500 && target_m1_tokens as f64 > m0_tokens as f64 * 0.15;
+                    witnessed[0] |= budget_pressure && !ratio_pressure;
+                    witnessed[1] |= ratio_pressure && !budget_pressure;
+                    witnessed[2] |= !budget_pressure && !ratio_pressure;
+                    s.arm_soft_refresh("ses").unwrap();
+                    let mut context = pctx("git:proj", "/nonexistent-docs", 0);
+                    context.history_budget_tokens = budget;
+                    let request = req(
+                        "ses",
+                        "cfg0",
+                        vec![
+                            item("a", 1, "raw"),
+                            item("b", 2, "new"),
+                            item("c", 3, "tail"),
+                        ],
+                    );
+                    let observed = std::cell::RefCell::new(Vec::new());
+                    let estimate = |text: &str| {
+                        observed.borrow_mut().push(text.to_string());
+                        let cached = crate::token_cache::cached_estimate_tokens(text);
+                        assert_eq!(cached, tokenizer::estimate_tokens(text));
+                        cached
+                    };
+                    let result = apply_once_with_estimator(&s, &request, &context, estimate, None)
+                        .unwrap()
+                        .response;
+                    let observed = observed.borrow();
+                    assert!(
+                        observed.contains(&" x".repeat(m0_tokens)),
+                        "SOFT measures frozen m0 through injection"
+                    );
+                    assert!(
+                        observed.contains(&m1.body),
+                        "SOFT measures composed m1 through injection"
+                    );
+                    assert_eq!(result.action, if expected { "HARD" } else { "SOFT" });
+                    assert_eq!(
+                        result.materialize_reason.as_deref() == Some("pressure_refold"),
+                        expected,
+                        "m0={m0_tokens}, m1={target_m1_tokens}, budget={budget}"
+                    );
+                }
+            }
+        }
+        assert!(
+            witnessed[0],
+            "soft-pressure-refold-thresholds-are-each-crossed-budget-share"
+        );
+        assert!(
+            witnessed[1],
+            "soft-pressure-refold-thresholds-are-each-crossed-m0-ratio"
+        );
+        assert!(
+            witnessed[2],
+            "soft-pressure-refold-thresholds-are-each-crossed-below"
+        );
+    }
+
+    #[test]
+    fn soft_pressure_absence_and_placeholder_preserve_estimator_gates() {
+        let _guard = crate::token_cache::test_cache_guard();
+        for has_m0 in [false, true] {
+            for body in [
+                M1_PLACEHOLDER,
+                "",
+                " x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x",
+            ] {
+                let mut core = CoreState::empty();
+                if has_m0 {
+                    core.frozen_units.push(synth_region("m0", " x".repeat(500)));
+                }
+                let m1 = crate::m1_compose::M1Composition {
+                    body: body.to_string(),
+                    memory_update_count: 0,
+                    new_coverage: None,
+                    note_deliveries: Vec::new(),
+                    profile_rendered: false,
+                    notes_block: String::new(),
+                };
+                let observed = std::cell::RefCell::new(Vec::new());
+                let estimate = |text: &str| {
+                    observed.borrow_mut().push(text.to_string());
+                    crate::token_cache::cached_estimate_tokens(text)
+                };
+                for budget in [0.0, -1.0, 1.0, 100_000.0] {
+                    observed.borrow_mut().clear();
+                    let before = crate::token_cache::local_stats();
+                    let actual = soft_pressure_refold(&core.frozen_units, body, budget, estimate);
+                    let after = crate::token_cache::local_stats();
+                    assert_eq!(actual, frozen_soft_pressure_refold(&core, &m1, budget));
+                    let expected_calls = usize::from(has_m0) + usize::from(body != M1_PLACEHOLDER);
+                    assert_eq!(observed.borrow().len(), expected_calls);
+                    assert_eq!(after.calls - before.calls, expected_calls as u64);
+                    assert!(!observed.borrow().iter().any(|text| text == M1_PLACEHOLDER));
+                    if has_m0 {
+                        assert_eq!(observed.borrow()[0], core.frozen_units[0].frozen_payload);
+                    }
+                    if body != M1_PLACEHOLDER {
+                        assert_eq!(observed.borrow().last().map(String::as_str), Some(body));
+                    }
+                }
+            }
+        }
+        let core = vec![synth_region("m0", " x".repeat(500))];
+        let body = " y".repeat(76);
+        soft_pressure_refold(
+            &core,
+            &body,
+            100_000.0,
+            crate::token_cache::cached_estimate_tokens,
+        );
+        let before = crate::token_cache::local_stats();
+        assert!(soft_pressure_refold(
+            &core,
+            &body,
+            100_000.0,
+            crate::token_cache::cached_estimate_tokens
+        ));
+        let after = crate::token_cache::local_stats();
+        assert_eq!(after.hits - before.hits, 2);
+    }
+
+    #[test]
+    fn selection_input_shares_projected_wire_value() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../testdata/selection-golden.json")).unwrap();
+        let calls = cases
+            .iter()
+            .flat_map(|case| case["items"].as_array().unwrap())
+            .filter_map(|item| item["kind"].get("ToolCall"));
+        let mut checked = 0;
+        for call in calls {
+            let mut message = assistant_tool_call("call", 1, "call-id");
+            *message.ck.content_mut()[0].kind_mut() = wire::BlockKind::ToolCall {
+                id: "call-id".to_string(),
+                name: call["name"].as_str().unwrap().to_string(),
+                input: call["input"].clone(),
+                provider_executed: false,
+            };
+            let projection = project_messages(&[message]).unwrap();
+            let flat = &projection.blocks[0];
+            let wire::BlockKind::ToolCall {
+                input: original, ..
+            } = flat.wire.kind()
+            else {
+                panic!("tool call")
+            };
+            assert_eq!(original, &call["input"]);
+            assert_eq!(flat.tool_input.as_deref(), Some(original));
+            let item = sel_item_from_flat(flat, &HashMap::new());
+            let cloned = item.clone();
+            let boundary = crate::sel_kind_for_flat(flat);
+            for kind in [&item.kind, &cloned.kind, &boundary] {
+                let SelKind::ToolCall { input, .. } = kind else {
+                    panic!("selection tool call")
+                };
+                assert_eq!(input.as_ref(), original);
+                assert!(
+                    std::ptr::eq(input.as_ref(), original),
+                    "selection must borrow the projected wire input"
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 48,
+            "every tool call in the frozen corpus is checked"
         );
     }
     fn profile_req(
@@ -27488,6 +27808,7 @@ pub(crate) mod tests {
                 if mode == "fresh" {
                     assert!(!s.load_tags_for_session("ses").unwrap().is_empty());
                 }
+                let boundary_observation = format!("{:?}", boundary.messages);
                 observations.push((
                     served,
                     fingerprints,
@@ -27495,7 +27816,7 @@ pub(crate) mod tests {
                     serde_json::to_vec(&result.response.native_messages).unwrap(),
                     s.load_tags_for_session("ses").unwrap(),
                     firing_input,
-                    format!("{:?}", boundary.messages),
+                    boundary_observation,
                 ));
             }
             assert_eq!(observations[0], observations[1], "{mode}");
@@ -27918,6 +28239,7 @@ pub(crate) mod tests {
     #[test]
     fn serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes() {
         let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
+        let before = crate::token_cache::local_stats();
         let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
         let snapshot = SerializedOutputCacheSnapshot {
             entries: first.cache_entries.clone(),
@@ -27932,6 +28254,7 @@ pub(crate) mod tests {
             false,
         );
         let fresh = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
 
         assert_eq!(replay.cache_stats.serialized_items, 0);
         assert_eq!(replay.cache_stats.reused_items, 4);

@@ -104,8 +104,8 @@ fn text_block(
     ordinal: u64,
     text: String,
     arc_id: Option<String>,
-    kind: SelKind,
-) -> BoundaryBlock {
+    kind: SelKind<'_>,
+) -> BoundaryBlock<'_> {
     let token_count = estimate_tokens(&text);
     BoundaryBlock {
         id,
@@ -121,7 +121,7 @@ fn text_block(
     }
 }
 
-fn arc_storm(arcs: usize) -> Vec<BoundaryMsg> {
+fn arc_storm(arcs: usize) -> Vec<BoundaryMsg<'static>> {
     let mut messages = Vec::with_capacity(arcs * 2 + arcs / 8 + 2);
     let mut ordinal: u64 = 1;
     messages.push(BoundaryMsg {
@@ -168,7 +168,9 @@ fn arc_storm(arcs: usize) -> Vec<BoundaryMsg> {
         let call_text = format!("{{\"filePath\":\"src/file_{path_bucket}.rs\"}}");
         let call_kind = || SelKind::ToolCall {
             name: tool.to_string(),
-            input: serde_json::json!({"filePath": format!("src/file_{path_bucket}.rs")}),
+            input: std::borrow::Cow::Owned(
+                serde_json::json!({"filePath": format!("src/file_{path_bucket}.rs")}),
+            ),
         };
         let mut call_blocks = vec![text_block(
             format!("m-call-{i}#0"),
@@ -287,7 +289,7 @@ fn bench_boundary(c: &mut Criterion) {
     group.finish();
 }
 
-fn selection_items(messages: &[BoundaryMsg]) -> Vec<SelItem> {
+fn selection_items<'a>(messages: &[BoundaryMsg<'a>]) -> Vec<SelItem<'a>> {
     messages
         .iter()
         .flat_map(|message| {

@@ -117,6 +117,24 @@ declared sum, measures contention, or scans the whole `apply_once` body.
   decision.
 - Conclusion: unresolved, needs `/testing:test-strategy`.
 
+## Implementation evidence
+
+The preceding discovery snapshot is retained at its stated baseline. Current
+checks and decision provenance are in [shared selection and pressure
+accounting](shared-selection-and-pressure-accounting.md).
+
+The accounting choice is resolved without adding parameters to tag helpers:
+SOFT uses the injected estimator; tag minting and nudge derivation use the
+existing cache entry point. The whole-production-module scan rejects direct
+tokenizer paths and explicitly includes serialization, SOFT, minting, and
+nudge helpers. It fails on all four direct baseline calls before edits.
+
+Runtime checks cover exact SOFT inputs and classification, cached/direct
+equality, placeholder and missing-m0 call gates, two warm hits, tag/nudge
+counter deltas, and zero serialization estimates. The declaration and cache
+capacity are unchanged. Contention measurement and an independent recomputed
+declaration sum remain outside this change.
+
 [tc-doc]: ../../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../../crates/daemon/src/token_cache.rs#L24-L28

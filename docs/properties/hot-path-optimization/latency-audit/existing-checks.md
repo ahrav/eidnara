@@ -68,7 +68,8 @@ not the handler.
 | [`differential_assert_rejects_frontier_inside_mutated_native_region`][t-native-reject] | The differential panics on a corrupt native frontier. | unaudited |
 | [`frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits`][t-vacuity] | Same-length edits and repeats are not vacuously reused. | unaudited |
 | [`duplicate_tool_use_assert_covers_incremental_native_suffix`][t-dup] | Tool-use ids are unique across the cached prefix and encoded suffix. | unaudited |
-| [`incremental_sidecar_carries_pins_across_three_generations`][t-sidecar] | `mid_pins` survive incremental sidecar decode. | unaudited |
+| [`incremental_sidecar_carries_pins_across_three_generations`][t-sidecar] | Full and incremental order, metadata, and pins agree across three generations and repeated IDs. Sparse-prefix cases preserve order and missing metadata. | unaudited |
+| [`selection_input_shares_projected_wire_value`][selection-sharing] | Selection and historian inputs equal and point to the projected wire input; cloning selection preserves that pointer. | unaudited |
 | [`tag_baseline_cache_matches_cold_passes_across_drop_reset_and_remint`][t-tagcold] | Cold and cached passes serve equal bytes and equal durable rows across five passes. | unaudited |
 | [`poisoned_tag_baseline_refills_after_direct_sql_update`][t-poison] | A generation change refills the baseline. | unaudited |
 | [`tag_baseline_cache_keeps_interleaved_sessions_isolated`][t-interleave] | Two sessions do not share rows. | unaudited |
@@ -76,15 +77,13 @@ not the handler.
 | [`parity_golden_matches_ts_reference_across_full_corpus`][t-hyg-golden] | Per-part hashes and totals match the TypeScript golden. | unaudited |
 | [selection_differential.rs][t-seldiff] | Optimized selection equals the frozen reference over generated `SelItem`s. | unaudited |
 
-None found: a test that `tool_input` on a `FlatBlock` equals the `input`
-inside its `wire.kind()`; a test that a `Served` prepared segment writes
+None found: a test that a `Served` prepared segment writes
 `canonical_bytes`, or that names the sorted-key form; a captured production
 delta body replaying a synthetic pair; a test that the tag baseline entry is
 unchanged after a pass whose mint commit
 fails; a test that runs either differential gate from `crates/daemon/tests/`
 or `crates/daemon/benches/` (`cfg!(test)` is false there and no file sets the
-variables); a comparison of incremental and full `DecodeSidecar` values
-rather than encoded bytes.
+variables).
 
 ## Cache-state load, pass trace, side channel, and meta preparation
 
@@ -308,7 +307,11 @@ delta in any fault table.
 | [`insert_current_rotates_at_capacity`][t-tc-rotate] | `current` never exceeds `GENERATION_CAP`. | unaudited |
 | [`stats_partition_calls_into_hits_misses_and_bypassed`][t-tc-stats] | `calls == hits + misses + bypassed`. | unaudited |
 | [`kind_prefixed_and_raw_content_keys_do_not_alias`][t-tc-alias] | The tail-hygiene and raw key domains are disjoint. | unaudited |
-| [`protected_floor_has_no_global_estimator_bypass`][t-bypass] | No direct tokenizer call in one helper's source span. | unaudited |
+| [`production_transform_module_has_no_global_estimator_bypass`][t-bypass] | No direct tokenizer path in production `transform.rs`, including imports, SOFT, serialization, tag minting, and nudge derivation. This lexical scan does not cover the transitive handler call graph. | unaudited |
+| [`soft_pressure_classification_matches_frozen_thresholds`][soft-threshold-check] | Forty-eight real SOFT evaluations match a frozen direct-tokenizer predicate; spies observe exact texts and three independent witnesses cross both pressure boundaries and neither. | unaudited |
+| [`soft_pressure_absence_and_placeholder_preserve_estimator_gates`][soft-gates-check] | Missing m0 and placeholder m1 skip only their own measurement; cached counts preserve reference classification, and two warm inputs hit the cache. | unaudited |
+| [`mature_tag_mint_filter_preserves_rows_and_tokenizes_only_new_sources`][tag-accounting-check] | Only new tags count; stored nudge rows do not recount; derived nudge counts match stored counts; an entirely tagged projection does no work. | unaudited |
+| [`serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes`][serialization-gate-check] | Fresh serialization and cached replay produce equal bytes without estimating tokens. | unaudited |
 | [`preselection_never_drops_a_rule_whose_pattern_matches`][t-preselect] | A matching rule is always preselected (16 inputs). | unaudited |
 | [`provider_canaries_return_stable_rule_ids_and_value_spans`][t-canaries] | Canary inputs yield stable rule ids and spans. | unaudited |
 | [`minimal_fixture_is_truthful_and_executable`][t-qual] | A one-case qualification fixture with `authority_qualified: false`. | unaudited |
@@ -339,8 +342,7 @@ session; a check that `DECLARED_RETAINED_RESIDENT_BYTES` includes every
 cache; token-cache lock contention evidence; a bounded-scan versus
 whole-input differential for the secret scanner; a DST or
 unsatisfiable-expression case for the cron stepper; guidance override
-staleness, or two project roots sharing one `ConfigCache`; any test of the
-SOFT pressure-refold predicate's classification; any test that aborts between
+staleness, or two project roots sharing one `ConfigCache`; any test that aborts between
 commit and bookkeeping and inspects the next pass; any test in
 `crates/daemon/tests/` or in `kernel_routes` that panics inside a
 `kernel_routes::blocking` closure or any other `spawn_blocking` worker and
@@ -363,11 +365,11 @@ not a claim that no related check exists anywhere in the repository.
 
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12484-L12499
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L18567-L18625
-[t-fp]: ../../../../crates/daemon/src/lib.rs#L18627-L18691
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L26847-L26902
-[t-shape]: ../../../../crates/daemon/src/lib.rs#L32698-L32715
-[t-shape2]: ../../../../crates/daemon/src/lib.rs#L32718-L32758
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L18573-L18631
+[t-fp]: ../../../../crates/daemon/src/lib.rs#L18633-L18697
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L26853-L26908
+[t-shape]: ../../../../crates/daemon/src/lib.rs#L32704-L32721
+[t-shape2]: ../../../../crates/daemon/src/lib.rs#L32724-L32764
 [t-envelope]: ../../../../crates/daemon/src/transform.rs#L16198-L16224
 [t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../crates/daemon/tests/direct_host.rs#L48-L128
@@ -375,55 +377,55 @@ not a claim that no related check exists anywhere in the repository.
 [t-budget]: ../../../../crates/host-runtime/src/wire.rs#L825-L865
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503
 
-[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2020
-[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2022-L2045
+[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
+[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2036
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1411
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1596
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22220
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L20948
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22226
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L20954
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19168
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27579
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27331
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23118
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28653
-[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27510
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
+[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27831
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13746
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13616
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20644
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L21748
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21678
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L22265
-[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2062
-[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22479
-[t-poison]: ../../../../crates/daemon/src/transform.rs#L22548
-[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22581
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20650
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L21754
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21684
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L22271
+[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2071
+[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22512
+[t-poison]: ../../../../crates/daemon/src/transform.rs#L22581
+[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22614
 [t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L795
 [t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L1104
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8224-L8232
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5449
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L35970
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L35202
-[t-cas]: ../../../../crates/daemon/src/lib.rs#L22607
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L35976
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L35208
+[t-cas]: ../../../../crates/daemon/src/lib.rs#L22613
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L16453
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L16507
 [t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L16576
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-reject]: ../../../../crates/daemon/src/lib.rs#L23728
-[t-success]: ../../../../crates/daemon/src/lib.rs#L23758
-[t-repeat]: ../../../../crates/daemon/src/lib.rs#L23774
-[t-frozen]: ../../../../crates/daemon/src/lib.rs#L23802
-[t-status]: ../../../../crates/daemon/src/lib.rs#L23835
-[t-divergence]: ../../../../crates/daemon/src/lib.rs#L31920
+[t-reject]: ../../../../crates/daemon/src/lib.rs#L23734
+[t-success]: ../../../../crates/daemon/src/lib.rs#L23764
+[t-repeat]: ../../../../crates/daemon/src/lib.rs#L23780
+[t-frozen]: ../../../../crates/daemon/src/lib.rs#L23808
+[t-status]: ../../../../crates/daemon/src/lib.rs#L23841
+[t-divergence]: ../../../../crates/daemon/src/lib.rs#L31926
 [t-upserts]: ../../../../crates/memory-store/src/lib.rs#L17545
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13560
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L15376
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35834
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35840
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19067
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L20529
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15112
@@ -506,7 +508,12 @@ not a claim that no related check exists anywhere in the repository.
 [t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L233
 [t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L249
 [t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L266
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24231-L24242
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24264
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24517
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24318
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24453
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21408
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28240
 [t-preselect]: ../../../../crates/secret-scanner/src/rules.rs#L685-L722
 [t-canaries]: ../../../../crates/secret-scanner/tests/rule_canaries.rs#L4
 [t-qual]: ../../../../crates/secret-scanner/tests/qualification.rs#L49-L63

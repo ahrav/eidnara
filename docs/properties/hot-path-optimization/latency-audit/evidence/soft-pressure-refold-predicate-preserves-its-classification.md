@@ -101,6 +101,26 @@ constructed `M1Composition` until a writer for `memory_update_count` exists.
 - Conclusion: resolved with answer - unreachable at HEAD; raised for W10 and
   for the record's required state, which names it as constructible.
 
+## Implementation evidence and owner decision
+
+The preceding discovery snapshot is retained at its stated baseline. Current
+checks and explicit decision provenance are in [shared selection and pressure
+accounting](shared-selection-and-pressure-accounting.md).
+
+The owner authorizes removal of the dead update-count arm, not changes to
+0.20, 0.15, 500, or their comparisons. The original predicate is frozen in a
+test-only reference before production edits and evaluated with count zero.
+The real composition's zero count is asserted in all 48 full-pass cases.
+Thus removal preserves every production-reachable classification, while the
+reference remains independent of the implementation.
+
+The SOFT spy observes the exact frozen m0 and composed m1 texts through the
+injected estimator, verifies cache/direct parity, and compares both the
+response action and the `pressure_refold` reason. Separate predicate-seam
+tests cover an absent m0, a placeholder, empty content, and warm cache hits.
+The update-count source question is resolved by retirement, not by inventing
+a writer or treating an unreachable condition as covered.
+
 [soft-arm]: ../../../../../crates/daemon/src/transform.rs#L4284-L4297
 [soft-m1-compose]: ../../../../../crates/daemon/src/transform.rs#L4295
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
