@@ -18,6 +18,12 @@ The P2 entries include a local campaign against the frozen
 `7ed1e9845af1a76ff04c31d95ea811367a926bb0` predicate. The
 [P2 investigation][session-db-evidence] records execution and its limits.
 
+The P3 entries include a 2026-09-11 [host admission probe][page-admission-probe]
+on `90f75bbe5606c4f6b52ffa3bdc4fe52dcce59253`. That historical run refutes
+universal admission. The [carrier campaign][carrier-campaign] uses the owner's
+approved scope: Rust-valid strings must fit, and lone surrogates must retain
+their bytes and existing refusal.
+
 ## Fault availability
 
 | Class | Construction and availability | Limit |
@@ -30,7 +36,7 @@ The P2 entries include a local campaign against the frozen
 | Trace and drain faults | An outbox delivery failure is injectable at the store (`fail_next_historian_side_channel_for_test`); two drainers exist in production (pass and publish task). | No seam injects a `pass_trace` upsert failure (the store's four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928` do not cover it); no fault point exists for a crash between the mark commit and the delete commit; SIGKILL at that point needs a child process. |
 | SDK read failure and agent switch | The [hook campaign][permission-campaign] stores a deny, invalidates freshness or advances the 30 s TTL, then rejects or hangs past [2000 ms][timeout]. SDK mocks and fake timers also schedule late completions across invalidation and deletion. | No permission-change subscription exists. The user accepts silent edits remaining unobserved for at most the 30 s freshness window. |
 | Second-session rows and read errors | Executed: static differential states with rollback-scoped second-session rows; approved strict-scoping outcomes in both inconsistent directions; native retirement on eviction, oversized SQL/binds and throwing execution; close and same-path replacement; finalizer failure and pressure without GC; committed edits and replacement through the transform hook. | No jointly atomic snapshot, arbitrary concurrent-writer equivalence, or concurrent-open ABA proof. OpenCode's replacement behavior is unknown; identity checks remain unconditional. |
-| Byte-measure boundary | A lone surrogate in a string field takes the escape path; a body within a few bytes of 512 KiB under `JSON.stringify` may measure differently under `serde_json`. | Whether any real body crosses the boundary is unresolved. |
+| Byte-measure boundary | Executed: exact unpaged/intermediate/final boundaries; unpaged numeric expansion without a page cap; bounded paged numeric expansion; continuations; getters and `toJSON`; field collisions; surrogates mixed with numbers in one item or on separate pages. The registered Cargo test asserts exact page counts and boundary lengths, then checks staging and completion. | Twelve transforms complete, nine pages stage, six surrogate requests retain refusal, and one over-cap scalar body is refused by the pager. TypeScript native attachment remains unavailable; fake-writer evidence is not addon evidence. |
 | Ring residency and direct frames | A released run of at least one batch on an idle ring, a wrapped run, and an aborted reservation are constructible in-crate; `publish_direct` accepts an injected serializer and deadline. | The direct path has no production sender; the [`direct_fill` fixture arm][fixture-arm] is the only entry. |
 | CAS fault points and crashes | [`cas_fault_injection.rs`][t-faults] supplies six ingest and three GC fault points plus SIGKILL barriers. | GC and purge decrements have no daemon caller; a second ingest before orphan recovery is not constructed. |
 | SOFT pressure | Memory update counts, m1 body size, and frozen m0 size are workload inputs under default configuration. | Boundary values need exact token counts recorded before the candidate runs. |
@@ -58,7 +64,7 @@ The P2 entries include a local campaign against the frozen
 | [C6][c6] | A firing with all three kinds; a failed inline delivery per kind through the `test-support` seam, or a reopen between publish and drain; a pass at or past the 1000 ms backoff. | The outbox rows and their `next_attempt_at_ms` read before the drain delivers, against the drain's `now_ms`. |
 | [P1][p1] | A stored deny then a failed refresh; empty-cache and expired-allow failure; missing named agent and malformed SDK payload; session/agent switches; TTL expiry at settlement; session update, compaction, flush, deletion, pending eviction, and overlapping reads. | Live-equivalent values at the last invalidation-free read; absent on failure; one SDK fill for overlapping same-key allows; the first fill's deadline shared by followers; invalidated fills cannot publish or return allow. |
 | [P2][p2] | Static fixture and second-session states; malformed/dynamic values; time/part lists growing from 801 to 870 IDs, with mid-turn reads between each size; retirement by eviction/oversized SQL/oversized binds, including failures; explicit close and replacement; finalizer failure; pressure while raw getters stay alive. | Hash-pinned reference; exact timestamp maps and ordered message/part contents for all 70 remainders; five warm statements, one connection and zero closes on both adapters. Retired native getters fail without GC; at most 64 cached natives survive. Finalizer failures close the database. Stat identities, hook `mid_turn`, and both approved inconsistent-association directions remain asserted. |
-| [P3][p3] | A lone-surrogate body, a paged body, and a boundary body with `f64` fields. | `writeUtf8`'s emitted count and the host's `serde_json` length. |
+| [P3][p3] | A lone-surrogate body, a paged body, a boundary body with `f64` fields, mutation after measurement, and a plain object with carrier-like field names. | Compare carried text to the raw header and captured writer bytes. Independently check Rust parse/size and host terminal outcomes. A parse failure has no reserialized length. Final served-message bytes are compared with an unpaged control, not inferred from staging ACKs. |
 | [P4][p4] | Control characters and newlines in fields; a planted symlink; a foreign-uid directory. | The written file's bytes, mode, and the swallow counter. |
 | [P5][p5] | An SDK fake answers deny, then freshness expires without deleting the deny, then a live read rejects or times out. Both variants execute for transform and capture. | Cached deny at resolver entry, live SDK invocation, and the observed Error or TimeoutError; the constant marker does not depend on the served outcome. |
 | [T1][t1] | Over-quotient `max_connections`; a released batch on an idle ring; an aborted reservation; a wrapped run. | Admission outcome; `arena_reclaimed - punched`; `mincore` residency of the aborted range. |
@@ -134,11 +140,15 @@ assertions pass.
 
 [permission-campaign]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L166-L243
 [session-db-evidence]: evidence/mid-turn-read-is-invariant-under-query-collapse-and-statement-caching.md#q-what-do-the-local-differential-and-native-cache-checks-establish
+[page-admission-probe]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-does-the-real-host-admission-probe-establish
+[carrier-campaign]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-do-the-unpaged-correction-and-registered-cargo-test-prove
 
 1. P2 uses its frozen base predicate and native adapter spies. A2, B4, C4,
-   P3, W5, W6, and W9 have a pure-function reference at HEAD
+   W5, W6, and W9 have a pure-function reference at HEAD
    (the current reader, digest, stepper, predicate, or frozen differential).
    Start there with corpora and boundary values, not a new harness.
+   P3 needs Rust parsing and host admission as well as byte equality; a
+   JavaScript-only size oracle misses its demonstrated refusals.
 2. B1, B3, C1, C2, C6, W3, W7, and W13 need one process and a real store or
    file system but no concurrency: run both differential gates from an
    integration test, fail a mint commit, pair a narrow read with a full
@@ -168,7 +178,7 @@ in the records' open questions.
 [handle]: ../../../../crates/daemon/src/lib.rs#L11805-L11827
 [capacity]: ../../../../crates/host-runtime/src/handler.rs#L486-L491
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
-[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
+[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12484-L12499
 [pageapply]: ../../../../crates/daemon/src/lib.rs#L9425-L9433
 [expand]: ../../../../crates/daemon/src/lib.rs#L4151-L4245

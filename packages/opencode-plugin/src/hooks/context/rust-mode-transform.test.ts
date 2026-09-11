@@ -314,7 +314,7 @@ describe("Rust mode transform request", () => {
             prompt_surface_config_identity: promptSurfaceConfigIdentity(undefined),
             prompt_surface_tool_descriptions: {},
         });
-        expect(first.native_messages).toBe(messages);
+        expect(first.native_messages).toEqual(makeMessages(sessionId));
         expect(Array.isArray(first.messages)).toBe(true);
         expect("pass_inputs" in first).toBe(false);
         expect(output.messages).toEqual(native);

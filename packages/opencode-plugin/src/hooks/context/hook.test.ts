@@ -1411,3 +1411,19 @@ describe("eidnara hook", () => {
         expect(liveSessionState.internalChildSessions.has(sessionId)).toBe(false);
     });
 });
+
+it("sends a serialized body carrier from the live transform hook", async () => {
+    const { serializedJsonText } = await import("../../shared/host-client/serialized-json-body");
+    useTempDataHome("hook-serialized-body-");
+    const sessionId = "hook-serialized-body";
+    const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+    const hook = requireHook(createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })));
+    const messages = installOneRawMessage(sessionId);
+    await hook["experimental.chat.messages.transform"]({}, { messages });
+    const calls = fake.calls.filter((call) => call.method === "transform");
+    expect(calls).toHaveLength(1);
+    const text = serializedJsonText(calls[0]!.body);
+    expect(text).toBeString();
+    expect(JSON.parse(text!)).toMatchObject({ method: "transform", session_id: sessionId });
+    expect(Object.isFrozen(calls[0]!.body)).toBe(true);
+});

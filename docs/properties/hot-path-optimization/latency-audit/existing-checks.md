@@ -167,6 +167,13 @@ not whether the focused tests ran.
 | [module-wire.test.ts:1391][t1391] | The pageable array field list matches the daemon's Rust literal. | unaudited |
 | [rust-mode-transform.test.ts:537, 575, 614][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
 | [frame-channel.test.ts:181, 193][t181] | The declared byte length equals written bytes for lone surrogates, including across a segment boundary. | unaudited |
+| [Joint pager and native-writer fake][serialized-writer] | Frozen corpus checks carried UTF-8 bytes against the raw header and captured byte array through the real module transport, client encoder, and writer. Exact first/final lengths and page counts are asserted. | unaudited |
+| [Module transport snapshot][serialized-transport] | A getter changes on a second read, source and inspection values mutate, and a stringify spy rejects any send-time serialization. The public connection factory and channel injection exercise the transport without private-field assignments. | unaudited |
+| [Generic carrier encoding][serialized-client] | Plain Pi-style objects with colliding field names or symbol descriptions remain ordinary objects; generic client snapshot encoding retains authoritative text after nested inspection edits. | unaudited |
+| [Unpaged boundary][serialized-unpaged] | `2 ** 64`, raw `1e5`, and raw `-0` remain single unpaged requests at 524288 wire bytes despite larger Rust reserialization. | unaudited |
+| [Pager serialization spy][serialized-pager] | The full input and every emitted envelope serialize once. `toJSON` runs once. Digest and packing serializations remain outside that claim. | unaudited |
+| [Live transform hook][serialized-hook] | The real hook passes a carrier with the matching transform/session discriminator. | unaudited |
+| [Real-host corpus][serialized-host] | A registered Cargo integration test compiles in normal CI and is ignored until a generated corpus is supplied. The one-command wrapper requires one named pass. It verifies byte/hash receipts, twelve complete transforms equal to unpaged controls, nine staged pages, six unchanged surrogate refusals, one pager refusal, exact intermediate/final boundaries, and the 24-byte f64 witness. | unaudited |
 | [rust-mode-transform.test.ts:1446, 1582][tinplace] | In-place mutation of an older message forces a full send; recovery after repeated rejection. | unaudited |
 | [rust-mode-transform.test.ts:248][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog`). | unaudited |
 | [logger.test.ts:358][t358] | Control characters are removed; entry size is bounded; no forged fourth line. | unaudited |
@@ -174,11 +181,25 @@ not whether the focused tests ran.
 | [logger.test.ts:342, 408][t342] | Swallowed-write counter; exit flush without holding the process. | unaudited |
 | [event-handler.test.ts:272-524][tevent] | `message.updated` usage bookkeeping; no assertions on log lines. | unaudited |
 
-None found: a test that runs a lone-surrogate body through
-paging and the frame writer in one path; a test that constructs a body at the
-512 KiB boundary under both measures; a test asserting secret redaction of
-log lines on this path; a test asserting log line counts per pass or per
+None found: a test asserting secret redaction of log lines on this path;
+a test asserting log line counts per pass or per
 `message.updated` event.
+
+The [2026-09-11 local host probe](evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-does-the-real-host-admission-probe-establish)
+constructs the boundary under both measures and observes real host refusals.
+It is historical diagnostic execution, not a passing P3 check. The
+[scoped carrier campaign][serialized-campaign] records the approved refusal
+oracle and executable checks. Native-writer fakes do not prove actual addon
+attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
+
+[serialized-writer]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L55
+[serialized-transport]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
+[serialized-client]: ../../../../packages/opencode-plugin/src/shared/host-client/client.test.ts#L108-L175
+[serialized-unpaged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1456
+[serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1425
+[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1415
+[serialized-host]: ../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
+[serialized-campaign]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-do-the-unpaged-correction-and-registered-cargo-test-prove
 
 [permission-provisional]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L381
 [permission-agent]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L444
