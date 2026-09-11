@@ -1126,6 +1126,73 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
 }
 
 #[test]
+fn capture_expiring_during_admission_rolls_back_pin_and_references() {
+    let mut fixture = Fixture::open();
+    fixture.publish("messages", "slow-capture", 1, "capture evidence");
+    let lifetime_ms = 20;
+    let mut seen_at_admission = false;
+    let result = fixture.store.capture_source_hold_with_hook_for_test(
+        &fixture.binding(),
+        bounds(lifetime_ms),
+        |refs| {
+            seen_at_admission = true;
+            assert_eq!(refs, 0);
+            let expired_by = wall_ms() + i64::try_from(lifetime_ms).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(lifetime_ms + 1));
+            assert!(wall_ms() >= expired_by, "the admission hook crosses expiry");
+        },
+    );
+    assert!(seen_at_admission);
+    assert_eq!(
+        result,
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
+    );
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pins"), 0);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert_eq!(fixture.checkpoint(), 0);
+}
+
+#[test]
+fn extension_expiring_during_admission_preserves_hold_and_checkpoint() {
+    let mut fixture = Fixture::open();
+    let binding = fixture.binding();
+    let hold = fixture
+        .store
+        .capture_source_hold(&binding, bounds(1_000))
+        .unwrap();
+    fixture.publish("messages", "slow-extension", 1, "extension evidence");
+    let through = fixture.store.tip().unwrap();
+    let mut seen_at_admission = false;
+    let result = fixture.store.extend_source_hold_with_hook_for_test(
+        &binding,
+        &hold.hold_id,
+        through,
+        wide_admission(),
+        |refs| {
+            seen_at_admission = true;
+            assert_eq!(refs, 0);
+            let remaining = u64::try_from((hold.expires_at - wall_ms()).max(0)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(remaining + 1));
+            assert!(wall_ms() >= hold.expires_at);
+        },
+    );
+    assert!(seen_at_admission);
+    assert_eq!(
+        result,
+        Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired))
+    );
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pins"), 1);
+    assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+    assert_eq!(fixture.checkpoint(), 0);
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&binding, &hold.hold_id, hold.captured_at),
+        Ok(hold)
+    );
+}
+
+#[test]
 fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the_consumer() {
     let mut fixture = Fixture::open();
     fixture.seed_five_classes();
@@ -1147,7 +1214,7 @@ fn purge_expiry_missing_bytes_and_release_invalidate_the_hold_without_moving_the
     // releases the expired pin durably. A dead hold serves no page.
     let expiring = fixture
         .store
-        .capture_source_hold(&binding, bounds(1))
+        .capture_source_hold(&binding, bounds(HOUR_MS / 2))
         .unwrap();
     let fresh = fixture.store.capture_source_hold(&binding, wide()).unwrap();
     assert_eq!(
@@ -1879,9 +1946,10 @@ fn extension_is_bounded_idempotent_and_gates_acknowledgement() {
     let later = fixture.store.tip().unwrap();
     let expiring = fixture
         .store
-        .capture_source_hold(&binding, bounds(1))
+        .capture_source_hold(&binding, bounds(1_000))
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(3));
+    std::thread::sleep(std::time::Duration::from_millis(1_001));
+    assert!(wall_ms() >= expiring.expires_at);
     let expired = SourceHoldError::Invalid(SourceHoldInvalidity::Expired);
     assert_eq!(
         fixture
@@ -1945,6 +2013,109 @@ fn extension_is_bounded_idempotent_and_gates_acknowledgement() {
         through,
         "no failure advances acknowledgement"
     );
+}
+
+#[test]
+fn extension_after_window_deletion_distinguishes_purge_from_logical_delete() {
+    for kind in [ArtifactDeletionKind::Delete, ArtifactDeletionKind::Purge] {
+        let mut fixture = Fixture::open();
+        let binding = fixture.binding();
+        let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+        assert_eq!((hold.references, hold.encoded_bytes), (0, 0));
+
+        fixture.publish("messages", "late", 1, "late evidence");
+        let evidence = fixture.live_entry("messages", "late").clone();
+        let through = fixture.store.tip().unwrap();
+        assert!(through > hold.snapshot);
+        let deleted = fixture.delete_evidence(&evidence.evidence_id, kind, wall_ms());
+        assert!(deleted > through);
+        assert_eq!(
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1),
+            Err(SourceHoldError::ExtensionIncomplete { uncovered: 1 })
+        );
+        assert_eq!(fixture.checkpoint(), 0);
+        assert_eq!(
+            fixture
+                .store
+                .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+            Ok(hold.clone())
+        );
+
+        let extended =
+            fixture
+                .store
+                .extend_source_hold(&binding, &hold.hold_id, through, wide_admission());
+        if kind == ArtifactDeletionKind::Purge {
+            assert!(!fixture.object_present(&evidence.digest));
+            assert_eq!(
+                fixture.count("SELECT COUNT(*) FROM artifact_pending_unlinks"),
+                0
+            );
+            assert_eq!(
+                fixture.count("SELECT COUNT(*) FROM artifact_purge_tombstones"),
+                1
+            );
+            assert!(
+                extended.is_err(),
+                "purged evidence must be refused before reference insertion: {extended:?}"
+            );
+            assert_eq!(extended, Err(SourceHoldError::PurgedEvidence));
+            assert_eq!(fixture.count("SELECT COUNT(*) FROM capture_pin_refs"), 0);
+            assert_eq!(
+                fixture
+                    .store
+                    .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1),
+                Err(SourceHoldError::ExtensionIncomplete { uncovered: 1 })
+            );
+            assert_eq!(fixture.checkpoint(), 0);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+                Ok(hold.clone())
+            );
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, hold.snapshot, 1)
+                .unwrap();
+            assert_eq!(fixture.checkpoint(), hold.snapshot);
+            assert_eq!(
+                fixture.store.extend_source_hold(
+                    &binding,
+                    &hold.hold_id,
+                    deleted,
+                    wide_admission()
+                ),
+                Ok(hold.clone())
+            );
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, deleted, 1)
+                .unwrap();
+            assert_eq!(fixture.checkpoint(), deleted);
+        } else {
+            let extended = extended.unwrap();
+            assert_extended_hold_matches_ledger(&fixture, &extended, through);
+            assert_eq!(extended.references, 1);
+            fixture
+                .store
+                .acknowledge_through_source_hold(&binding, &hold.hold_id, through, 1)
+                .unwrap();
+            assert_eq!(fixture.checkpoint(), through);
+            assert_eq!(
+                fixture
+                    .store
+                    .source_hold_status(&binding, &hold.hold_id, wall_ms()),
+                Ok(extended)
+            );
+            assert_eq!(
+                fs::read(fixture.object_path(&evidence.digest)).unwrap(),
+                evidence.text.as_bytes()
+            );
+        }
+    }
 }
 
 #[test]

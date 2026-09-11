@@ -143,6 +143,8 @@ pub enum SourceHoldError {
         "source hold does not reference {uncovered} evidence rows cited by descriptors through the commit being acknowledged"
     )]
     ExtensionIncomplete { uncovered: usize },
+    #[error("source hold would reference purged evidence")]
+    PurgedEvidence,
     #[error("source hold binding does not match the stored hold")]
     BindingMismatch,
     #[error("source hold is not valid: {0:?}")]
@@ -235,11 +237,9 @@ impl Window {
         )
     }
 
-    /// Distinct cited evidence that hold `?3` does not reference yet, with
-    /// its byte length.
     fn unreferenced_evidence_sql(self) -> String {
         format!(
-            "SELECT e.evidence_id,e.byte_length {}
+            "SELECT e.evidence_id,e.byte_length,e.artifact_digest {}
                AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                               WHERE r.capture_pin_id=?3 AND r.evidence_id=e.evidence_id)
              GROUP BY e.evidence_id",
@@ -851,6 +851,9 @@ impl Admitted<'_> {
         if usize::try_from(total).map_err(corrupt)? != self.references {
             return Err(KernelError::CorruptCanonicalRow.into());
         }
+        if current_time_ms() >= self.row.expires_at {
+            return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
+        }
         Ok(())
     }
 }
@@ -890,9 +893,6 @@ pub(crate) fn release_consumer_holds_in_tx(
     Ok(held)
 }
 
-/// Counts the distinct unreferenced evidence in `window`, adds it to the
-/// hold's current totals, and refuses whole when the result exceeds
-/// `admission`. Runs before any reference row is written.
 fn admit_references<'a>(
     tx: &Transaction<'_>,
     row: HoldRow<'a>,
@@ -901,16 +901,21 @@ fn admit_references<'a>(
     admission: SourceHoldAdmission,
     at_admission: Option<&mut dyn FnMut(i64)>,
 ) -> Result<Admitted<'a>, SourceHoldError> {
-    let (added, added_bytes): (i64, Option<i64>) = tx
+    let (added, added_bytes, purged): (i64, Option<i64>, bool) = tx
         .query_row_cached(
             &format!(
-                "SELECT COUNT(*),SUM(byte_length) FROM ({})",
+                "SELECT COUNT(*),SUM(e.byte_length),COUNT(t.artifact_digest)>0
+                 FROM ({}) e
+                 LEFT JOIN artifact_purge_tombstones t ON t.artifact_digest=e.artifact_digest",
                 window.unreferenced_evidence_sql()
             ),
             params![window.through, window.after, row.hold_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(sqlite)?;
+    if purged {
+        return Err(SourceHoldError::PurgedEvidence);
+    }
     let added = usize::try_from(added).map_err(corrupt)?;
     let references = current.0.checked_add(added).ok_or_else(|| corrupt(()))?;
     let encoded_bytes = current
