@@ -125,7 +125,9 @@ uid; and an assertion that every written line matches
 `^\[<ISO-8601>\] ` with no control code point and each field at most 2048
 characters plus the ellipsis. The
 [plugin checks](../existing-checks.md#plugin-pre-send) cover the sanitizer
-and hardening once each; none asserts line counts per pass or event.
+and hardening once each. The [real transform/event fixture][hook-test]
+asserts the exact pass and event line counts at debug, a single warning line
+at warn, and no writes at off.
 
 ## Investigation log
 
