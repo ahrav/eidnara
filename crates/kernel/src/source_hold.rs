@@ -601,6 +601,9 @@ impl KernelStore {
         binding: &SourceHoldBinding,
         hold_id: &str,
     ) -> Result<Option<StoredPin>, SourceHoldError> {
+        if binding.lease_epoch != self.lease_epoch() {
+            return Err(SourceHoldError::IncarnationMismatch);
+        }
         let row = tx
             .query_row_cached(
                 "SELECT pin_kind,owner_id,commit_seq,lease_epoch,created_at,expires_at,

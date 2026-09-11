@@ -1477,6 +1477,23 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
     let new_binding = fixture.binding();
     assert_ne!(new_binding.lease_epoch, old_binding.lease_epoch);
 
+    assert_eq!(
+        fixture
+            .store
+            .source_hold_status(&old_binding, &old.hold_id, old.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
+    assert_eq!(
+        fixture.first_page(&old_binding, &old.hold_id, old.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .release_source_hold(&old_binding, &old.hold_id, old.captured_at),
+        Err(SourceHoldError::IncarnationMismatch)
+    );
+
     // The old hold cannot be used under the new incarnation.
     assert_eq!(
         fixture
@@ -1506,19 +1523,23 @@ fn a_new_incarnation_reconciles_old_holds_and_captures_a_new_s() {
             fixture
                 .store
                 .source_hold_status(&old_binding, &hold.hold_id, 0),
-            Err(SourceHoldError::Invalid(SourceHoldInvalidity::Released))
+            Err(SourceHoldError::IncarnationMismatch)
         );
         assert!(
             fixture.pin_refs(&hold.hold_id).is_empty(),
             "references released with the pin"
         );
     }
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM capture_pins WHERE released_at IS NOT NULL"),
+        2
+    );
     // The other consumer's old hold is untouched and still pins the deleted evidence.
     assert_eq!(
         fixture
             .store
             .source_hold_status(&other_binding, &other.hold_id, other.captured_at),
-        Ok(other.clone())
+        Err(SourceHoldError::IncarnationMismatch)
     );
     assert!(fixture.pin_refs(&other.hold_id).contains(&doomed));
 
