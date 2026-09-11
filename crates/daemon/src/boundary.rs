@@ -80,13 +80,13 @@ impl Role {
 
 /// `BoundaryBlock` retains the original pre-reduction content block.
 #[derive(Debug, Clone)]
-pub struct BoundaryBlock {
+pub struct BoundaryBlock<'a> {
     /// The block retains its stable `id`.
     pub id: String,
     /// Message-level algorithms use the parent message ordinal, not this block ordinal.
     /// Callers that preserve block order use the block ordinal.
     pub ordinal: u64,
-    pub kind: SelKind,
+    pub kind: SelKind<'a>,
     /// `provider_executed` is true for provider/server-executed tool blocks; such blocks cannot start an in-flight tool-call arc.
     pub provider_executed: bool,
     /// The caller supplies this original byte length for diagnostics.
@@ -109,13 +109,13 @@ pub struct BoundaryBlock {
 }
 
 #[derive(Debug, Clone)]
-pub struct BoundaryMsg {
+pub struct BoundaryMsg<'a> {
     /// The message retains `ordinal` as its absolute raw-session ordinal.
     pub message_ordinal: u64,
     /// Provider message id. Used only for diagnostics; boundary and trigger logic do not read it.
     pub message_id: String,
     pub role: Role,
-    pub blocks: Vec<BoundaryBlock>,
+    pub blocks: Vec<BoundaryBlock<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1737,7 +1737,7 @@ fn extract_tool_call_summaries(blocks: &[BoundaryBlock]) -> Vec<String> {
             summaries.push(format!("TC: {description}"));
             continue;
         }
-        let key_arg = extract_key_arg(input);
+        let key_arg = extract_key_arg(input.as_ref());
         if let Some(key_arg) = key_arg {
             summaries.push(format!("TC: {name}({key_arg})"));
         } else {
@@ -1867,7 +1867,7 @@ mod tests {
         ignored: Option<bool>,
     }
 
-    fn parse_kind(value: &Value) -> SelKind {
+    fn parse_kind(value: &Value) -> SelKind<'_> {
         if let Some(s) = value.as_str() {
             return match s {
                 "Reasoning" => SelKind::Reasoning,
@@ -1885,7 +1885,7 @@ mod tests {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string(),
-                    input: tc.get("input").cloned().unwrap_or(Value::Null),
+                    input: std::borrow::Cow::Borrowed(tc.get("input").unwrap_or(&Value::Null)),
                 };
             }
             if let Some(tr) = obj.get("ToolResult") {
@@ -1901,7 +1901,7 @@ mod tests {
         SelKind::Opaque
     }
 
-    fn messages(json: &[MessageJson]) -> Vec<BoundaryMsg> {
+    fn messages(json: &[MessageJson]) -> Vec<BoundaryMsg<'_>> {
         json.iter()
             .map(|message| BoundaryMsg {
                 message_ordinal: message.message_ordinal,
@@ -2139,7 +2139,7 @@ mod tests {
         }
     }
 
-    fn text_msg(ord: u64, role: Role, text: &str) -> BoundaryMsg {
+    fn text_msg(ord: u64, role: Role, text: &str) -> BoundaryMsg<'static> {
         BoundaryMsg {
             message_ordinal: ord,
             message_id: format!("m-{ord}"),
@@ -2159,7 +2159,7 @@ mod tests {
         }
     }
 
-    fn tool_call_msg(ord: u64, arc_id: &str) -> BoundaryMsg {
+    fn tool_call_msg(ord: u64, arc_id: &str) -> BoundaryMsg<'static> {
         BoundaryMsg {
             message_ordinal: ord,
             message_id: format!("m-{ord}"),
@@ -2169,7 +2169,7 @@ mod tests {
                 ordinal: ord,
                 kind: SelKind::ToolCall {
                     name: "bash".to_string(),
-                    input: serde_json::json!({"description":"run build"}),
+                    input: std::borrow::Cow::Owned(serde_json::json!({"description":"run build"})),
                 },
                 provider_executed: false,
                 byte_size: 32,
@@ -2182,7 +2182,7 @@ mod tests {
         }
     }
 
-    fn reasoning_tool_call_msg(ord: u64, arc_id: &str) -> BoundaryMsg {
+    fn reasoning_tool_call_msg(ord: u64, arc_id: &str) -> BoundaryMsg<'static> {
         let mut message = tool_call_msg(ord, arc_id);
         message.blocks.insert(
             0,
@@ -2202,7 +2202,7 @@ mod tests {
         message
     }
 
-    fn tool_result_msg(ord: u64, arc_id: &str, text: &str) -> BoundaryMsg {
+    fn tool_result_msg(ord: u64, arc_id: &str, text: &str) -> BoundaryMsg<'static> {
         BoundaryMsg {
             message_ordinal: ord,
             message_id: format!("m-{ord}"),
@@ -2224,7 +2224,7 @@ mod tests {
         }
     }
 
-    fn completed_newest_tool_arc_tail() -> Vec<BoundaryMsg> {
+    fn completed_newest_tool_arc_tail() -> Vec<BoundaryMsg<'static>> {
         vec![
             text_msg(1, Role::Assistant, &"head ".repeat(600)),
             tool_call_msg(2, "arc-newest"),
@@ -2470,7 +2470,7 @@ mod tests {
                     ordinal: 2,
                     kind: SelKind::ToolCall {
                         name: "bash".to_string(),
-                        input: serde_json::json!({"description": "x"}),
+                        input: std::borrow::Cow::Owned(serde_json::json!({"description": "x"})),
                     },
                     provider_executed: false,
                     byte_size: 16,

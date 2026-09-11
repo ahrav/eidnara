@@ -16542,35 +16542,35 @@ fn wrapup_has_remaining_messages(
     })
 }
 
-fn wrapup_boundary_messages(
+fn wrapup_boundary_messages<'a>(
     parsed: &TransformRequest,
-    projection: &crate::wire::FlatProjection,
+    projection: &'a crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
-) -> CachedBoundaryMessages {
+) -> CachedBoundaryMessages<'a> {
     cached_boundary_messages(parsed, projection, token_cache, true)
 }
 
-fn boundary_messages(
+fn boundary_messages<'a>(
     parsed: &TransformRequest,
-    projection: &crate::wire::FlatProjection,
+    projection: &'a crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
-) -> CachedBoundaryMessages {
+) -> CachedBoundaryMessages<'a> {
     cached_boundary_messages(parsed, projection, token_cache, false)
 }
 
-struct CachedBoundaryMessages {
-    messages: Vec<BoundaryMsg>,
+struct CachedBoundaryMessages<'a> {
+    messages: Vec<BoundaryMsg<'a>>,
     token_cache_hits: usize,
     tokenized_blocks: usize,
     token_cache_snapshot: BoundaryTokenCacheSnapshot,
 }
 
-fn cached_boundary_messages(
+fn cached_boundary_messages<'a>(
     parsed: &TransformRequest,
-    projection: &crate::wire::FlatProjection,
+    projection: &'a crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
     include_system: bool,
-) -> CachedBoundaryMessages {
+) -> CachedBoundaryMessages<'a> {
     let mut cache_snapshot = token_cache
         .lock()
         .expect("boundary token cache mutex")
@@ -16627,11 +16627,14 @@ fn cached_boundary_messages(
     }
 }
 
-fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind {
+fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
     match block.kind_tag.as_str() {
         "tool_call" => SelKind::ToolCall {
             name: block.name.clone().unwrap_or_default(),
-            input: block.tool_input.as_deref().cloned().unwrap_or(Value::Null),
+            input: std::borrow::Cow::Borrowed(match block.wire.kind() {
+                crate::wire::BlockKind::ToolCall { input, .. } => input,
+                _ => &Value::Null,
+            }),
         },
         "tool_result" => SelKind::ToolResult {
             tool_name: block.name.clone().unwrap_or_default(),
@@ -17335,7 +17338,10 @@ mod tests {
             .collect()
     }
 
-    fn trigger_messages_fixture(message_count: usize, payload_bytes: usize) -> Vec<BoundaryMsg> {
+    fn trigger_messages_fixture(
+        message_count: usize,
+        payload_bytes: usize,
+    ) -> Vec<BoundaryMsg<'static>> {
         (0..message_count)
             .map(|index| {
                 let original = format!("message {index}: {}", "x".repeat(payload_bytes));

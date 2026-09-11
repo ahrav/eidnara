@@ -406,7 +406,7 @@ fn newest_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
         if !name.eq_ignore_ascii_case(TODO_TOOL_NAME) {
             continue;
         }
-        let Some(state_json) = todo_state_from_input(input) else {
+        let Some(state_json) = todo_state_from_input(input.as_ref()) else {
             continue;
         };
         let replace = latest
@@ -497,7 +497,7 @@ mod tests {
             .freeze_at(Some("anchor".to_string()))
     }
 
-    fn todowrite_tail_item(id: &str, ordinal: u64, state_json: &str) -> SelItem {
+    fn todowrite_tail_item(id: &str, ordinal: u64, state_json: &str) -> SelItem<'static> {
         let todos: serde_json::Value = serde_json::from_str(state_json).expect("todo state JSON");
         SelItem {
             id: id.to_string(),
@@ -505,7 +505,7 @@ mod tests {
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
                 name: TODO_TOOL_NAME.to_string(),
-                input: serde_json::json!({ "todos": todos }),
+                input: std::borrow::Cow::Owned(serde_json::json!({ "todos": todos })),
             },
             provider_executed: false,
             byte_size: 0,

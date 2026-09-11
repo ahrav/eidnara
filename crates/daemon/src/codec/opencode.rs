@@ -274,17 +274,26 @@ pub(crate) fn decode_opencode_sidecar_incremental(
     .sidecar;
     let mut sidecar = DecodeSidecar::new(HARNESS);
     sidecar.mid_pins = suffix.mid_pins;
+    let mut order_is_indexed = true;
     for mid in prior.order.iter().take(replace_from) {
         sidecar.order.push(mid.clone());
         if let Some(meta) = prior.messages.get(mid) {
             sidecar.messages.insert(mid.clone(), Arc::clone(meta));
+        } else {
+            order_is_indexed = false;
         }
     }
     for mid in suffix.order {
         let Some(meta) = suffix.messages.get(&mid) else {
             continue;
         };
-        if !sidecar.order.contains(&mid) {
+        // Sparse prefixes retain order entries whose metadata is absent.
+        let seen = if order_is_indexed {
+            sidecar.messages.contains_key(&mid)
+        } else {
+            sidecar.order.contains(&mid)
+        };
+        if !seen {
             sidecar.order.push(mid.clone());
         }
         sidecar.messages.insert(mid, Arc::clone(meta));
@@ -2087,6 +2096,13 @@ mod tests {
         }));
         let incremental = decode_opencode_sidecar_incremental(&generation_3, &second, 2);
         let full = decode_opencode_with_sidecar(&generation_3, Some(&seed)).sidecar;
+        assert!(
+            incremental
+                .order
+                .iter()
+                .all(|mid| incremental.messages.contains_key(mid))
+        );
+        assert_eq!(incremental.order, ["pinned-mid", "other-key"]);
         assert_eq!(incremental, full);
         assert_eq!(
             incremental.message_by_mid("pinned-mid").unwrap().raw["info"]["generation"],
@@ -2098,6 +2114,21 @@ mod tests {
         let broken = decode_opencode_sidecar_incremental(&generation_3, &broken_prior, 2);
         assert_ne!(broken, full);
         assert!(broken.message_by_mid("stable-key").is_some());
+
+        for missing in ["pinned-mid", "other-key"] {
+            let mut sparse = decode_opencode_with_sidecar(&generation_2, Some(&seed)).sidecar;
+            sparse.messages.remove(missing);
+            let recovered = decode_opencode_sidecar_incremental(&generation_3, &sparse, 2);
+            assert_eq!(
+                recovered.order, full.order,
+                "missing prefix metadata for {missing}"
+            );
+            let mut expected = full.clone();
+            if missing == "other-key" {
+                expected.messages.remove(missing);
+            }
+            assert_eq!(recovered, expected);
+        }
     }
 
     #[test]

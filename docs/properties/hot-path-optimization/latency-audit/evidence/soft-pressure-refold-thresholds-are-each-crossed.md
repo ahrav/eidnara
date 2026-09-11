@@ -93,6 +93,26 @@ specification introduces; at HEAD the field is the constant `0`
 - Conclusion: needs human input - keep the marker for a specification-era
   writer, or drop the disjunct from W9's reference and this record.
 
+## Implementation evidence and marker retirement
+
+The preceding discovery snapshot is retained at its stated baseline. Current
+checks and explicit decision provenance are in [shared selection and pressure
+accounting](shared-selection-and-pressure-accounting.md).
+
+The owner decision retires
+`soft-pressure-refold-thresholds-are-each-crossed-updates` together with the
+dead production disjunct. The marker is not exercised and no new writer is
+required. This resolves the discovery question; its historical text above is
+not an active requirement.
+
+The other three constant markers are asserted by the 48-case real-store
+threshold test. They observe budget-only pressure, ratio-only pressure, and
+neither condition from direct counts before the candidate runs. The m0
+payload is constructed at 499/500 tokens; m1 is genuinely composed from
+stored compartments at 74/75/76 tokens. The test drives a SOFT plan and checks
+its SOFT-or-HARD result. This is bounded characterization, not evidence that
+these shapes represent production traffic.
+
 [plan-select]: ../../../../../crates/daemon/src/transform.rs#L3795-L3813
 [m0-unit]: ../../../../../crates/daemon/src/transform.rs#L4217
 [m0-unit-refold]: ../../../../../crates/daemon/src/transform.rs#L4407

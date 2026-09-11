@@ -21,6 +21,7 @@
 //! Each target receives exactly one decision; `drop` overrides `edit_marker`.
 //! Selectors emit decisions in stable order.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::transform::{ReductionDecision, utf16_len, utf16_prefix};
@@ -109,11 +110,10 @@ pub enum SelMessageRole {
 
 /// The selectors use this typed content-kind projection.
 #[derive(Debug, Clone)]
-pub enum SelKind {
+pub enum SelKind<'a> {
     ToolCall {
         name: String,
-        /// The ToolCall.input (filePath / action / diff keys live here).
-        input: serde_json::Value,
+        input: Cow<'a, serde_json::Value>,
     },
     ToolResult {
         tool_name: String,
@@ -130,12 +130,12 @@ pub enum SelKind {
 /// block, including tool calls and tool results. This struct adds the typed fields that
 /// the selection logic needs on top of the raw incoming item.
 #[derive(Debug, Clone)]
-pub struct SelItem {
+pub struct SelItem<'a> {
     pub id: String,
     pub ordinal: u64,
     /// Provider-facing role of the owning message.
     pub message_role: SelMessageRole,
-    pub kind: SelKind,
+    pub kind: SelKind<'a>,
     /// True = the model's own SERVER-side tool (stays verbatim; never targeted).
     pub provider_executed: bool,
     /// Bytes this block contributes to reclaim accounting (output/content bytes).
@@ -326,7 +326,7 @@ fn group_arcs<'a>(items: &'a [SelItem], frozen: &HashSet<String>) -> Vec<ToolArc
                 if entry.call_inputs.is_empty() {
                     entry.owner_message_id = item_message_id(item);
                 }
-                entry.call_inputs.push((item.id.as_str(), input));
+                entry.call_inputs.push((item.id.as_str(), input.as_ref()));
                 entry.call_bytes += item.byte_size;
                 entry.provider_executed = item.provider_executed;
             }
@@ -371,7 +371,7 @@ struct ReasoningMessageShape {
     tool_arc_ids: HashSet<String>,
 }
 
-fn item_message_id(item: &SelItem) -> Option<&str> {
+fn item_message_id<'a>(item: &'a SelItem<'_>) -> Option<&'a str> {
     let (mid, index) = item.id.rsplit_once('#')?;
     index.parse::<usize>().ok().map(|_| mid)
 }
@@ -381,7 +381,7 @@ struct AdjacencyMessageShape<'a> {
     ordinal: u64,
     role: SelMessageRole,
     has_reasoning: bool,
-    items: Vec<&'a SelItem>,
+    items: Vec<&'a SelItem<'a>>,
 }
 
 impl AdjacencyMessageShape<'_> {
@@ -1328,7 +1328,7 @@ mod tests {
         name: &str,
         input: serde_json::Value,
         bytes: usize,
-    ) -> SelItem {
+    ) -> SelItem<'static> {
         let id = call_block_id(mid);
         SelItem {
             id: id.clone(),
@@ -1336,7 +1336,7 @@ mod tests {
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
                 name: name.to_string(),
-                input,
+                input: Cow::Owned(input),
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1345,7 +1345,7 @@ mod tests {
         }
     }
 
-    fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem {
+    fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: result_block_id(mid),
             ordinal,
@@ -1360,7 +1360,7 @@ mod tests {
         }
     }
 
-    fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem {
+    fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: reasoning_block_id(mid),
             ordinal,
@@ -1373,7 +1373,7 @@ mod tests {
         }
     }
 
-    fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem {
+    fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
@@ -1386,7 +1386,7 @@ mod tests {
         }
     }
 
-    fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem {
+    fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
@@ -1406,14 +1406,14 @@ mod tests {
         name: &str,
         input: serde_json::Value,
         bytes: usize,
-    ) -> SelItem {
+    ) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
                 name: name.to_string(),
-                input,
+                input: Cow::Owned(input),
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1428,7 +1428,7 @@ mod tests {
         ordinal: u64,
         name: &str,
         bytes: usize,
-    ) -> SelItem {
+    ) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
@@ -1583,7 +1583,7 @@ mod tests {
         expected: std::collections::BTreeMap<String, String>,
     }
 
-    fn parse_kind(v: &serde_json::Value) -> SelKind {
+    fn parse_kind(v: &serde_json::Value) -> SelKind<'_> {
         if let Some(s) = v.as_str() {
             return match s {
                 "Reasoning" => SelKind::Reasoning,
@@ -1601,7 +1601,7 @@ mod tests {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    input: tc.get("input").cloned().unwrap_or(serde_json::Value::Null),
+                    input: Cow::Borrowed(tc.get("input").unwrap_or(&serde_json::Value::Null)),
                 };
             }
             if let Some(tr) = obj.get("ToolResult") {

@@ -298,10 +298,14 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Both differential gates run in-crate under `cfg!(test)`;
-no run compares `tool_input` with `wire.kind()`, sidecar order, chunk
-sharing, or the served sorted-key form, and neither gate runs from
-`crates/daemon/tests/` or the benches.
+Exercised: partial - The selection differential passes unchanged against its
+frozen reference. The [sharing check][selection-sharing] compares the selected
+inputs from all 48 frozen-corpus tool calls with the projected wire value and
+proves pointer identity through clones
+and historian input construction. The [sidecar check][sidecar-order-check]
+compares full and incremental order, metadata, and pins across three
+generations, including repeated IDs and sparse cached metadata. Broader
+projection and native comparisons remain in the shared-input suites.
 Guarantee: The projection, the native attachment, and the served message
 bytes depend only on message values, never on which allocation holds them or
 which lane assembled them.
@@ -309,15 +313,19 @@ Check: `always` - For every pass, three artifact families agree with their
 value-only construction. Projection: `project_messages(&msgs)` is equal under
 [`FlatProjection`][flatproj]'s derived `PartialEq` whether the slice is the
 fresh request, the normalized clone, a reattached prefix plus suffix, or a
-shared view; per block `content_hash == sha256(bytes)`, `bytes ==
-to_string(wire)`, and `tool_input` equals the `input` inside `wire.kind()`;
+shared view; per block `content_hash == sha256(bytes)` and `bytes ==
+to_string(wire)`, and `FlatBlock` holds no tool input outside `wire` (the
+wire block itself may keep the input in both `kind()` and its retained
+`original`, and the retained charge counts both);
 and `project_messages_incremental(msgs, cached, k) == project_messages(msgs)`
 with equal [`differential_bytes`][diff-bytes]. Native attachment: under
 `serve_native`, `to_vec(incremental native_messages) ==
 to_vec(encode_full_native_messages(..))` as the [differential][native-diff]
-already compares; the incremental sidecar has the same `order` and
-`messages` as `decode_opencode(native_messages).sidecar`, with `order` in
-first-seen position ([`remember_message`][remember]); and
+already compares; with complete prefix metadata, the incremental sidecar has
+the same `order`, `messages`, and pins as a full decode with the same inherited
+pins. With discarded prefix metadata, order still matches the full decode,
+while metadata remains sparse unless replaced by the suffix. Order keeps
+first-seen positions ([`remember_message`][remember]); and
 [`native_ingress_chunks`][ingress-chunks] shares a chunk for index `i`
 exactly when `chunk.value == native_messages[i]` by value. Served bytes: for
 every `ServedMessage`, `canonical_bytes ==
@@ -333,11 +341,12 @@ every pass projects and serves, every plugin turn attaches, and every
 downstream digest keys on these fields.
 Fault/timing angle: None in time. A projector that reuses an ingress
 `Arc<WireBlock>` and computes `bytes` from another serialization; a consumer
-reading `tool_input` and `wire.kind()` from blocks no longer built together
-([`sel_item_from_flat`][sel-item] reads `wire`,
-[`sel_kind_for_flat`][sel-kind] reads `tool_input`); chunk reuse decided by
+reading a projected input copy that is not the `wire.kind()` value
+([`sel_item_from_flat`][sel-item] and
+[`sel_kind_for_flat`][sel-kind] both borrow the typed wire input, and
+`FlatBlock` holds no copy outside `wire`); chunk reuse decided by
 pointer identity; an incremental sidecar merge that changes first-seen order
-on a repeated mid ([`:277-291`][sidecar-merge]); a direct `to_vec(&message)`
+on a repeated mid ([`:277-300`][sidecar-merge]); a direct `to_vec(&message)`
 on a typed shell (rebuilt prefix, reduced, overlaid, or synthetic) that emits
 struct field order instead of sorted keys, which
 [`Serialize for ServedMessage`][ser-served] already does and the handler
@@ -355,10 +364,10 @@ Both differential gates ([prefix][gate-prefix], [native][gate-native]), the
 [flatten][flatten] fields, [`from_message_reusing`][served-reusing], the
 sorted-key cause, and the segment writer are source-verified.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
-include both differentials, fingerprint reuse, and pinned fingerprint ids;
-none found for `tool_input` versus `wire.kind()`, sidecar `order` equality,
-the chunk-sharing predicate, a `Served` segment writing `canonical_bytes`,
-or the sorted-key form; all unaudited.
+include both differentials, fingerprint reuse, pinned fingerprint IDs, the
+selection-sharing check, and sidecar order/pin equality. Dedicated
+chunk-sharing and segment-write oracles remain outside this change; all checks
+remain unaudited for adequacy.
 Impact: Output identity, served fingerprints, token caches, tag mint, and the
 plugin's replay source can drift from the message values.
 Open questions:
@@ -370,10 +379,6 @@ Open questions:
   (needs human input)
 - Is sorted-key canonical JSON a contract with the plugin or an artifact of
   `preserve_order` being off? No wire document names it. (needs human input)
-- [`decode_opencode_sidecar_incremental`][sidecar-inc] sets `mid_pins` from
-  the suffix decode only; the full decode accumulates pins over the whole
-  array. Is pin equality required? Unresolved, needs a two-form sidecar
-  comparison.
 
 ### synthetic-normalization-is-scoped-to-the-pass
 
@@ -457,10 +462,10 @@ for the session equals `store.load_tags_for_session(session)` for the
 [`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
 rows with `tag_number = max + offset + 1` in projection block order; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7195-7200`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([`:7196-7201`][mint-input]).
 `always` because the entry is read on the next pass of the same session and
 a stale or speculative row changes the active-tag match at
-[`:7389`][active-match].
+[`:7392`][active-match].
 Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
 [`snapshot`][tag-snapshot] holds a second reference. A design that appends
 in place, or stores the pass's `Arc` back before commit, exposes rows the
@@ -666,7 +671,7 @@ specification states the new coupling. `always` because status, health, and
 the plugin display read these counters on every request, and every call site
 discards the trace result with `let _ =` ([`:8131`][received-call],
 [`:8194-8201`][rejected-call], [`:8436`][completed-call],
-[`:1819-1843`][stable-call]).
+[`record_stable_pass_trace`][stable-call]).
 Fault/timing angle: A fold moves the bump after `run_transform`, so a rejected
 or stable pass under-counts, or attaches it to every commit so a rerun
 Emergency95 pass double-counts; inside a fused transaction a `pass_trace`
@@ -1653,10 +1658,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Memo parity on four inputs, hit accounting, rotation,
-stats partition, and key-domain non-aliasing have tests; none checks the
-declared-bytes sum, measures contention, or scans the whole `apply_once`
-body for direct tokenizer calls.
+Exercised: partial - Memo parity, hit accounting, rotation, stats partition,
+and key-domain non-aliasing have tests. The [whole-module scan][t-bypass]
+covers SOFT, serialization, tag minting, and nudge derivation. The
+[SOFT spy][soft-threshold-check], [estimator gates][soft-gates-check],
+[tag/nudge accounting][tag-accounting-check], and
+[serialization gate][serialization-gate-check] pass. Cache sizing and
+contention are unchanged and receive no new measurement.
 Guarantee: Sharding or resizing the token cache changes latency only, and an
 optimization cannot make a decision-bearing token count invisible to the
 pass's own accounting.
@@ -1670,43 +1678,38 @@ new shard count, generation count, and cap; and inside a pass every token
 estimate that feeds a budget, a threshold, or a persisted `token_count` is
 obtained through the injected `estimate_tokens` parameter of
 [`apply_once`][ao-sig] or through [`cached_estimate_tokens`][tc-cet], so it
-is counted in `tokenize_calls`, with the HEAD exceptions enumerated and each
-one routed or kept explicitly. `always` because
+is counted in `tokenize_calls`. The SOFT predicate uses the injected function;
+tag minting and nudge derivation call the existing cached estimator directly.
+Serialization performs no token estimate. `always` because
 [`transform_with_projection_cached`][tc-inject] passes
 `cached_estimate_tokens` on every pass and the declaration's [doc][declared-doc]
 says the runtime bound holds only when the declaration is truthful.
 Fault/timing angle: Two sessions miss on the same digest at once
 ([concurrent misses may tokenize twice][tc-concurrent]); a generation
 rotation at [`GENERATION_CAP = 65_536`][tc-cap] while a promote-on-hit insert
-runs; a sharded replacement that omits its term from the declaration. The
-direct `tokenizer::estimate_tokens` calls in production transform code at
-HEAD are the SOFT predicate's `m0_tokens` and `m1_tokens` at
-[`:4339-4350`][soft-direct] (W9), the tag-mint `token_count` at
-[`:7199`][mint-direct], and `ActiveTagForNudge.token_count` at
-[`:8598`][nudge-direct]; the tokenizer crate exposes no call counter
-([`estimate_tokens`][tok-fn]).
+runs; a sharded replacement that omits its term from the declaration.
+The source scan rejects direct tokenizer paths in production `transform.rs`;
+it is not a whole-call-graph proof. Runtime spies cover the SOFT measurement
+inputs and cache counters cover tag/nudge paths.
 Required faults and enabling state: Two concurrent transform passes; 65_536
 distinct digests; a pass minting new tags on the tail; a pass whose SOFT
 predicate crosses a threshold.
 Confidence: high - [Evidence](evidence/token-cache-is-a-pure-declared-memo-behind-one-estimator-interface.md).
 The [module doc][tc-doc], the global [`Mutex`][tc-static] over two
 generations, [`RETAINED_BYTES_BOUND`][tc-bound], [`count_with_digest`][tc-cwd],
-and the three direct call sites are source-verified. The sharding note at
+and estimator routing are source-verified. The sharding note at
 [`:112-113`][tc-shard] is conditional and cites no measurement.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the five token-cache tests and
-[`protected_floor_has_no_global_estimator_bypass`][t-bypass], a source scan
-limited to one helper; all unaudited.
+list the token-cache tests and
+[`production_transform_module_has_no_global_estimator_bypass`][t-bypass], plus runtime checks
+for SOFT, tag/nudge accounting, and serialization; all unaudited.
 Impact: A rendered byte or budget decision changes, or the resident-memory
 declaration undercounts a cache.
 Open questions:
 - Is there any measured lock contention at HEAD? The comment is conditional;
   the audit should measure before sharding.
-- Should the `:7199` and `:8598` calls stay direct because their inputs are
-  new tail blocks that miss the cache anyway, or route through the interface
-  for accounting? (needs human input)
-- Extend the source-scan test to the whole `apply_once` body, or replace it
-  with an injected counting estimator plus a `tokenize_calls` oracle?
+- Accounting scope is resolved: tag and nudge counts use the existing cache;
+  no forwarding parameters or additional retained memo are introduced.
 
 ### bounded-secret-scan-finds-every-whole-input-finding
 
@@ -1959,85 +1962,88 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No test compares the predicate's classification against
-a frozen reference, and the parent's H records follow the estimator into
-`decay_render` without examining these two direct tokenizer calls.
+Exercised: yes - [Forty-eight real SOFT evaluations][soft-threshold-check]
+compare classification with a frozen direct-tokenizer reference at the budget
+share, m0 floor, and m0 ratio boundaries. An injected spy records the exact
+texts and checks cached/direct equality. [Absent m0 and placeholder
+checks][soft-gates-check] cover measurement gates at the predicate seam.
 Guarantee: The SOFT pass's pressure-refold classification is preserved for
-fixed frozen m0, composed m1, budget, and update count.
+fixed frozen m0, composed m1, and budget on production-reachable inputs.
 Check: `always` - For every SOFT pass, `pressure_refold` equals a frozen copy
-of the predicate at [`:4339-4357`][soft-predicate], kept as a test-only
-reference function, evaluated with the uncached
+of the [frozen predicate][soft-reference], evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
-`m1.body`: `m1.memory_update_count > 40`, or `m1` has content and
+`m1.body`: `m1` has content and
 `m1_tokens > history_budget_tokens * 0.20` with a positive budget, or `m1`
 has content and `m0_tokens >= 500` and `m1_tokens > m0_tokens * 0.15`;
 `m1_tokens` is `0` when `m1.body == M1_PLACEHOLDER`, and `m0_tokens` is `0`
 when no frozen unit has key `m0`. A cache-backed count may replace the direct
 call only if it equals the direct count for the exact text at each observed
-comparison (H1's cache clause). `always` because the classification selects
+comparison (H1's cache clause). `M1Composition` carries no memory update count;
+composition has no writer for one, and the dead update-count disjunct is
+removed by the explicit owner decision recorded in the evidence. The frozen
+reference retains the original expression and takes that count as a parameter
+the callers set to `0`, so its reachable classifications stay fixed.
+`always` because the classification selects
 between an ordinary SOFT and a rematerialized m0, which H2 states as distinct
 boundaries.
 Fault/timing angle: A cached or estimated count crosses a threshold the exact
 count does not, or the reverse, at a boundary value; a batched estimate
 reuses a count for a different m1 body.
-Required faults and enabling state: SOFT passes with `memory_update_count` at
-40 and 41 once a writer exists (at HEAD the field is the constant `0`, so this
-arm is reachable only through a directly constructed `M1Composition`);
-`m1_tokens` at the 0.20 budget boundary; `m0_tokens` at 499 and 500 with
+Required faults and enabling state: SOFT passes with `m1_tokens` at the 0.20
+budget boundary; `m0_tokens` at 499 and 500 with
 `m1_tokens` at the 0.15 boundary; an `m1.body` equal to the placeholder; a
 store with no `m0` frozen unit.
 Confidence: high - [Evidence](evidence/soft-pressure-refold-predicate-preserves-its-classification.md).
-The predicate, its two direct tokenizer calls, and the `M1_PLACEHOLDER`
-guard are source-verified; the m1 composition itself receives
-`cached_estimate_tokens` at [`:4336`][soft-m1-compose].
-Existing check: none found for the predicate; [H2][h2] states the SOFT and
-refold boundaries and [H1][h1] the cache-equals-direct clause for history
-rendering.
+The [predicate][soft-predicate], injected measurements, and placeholder guard
+are source-verified. The frozen reference and full-pass characterization run
+precede production edits.
+Existing check: [Threshold comparison][soft-threshold-check]
+and [measurement gates][soft-gates-check]; adequacy remains unaudited.
 Impact: A pass refolds m0 when the reference would keep it, or keeps it when
 the reference would refold, changing prompt content and frozen bytes.
-Open questions:
-- Are the constants 40, 0.20, 0.15, and 500 a contract or tuning? A frozen
-  reference pins them either way. (needs human input)
+Open questions: None for this preservation change. The owner authorizes only
+removal of the dead update-count disjunct. Constants 0.20, 0.15, and 500 and
+their strict/non-strict comparisons remain fixed.
 
 ### soft-pressure-refold-thresholds-are-each-crossed
 
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - No witness records any threshold crossing; the
-`-updates` marker cannot fire at HEAD because `memory_update_count` is the
-constant `0` (`crates/daemon/src/m1_compose.rs:231`) and has no other writer.
-Guarantee: A SOFT-preservation campaign crosses each of the three pressure
+Exercised: yes - The [threshold campaign][soft-threshold-check] records all
+three remaining witness conditions from independently measured inputs before
+comparing the actual classification, then asserts that all were seen. The
+update-count marker is retired by
+the explicit owner decision in the evidence, not reported as exercised.
+Guarantee: A SOFT-preservation campaign crosses each of the two pressure
 conditions independently, so W9 cannot pass on passes that never approach a
 boundary.
-Check: `sometimes` - Under four constant markers, each of the following holds
-on at least one SOFT pass with the other two conditions false:
-`soft-pressure-refold-thresholds-are-each-crossed-updates` records
-`m1.memory_update_count > 40`;
+Check: `sometimes` - Under three constant markers, each pressure condition
+holds on at least one SOFT evaluation with the other condition false:
 `soft-pressure-refold-thresholds-are-each-crossed-budget-share` records
 `m1` has content, `history_budget_tokens > 0`, and
 `m1_tokens > history_budget_tokens * 0.20`;
 `soft-pressure-refold-thresholds-are-each-crossed-m0-ratio` records `m1` has
 content, `m0_tokens >= 500`, and `m1_tokens > m0_tokens * 0.15`; and
 `soft-pressure-refold-thresholds-are-each-crossed-below` records a SOFT pass
-with content where all three are false. Each marker asserts the independently
+with content where both are false. Each marker asserts the independently
 measured inputs, not `pressure_refold` itself.
-Fault/timing angle: Small fixtures keep m1 short and update counts low, so
+Fault/timing angle: Small fixtures keep m1 short, so
 every SOFT pass takes the ordinary branch.
-Required faults and enabling state: A writer for `memory_update_count` that
-the specification introduces (none exists at HEAD), then a session with more
-than 40 memory updates since the last fold; an m1 body whose exact token
-count exceeds a fifth of a small positive budget; a frozen m0 of at least 500
+Required faults and enabling state: An m1 body whose exact token count
+exceeds a fifth of a small positive budget; a frozen m0 of at least 500
 tokens with an m1 above 15 percent of it; direct token counts recorded before
 the candidate runs.
 Confidence: high - [Evidence](evidence/soft-pressure-refold-thresholds-are-each-crossed.md).
-The three disjuncts and their inputs are source-verified.
-Existing check: none found.
+The two active disjuncts and their inputs are source-verified. The campaign
+uses a real store and composed m1, with a constructed frozen m0 payload of
+exactly 499 or 500 tokens; it is not production-workload evidence.
+Existing check: [Threshold comparison and three witnesses][soft-threshold-check];
+adequacy remains unaudited.
 Impact: W9 passes without any boundary being approached.
-Open questions:
-- Does the specification give `memory_update_count` a writer, so the
-  `-updates` marker can fire, or is the first disjunct dropped from W9's
-  reference and from this record? (needs human input)
+Open questions: None. The update-count arm and its reachability obligation
+are retired. The evidence retains the discovery snapshot and decision
+provenance.
 
 ### abort-lands-between-transform-commit-and-bookkeeping
 
@@ -2275,7 +2281,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [A1][a1] | Drive `Handler::handle` directly with oversize and pool-short bodies; measure retained copies from the typed request. |
 | [A2][a2] | Build the discriminator and decode corpus once; run it through both lanes and the probe. |
 | [A3][a3] | Construct concurrent parses with a barrier so the shortfall is observable. |
-| [B1][b1] | Run both differential gates from an integration test; add `tool_input`, sidecar order, chunk sharing, and sorted-key oracles. |
+| [B1][b1] | Selection input sharing and sidecar order/pins are checked. Extend integration coverage for chunk sharing and sorted-key output. |
 | [B2][b2] | Typed-flag reference and delta comparisons run. Extend the finite observer corpus when new replay shapes appear. |
 | [B3][b3] | Fail a mint commit and inspect the cache entry; compare `source_bytes` with projected text. |
 | [B4][b4] | State the digest input explicitly against `FlatBlock.content_hash`. |
@@ -2300,14 +2306,14 @@ oracle. The following notes define the evidence to request, not tickets.
 | [G3][g3] | Record a usage delta per decrement path with bytes at stake. |
 | [W1][w1] | Choose the size class and the manifest form; run through `Handler::handle`. |
 | [W2][w2] | Tie the TypeScript key list to the Rust struct; assert what each field brackets. |
-| [W3][w3] | Check the declared-bytes sum; replace the source scan with a counting estimator. |
+| [W3][w3] | Whole-module scan and SOFT/tag/nudge accounting checks exist. Recheck the declared-bytes sum if cache sizing changes. |
 | [W4][w4] | Differential bounded-versus-whole over rules, limits, and edge-margin inputs. |
 | [W5][w5] | Reuse the frozen reference; add a format-change-across-restart case. |
 | [W6][w6] | Differential against the stepper over DST and unsatisfiable expressions. |
 | [W7][w7] | Edit tiers and the override between passes; alternate two project roots. |
 | [W8][w8] | Abort between commit and bookkeeping; read the next pass's derived inputs. |
-| [W9][w9] | Freeze the predicate and its direct estimator as a reference. |
-| [W10][w10] | Record the three inputs at each boundary before the candidate runs. |
+| [W9][w9] | Frozen direct-estimator reference and threshold comparison exist; preserve them when changing pressure logic. |
+| [W10][w10] | Three active witnesses exist; the dead update-count witness is retired with its disjunct. |
 | [W11][w11] | Trigger an abort through the interleave hook or its successor. |
 | [W12][w12] | Panic with a sentinel inside a `kernel_routes::blocking` closure from a child process; capture stderr and the terminal; repeat on the runtime worker as the control. |
 | [W13][w13] | Give a `ScriptedHost` project a schedule and tick past its instant; record the project, schedule, `now_ms`, and computed instant at the `next_due` call. |
@@ -2428,32 +2434,32 @@ evaluation of this area and its disposition are recorded in
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13315-L13332
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14427-L14442
 [segments]: ../../../../crates/daemon/src/lib.rs#L14448-L14454
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567-L16626
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16628-L16643
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16568
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16630
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2028-L2050
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2020
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2125-L2141
-[sel-item]: ../../../../crates/daemon/src/transform.rs#L6355-L6384
+[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2116-L2132
+[sel-item]: ../../../../crates/daemon/src/transform.rs#L6352
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
 [tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7195-L7200
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7300-L7321
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7389
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27579
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27331
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23118
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28653
-[flatproj]: ../../../../crates/daemon/src/wire.rs#L114-L127
-[reattach]: ../../../../crates/daemon/src/wire.rs#L145-L186
-[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../crates/daemon/src/wire.rs#L680-L743
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L833-L844
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7196-L7201
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7303-L7324
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7328-L7352
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7392
+[make-mut]: ../../../../crates/daemon/src/transform.rs#L7927-L7928
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27907
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27658
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28983
+[flatproj]: ../../../../crates/daemon/src/wire.rs#L112-L125
+[reattach]: ../../../../crates/daemon/src/wire.rs#L143-L184
+[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L322-L330
+[flatten]: ../../../../crates/daemon/src/wire.rs#L673-L732
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L822-L831
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264
@@ -2461,8 +2467,8 @@ evaluation of this area and its disposition are recorded in
 [hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L536-L554
 [hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L555-L565
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
-[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L258-L293
-[sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L277-L291
+[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L258-L302
+[sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L277-L300
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
 [segment-served]: ../../../../crates/daemon/src/dispatch.rs#L50-L72
@@ -2493,12 +2499,12 @@ evaluation of this area and its disposition are recorded in
 [completed-call]: ../../../../crates/daemon/src/lib.rs#L8436
 [cfg-models]: ../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
-[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1940-L1979
-[stable-call]: ../../../../crates/daemon/src/transform.rs#L1819-L1843
-[descend]: ../../../../crates/daemon/src/transform.rs#L2961-L2972
-[value-compare]: ../../../../crates/daemon/src/transform.rs#L3225
-[truncate]: ../../../../crates/daemon/src/transform.rs#L4130-L4136
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13603
+[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1931-L1970
+[stable-call]: ../../../../crates/daemon/src/transform.rs#L1813-L1837
+[descend]: ../../../../crates/daemon/src/transform.rs#L2952-L2963
+[value-compare]: ../../../../crates/daemon/src/transform.rs#L3216
+[truncate]: ../../../../crates/daemon/src/transform.rs#L4121-L4127
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13606
 [received]: ../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6496-L6514
@@ -2654,16 +2660,16 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12417-L12422
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L27704-L27709
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12420-L12425
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28032-L28037
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8463-L8488
 [respond]: ../../../../crates/daemon/src/lib.rs#L14404
 [tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1199-L1210
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
-[snap-add]: ../../../../crates/daemon/src/transform.rs#L2410
-[snap-once]: ../../../../crates/daemon/src/transform.rs#L2890
+[snap-add]: ../../../../crates/daemon/src/transform.rs#L2401
+[snap-once]: ../../../../crates/daemon/src/transform.rs#L2881
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
@@ -2674,16 +2680,19 @@ evaluation of this area and its disposition are recorded in
 [tc-shard]: ../../../../crates/daemon/src/token_cache.rs#L112-L113
 [tc-u32]: ../../../../crates/daemon/src/token_cache.rs#L135-L137
 [tc-cet]: ../../../../crates/daemon/src/token_cache.rs#L165-L181
-[tc-inject]: ../../../../crates/daemon/src/transform.rs#L1799-L1815
+[tc-inject]: ../../../../crates/daemon/src/transform.rs#L1793-L1809
 [declared-doc]: ../../../../crates/daemon/src/lib.rs#L2236-L2241
 [declared]: ../../../../crates/daemon/src/lib.rs#L2243-L2257
-[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2874-L2878
-[soft-direct]: ../../../../crates/daemon/src/transform.rs#L4339-L4350
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4339-L4357
-[soft-m1-compose]: ../../../../crates/daemon/src/transform.rs#L4336
-[mint-direct]: ../../../../crates/daemon/src/transform.rs#L7199
-[nudge-direct]: ../../../../crates/daemon/src/transform.rs#L8598
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24231-L24242
+[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2865
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6315
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24267
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24519
+[sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2071
+[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24296
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24321
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24456
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21411
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28247
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
@@ -2771,7 +2780,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L10981-L10985
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5900-L5909
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35834
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35840
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261

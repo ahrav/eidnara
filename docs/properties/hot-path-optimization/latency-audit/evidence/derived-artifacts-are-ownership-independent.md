@@ -27,7 +27,7 @@ never of the allocation or the lane that produced them.
   from the same block for their consumers to agree.
 - The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2919-2921`][prefix-call] when a reusable projection exists and
+  [`:2910-2912`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
@@ -121,30 +121,51 @@ both differentials and fingerprint reuse; none covers the four added oracles.
 - Missing evidence: A two-form sidecar comparison.
 - Conclusion: unresolved, needs a two-form sidecar comparison.
 
+## Implementation evidence
+
+The preceding discovery snapshot is retained at its stated baseline. Current
+checks and decision provenance are in [shared selection and pressure
+accounting](shared-selection-and-pressure-accounting.md).
+
+Both production selection constructors borrow the projected wire input.
+The pointer-identity test fails on the clone-based baseline and passes on
+the borrowed representation, including a selection clone and historian input.
+The unchanged selection reference passes all 18 differential tests. The
+`tool_input` versus `wire.kind()` question from the discovery snapshot is
+resolved by removal: `FlatBlock` no longer carries a separate input copy, so
+there is one projected input and no pair of fields to drift apart.
+
+The sidecar test compares full and incremental order, metadata, and pins over
+three generations with repeated IDs. It also checks sparse prefixes: map
+membership is valid only when every copied order entry has metadata; otherwise
+the original order scan preserves missing-metadata behavior. This resolves
+the two-form pin question for the tested cases. Sorted-key protocol intent
+and the production differential-panic policy remain outside this change.
+
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
-[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
-[flatproj]: ../../../../../crates/daemon/src/wire.rs#L114-L127
-[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L141-L144
-[reattach]: ../../../../../crates/daemon/src/wire.rs#L145-L186
-[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L680-L743
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L833-L842
+[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L62
+[flatproj]: ../../../../../crates/daemon/src/wire.rs#L112-L125
+[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L139-L142
+[reattach]: ../../../../../crates/daemon/src/wire.rs#L143-L184
+[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L322-L330
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L732
+[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L822-L831
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2013-L2020
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2030-L2045
-[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2919-L2921
-[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6355-L6384
-[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16629-L16644
+[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
+[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2910-L2912
+[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6352
+[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16630
 [ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13027-L13071
 [chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13058
 [gate-native]: ../../../../../crates/daemon/src/lib.rs#L13073-L13080
 [native-diff]: ../../../../../crates/daemon/src/lib.rs#L13316-L13333
 [segments-take]: ../../../../../crates/daemon/src/lib.rs#L14428-L14443
 [segments]: ../../../../../crates/daemon/src/lib.rs#L14448-L14454
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20948
-[sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L293
-[sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L277-L291
+[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20956
+[sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L302
+[sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L278-L300
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
 [serde-features]: ../../../../../Cargo.toml#L47
