@@ -181,6 +181,10 @@ impl EmbeddingSupervisor {
         // Whether each kind's last slice found nothing to do; the loop waits only when both did, so a dry sweep never throttles a backfill with a backlog and a blocked backfill never spins while the sweep is also dry.
         let mut idle = Idle::default();
         loop {
+            // A stop is terminal for this supervisor: a later `run` on the same value schedules nothing and leaves the recorded reason in place.
+            if self.stopped() {
+                return;
+            }
             if self.shutdown.is_cancelled() {
                 self.stop_with(Stop::Shutdown);
                 return;
@@ -371,6 +375,13 @@ impl EmbeddingSupervisor {
                 }
             }
         }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 
     fn stop_with(&self, stop: Stop) {

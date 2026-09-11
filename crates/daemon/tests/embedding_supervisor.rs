@@ -722,6 +722,16 @@ async fn a_panicking_slice_is_reported_and_stops_the_supervisor() {
         .await
         .unwrap()
         .unwrap();
+
+    // The stop is terminal: a later `run` on the same supervisor, with no shutdown in between, returns without scheduling a slice.
+    tokio::time::timeout(Duration::from_secs(2), Arc::clone(&supervisor).run())
+        .await
+        .expect("a stopped supervisor's run returns at once");
+    assert!(
+        events.try_recv().is_err(),
+        "no slice started and no second stop was reported"
+    );
+
     let report = supervisor.shutdown(Duration::from_secs(2)).await.unwrap();
     assert_eq!(
         report.stop,
