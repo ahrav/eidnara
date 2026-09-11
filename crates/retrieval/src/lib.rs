@@ -28,12 +28,11 @@ use storage::GuardedConn;
 /// identity checked on every open.
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
-/// The schema version the baseline text implements. A projection whose stored
-/// identity names another version is rebuilt.
+/// A schema mismatch requires a rebuild from canonical state.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The identity every row in one projection was built under. Any component
-/// that differs at open makes the projection incompatible.
+/// Connection opening does not compare projection identities.
+/// A matching identity does not establish completeness or authorize search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionIdentity {
     pub schema_version: u32,
@@ -202,6 +201,10 @@ pub enum ProjectionError {
     )]
     NonPositiveTombstoneSequence { occurrence_id: String },
     #[error(
+        "the tombstone for occurrence {occurrence_id} must name a commit sequence after its creation"
+    )]
+    TombstoneNotAfterCreation { occurrence_id: String },
+    #[error(
         "occurrence {occurrence_id} is stored with a different tuple under the same identifier"
     )]
     OccurrenceCollision { occurrence_id: String },
@@ -240,7 +243,19 @@ fn parse_sensitivity(value: &str) -> Option<Sensitivity> {
         .find(|candidate| candidate.as_str() == value)
 }
 
-/// Installs the identity in an empty projection or checks an installed one.
+/// A successful identity check does not prove that the projection is complete.
+/// Pass the expected build identity; replaying the stored row cannot detect drift.
+/// Opening the connection does not call this check.
+/// This operation does not rebuild, delete, or authorize serving the projection.
+///
+/// # Errors
+///
+/// Returns [`ProjectionError::IdentityMismatch`] for an unsupported schema version.
+/// The schema-version check also applies before the first identity insert.
+/// Any stored identity component mismatch returns the same error.
+/// Insertion returns [`ProjectionError::CorruptRow`] for epochs above `i64::MAX`.
+/// A negative stored epoch also returns [`ProjectionError::CorruptRow`].
+/// Returns [`ProjectionError::Sqlite`] if reading or inserting the identity fails.
 pub fn install_identity(
     conn: &GuardedConn<'_>,
     identity: &ProjectionIdentity,
@@ -583,6 +598,7 @@ fn persist_with_digests<'c>(
 /// Records that an occurrence stopped being live. Recording the same
 /// tombstone again is a no-op; a different one for the same occurrence is a
 /// collision, because an invalidation fact never changes.
+/// The invalidation commit must be strictly after the stored creation commit.
 pub fn tombstone_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
@@ -594,13 +610,20 @@ pub fn tombstone_occurrence(
             occurrence_id: occurrence_id.to_string(),
         });
     }
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM occurrences WHERE occurrence_id=?1)",
-        [occurrence_id],
-        |row| row.get(0),
-    )?;
-    if !exists {
+    let created_commit_seq: Option<i64> = conn
+        .query_row(
+            "SELECT created_commit_seq FROM occurrences WHERE occurrence_id=?1",
+            [occurrence_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(created_commit_seq) = created_commit_seq else {
         return Err(ProjectionError::UnknownOccurrence {
+            occurrence_id: occurrence_id.to_string(),
+        });
+    };
+    if tombstone.invalidated_commit_seq <= created_commit_seq {
+        return Err(ProjectionError::TombstoneNotAfterCreation {
             occurrence_id: occurrence_id.to_string(),
         });
     }

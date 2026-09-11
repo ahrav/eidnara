@@ -693,8 +693,93 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
         .unwrap();
 }
 
-/// `persist_occurrences` detects all collisions before writing, so a refused
-/// batch writes no records even if its transaction commits.
+#[test]
+fn tombstones_require_a_commit_after_occurrence_creation() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let outcomes = store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, &[record]).unwrap()))
+        .unwrap();
+    let occurrence_id = &outcomes[0].occurrence_id;
+    let mut expected = store
+        .with_conn(|conn| Ok(read_occurrence(conn, occurrence_id).unwrap().unwrap()))
+        .unwrap();
+    assert_eq!(expected.created_commit_seq, 7);
+    assert_eq!(expected.tombstone, None);
+
+    for invalidated_commit_seq in [6, 7] {
+        let (result, changed_rows) = store
+            .with_conn_fenced(|conn| {
+                let before: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                let result = tombstone_occurrence(
+                    conn,
+                    occurrence_id,
+                    Tombstone {
+                        invalidated_commit_seq,
+                        reason: TombstoneReason::Superseded,
+                    },
+                    2,
+                );
+                let after: i64 = conn.query_row("SELECT total_changes()", [], |row| row.get(0))?;
+                Ok((result, after - before))
+            })
+            .unwrap();
+        assert_eq!(
+            result.map_err(|error| error.to_string()),
+            Err(format!(
+                "the tombstone for occurrence {occurrence_id} must name a commit sequence after its creation"
+            )),
+            "invalidation at {invalidated_commit_seq} must follow creation at 7"
+        );
+        assert_eq!(changed_rows, 0, "a rejected request must not mutate rows");
+        store
+            .with_conn(|conn| {
+                assert_eq!(
+                    read_occurrence(conn, occurrence_id).unwrap(),
+                    Some(expected.clone())
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    let stone = Tombstone {
+        invalidated_commit_seq: 8,
+        reason: TombstoneReason::Superseded,
+    };
+    store
+        .with_conn_fenced(|conn| {
+            assert_eq!(
+                tombstone_occurrence(conn, occurrence_id, stone, 3),
+                Ok(true)
+            );
+            assert_eq!(
+                tombstone_occurrence(conn, occurrence_id, stone, 4),
+                Ok(false)
+            );
+            Ok(())
+        })
+        .unwrap();
+    expected.tombstone = Some(stone);
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                read_occurrence(conn, occurrence_id).unwrap(),
+                Some(expected)
+            );
+            let recorded_at: i64 = conn.query_row(
+                "SELECT recorded_at FROM occurrence_tombstones WHERE occurrence_id=?1",
+                [occurrence_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(recorded_at, 3, "replay must retain the original timestamp");
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn a_collision_anywhere_in_a_batch_writes_none_of_the_batch() {
     let fixtures = fixtures();
