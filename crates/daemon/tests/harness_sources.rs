@@ -576,23 +576,6 @@ fn adapters_bind_native_identity_exactly_and_refuse_missing_identity() {
         opencode_units(&opencode_session(), &ignored).unwrap(),
         vec![]
     );
-    // An in-progress assistant record carries `completed` as an explicit null; its revision is `created`, the same as when the key is absent.
-    let mut in_progress = opencode_assistant("msg_p", 5000);
-    in_progress["info"]["time"]["completed"] = Value::Null;
-    let units = opencode_units(&opencode_session(), &in_progress).unwrap();
-    assert_eq!(units.len(), 4);
-    assert_eq!(
-        units[0].revision, "4000",
-        "completed - 1000 is the created stamp"
-    );
-    in_progress["info"]["time"]
-        .as_object_mut()
-        .unwrap()
-        .remove("completed");
-    assert_eq!(
-        opencode_units(&opencode_session(), &in_progress).unwrap(),
-        units
-    );
     // Debug output of a unit names identities and sizes, never text.
     let debug = format!(
         "{:?}",
@@ -743,6 +726,338 @@ fn inventory(corpus: &Corpus) -> BTreeSet<(String, String, String)> {
         .collect()
 }
 
+#[test]
+fn pi_refuses_unsupported_message_roles() {
+    for role in ["system", "developer", "custom", "future-role"] {
+        let mut entry = pi_user("pi-u1", "not conversation text", 100);
+        entry["message"]["role"] = json!(role);
+        assert_eq!(
+            pi_units(&pi_session(), &entry),
+            Err(AdapterRefusal::UnsupportedShape("message.role")),
+            "{role}"
+        );
+    }
+}
+
+#[test]
+fn opencode_refuses_pi_namespace() {
+    let session = SessionIdentity {
+        harness: Harness::Pi,
+        ..opencode_session()
+    };
+    assert_eq!(
+        opencode_units(&session, &opencode_user("msg_u", "hello", 100)),
+        Err(AdapterRefusal::UnsupportedShape("harness"))
+    );
+}
+
+#[test]
+fn pi_refuses_opencode_namespace() {
+    let session = SessionIdentity {
+        harness: Harness::OpenCode,
+        ..pi_session()
+    };
+    assert_eq!(
+        pi_units(&session, &pi_user("pi-u1", "hello", 100)),
+        Err(AdapterRefusal::UnsupportedShape("harness"))
+    );
+}
+
+#[test]
+fn opencode_requires_parts_array() {
+    let mut record = opencode_user("msg_u", "hello", 100);
+    for parts in [
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!(42)),
+        Some(json!("text")),
+    ] {
+        record.as_object_mut().unwrap().remove("parts");
+        if let Some(parts) = parts {
+            record["parts"] = parts;
+        }
+        assert_eq!(
+            opencode_units(&opencode_session(), &record),
+            Err(AdapterRefusal::UnsupportedShape("parts")),
+            "{record:?}"
+        );
+    }
+    for parts in [
+        json!([]),
+        json!([{ "type": "reasoning", "text": "thinking" }]),
+    ] {
+        record["parts"] = parts;
+        assert_eq!(
+            opencode_units(&opencode_session(), &record).unwrap(),
+            vec![]
+        );
+    }
+}
+
+#[test]
+fn unfinished_assistant_text_is_deferred_but_settled_tools_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let mut record = opencode_assistant("msg_stream", 5000);
+    record["info"]["time"]["completed"] = Value::Null;
+    for text in ["H", "Hello"] {
+        record["parts"][2]["text"] = json!(text);
+        let units = opencode_units(&opencode_session(), &record).unwrap();
+        assert_eq!(units.len(), 2, "unfinished text must not become a source");
+        for unit in &units {
+            assert_eq!(unit.class, OccurrenceClass::RawToolSpans);
+            publisher.publish(unit, 6000).unwrap();
+        }
+        record["info"]["time"]
+            .as_object_mut()
+            .unwrap()
+            .remove("completed");
+    }
+    record["info"]["error"] = json!({ "name": "MessageAbortedError" });
+    assert!(
+        opencode_units(&opencode_session(), &record)
+            .unwrap()
+            .iter()
+            .all(|unit| unit.class == OccurrenceClass::RawToolSpans),
+        "an abort without a completion timestamp provides no stable text revision"
+    );
+    record["info"]["time"]["completed"] = json!(5000);
+    for unit in opencode_units(&opencode_session(), &record).unwrap() {
+        publisher.publish(&unit, 6000).unwrap();
+    }
+    let messages: BTreeSet<_> = inventory(&corpus)
+        .into_iter()
+        .filter(|(class, _, _)| class == "messages")
+        .map(|(_, text, _)| text)
+        .collect();
+    assert_eq!(
+        messages,
+        BTreeSet::from(["Hello".to_owned(), String::new()])
+    );
+    let user = opencode_units(
+        &opencode_session(),
+        &opencode_user("msg_user", "user text", 100),
+    )
+    .unwrap();
+    assert_eq!(user.len(), 1);
+    assert_eq!(user[0].revision, "100");
+    publisher.publish(&user[0], 6000).unwrap();
+}
+
+#[test]
+fn publication_receipt_conflicts_on_provider_egress_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let unit = pi_units(&pi_session(), &pi_user("pi-u1", "hello", 100))
+        .unwrap()
+        .remove(0);
+    let remote = SourcePublisher {
+        egress: ProviderEgress::RemoteAllowed,
+        ..corpus.publisher()
+    };
+    remote.publish(&unit, NOW).unwrap();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    let result = corpus.publisher().publish(&unit, NOW);
+    assert!(
+        matches!(result, Err(PublishError::IdentityReused)),
+        "{result:?}"
+    );
+    assert_eq!(corpus.tip(), tip);
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+}
+
+#[test]
+fn publication_receipt_distinguishes_delimiters_inside_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let mut unit = pi_units(&pi_session(), &pi_user("pi-u1", "a\u{1f}b", 100))
+        .unwrap()
+        .remove(0);
+    corpus.publisher().publish(&unit, NOW).unwrap();
+    let tip = corpus.tip();
+    let staged = corpus.kernel.staged_artifacts_for_test();
+    unit.text = "a".to_owned();
+    let other = SourcePublisher {
+        domain_id: "b\u{1f}domain",
+        ..corpus.publisher()
+    };
+    let result = other.publish(&unit, NOW);
+    assert!(
+        matches!(result, Err(PublishError::IdentityReused)),
+        "{result:?}"
+    );
+    assert_eq!(corpus.tip(), tip);
+    assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+}
+
+#[test]
+fn publication_store_failure_preserves_evidence_for_retry() {
+    for table in ["observations", "admission_decisions"] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let unit = pi_units(&pi_session(), &pi_user("pi-u1", "retry text", 100))
+            .unwrap()
+            .remove(0);
+        let connection = Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TRIGGER publication_failure BEFORE INSERT ON {table}
+             BEGIN SELECT injected_store_failure(); END;"
+            ))
+            .unwrap();
+        let failed = corpus.publisher().publish(&unit, NOW).unwrap_err();
+        let evidence = match failed {
+            PublishError::Kernel {
+                error: kernel::KernelError::Io,
+                evidence: Some(evidence),
+            }
+            | PublishError::Descriptor {
+                refusal: SourceDescriptorError::Kernel(kernel::KernelError::Io),
+                evidence: Some(evidence),
+            } => evidence,
+            other => panic!("expected store Io after retention, got {other:?}"),
+        };
+        assert_eq!(
+            evidence.retired, None,
+            "store failure must not attempt compensation"
+        );
+        connection
+            .execute_batch("DROP TRIGGER publication_failure")
+            .unwrap();
+        let (_, states) = corpus
+            .kernel
+            .object_states(std::slice::from_ref(&evidence.object_id))
+            .unwrap();
+        assert_eq!(
+            states[0].as_ref().unwrap().object.invalidated_commit_seq,
+            None,
+            "store failure must leave retained evidence live for retry ({table})"
+        );
+        let published = corpus.publisher().publish(&unit, NOW).unwrap();
+        assert_eq!(published.evidence_object_id, evidence.object_id);
+        assert!(!published.replayed);
+        assert!(corpus.publisher().publish(&unit, NOW).unwrap().replayed);
+        assert_eq!(inventory(&corpus).len(), 1);
+    }
+}
+
+#[test]
+fn publication_missing_scope_preserves_evidence_until_scope_is_created() {
+    const MISSING_SCOPE: &str = "project:recoverable";
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = SourcePublisher {
+        scope_id: MISSING_SCOPE,
+        ..corpus.publisher()
+    };
+    let unit = pi_units(&pi_session(), &pi_user("pi-u1", "recoverable scope", 100))
+        .unwrap()
+        .remove(0);
+    let tip = corpus.tip();
+    let failed = publisher.publish(&unit, NOW).unwrap_err();
+    let PublishError::Kernel {
+        error: kernel::KernelError::NotFound,
+        evidence: Some(evidence),
+    } = failed
+    else {
+        panic!("expected missing scope after retention, got {failed:?}");
+    };
+    assert_eq!(
+        evidence.retired, None,
+        "missing scope must not attempt compensation"
+    );
+    assert_eq!(corpus.tip(), tip + 1, "only artifact retention commits");
+    let (_, states) = corpus
+        .kernel
+        .object_states(std::slice::from_ref(&evidence.object_id))
+        .unwrap();
+    assert_eq!(
+        states[0].as_ref().unwrap().object.invalidated_commit_seq,
+        None
+    );
+    assert!(inventory(&corpus).is_empty());
+
+    corpus
+        .kernel
+        .commit(intent("create-requested-scope"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: MISSING_SCOPE.to_owned(),
+                object_id: MISSING_SCOPE.to_owned(),
+                source_id: MISSING_SCOPE.to_owned(),
+                domain_id: "domain".to_owned(),
+                source_kind: "kernel_route".to_owned(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_owned(),
+                    operator: "exact".to_owned(),
+                    exact_value: Some(PROJECT.to_owned()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = corpus.tip();
+    let published = publisher.publish(&unit, NOW).unwrap();
+    assert_eq!(published.evidence_object_id, evidence.object_id);
+    assert!(!published.replayed);
+    assert_eq!(corpus.tip(), tip + 1, "retry reuses the artifact receipt");
+    let rows = corpus.export();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].object_id, published.object_id);
+    assert_eq!(rows[0].text.as_deref(), Some("recoverable scope"));
+    let tip = corpus.tip();
+    assert!(publisher.publish(&unit, NOW).unwrap().replayed);
+    assert_eq!(corpus.tip(), tip);
+}
+
+#[test]
+fn permanent_refusal_reports_failed_retirement_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let publisher = corpus.publisher();
+    let mut unit = pi_units(&pi_session(), &pi_user("pi-u1", "retirement failure", 100))
+        .unwrap()
+        .remove(0);
+    publisher.publish(&unit, NOW).unwrap();
+    unit.revision = "50".to_owned();
+    let connection = Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
+    connection.execute_batch(
+        "CREATE TRIGGER retirement_failure BEFORE UPDATE OF invalidated_commit_seq ON evidence_meta
+         BEGIN SELECT injected_retirement_failure(); END;"
+    ).unwrap();
+    let failed = publisher.publish(&unit, NOW).unwrap_err();
+    let PublishError::Descriptor {
+        refusal: SourceDescriptorError::RevisionNotAdvanced,
+        evidence: Some(evidence),
+    } = failed
+    else {
+        panic!("expected permanent refusal with compensation, got {failed:?}");
+    };
+    assert_eq!(evidence.retired, Some(Err(kernel::KernelError::Io)));
+    let (_, states) = corpus
+        .kernel
+        .object_states(std::slice::from_ref(&evidence.object_id))
+        .unwrap();
+    assert_eq!(
+        states[0].as_ref().unwrap().object.invalidated_commit_seq,
+        None
+    );
+    connection
+        .execute_batch("DROP TRIGGER retirement_failure")
+        .unwrap();
+}
+
 /// AC1, AC3, AC5: equal text under different native identities is two occurrences; publishing a unit again replays its receipts; a newer revision invalidates its predecessor in the same commit; a stale revision is refused; reopen preserves exact bytes.
 #[test]
 fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
@@ -851,7 +1166,7 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
         panic!("a stale revision is refused after its evidence was retained: {refused:?}");
     };
     // The refused block's evidence was retained and then retired in the compensating commit: the evidence object is invalidated, so it is not a live source and no descriptor names it.
-    assert_eq!(evidence.retired, Ok(()), "{evidence:?}");
+    assert_eq!(evidence.retired, Some(Ok(())), "{evidence:?}");
     let (_, states) = corpus
         .kernel
         .object_states(std::slice::from_ref(&evidence.object_id))
@@ -879,7 +1194,7 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
         panic!("a repeated stale publication is refused: {again:?}");
     };
     assert_eq!(evidence_again.object_id, evidence.object_id);
-    assert_eq!(evidence_again.retired, Ok(()));
+    assert_eq!(evidence_again.retired, Some(Ok(())));
 
     // Tool bytes: exact through publication, export, and reopen.
     let tool = opencode_units(&opencode_session(), &opencode_assistant("msg_a", 5000)).unwrap();
@@ -1024,11 +1339,41 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
     ];
     let mut empty_block = None;
     let mut evidence_objects = BTreeMap::new();
+    let kernel_db = Connection::open_with_flags(
+        dir.path().join("kernel/kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
     for (units, expected) in &records {
         assert_eq!(units.len(), expected.len(), "{units:?}");
         for (unit, expected_provenance) in units.iter().zip(expected) {
             let published = publisher.publish(unit, NOW).unwrap();
             assert_eq!(published.provenance, *expected_provenance, "{unit:?}");
+            let admissions: Vec<(String, String, String)> = kernel_db
+                .prepare(
+                    "SELECT a.source_class,a.taint_class,e.object_id
+                 FROM admission_decisions a
+                 JOIN observations o ON o.object_id=a.subject_object_id
+                 JOIN evidence_meta e ON e.evidence_id=a.evidence_id
+                 WHERE a.subject_object_id=?1 AND a.evidence_id=o.evidence_id",
+                )
+                .unwrap()
+                .query_map([&published.object_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                admissions,
+                vec![(
+                    expected_provenance.0.as_str().to_owned(),
+                    expected_provenance.1.as_str().to_owned(),
+                    published.evidence_object_id.clone(),
+                )],
+                "durable admission must bind the fixture's classes and evidence to {}",
+                published.object_id
+            );
             if unit.class == OccurrenceClass::Messages && unit.text.is_empty() {
                 empty_block = Some(published.occurrence_id.clone());
             }
@@ -1193,8 +1538,45 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
         .unwrap();
     assert_eq!(raw_jobs, 0);
 
-    // Negative control: a tool string leaked through the message class would be counted by the same pending oracle.
+    drop(dispatcher);
     drop(projection);
+    let reopened = SearchProjection::open(dir.path()).unwrap();
+    reopened
+        .read(|conn| {
+            for row in &rows {
+                let completion = retrieval::vectors::completion_status(
+                    conn,
+                    &row.detail.occurrence_id,
+                    GENERATION,
+                )?;
+                if embeddable.contains(&row.detail.occurrence_id) {
+                    assert_eq!(
+                        completion.job_state.as_deref(),
+                        Some("embedded"),
+                        "{}",
+                        row.object_id
+                    );
+                    assert!(
+                        completion.has_durable_vector(&TestEngine::vector_for(
+                            row.text.as_deref().unwrap()
+                        )),
+                        "{} must retain its own vector",
+                        row.object_id
+                    );
+                } else {
+                    assert!(
+                        completion.vector.is_none(),
+                        "{} is lexical only",
+                        row.object_id
+                    );
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    drop(reopened);
+
+    // Negative control: a tool string leaked through the message class would be counted by the same pending oracle.
     let mut smuggled = opencode_units(&opencode_session(), &opencode_assistant("msg_leak", 9000))
         .unwrap()
         .remove(1);

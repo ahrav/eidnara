@@ -2,7 +2,7 @@
 //!
 //! Identity is native or refused. A message occurrence names the project, harness, durable session, native message, and block position; a raw tool occurrence names the parent message, tool call, result revision, and output block. A payload hash never stands in for a missing identity. An OpenCode record names its session and is refused when it names another; Pi entries carry no session, so the caller's binding of the session file is the session identity. Message parts that are not text (reasoning, steps, files, patches, images) are not text sources and contribute nothing; a tool result whose content is not text is refused, because the tool string is the source and a non-text one has no disposition here. Tool strings are retained exactly as the codec received them and are never joined; a tool result is never part of a message's text, and its class creates no dense work downstream.
 //!
-//! Publication goes through the kernel's shared source operation: the block is retained as an exact artifact (which runs the bounded secret scan and refuses rewritten or unscannable bytes), then one commit publishes the descriptor with the class the store recorded for that evidence and records the admission. Both steps carry receipt keys derived from the canonical occurrence identity, revision, and representation, and a request digest over the text and the publishing context. The descriptor receipt is consulted first, so a replay returns the stored receipt without offering the bytes again, the same unit under another scope or with other text is a conflict, and a newer revision of the same lineage invalidates its predecessor in the same commit. A native revision far ahead of the observation is refused before retention, since nothing later could advance the lineage past it. A descriptor refusal after the artifact was retained retires the evidence object in a compensating commit and reports whether that commit landed, so no refused block stays a live source unnoticed.
+//! Publication retains each block's exact bytes, then commits its descriptor and admission. Receipt keys make replays idempotent; changed bytes or publishing context conflict. A newer revision invalidates its predecessor atomically. Permanent descriptor refusals attempt to retire retained evidence. Kernel failures, including unmet preconditions such as a missing scope, preserve it; callers decide whether the failure permits retry.
 
 use kernel::source_identity::{
     HARNESSES, Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
@@ -182,15 +182,20 @@ struct ToolBlock<'a> {
     is_error: bool,
 }
 
-/// Units of one OpenCode `MessageV2` record: every `text` part in position order (its block index is its part position), and every `tool` part whose state settled, as the exact `state.output` or `state.error` string (its output block index is 0, the one string). Ignored text and parts of other kinds contribute nothing.
+/// Units of one OpenCode `MessageV2` record: user text at `time.created`, assistant text at `time.completed`, and settled tool parts at `state.time.end`. Text block indices are part positions; a tool's output block index is 0, its one exact output or error string. Ignored text and other part kinds contribute nothing.
+///
+/// Assistant text without a completion timestamp is deferred. A valid completion timestamp makes non-ignored text eligible even when `info.error` is present. Settled tools contribute independently. The adapter uses no separate edit revision for user text or completed assistant text; changing bytes at the same native identity and timestamp conflicts at publication.
 ///
 /// # Errors
 ///
-/// Refuses a record without `info.id`, `info.sessionID`, `info.role`, or `info.time`; a record from another session; a settled tool part without `callID` or `state.time.end`; and a settled tool part whose output is not a string.
+/// Refuses a non-OpenCode binding, non-object `info`, missing identities, a different session, missing or invalid timestamps, non-array `parts`, non-string selected text, tool parts without `state`, and settled tools without `callID`, `state.time.end`, or string output.
 pub fn opencode_units(
     session: &SessionIdentity,
     message: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    if session.harness != Harness::OpenCode {
+        return Err(AdapterRefusal::UnsupportedShape("harness"));
+    }
     let info = message
         .get("info")
         .filter(|info| info.is_object())
@@ -203,24 +208,20 @@ pub fn opencode_units(
     let time = info
         .get("time")
         .ok_or(AdapterRefusal::MissingIdentity("time"))?;
-    // An in-progress record carries `completed` as an explicit null, which is the same absence as a missing key.
-    let message_revision = revision(
-        time.get("completed")
-            .filter(|completed| !completed.is_null())
-            .or_else(|| time.get("created")),
-        "time",
-    )?;
-    let mut units = Vec::new();
-    for (index, part) in message
+    let completed = time
+        .get("completed")
+        .filter(|completed| !completed.is_null());
+    let message_revision = revision(completed.or_else(|| time.get("created")), "time")?;
+    let parts = message
         .get("parts")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
+        .ok_or(AdapterRefusal::UnsupportedShape("parts"))?;
+    let mut units = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
         match part.get("type").and_then(Value::as_str) {
             // An ignored text part is not conversation text.
             Some("text") if part.get("ignored").and_then(Value::as_bool) == Some(true) => {}
+            Some("text") if role == "assistant" && completed.is_none() => {}
             Some("text") => {
                 let text = part
                     .get("text")
@@ -263,11 +264,14 @@ pub fn opencode_units(
 ///
 /// # Errors
 ///
-/// Refuses a message entry without `id`, `message.role`, or a numeric `message.timestamp`; a tool result without `toolCallId` or `parentId`; and a tool result content item that is not text.
+/// Refuses a non-Pi binding, non-object entries or messages, missing identities or timestamps, invalid timestamps, unsupported roles, malformed content containers or text items, and tool results without a call or parent or with non-text content.
 pub fn pi_units(
     session: &SessionIdentity,
     entry: &Value,
 ) -> Result<Vec<SourceUnit>, AdapterRefusal> {
+    if session.harness != Harness::Pi {
+        return Err(AdapterRefusal::UnsupportedShape("harness"));
+    }
     if !entry.is_object() {
         return Err(AdapterRefusal::NotAnObject);
     }
@@ -280,6 +284,9 @@ pub fn pi_units(
         .filter(|message| message.is_object())
         .ok_or(AdapterRefusal::MissingIdentity("message"))?;
     let role = field(message, "role")?;
+    if !matches!(role, "user" | "assistant" | "toolResult") {
+        return Err(AdapterRefusal::UnsupportedShape("message.role"));
+    }
     let stamp = revision(message.get("timestamp"), "timestamp")?;
     let mut units = Vec::new();
     if role == "toolResult" {
@@ -343,11 +350,13 @@ pub struct Published {
     pub provenance: (SourceClass, TaintClass),
 }
 
-/// What became of the evidence a refused publication had already retained. The artifact is retained before the descriptor commit, so a refusal leaves an evidence object behind; `retired` is `Ok` once the compensating commit invalidated it and `Err` when the object is still a live evidence row the caller must reconcile.
+/// Evidence retained before publication failed. Only permanent descriptor refusals attempt compensation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedEvidence {
     pub object_id: String,
-    pub retired: Result<(), KernelError>,
+    /// `None` means retirement was not attempted. `Some(Ok(()))` confirms retirement;
+    /// `Some(Err(error))` reports a failed compensation attempt.
+    pub retired: Option<Result<(), KernelError>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -355,7 +364,7 @@ pub enum PublishError {
     /// The exact artifact was refused: the bytes were rewritten by the scanner, could not be scanned, or exceed the store's bounds. Nothing new was retained.
     #[error("the block's bytes were refused: {0:?}")]
     Artifact(ArtifactErrorKind),
-    /// The identity and revision were already published with other bytes or under another domain, scope, role, or asserted sensitivity. A receipt never moves a row, so nothing new was retained.
+    /// The identity and revision conflict with stored bytes, domain, scope, role, sensitivity, or provider egress policy. Nothing is retained by this request.
     #[error("the identity and revision were already published under another request")]
     IdentityReused,
     /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
@@ -367,7 +376,7 @@ pub enum PublishError {
         refusal: SourceDescriptorError,
         evidence: Option<RetainedEvidence>,
     },
-    /// The store failed. `evidence` is present when the failure came after the artifact was retained.
+    /// A kernel failure, including an unmet precondition such as a missing scope. When present, `evidence` is preserved without attempting retirement. The failure does not imply retryability.
     #[error("{error}")]
     Kernel {
         error: KernelError,
@@ -397,7 +406,7 @@ impl SourcePublisher<'_> {
     ///
     /// # Errors
     ///
-    /// Returns [`PublishError::RevisionAhead`] and [`PublishError::IdentityReused`] before anything is retained, [`PublishError::Artifact`] when the bytes are refused before anything is retained, [`PublishError::Descriptor`] when the kernel refuses the descriptor (a stale revision, a colliding tuple, a mismatched domain), and [`PublishError::Kernel`] for store failures. A refusal after retention carries the evidence object and whether the compensating retirement committed.
+    /// Returns identity, revision, or artifact errors before retention, descriptor errors for permanent refusals, and kernel errors including unmet preconditions such as a missing scope. Failures after retention carry the evidence object. Permanent refusals attempt retirement; kernel failures preserve evidence without implying retryability.
     pub fn publish(&self, unit: &SourceUnit, observed_at: i64) -> Result<Published, PublishError> {
         let identity: Vec<(&str, &str)> = unit
             .identity
@@ -491,7 +500,10 @@ impl SourcePublisher<'_> {
         let sensitivity = match self.stored_sensitivity(&evidence_object_id) {
             Ok(sensitivity) => sensitivity,
             Err(error) => {
-                let evidence = Some(self.retire_evidence(&key, &request_digest, &harness));
+                let evidence = Some(RetainedEvidence {
+                    object_id: evidence_object_id,
+                    retired: None,
+                });
                 return Err(PublishError::Kernel { error, evidence });
             }
         };
@@ -549,11 +561,20 @@ impl SourcePublisher<'_> {
                 provenance,
             }),
             (Err(error), outcome) => {
-                // The evidence was retained for a descriptor the kernel refused; retiring it leaves no live source behind.
-                let evidence = Some(self.retire_evidence(&key, &request_digest, &harness));
-                Err(match outcome {
-                    Some(Err(refusal)) => PublishError::Descriptor { refusal, evidence },
-                    _ => PublishError::Kernel { error, evidence },
+                let error = match outcome {
+                    Some(Err(SourceDescriptorError::Kernel(error))) => error,
+                    Some(Err(refusal)) => {
+                        let evidence = Some(self.retire_evidence(&key, &request_digest, &harness));
+                        return Err(PublishError::Descriptor { refusal, evidence });
+                    }
+                    _ => error,
+                };
+                Err(PublishError::Kernel {
+                    error,
+                    evidence: Some(RetainedEvidence {
+                        object_id: evidence_object_id,
+                        retired: None,
+                    }),
                 })
             }
         }
@@ -605,7 +626,10 @@ impl SourcePublisher<'_> {
             }
             other => other,
         };
-        RetainedEvidence { object_id, retired }
+        RetainedEvidence {
+            object_id,
+            retired: Some(retired),
+        }
     }
 
     fn intent(&self, operation: &str, request_digest: &str, harness: &str) -> CommitIntent {
@@ -618,7 +642,7 @@ impl SourcePublisher<'_> {
         }
     }
 
-    /// The request digest covers the text and the publishing context, so the same identity republished with other bytes, into another scope or domain, or under another class is a conflict rather than a replay.
+    /// The request digest binds text, domain, scope, role, sensitivity, and provider-egress policy. Changing any of these under the same receipt key conflicts rather than replaying.
     fn request_digest(&self, unit: &SourceUnit) -> String {
         let mut bytes = Vec::new();
         for part in [
@@ -628,9 +652,13 @@ impl SourcePublisher<'_> {
             unit.role.as_str(),
             self.sensitivity.as_str(),
         ] {
+            bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
             bytes.extend_from_slice(part.as_bytes());
-            bytes.push(0x1f);
         }
+        bytes.push(match self.egress {
+            ProviderEgress::RemoteAllowed => 0,
+            ProviderEgress::LocalOnly => 1,
+        });
         identity_digest(&bytes)
     }
 }

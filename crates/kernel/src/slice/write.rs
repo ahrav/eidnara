@@ -445,7 +445,8 @@ impl Envelope<'_> {
         })
     }
 
-    /// Invalidates a live evidence object without deleting its historical row. Rejects retirement while a live observation, decision, or asserted edge cites the evidence.
+    /// Invalidates a live evidence object without deleting its historical row. Rejects retirement while a live observation, decision (including its events), or asserted edge cites the evidence.
+    /// Evidence metadata can carry a stricter class than the registry, so retirement folds it into the change payload.
     ///
     /// # Errors
     ///
@@ -457,29 +458,38 @@ impl Envelope<'_> {
     fn retire_evidence_inner(&mut self, object_id: &str) -> Result<RetirementOutcome, KernelError> {
         let object_id = identity_field(object_id)?;
         let mut object = load_live_typed_object(self.tx, &object_id.text, "evidence")?;
-        let cited: bool = self
+        let (sensitivity, cited): (String, bool) = self
             .tx
             .query_row_cached(
-                "SELECT EXISTS(
-                     SELECT 1 FROM evidence_meta e
-                     WHERE e.object_id=?1 AND e.invalidated_commit_seq IS NULL
-                       AND (EXISTS(SELECT 1 FROM observations o
+                "SELECT e.sensitivity_class,
+                        (EXISTS(SELECT 1 FROM observations o
                                    WHERE o.evidence_id=e.evidence_id
                                      AND o.invalidated_commit_seq IS NULL)
                          OR EXISTS(SELECT 1 FROM decisions d
                                    WHERE d.evidence_id=e.evidence_id
                                      AND d.invalidated_commit_seq IS NULL)
+                         OR EXISTS(SELECT 1 FROM decision_events de
+                                   JOIN decisions d ON d.decision_id=de.decision_id
+                                   WHERE de.evidence_id=e.evidence_id
+                                     AND d.invalidated_commit_seq IS NULL)
                          OR EXISTS(SELECT 1 FROM asserted_edges a
                                    WHERE a.evidence_id=e.evidence_id
-                                     AND a.invalidated_commit_seq IS NULL)))",
+                                     AND a.invalidated_commit_seq IS NULL))
+                 FROM evidence_meta e
+                 WHERE e.object_id=?1 AND e.invalidated_commit_seq IS NULL",
                 [&object_id.text],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(map_sqlite)?;
+            .optional()
+            .map_err(map_sqlite)?
+            .ok_or(KernelError::NotFound)?;
         if cited {
             return Err(KernelError::Conflict);
         }
         invalidate(self.tx, self.commit_seq, "evidence_meta", &object_id.text)?;
+        object.sensitivity = object
+            .sensitivity
+            .restrictive(Sensitivity::from_stored(&sensitivity));
         object.invalidated_commit_seq = Some(self.commit_seq);
         self.changes.push(PendingChange {
             object,

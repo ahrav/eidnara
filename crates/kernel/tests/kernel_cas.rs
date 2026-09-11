@@ -1927,6 +1927,52 @@ fn a_classification_tightening_reaches_the_outbox_for_every_row_it_changes() {
 }
 
 #[test]
+fn evidence_retirement_preserves_tightened_classification() {
+    for sensitivity in [Sensitivity::Sensitive, Sensitivity::Secret] {
+        let root = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(root.path()).unwrap();
+        seed_domain(&store);
+        let payload = b"classified evidence".to_vec();
+        store
+            .ingest_artifact(request("first", payload.clone()))
+            .unwrap();
+        let mut stricter = request("first", payload);
+        stricter.asserted_sensitivity = sensitivity;
+        store.ingest_artifact(stricter).unwrap();
+        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+        let stored: String = connection.query_row(
+            "SELECT sensitivity_class FROM evidence_meta WHERE object_id='evidence-object-first'",
+            [], |row| row.get(0)).unwrap();
+        assert_eq!(stored, sensitivity.as_str());
+        let retired = store
+            .commit(intent("retire", b"retire"), |envelope| {
+                envelope.retire_evidence("evidence-object-first")?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let pending = store.pending_outbox(64).unwrap();
+        let changes: Vec<_> = pending
+            .iter()
+            .filter(|entry| entry.commit_seq == retired.commit_seq)
+            .collect();
+        assert_eq!(changes.len(), 1);
+        let change = changes[0];
+        let payload: serde_json::Value = serde_json::from_slice(&change.payload).unwrap();
+        assert_eq!(payload["change_kind"], "evidence_retire");
+        assert_eq!(change.object_id, "evidence-object-first");
+        assert_eq!(
+            change.sensitivity, sensitivity,
+            "outbox must preserve the evidence class"
+        );
+        assert_eq!(
+            payload["object"]["sensitivity"],
+            sensitivity.as_str(),
+            "payload must preserve the evidence class"
+        );
+    }
+}
+
+#[test]
 fn a_tightening_asserted_while_no_reference_is_live_governs_the_next_one() {
     use kernel::{ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest};
 
