@@ -1483,11 +1483,7 @@ mod tests {
     #[test]
     fn a_served_page_keeps_the_job_held_past_expiry() {
         let dimensions = 2;
-        let limits = SynapseLimits {
-            retention: std::time::Duration::from_millis(300),
-            ..SynapseLimits::default()
-        };
-        let jobs = JobTable::new(limits);
+        let mut jobs = JobTable::new(SynapseLimits::default());
 
         let AdmitOutcome::Admitted { job_id, seq } = jobs.admit_uncharged_for_tests(
             "held".to_owned(),
@@ -1502,9 +1498,7 @@ mod tests {
             panic!("the result is served");
         };
 
-        // Expiry removes the table entry, but the served page still holds the
-        // result: the job remains a physical holder until the page is gone.
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        jobs.limits.retention = std::time::Duration::ZERO;
         assert!(matches!(
             jobs.poll(&job_id, "held", None),
             PollOutcome::Restarted

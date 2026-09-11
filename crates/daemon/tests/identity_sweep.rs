@@ -57,6 +57,8 @@ const NOW: i64 = 1_000;
 
 type Gate = Arc<(Mutex<bool>, Condvar)>;
 
+struct GateGuard(Gate);
+
 /// A deterministic engine: one whitespace word is one token, the vector is derived from the text, and inference can be held at a gate; `completed` counts inferences that returned.
 struct TestEngine {
     calls: AtomicUsize,
@@ -81,15 +83,10 @@ impl TestEngine {
         self.completed.load(Ordering::SeqCst)
     }
 
-    fn block_calls(&self) -> Gate {
+    fn block_calls(&self) -> GateGuard {
         let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
         *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
-        gate
-    }
-
-    fn release(gate: &Gate) {
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
+        GateGuard(gate)
     }
 
     fn vector_for(text: &str) -> Vec<f32> {
@@ -104,6 +101,19 @@ impl TestEngine {
             *v /= norm;
         }
         vector
+    }
+}
+
+impl GateGuard {
+    fn release(&self) {
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
+    }
+}
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1142,7 +1152,7 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
 
     // Native exit with the result leased in the table: still held, and the host proves the result is ready.
-    TestEngine::release(&gate);
+    gate.release();
     let settled = std::time::Instant::now();
     while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(5));
@@ -1222,7 +1232,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
         &bounds(Duration::from_millis(50)),
         NOW,
     );
-    TestEngine::release(&gate);
+    gate.release();
     let settled = std::time::Instant::now();
     while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(5));
@@ -1335,6 +1345,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
         &bounds(Duration::from_millis(50)),
         NOW,
     );
+    gate.release();
     assert_eq!(
         events
             .iter()
@@ -1342,8 +1353,6 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
             .count(),
         1
     );
-    // The gate opens before any assertion so a failure cannot strand the blocked worker.
-    TestEngine::release(&gate);
     let settled = std::time::Instant::now();
     while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(5));
