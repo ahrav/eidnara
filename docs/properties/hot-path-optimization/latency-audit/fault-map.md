@@ -26,6 +26,10 @@ their bytes and existing refusal.
 
 ## Fault availability
 
+P4's [local proof][log-gate-evidence] uses production-mode subprocesses with
+real logger I/O and real transform/event handlers. Only the module response,
+raw-row provider, and foreign-owner stat are controlled seams.
+
 | Class | Construction and availability | Limit |
 | --- | --- | --- |
 | Oversize and pool-short bodies | [`Handler::handle`][handle] takes the byte cap, footprint, and a non-awaiting scratch reservation on every request; a body over 32 MiB or a footprint over [`resident_capacity()`][capacity] refuses permanently, and concurrent parses can drain the shared [scratch pool][pools]. | `RequestCtx` is transport-private, so only a real host or a new seam drives the handler; the plugin [pages at 512 KiB][paging], so production oversize bodies have no known sender. |
@@ -65,7 +69,7 @@ their bytes and existing refusal.
 | [P1][p1] | A stored deny then a failed refresh; empty-cache and expired-allow failure; missing named agent and malformed SDK payload; session/agent switches; TTL expiry at settlement; session update, compaction, flush, deletion, pending eviction, and overlapping reads. | Live-equivalent values at the last invalidation-free read; absent on failure; one SDK fill for overlapping same-key allows; the first fill's deadline shared by followers; invalidated fills cannot publish or return allow. |
 | [P2][p2] | Static fixture and second-session states; malformed/dynamic values; time/part lists growing from 801 to 870 IDs, with mid-turn reads between each size; retirement by eviction/oversized SQL/oversized binds, including failures; explicit close and replacement; finalizer failure; pressure while raw getters stay alive. | Hash-pinned reference; exact timestamp maps and ordered message/part contents for all 70 remainders; five warm statements, one connection and zero closes on both adapters. Retired native getters fail without GC; at most 64 cached natives survive. Finalizer failures close the database. Stat identities, hook `mid_turn`, and both approved inconsistent-association directions remain asserted. |
 | [P3][p3] | A lone-surrogate body, a paged body, a boundary body with `f64` fields, mutation after measurement, and a plain object with carrier-like field names. | Compare carried text to the raw header and captured writer bytes. Independently check Rust parse/size and host terminal outcomes. A parse failure has no reserialized length. Final served-message bytes are compared with an unpaged control, not inferred from staging ACKs. |
-| [P4][p4] | Control characters and newlines in fields; a planted symlink; a foreign-uid directory. | The written file's bytes, mode, and the swallow counter. |
+| [P4][p4] | Default and info-level admitted fields; file/directory symlinks; a foreign uid from the stat seam; throwing serialization; getters under off or a higher minimum; off after admission; a module failure during a real transform. | Exact truncated payloads with ellipses; file modes; non-plain-directory and foreign-owner diagnostics captured at each failure; one swallow per failed batch; zero inspection, sanitizer, stringify, Date, timer, mkdir, open, and write calls for rejection; two pass lines and two event lines at debug, only the fixture's fallback warning at warn, no lines at off; identical served and fallback bytes. |
 | [P5][p5] | An SDK fake answers deny, then freshness expires without deleting the deny, then a live read rejects or times out. Both variants execute for transform and capture. | Cached deny at resolver entry, live SDK invocation, and the observed Error or TimeoutError; the constant marker does not depend on the served outcome. |
 | [T1][t1] | Over-quotient `max_connections`; a released batch on an idle ring; an aborted reservation; a wrapped run. | Admission outcome; `arena_reclaimed - punched`; `mincore` residency of the aborted range. |
 | [T2][t2] | A concurrent same-shape writer; mismatched span lengths; each word offset. | Byte-for-byte agreement of per-byte and bulk reads; no uninitialized byte in the returned `Vec`. |
@@ -207,6 +211,7 @@ in the records' open questions.
 [p2]: catalog.md#mid-turn-read-is-invariant-under-query-collapse-and-statement-caching
 [p3]: catalog.md#paged-body-measure-equals-declared-frame-length-and-fits-host-caps
 [p4]: catalog.md#log-lines-keep-sanitizer-and-file-hardening-guarantees
+[log-gate-evidence]: evidence/log-lines-keep-sanitizer-and-file-hardening-guarantees.md#current-contract-and-proof
 [p5]: catalog.md#todowrite-deny-then-read-failure-is-exercised
 [t1]: catalog.md#arena-residency-is-bounded-by-admission-and-one-punch-batch
 [t2]: catalog.md#arena-payload-copies-keep-the-address-derived-atomic-shape

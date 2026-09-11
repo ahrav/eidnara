@@ -175,15 +175,18 @@ not whether the focused tests ran.
 | [Live transform hook][serialized-hook] | The real hook passes a carrier with the matching transform/session discriminator. | unaudited |
 | [Real-host corpus][serialized-host] | A registered Cargo integration test compiles in normal CI and is ignored until a generated corpus is supplied. The one-command wrapper requires one named pass. It verifies byte/hash receipts, twelve complete transforms equal to unpaged controls, nine staged pages, six unchanged surrogate refusals, one pager refusal, exact intermediate/final boundaries, and the 24-byte f64 witness. | unaudited |
 | [rust-mode-transform.test.ts:1446, 1582][tinplace] | In-place mutation of an older message forces a full send; recovery after repeated rejection. | unaudited |
-| [rust-mode-transform.test.ts:248][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog`). | unaudited |
-| [logger.test.ts:358][t358] | Control characters are removed; entry size is bounded; no forged fourth line. | unaudited |
-| [logger.test.ts:381][t381] | The default log is `0600` under `0700` directories; a planted symlink is not followed. | unaudited |
-| [logger.test.ts:342, 408][t342] | Swallowed-write counter; exit flush without holding the process. | unaudited |
+| [rust-mode-transform.test.ts:248][t244] | `rust pass:` and `rust module stages:` lines are emitted per pass (spy on `sessionLog.debug`). | unaudited |
+| [Baseline logger.test.ts:358][t358] | Control characters are removed; entry size is bounded; no forged fourth line. | unaudited |
+| [Baseline logger.test.ts:381][t381] | The default log is `0600` under `0700` directories; a planted symlink is not followed. | unaudited |
+| [Baseline logger.test.ts:342][t342], [408][t408] | Swallowed-write counter; exit flush without holding the process. | unaudited |
+| [Gate and level ordering][log-level-checks] | Off and below-threshold calls perform no caller inspection, sanitizer iteration, serialization, timestamp, timer, or file work. The level table is frozen and info methods are distinct from plain functions. Every minimum and invalid defaults preserve exact plain/session output. | unaudited |
+| [Admitted-entry cleanup][log-flush-checks] | Off preserves explicit and exit flushing; one failed batch counts once, even after a second empty flush. | unaudited |
+| [Default and info hardening][log-hardening-checks] | Both minima check exact 2048-character payloads plus ellipses, sanitization, modes, FIFO, serialization markers, swallow counts, and exit behavior. Managed-directory symlink and simulated foreign-uid failures must identify the corresponding refusal, not just increment the counter. | unaudited |
+| [Real transform/event logging][log-hook-checks] | Actual handlers run at debug, warn, and off. Exact pass/event line counts, warning-only filtering, no off writes, and byte-identical served/fallback output are asserted without replacing the logger. | unaudited |
 | [event-handler.test.ts:272-524][tevent] | `message.updated` usage bookkeeping; no assertions on log lines. | unaudited |
 
-None found: a test asserting secret redaction of log lines on this path;
-a test asserting log line counts per pass or per
-`message.updated` event.
+None found: a test asserting secret redaction of log lines on this path.
+The logger does not apply secret redaction; P4 preserves that boundary.
 
 The [2026-09-11 local host probe](evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-does-the-real-host-admission-probe-establish)
 constructs the boundary under both measures and observes real host refusals.
@@ -212,9 +215,8 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [permission-overlap]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L415
 [permission-lifetime]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L347
 
-Suspiciously quiet: `transform-stage-logger.ts` has no test file;
-`event-handler.test.ts` never asserts on the two `sessionLog` lines per
-`message.updated` event. The two empty-cache hung-read tests now assert
+Stage logging and event line counts are exercised by the real transform/event
+fixture in `logger.test.ts`. The two empty-cache hung-read tests assert
 fail-closed behavior. Separate P5 hook witnesses seed a successful deny before
 forcing and observing a failed live read.
 
@@ -439,9 +441,14 @@ not a claim that no related check exists anywhere in the repository.
 [t1371]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1371
 [t1391]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1391
 [t181]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.test.ts#L181
-[t358]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L358
-[t381]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L381
-[t342]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L342
+[t358]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L358
+[t381]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L381
+[t342]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L342
+[t408]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L408
+[log-level-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377
+[log-flush-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L492
+[log-hardening-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L607
+[log-hook-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L519
 [tevent]: ../../../../packages/opencode-plugin/src/hooks/context/event-handler.test.ts#L272
 
 [t-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L1052-L1074
