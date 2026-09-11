@@ -1,4 +1,4 @@
-import type { Database } from "../../shared/sqlite";
+import type { SqliteReader } from "../../shared/sqlite";
 
 export const RAW_PART_VERSION_KEY = "__eidnaraPartUpdatedAt";
 
@@ -137,23 +137,24 @@ const PART_LOOKUP_CHUNK = 800;
 
 /** Parts for the given message ids, grouped by message and ordered by `time_created, id` within each message. */
 function readRawPartsByMessageId(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     messageIds: readonly string[],
 ): Map<string, unknown[]> {
     const partsByMessageId = new Map<string, unknown[]>();
+    if (messageIds.length === 0) return partsByMessageId;
+    // NULL padding fixes the SQL shape without adding IDs to the lookup.
+    const placeholders = Array(PART_LOOKUP_CHUNK).fill("?").join(", ");
+    const selectParts = db.prepare(
+        `SELECT message_id, data, time_updated
+         FROM part
+         WHERE session_id = ? AND message_id IN (${placeholders})
+         ORDER BY time_created ASC, id ASC`,
+    );
     for (let i = 0; i < messageIds.length; i += PART_LOOKUP_CHUNK) {
-        const slice = messageIds.slice(i, i + PART_LOOKUP_CHUNK);
-        const placeholders = slice.map(() => "?").join(", ");
-        const partRows = db
-            .prepare(
-                `SELECT message_id, data, time_updated
-                 FROM part
-                 WHERE session_id = ? AND message_id IN (${placeholders})
-                 ORDER BY time_created ASC, id ASC`,
-            )
-            .all(sessionId, ...slice)
-            .filter(isRawPartRow);
+        const slice: (string | null)[] = messageIds.slice(i, i + PART_LOOKUP_CHUNK);
+        while (slice.length < PART_LOOKUP_CHUNK) slice.push(null);
+        const partRows = selectParts.all(sessionId, ...slice).filter(isRawPartRow);
         for (const part of partRows) {
             const list = partsByMessageId.get(part.message_id) ?? [];
             list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
@@ -163,7 +164,7 @@ function readRawPartsByMessageId(
     return partsByMessageId;
 }
 
-export function readRawSessionMessagesFromDb(db: Database, sessionId: string): RawMessage[] {
+export function readRawSessionMessagesFromDb(db: SqliteReader, sessionId: string): RawMessage[] {
     const messageRows = db
         .prepare(
             "SELECT id, data, time_created, time_updated FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
@@ -212,7 +213,7 @@ interface PagedRawMessageRow extends RawMessageRow {
  * The page limit bounds JSON parsing and per-call work. Negative `afterOrdinal` values start at row 1.
  */
 export function readRawSessionMessagePageFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     afterOrdinal: number,
     limit: number,
@@ -262,7 +263,7 @@ export function readRawSessionMessagePageFromDb(
     });
 }
 
-export function countRawSessionMessageOrdinalsFromDb(db: Database, sessionId: string): number {
+export function countRawSessionMessageOrdinalsFromDb(db: SqliteReader, sessionId: string): number {
     const row = db
         .prepare(
             `SELECT COUNT(*) AS count
@@ -278,7 +279,7 @@ export function countRawSessionMessageOrdinalsFromDb(db: Database, sessionId: st
  * readRawSessionMessageIdOrdinalsFromDb preserves readRawSessionMessagePageFromDb's ordering, summary predicate, and malformed-message behavior.
  */
 export function readRawSessionMessageIdOrdinalsFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
 ): Map<string, number> {
     const messageRows = db
@@ -300,7 +301,7 @@ export function readRawSessionMessageIdOrdinalsFromDb(
 
 /** The keyset page supports incremental maintenance of shadow message ordinals. */
 export function readRawSessionMessageOrdinalPageFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     after: RawMessageOrdinalAnchor | null,
     limit: number,
@@ -342,7 +343,7 @@ export function readRawSessionMessageOrdinalPageFromDb(
 }
 
 /** The count includes compaction-summary rows. */
-export function countStoredRawSessionMessagesFromDb(db: Database, sessionId: string): number {
+export function countStoredRawSessionMessagesFromDb(db: SqliteReader, sessionId: string): number {
     const row = db
         .prepare("SELECT COUNT(*) AS count FROM message WHERE session_id = ?")
         .get(sessionId) as { count?: number } | null;
@@ -371,7 +372,7 @@ function isAnchorRow(row: unknown): row is AnchorRow {
  * function returns null instead of a tail with an empty boundary slot.
  */
 export function readRawSessionTailFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     baseOrdinal: number,
     anchorMessageId: string,
@@ -533,7 +534,7 @@ export function buildInMemoryTailRawMessages(args: {
 }
 
 export function readRawSessionMessagePartsByIdFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     messageId: string,
 ): RawMessageParts | null {
@@ -566,7 +567,7 @@ export function readRawSessionMessagePartsByIdFromDb(
 /**
  */
 export function readRawSessionMessageOrdinalByIdFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     messageId: string,
 ): number | null {
@@ -590,7 +591,7 @@ export function readRawSessionMessageOrdinalByIdFromDb(
 }
 
 export function readRawSessionMessageByIdFromDb(
-    db: Database,
+    db: SqliteReader,
     sessionId: string,
     messageId: string,
 ): RawMessage | null {

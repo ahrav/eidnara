@@ -3,7 +3,7 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sha256Hex } from "../../shared/kernel-client";
 import { sessionLog } from "../../shared/logger";
 import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
-import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
+import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "./read-session-db";
 
 /**
  *
@@ -146,7 +146,7 @@ function resolveToolAvailability(sessionId: string, toolName: string): ToolAvail
     if (cached !== undefined) return { callable: cached, frozen: true };
     // The resolver freezes the fail-open verdict when no database exists so hash persistence can proceed.
     // Caching the verdict keeps it final: a database that appears later cannot replace a frozen verdict consumers have already persisted.
-    if (!openCodeDbExists()) {
+    if (!refreshOpenCodeDbPresence()) {
         availabilityBySession.set(key, true);
         return { callable: true, frozen: true };
     }

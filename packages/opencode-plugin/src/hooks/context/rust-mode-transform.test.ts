@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -1607,5 +1607,61 @@ describe("delta prefix-mutation guard", () => {
         expect(bodies).toHaveLength(4);
         expect(recoveredOutput.messages).toEqual(recovered);
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
+    it("reads mid-turn state through the hook across warm reads and same-path replacement", async () => {
+        const sessionId = "session-db-hook";
+        installAvailabilityDb(sessionId, {});
+        const dataHome = process.env.XDG_DATA_HOME!;
+        const dbPath = join(dataHome, "opencode", "opencode.db");
+        const writer = new Database(dbPath);
+        writer.exec(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT)",
+        );
+        writer
+            .prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)")
+            .run(
+                "assistant",
+                sessionId,
+                100,
+                100,
+                JSON.stringify({ role: "assistant", finish: "stop", time: { completed: 100 } }),
+            );
+        writer
+            .prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)")
+            .run("new-user", sessionId, 200, 200, '{"role":"user"}');
+        writer
+            .prepare("INSERT INTO part VALUES (?, ?, ?, ?)")
+            .run("part", "new-user", sessionId, '{"type":"text","text":"prompt","ignored":true}');
+        installRawRows(sessionId, rawRows(1));
+        const { client, bodies } = recordingClient(() => ({
+            native_messages: makeMessages(sessionId),
+        }));
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        try {
+            for (let pass = 0; pass < 3; pass++) {
+                const messages = makeMessages(sessionId);
+                await transform.run(sessionId, messages, { messages: [...messages] });
+                if (pass === 1)
+                    writer.exec(`UPDATE part SET data = '{"type":"text","text":"prompt"}'`);
+            }
+        } finally {
+            writer.close();
+        }
+        expect(bodies.map((body) => body.mid_turn)).toEqual([false, false, true]);
+
+        installAvailabilityDb(sessionId);
+        const replacementPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        const replacement = new Database(replacementPath);
+        replacement.exec(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT)",
+        );
+        replacement.close();
+        renameSync(replacementPath, dbPath);
+        process.env.XDG_DATA_HOME = dataHome;
+        const messages = makeMessages(sessionId);
+        await transform.run(sessionId, messages, { messages: [...messages] });
+        expect(bodies).toHaveLength(4);
+        expect(bodies[3].mid_turn).toBe(false);
     });
 });

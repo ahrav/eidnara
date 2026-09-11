@@ -1,5 +1,5 @@
 import { tokenEstimatorGeneration } from "../../shared/token-estimator";
-import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
+import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "./read-session-db";
 import {
     type ChunkBlock,
     compactRole,
@@ -289,7 +289,7 @@ export function readRawSessionMessagePage(
             )
             .slice(0, limit);
     }
-    if (!openCodeDbExists()) return [];
+    if (!refreshOpenCodeDbPresence()) return [];
     return withReadOnlySessionDb((db) =>
         readRawSessionMessagePageFromDb(db, sessionId, afterOrdinal, limit, finalWatermark),
     );
@@ -301,7 +301,7 @@ export function getRawSessionMessageOrdinalCount(sessionId: string): number {
         if (provider.getMessageCount) return provider.getMessageCount();
         return provider.readMessages().length;
     }
-    if (!openCodeDbExists()) return 0;
+    if (!refreshOpenCodeDbPresence()) return 0;
     return withReadOnlySessionDb((db) => countRawSessionMessageOrdinalsFromDb(db, sessionId));
 }
 
@@ -329,7 +329,7 @@ export function primeTailRawMessageCache(args: {
     if (!activeRawMessageCache) return false;
     if (activeRawMessageCache.has(sessionId)) return false;
     if (sessionProviders.has(sessionId)) return false;
-    if (!openCodeDbExists()) return false;
+    if (!refreshOpenCodeDbPresence()) return false;
     if (lastCompartmentEnd < 1 || !anchorMessageId) return false;
 
     const result = withReadOnlySessionDb((db) =>
@@ -401,7 +401,7 @@ export function readRawSessionMessageOrdinalPage(
             .sort(compareOrdinalAnchors);
         return rows.slice(0, Math.max(1, Math.floor(limit)));
     }
-    if (!openCodeDbExists()) return [];
+    if (!refreshOpenCodeDbPresence()) return [];
     return withReadOnlySessionDb((db) =>
         readRawSessionMessageOrdinalPageFromDb(db, sessionId, after, limit),
     );
@@ -411,7 +411,7 @@ export function getRawSessionStoredMessageCount(sessionId: string): number {
     const provider = activeRawMessageProvider(sessionId);
     if (provider?.getStoredMessageCount) return provider.getStoredMessageCount();
     if (provider) return provider.readMessages().length;
-    if (!openCodeDbExists()) return 0;
+    if (!refreshOpenCodeDbPresence()) return 0;
     return withReadOnlySessionDb((db) => countStoredRawSessionMessagesFromDb(db, sessionId));
 }
 
@@ -425,7 +425,7 @@ export function readRawSessionMessagePartsById(
     if (provider) {
         return provider.readMessages().find((message) => message.id === messageId) ?? null;
     }
-    if (!openCodeDbExists()) return null;
+    if (!refreshOpenCodeDbPresence()) return null;
     return withReadOnlySessionDb((db) =>
         readRawSessionMessagePartsByIdFromDb(db, sessionId, messageId),
     );
@@ -463,7 +463,7 @@ export function readRawSessionMessageOrdinalById(
     if (provider) {
         return provider.readMessages().find((message) => message.id === messageId)?.ordinal ?? null;
     }
-    if (!openCodeDbExists()) return null;
+    if (!refreshOpenCodeDbPresence()) return null;
     return withReadOnlySessionDb((db) =>
         readRawSessionMessageOrdinalByIdFromDb(db, sessionId, messageId),
     );
@@ -477,14 +477,14 @@ export function readRawSessionMessageById(sessionId: string, messageId: string):
     if (provider) {
         return provider.readMessages().find((message) => message.id === messageId) ?? null;
     }
-    if (!openCodeDbExists()) return null;
+    if (!refreshOpenCodeDbPresence()) return null;
     return withReadOnlySessionDb((db) => readRawSessionMessageByIdFromDb(db, sessionId, messageId));
 }
 
 function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
     const provider = activeRawMessageProvider(sessionId);
     if (provider) return provider.readMessages();
-    if (!openCodeDbExists()) return [];
+    if (!refreshOpenCodeDbPresence()) return [];
     return withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
 }
 

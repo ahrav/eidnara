@@ -136,6 +136,8 @@ describes nothing the function does.
 The P1/P5 rows include the 2026-09-10 permission-cache implementation
 campaign. Its approval provenance and red/green execution history are appended
 to the [P1 evidence](evidence/cached-todowrite-verdict-never-lifts-a-deny-or-outlives-its-inputs.md).
+The P2 rows include the local differential and native-cache campaign described
+in the [P2 evidence](evidence/mid-turn-read-is-invariant-under-query-collapse-and-statement-caching.md).
 Other rows retain their discovery scope. `unaudited` describes adequacy review,
 not whether the focused tests ran.
 
@@ -152,9 +154,11 @@ not whether the focused tests ran.
 | [hook.test.ts:413][permission-overlap] | Real transform and capture hooks share one fill. Empty host agents normalize to absence: SDK agents are empty, session allow/deny rules decide, and undefined or empty capture reuses the same key. | unaudited |
 | [ctx-reduce-availability.test.ts:347][permission-lifetime] | Identity isolation, shared pending reads and timeout, 30 s read-start expiry at lookup and settlement, empty/allow/deny failures, missing named agents, malformed/error SDK payloads, invalidation fencing, and settled/pending LRU eviction. | unaudited |
 | [ctx-reduce-availability.test.ts:26-122][tavaildb] | DB-derived frozen verdicts: fail-open freeze, tie by id, malformed JSON row. | unaudited |
-| [read-session-db.test.ts:97-742][tmidturn] | Example states for `isMidTurnFromOpenCodeDb`: streaming, `tool-calls`, compaction summary, same-millisecond, malformed rows and parts, marker-only parts. | unaudited |
-| [read-session-db.test.ts:920-951][tismidturn] | `isMidTurn`: idle DB, missing DB, unreadable DB returns mid-turn. | unaudited |
-| [read-session-db.test.ts:953-1021][tdbpath] | The `OPENCODE_DB` override selects the database; an empty override is ignored. | unaudited |
+| [Frozen differential and example states][tmidturn] | Every valid example compares against the frozen base before and after rollback-scoped second-session rows. The reference file and shared primitives are hash-pinned. Malformed/dynamic values and tuple sentinels remain covered. Approved inconsistent associations have both old-false/new-true and old-true/new-false checks. Equality applies to static snapshots only. | unaudited |
+| [Native cache contract][session-db-cache] | Both adapters exercise native retirement after eviction, oversized SQL/binds, throwing execution, close, and replacement without GC. Real time/part reads grow from 801 to 870 IDs across 70 remainders with mid-turn reads between them: all five statements stay warm on one connection, with zero closes. Timestamp maps, ordered message/part outputs and frozen input lists are checked. Binding limits, arrays, named binds and partless users remain covered; finalizer failure still closes the database, and 128-query pressure leaves at most 64 live natives. | unaudited |
+| [Transform hook witness][session-db-hook] | Four real transform calls send `mid_turn` values false, false, true after a committed edit, then false after same-path replacement. | unaudited |
+| [isMidTurn wrapper][tismidturn] | Idle DB, missing DB, unreadable DB returns mid-turn. | unaudited |
+| [OPENCODE_DB override][tdbpath] | The override selects the database; an empty override is ignored. | unaudited |
 | [read-session-raw.test.ts:173, 249][tordinal] | Ordinal keyset page reads wider than one part chunk; summary rows spend no ordinal. | unaudited |
 | [sqlite.test.ts:279-467][tsqlite] | Adapter constructor option mapping, transaction shim, runtime selector errors. | unaudited |
 | [sqlite-bind-style.test.ts:32][tbind] | Every `.run/.get/.all` uses spread positional binds. | unaudited |
@@ -170,9 +174,7 @@ not whether the focused tests ran.
 | [logger.test.ts:342, 408][t342] | Swallowed-write counter; exit flush without holding the process. | unaudited |
 | [event-handler.test.ts:272-524][tevent] | `message.updated` usage bookkeeping; no assertions on log lines. | unaudited |
 
-None found: a test of `isMidTurnFromOpenCodeDb` with rows from a second
-session sharing the database; a test of a statement cache across connection
-replacement (no cache exists); a test that runs a lone-surrogate body through
+None found: a test that runs a lone-surrogate body through
 paging and the frame writer in one path; a test that constructs a body at the
 512 KiB boundary under both measures; a test asserting secret redaction of
 log lines on this path; a test asserting log line counts per pass or per
@@ -404,9 +406,11 @@ not a claim that no related check exists anywhere in the repository.
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
 [tinplace]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1441
 [tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L26
-[tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L97
-[tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L920
-[tdbpath]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L953
+[tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L871
+[tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1117-L1148
+[tdbpath]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1150-L1218
+[session-db-cache]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/session-db-cache-contract.ts#L1-L392
+[session-db-hook]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1612-L1666
 [tordinal]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.test.ts#L173
 [tsqlite]: ../../../../packages/opencode-plugin/src/shared/sqlite.test.ts#L279
 [tbind]: ../../../../packages/opencode-plugin/src/shared/sqlite-bind-style.test.ts#L32

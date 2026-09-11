@@ -23,7 +23,7 @@ import type { LiveSessionState } from "../hooks/context/live-session-state";
 import {
     findLastAssistantModelFromOpenCodeDb,
     findLastAssistantUsageFromOpenCodeDb,
-    openCodeDbExists,
+    refreshOpenCodeDbPresence,
     sessionHasCompactionSummaryInOpenCodeDb,
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
@@ -214,7 +214,7 @@ function resolveSidebarWorkMetrics(sessionId: string): {
     newWorkTokens: number;
     totalInputTokens: number;
 } {
-    if (!openCodeDbExists()) {
+    if (!refreshOpenCodeDbPresence()) {
         return { newWorkTokens: 0, totalInputTokens: 0 };
     }
     try {

@@ -308,6 +308,12 @@ export type Database = BetterSqlite3.Database;
  */
 export type Statement = BetterSqlite3.Statement<unknown[], unknown>;
 
+export type SqliteReadStatement = Pick<Statement, "get" | "all">;
+
+export interface SqliteReader {
+    prepare(sql: string): SqliteReadStatement;
+}
+
 const privilegeDepth = new WeakMap<Database, number>();
 
 /**

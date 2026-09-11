@@ -14,6 +14,10 @@ executed evidence and user-approved default/freshness decision are appended
 to the [P1 investigation](evidence/cached-todowrite-verdict-never-lifts-a-deny-or-outlives-its-inputs.md).
 The discovery statement above does not describe this later campaign.
 
+The P2 entries include a local campaign against the frozen
+`7ed1e9845af1a76ff04c31d95ea811367a926bb0` predicate. The
+[P2 investigation][session-db-evidence] records execution and its limits.
+
 ## Fault availability
 
 | Class | Construction and availability | Limit |
@@ -25,7 +29,7 @@ The discovery statement above does not describe this later campaign.
 | Post-commit interleaving and abort | The `#[cfg(test)]` [`between_transform_and_prepare`][hook] runs between the transform and `prepare_historian_fire`. | The hook is test-only; the Emergency95 awaits at `:8263`, `:8289`, and `:8315` are the only production windows. |
 | Trace and drain faults | An outbox delivery failure is injectable at the store (`fail_next_historian_side_channel_for_test`); two drainers exist in production (pass and publish task). | No seam injects a `pass_trace` upsert failure (the store's four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928` do not cover it); no fault point exists for a crash between the mark commit and the delete commit; SIGKILL at that point needs a child process. |
 | SDK read failure and agent switch | The [hook campaign][permission-campaign] stores a deny, invalidates freshness or advances the 30 s TTL, then rejects or hangs past [2000 ms][timeout]. SDK mocks and fake timers also schedule late completions across invalidation and deletion. | No permission-change subscription exists. The user accepts silent edits remaining unobserved for at most the 30 s freshness window. |
-| Second-session rows and read errors | Fixtures can seed two sessions in one database and make the file unreadable; `closeReadOnlySessionDb` is exported, and a test can rename a second database over the cached path. | OpenCode's real indexes are not in this repository; whether OpenCode ever replaces its database file in place is not stated here. |
+| Second-session rows and read errors | Executed: static differential states with rollback-scoped second-session rows; approved strict-scoping outcomes in both inconsistent directions; native retirement on eviction, oversized SQL/binds and throwing execution; close and same-path replacement; finalizer failure and pressure without GC; committed edits and replacement through the transform hook. | No jointly atomic snapshot, arbitrary concurrent-writer equivalence, or concurrent-open ABA proof. OpenCode's replacement behavior is unknown; identity checks remain unconditional. |
 | Byte-measure boundary | A lone surrogate in a string field takes the escape path; a body within a few bytes of 512 KiB under `JSON.stringify` may measure differently under `serde_json`. | Whether any real body crosses the boundary is unresolved. |
 | Ring residency and direct frames | A released run of at least one batch on an idle ring, a wrapped run, and an aborted reservation are constructible in-crate; `publish_direct` accepts an injected serializer and deadline. | The direct path has no production sender; the [`direct_fill` fixture arm][fixture-arm] is the only entry. |
 | CAS fault points and crashes | [`cas_fault_injection.rs`][t-faults] supplies six ingest and three GC fault points plus SIGKILL barriers. | GC and purge decrements have no daemon caller; a second ingest before orphan recovery is not constructed. |
@@ -53,7 +57,7 @@ The discovery statement above does not describe this later campaign.
 | [C5][c5] | A concurrent publish or recut through a second handle in the post-commit window. | Committed and observed `row_version` recorded separately. |
 | [C6][c6] | A firing with all three kinds; a failed inline delivery per kind through the `test-support` seam, or a reopen between publish and drain; a pass at or past the 1000 ms backoff. | The outbox rows and their `next_attempt_at_ms` read before the drain delivers, against the drain's `now_ms`. |
 | [P1][p1] | A stored deny then a failed refresh; empty-cache and expired-allow failure; missing named agent and malformed SDK payload; session/agent switches; TTL expiry at settlement; session update, compaction, flush, deletion, pending eviction, and overlapping reads. | Live-equivalent values at the last invalidation-free read; absent on failure; one SDK fill for overlapping same-key allows; the first fill's deadline shared by followers; invalidated fills cannot publish or return allow. |
-| [P2][p2] | The fixture states, second-session rows, a read error, a connection replacement with cached statements, a file replaced at the same path while the connection is cached. | The frozen reference predicate as the oracle; the connection identity per statement; the file identity (`st_dev`, `st_ino`) before and after. |
+| [P2][p2] | Static fixture and second-session states; malformed/dynamic values; time/part lists growing from 801 to 870 IDs, with mid-turn reads between each size; retirement by eviction/oversized SQL/oversized binds, including failures; explicit close and replacement; finalizer failure; pressure while raw getters stay alive. | Hash-pinned reference and primitives; exact timestamp maps and ordered message/part contents for all 70 remainders; five warm statements, one connection and zero closes on both adapters. Retired native getters fail without GC; at most 64 cached natives survive. Finalizer failures close the database. Stat identities, hook `mid_turn`, and both approved inconsistent-association directions remain asserted. |
 | [P3][p3] | A lone-surrogate body, a paged body, and a boundary body with `f64` fields. | `writeUtf8`'s emitted count and the host's `serde_json` length. |
 | [P4][p4] | Control characters and newlines in fields; a planted symlink; a foreign-uid directory. | The written file's bytes, mode, and the swallow counter. |
 | [P5][p5] | An SDK fake answers deny, then freshness expires without deleting the deny, then a live read rejects or times out. Both variants execute for transform and capture. | Cached deny at resolver entry, live SDK invocation, and the observed Error or TimeoutError; the constant marker does not depend on the served outcome. |
@@ -129,8 +133,10 @@ assertions pass.
 ## Cheapest valid oracle first
 
 [permission-campaign]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L166-L243
+[session-db-evidence]: evidence/mid-turn-read-is-invariant-under-query-collapse-and-statement-caching.md#q-what-do-the-local-differential-and-native-cache-checks-establish
 
-1. A2, B4, C4, P2, P3, W5, W6, and W9 have a pure-function reference at HEAD
+1. P2 uses its frozen base predicate and native adapter spies. A2, B4, C4,
+   P3, W5, W6, and W9 have a pure-function reference at HEAD
    (the current reader, digest, stepper, predicate, or frozen differential).
    Start there with corpora and boundary values, not a new harness.
 2. B1, B3, C1, C2, C6, W3, W7, and W13 need one process and a real store or

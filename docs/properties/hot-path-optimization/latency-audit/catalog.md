@@ -942,54 +942,53 @@ and accepted staleness window is appended to the evidence investigation log.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - About forty example states and the idle, missing, and
-unreadable database cases exist; none is a differential against the current
-function, none covers rows from a second session, and no statement cache
-exists to test.
-Guarantee: Collapsing the mid-turn queries or caching their statements
-changes cost, never the mid-turn answer, including the fail-closed answer on
-a read error and the connection a statement executes on.
-Check: `always` - For every database state, the collapsed [`isMidTurn`][ismidturn]
-returns the same boolean as a frozen reference function kept in the test file
-(a copy of HEAD's `isMidTurnFromOpenCodeDb`) whose semantics are: let A be the
-latest message by
+Exercised: yes - The example-state suite compares against a frozen predicate,
+then repeats with another session. Both native adapters exercise statement
+reuse, close, path changes, deletion, and same-path replacement. The transform
+hook observes idle, a committed user part, and a replacement database.
+Guarantee: On static snapshots where each part's session matches its owning
+message's session, query collapse and statement caching preserve the mid-turn
+answer; read errors stay fail-closed and native statements never outlive their
+connection or accumulate outside the bounded cache.
+Check: `always` - Under the user-approved association scope, the collapsed
+[`isMidTurn`][ismidturn] returns the same boolean on the static corpus as the
+[frozen reference][midturn-reference] from
+`7ed1e9845af1a76ff04c31d95ea811367a926bb0`. Let A be the latest message by
 `(time_created DESC, id DESC)` with `role = 'assistant'` that is not both
 `summary = 1` and `finish = 'stop'`, using the `json_valid` CASE guard so
 malformed `data` reads as NULL; return true if any `role = 'user'` message
-with `(time_created, id)` greater than A's (or every user row when A is
-absent) and no part of `type = 'compaction'` is real, meaning it has no
-parts, or some part parses as an object, is not machine-authored
+with `(time_created, id)` greater than A's (using `-1` and `""` for nullish
+time and id) and no same-session part of `type = 'compaction'` is real,
+meaning it has no parts, or some part parses as an object, is not machine-authored
 (`synthetic`, `syntheticTodoMarker`, `ignored`, or `metadata.marker.kind`),
 and is a non-text typed part or a text part with non-empty cleaned text;
-otherwise false if A is absent, true if A's `time.completed` is not a number,
+otherwise false if A's id is not a string, true if the SQL-extracted
+`time.completed` is not a JavaScript number,
 true if A's `finish = 'tool-calls'`, else true iff some part of A parses as
 an object with `type = 'tool'`, is not provider-executed, and is not
 machine-authored; a missing database returns false and any error on an
-existing database returns true. Every statement executed through
-`withReadOnlySessionDb` was prepared on the `Database` instance currently
-held in `cachedReadOnlyDb`, and every `get`/`all` observes committed state
-as of its own start; and the cached connection and any cached statements are
-discarded when the file identity (`st_dev`, `st_ino`) at the same path
-changes, or the record states, with evidence, that OpenCode never replaces
-the file in place. At HEAD the cache is keyed on the path alone
-([`getReadOnlySessionDb`][dbcache], the comparison at `:55`), so a file
-renamed over or deleted and recreated at the same path leaves the handle on
-the old inode; [`openCodeDbExists`][dbexists] is re-checked per call
-([`isMidTurn`][ismidturn] at `:75`), so a deleted file answers idle while the
-stale handle stays cached for the next replacement. `always` because the
-predicate must agree on every
-state and a statement bound to a closed or replaced connection is wrong on
-every execution.
+existing database returns true. Part parsing, exact provider flags, machine
+flags, and cleaned text stay in JavaScript. Every cached statement belongs
+to the [read-only connection][dbcache] that prepared it. Two consecutive
+reads reuse statements, not results. A path change, missing file, explicit
+close, or changed `(st_dev, st_ino)` discards the connection and its cache
+before another callback. Caller-held handles retain only SQL and the owner,
+not native statements. Eviction and uncached execution release native handles
+without waiting for GC; repeated `get`/`all` calls reprepare when needed.
+`always` because each evaluated corpus state must agree and closed or retired
+native statements must never execute.
 Fault/timing angle: [`isMidTurnFromOpenCodeDb`][midturndb] reads two tables
 without a transaction, so a writer landing between the assistant query and
-the [candidate query][newer] can make the reads inconsistent; a
-single-statement collapse removes that window and must not introduce a
-different answer for the enumerated states. The part subqueries omit
-`session_id` and are correct only while `message.id` is globally unique.
-[`getReadOnlySessionDb`][dbcache] closes and replaces the connection when
-`OPENCODE_DB` resolves to a new path; a cache keyed only on SQL text survives
-that unless scoped to the connection. Under `node:sqlite` `StatementSync` has
-no `finalize`; under `bun:sqlite` a finalized statement throws.
+the [candidate query][newer] can make the reads inconsistent. Two statements
+remain, one per candidate class, with same-session part joins and exclusion.
+No jointly atomic snapshot is promised. The reference reads assistant parts
+last; the collapsed query reads them first. Static equivalence does not imply
+equal answers under arbitrary concurrent-writer schedules. A stat before and
+after every native open checks replacement, including Node connection
+recycling. Bun finalizes retired statements; Node lacks a statement finalizer
+and closes the native connection on retirement. The next read reopens it with
+the same identity checks. Close attempts every cached finalizer and closes the
+native database in `finally` even if a finalizer throws.
 Required faults and enabling state: A populated `message`/`part` pair with
 the shapes the tests build (streaming assistant, `tool-calls` tail,
 compaction summary after `tool-calls`, same-millisecond rows, malformed JSON
@@ -998,29 +997,29 @@ the database; a read error on an existing database; a connection replacement
 or close between two passes while cached statements exist; a database file
 replaced at the same path between two passes (renamed over, or deleted and
 recreated with different rows) while the connection is cached, with the
-file identity read before and after.
+file identity read before and after; eviction and oversized SQL/bind removal
+paths, throwing executions, and a finalizer failure; repeated logical handles,
+bounded array binds, named binds, and a partless user on both native adapters;
+normal 800-ID time/part chunks between mid-turn reads, with native prepare and
+close counters and connection identities observed on both runtimes; lists
+growing from 801 to 870 IDs across 70 final-chunk widths, with exact returned
+maps, ordered message/part contents, frozen inputs and stable native identities.
 Confidence: medium - [Evidence](evidence/mid-turn-read-is-invariant-under-query-collapse-and-statement-caching.md).
-The predicate and connection cache are source-verified; the adapter
-([`shared/sqlite.ts`][sqlite]) has no statement cache and the "cached
-statements" comment at [`:304-309`][stmttype] describes a type alias only.
-OpenCode's real `message` and `part` indexes are not in this repository.
+The local differential and native lifetime checks pass. No production latency
+or native-heap-size claim follows from those checks.
 Existing check: [Plugin checks](existing-checks.md#plugin-pre-send) cover
-the example states, the `isMidTurn` wrapper, the `OPENCODE_DB` override, and
-spread positional binds; all unaudited.
+the differential states, both native caches, the actual transform hook, the
+wrapper, overrides, and spread positional binds; all unaudited for adequacy.
 Impact: A pass is treated as mid-turn when it is not, or a cached statement
 executes against a closed connection.
 Open questions:
 - Whether a collapsed query's plan depends on an index that exists in
   OpenCode's schema is unresolved, needs the pinned OpenCode schema; every
   fixture declares only `id TEXT PRIMARY KEY`.
-- Is the missing `session_id` in the part subqueries a correctness or only a
-  plan concern? Correctness holds under global `message.id` uniqueness, which
-  is a property of OpenCode's id scheme. Unresolved.
 - Does OpenCode ever replace `opencode.db` in place (rename over, or delete
   and recreate) while a plugin process holds a read-only handle? Nothing in
-  this repository states its write behavior; the answer decides whether the
-  file-identity clause is a live production condition or a stated
-  non-occurrence. (needs external input)
+  this repository states its write behavior. The implementation assumes it
+  can happen and checks identity regardless. (needs external input)
 
 ### paged-body-measure-equals-declared-frame-length-and-fits-host-caps
 
@@ -2254,7 +2253,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [C5][c5] | Reuse the interleave hook as the campaign marker. |
 | [C6][c6] | Fail the inline delivery for all three kinds, then drive a pass past the backoff and record the due rows before the drain delivers. |
 | [P1][p1] | Store a deny, then fail the read; switch agents between passes. |
-| [P2][p2] | Differential against the current predicate over the fixture states plus second-session rows and a read error. |
+| [P2][p2] | Frozen-reference differential over fixture and second-session states; native reuse/invalidation checks on both adapters and a transform-hook replacement witness. |
 | [P3][p3] | Run a lone-surrogate body through paging and the writer; attempt a boundary body under both measures. |
 | [P4][p4] | Place any gate where spies and the sanitizer still see every written line. |
 | [P5][p5] | Sequence deny-then-fail through an SDK fake. |
@@ -2513,13 +2512,11 @@ evaluation of this area and its disposition are recorded in
 [ts-stage-fn]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L244
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
-[ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
-[dbexists]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L33-L35
-[dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L37-L67
-[midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L84-L138
-[newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L152-L189
-[sqlite]: ../../../../packages/opencode-plugin/src/shared/sqlite.ts#L71-L79
-[stmttype]: ../../../../packages/opencode-plugin/src/shared/sqlite.ts#L304-L309
+[ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L218-L226
+[dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L215
+[midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L280
+[newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L293-L331
+[midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L9-L10
 [pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L629-L633
