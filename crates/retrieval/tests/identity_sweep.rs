@@ -1,10 +1,11 @@
 //! Selection cost scales with reclaimable identities. Each eligible identity appears once; ordering and the limit apply to the combined eligible set.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 
 use retrieval::batch::{VectorGeneration, register_generation};
-use retrieval::identity_sweep::{Candidate, candidates, candidates_sql};
+use retrieval::dispatch::{EpisodeGrant, Recovery, authorize_recovery};
+use retrieval::identity_sweep::{Candidate, candidates, candidates_sql, reclaim};
 use rusqlite::StatementStatus;
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
@@ -202,4 +203,61 @@ fn the_limit_and_order_span_both_eligibility_sources() {
         ]
     );
     assert!(found.iter().all(|candidate| candidate.has_vector));
+}
+
+#[test]
+fn reclaim_removes_a_recovered_jobs_consumed_authorization() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let reclaimed = store
+        .with_conn_fenced(|conn| {
+            install_generations(conn)?;
+            embedded(conn, "recovered", CURRENT, "job-recovered")?;
+            conn.execute(
+                "UPDATE embedding_jobs SET state='failed' WHERE job_id='job-recovered'",
+                [],
+            )?;
+            assert!(matches!(
+                authorize_recovery(
+                    conn,
+                    "job-recovered",
+                    "operator-1",
+                    EpisodeGrant {
+                        allowance: NonZeroU32::new(1).unwrap(),
+                        deadline: 100,
+                    },
+                    2,
+                )
+                .unwrap(),
+                Recovery::Granted { .. }
+            ));
+            conn.execute(
+                "UPDATE embedding_jobs SET state='embedded',updated_at=3 WHERE job_id='job-recovered'",
+                [],
+            )?;
+            tombstone(conn, "recovered")?;
+
+            let selected = candidates(conn, NonZeroUsize::new(1).unwrap(), None).unwrap();
+            assert_eq!(
+                pairs(&selected),
+                vec![("recovered".to_string(), CURRENT.to_string())]
+            );
+            let result = reclaim(conn, &selected);
+            assert!(
+                result.is_ok(),
+                "a consumed recovery authorization must not block reclamation: {result:?}"
+            );
+            let remaining_authorizations: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM embedding_recovery_authorizations WHERE job_id='job-recovered'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(remaining_authorizations, 0);
+            Ok(result.unwrap())
+        })
+        .unwrap();
+    assert_eq!(
+        (reclaimed.jobs, reclaimed.vectors, reclaimed.survivors),
+        (1, 1, 0)
+    );
 }

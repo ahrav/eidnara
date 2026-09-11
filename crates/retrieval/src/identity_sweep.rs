@@ -102,7 +102,7 @@ pub struct Reclaimed {
     pub survivors: usize,
 }
 
-/// Deletes each candidate's vector and job row, each only while the row is still finished and unreferenced. Payloads, occurrences, tombstones, generations, and receipts are never touched.
+/// Recovery authorizations prevent replay only while their parent job exists, so reclaim removes them in the same transaction as an eligible job.
 pub fn reclaim(
     conn: &GuardedConn<'_>,
     candidates: &[Candidate],
@@ -113,14 +113,20 @@ pub fn reclaim(
         "DELETE FROM occurrence_vectors WHERE occurrence_id=?1 AND generation_id=?2
          AND EXISTS(SELECT 1 FROM embedding_jobs j WHERE j.occurrence_id=?1 AND j.generation_id=?2 AND {FINISHED_JOB} AND {unreferenced})"
     );
+    let authorizations = format!(
+        "DELETE FROM embedding_recovery_authorizations WHERE job_id IN
+         (SELECT j.job_id FROM embedding_jobs j WHERE j.occurrence_id=?1 AND j.generation_id=?2 AND {FINISHED_JOB} AND {unreferenced})"
+    );
     let jobs = format!(
         "DELETE FROM embedding_jobs AS j WHERE j.occurrence_id=?1 AND j.generation_id=?2 AND {FINISHED_JOB} AND {unreferenced}"
     );
     let mut vectors = conn.prepare(&vectors)?;
+    let mut authorizations = conn.prepare(&authorizations)?;
     let mut jobs = conn.prepare(&jobs)?;
     for candidate in candidates {
         let key = params![candidate.occurrence_id, candidate.generation_id];
         reclaimed.vectors += vectors.execute(key)?;
+        authorizations.execute(key)?;
         let removed = jobs.execute(key)?;
         reclaimed.jobs += removed;
         if removed == 0 {
