@@ -57,7 +57,7 @@ pub enum DispatchEvent {
     Stage {
         job_id: String,
         stage: Stage,
-        deadline: Option<Instant>,
+        deadline: Instant,
     },
     /// The host accepted the job; native work may run from this point, whatever the charge that follows decides.
     Submitted {
@@ -128,6 +128,7 @@ pub struct EmbeddingDispatcher<'a> {
     synapse: &'a SynapseComponent,
     quarantine: Option<Quarantine>,
     lose_charge_reply: bool,
+    fail_read: bool,
 }
 
 impl<'a> EmbeddingDispatcher<'a> {
@@ -142,6 +143,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             synapse,
             quarantine: None,
             lose_charge_reply: false,
+            fail_read: false,
         }
     }
 
@@ -149,6 +151,12 @@ impl<'a> EmbeddingDispatcher<'a> {
     #[cfg(feature = "test-support")]
     pub fn lose_next_charge_reply_for_test(&mut self) {
         self.lose_charge_reply = true;
+    }
+
+    /// Makes the next pass's eligibility read fail as if the store were locked, so callers can exercise [`DispatchError::Read`].
+    #[cfg(feature = "test-support")]
+    pub fn fail_next_read_for_test(&mut self) {
+        self.fail_read = true;
     }
 
     /// Runs one pass and reports what stopped it early, if anything; every job's disposition reaches `observer`.
@@ -183,10 +191,15 @@ impl<'a> EmbeddingDispatcher<'a> {
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
             outcome => observer(DispatchEvent::Bound(outcome)),
         }
-        let jobs = self
-            .projection
-            .read(|conn| eligible_jobs(conn, bounds.max_jobs, now))
-            .map_err(DispatchError::Read)?;
+        let jobs = if std::mem::take(&mut self.fail_read) {
+            Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                "database is locked".to_owned(),
+            )))
+        } else {
+            self.projection
+                .read(|conn| eligible_jobs(conn, bounds.max_jobs, now))
+        }
+        .map_err(DispatchError::Read)?;
         let pass = Pass {
             lane: &lane,
             binding: &binding,
@@ -568,7 +581,7 @@ impl Pass<'_> {
         observer(DispatchEvent::Stage {
             job_id: job.job_id.clone(),
             stage,
-            deadline: self.budget.deadline(),
+            deadline: self.deadline,
         });
     }
 }

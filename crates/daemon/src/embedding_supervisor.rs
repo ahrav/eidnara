@@ -1,6 +1,6 @@
-//! Runs embedding maintenance as bounded slices under the daemon's shutdown token: a backfill pass over durable pending work, then an identity sweep, then a yield, so one maintenance kind never starves the other and no slice outlives its budget.
+//! Runs embedding maintenance as bounded slices under the daemon's shutdown token: a backfill pass over durable pending work, then an identity sweep, then a yield, so one maintenance kind never starves the other and no slice outlives its budget. The loop waits `idle` only when both kinds last found nothing to do, so a blocked lane cannot spin it and a dry sweep cannot throttle a backfill with a backlog.
 //!
-//! Every slice gets one `EvalBudget`: an absolute deadline derived once when the slice starts, and a sticky cancellation that shutdown raises. The dispatcher and the sweeper thread that same budget through admission, the result poll, the guard, and the reclamation write, so no stage renews it. A projection transaction's wait for the file is the store's own busy timeout, not the budget's, so a slice bound is the deadline plus that timeout. A slice runs on a tracked blocking thread; shutdown stops new slices, cancels the running one, and joins every tracked task. A native call that has not returned keeps its permit, its charges, and its result lease, and the join stays unresolved until it exits: grace expiry reports that state, it does not end it. A slice that panics is reported, not swallowed, and stops the supervisor. Quarantine from either maintenance kind stops the supervisor and retains every obligation for an operator.
+//! Every slice gets one `EvalBudget`: an absolute deadline derived once when the slice starts, and a sticky cancellation that shutdown raises. The dispatcher and the sweeper thread that same budget through admission, the result poll, the guard, and the reclamation write, so no stage renews it. A projection transaction's wait for the file is the store's own busy timeout, not the budget's, so a slice bound is the deadline plus that timeout. A slice runs on a tracked blocking thread; shutdown stops new slices, cancels the running one, and joins every tracked task. A native call that has not returned keeps its permit, its charges, and its result lease, and the join stays unresolved until it exits: grace expiry reports that state, it does not end it. A slice that panics is reported, not swallowed, and stops the supervisor. Quarantine from either maintenance kind stops the supervisor and retains every obligation for an operator. A read that fails before anything is decided is not terminal: the slice reports it and the loop runs the same kind again after the idle wait.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -31,7 +31,7 @@ pub struct Maintained {
     pub destination: ArtifactDestination,
 }
 
-/// Finite bounds every slice runs under. `slice` is the absolute budget of one slice; `idle` is the wait after a slice that found nothing to do.
+/// Finite bounds every slice runs under. `slice` is the absolute budget of one slice; `idle` is the wait once both a backfill and a sweep have found nothing to do.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceBounds {
     pub dispatch: DispatchBounds,
@@ -48,13 +48,16 @@ pub enum SliceKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceOutcome {
-    /// The pass ended, drained or blocked; `admitted` and `published` count its dispositions.
+    /// The pass ended, drained or blocked. `admitted` and `published` count rows that moved toward a vector; `dispositions` counts rows the pass retried or stopped.
     Backfill {
         end: Option<Blocked>,
         admitted: usize,
         published: usize,
+        dispositions: usize,
     },
     Sweep(SweepReport),
+    /// The slice's first read failed before anything was decided; the message is the error's display. The next slice of the same kind runs the work again.
+    ReadFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +101,13 @@ pub struct Unresolved {
     pub native: usize,
 }
 
+/// A host job submitted by this supervisor remains shutdown work while the host owns it.
+struct HostJob {
+    host_job_id: String,
+    /// Whether the admitted row still owns this job's result; retried and stopped rows do not.
+    result_expected: bool,
+}
+
 pub struct EmbeddingSupervisor {
     maintained: Arc<Maintained>,
     bounds: SliceBounds,
@@ -107,9 +117,10 @@ pub struct EmbeddingSupervisor {
     shutdown: CancellationToken,
     slices: AtomicUsize,
     stop: Mutex<Option<Stop>>,
-    /// Host jobs this supervisor admitted and has not seen published, by durable job identifier: the physical work its shutdown must account for.
-    admitted: Mutex<BTreeMap<String, String>>,
+    /// Host jobs this supervisor submitted and has not seen published, by durable job identifier. An entry outlives its row's disposition: the host runs the call to completion whatever the row says.
+    admitted: Mutex<BTreeMap<String, HostJob>>,
     panic_next_slice: AtomicBool,
+    fail_next_read: AtomicBool,
 }
 
 impl EmbeddingSupervisor {
@@ -130,6 +141,7 @@ impl EmbeddingSupervisor {
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
             panic_next_slice: AtomicBool::new(false),
+            fail_next_read: AtomicBool::new(false),
         })
     }
 
@@ -139,10 +151,18 @@ impl EmbeddingSupervisor {
         self.panic_next_slice.store(true, Ordering::SeqCst);
     }
 
+    /// Makes the next backfill slice's eligibility read fail as if the store were locked.
+    #[cfg(feature = "test-support")]
+    pub fn fail_next_read_for_test(&self) {
+        self.fail_next_read.store(true, Ordering::SeqCst);
+    }
+
     /// Runs slices until shutdown or a stop. Must run inside a Tokio runtime; each slice is a tracked blocking task, and the loop yields between slices. The loop itself holds a tracker token, so `shutdown` cannot report a drain while a slice could still start.
     pub async fn run(self: Arc<Self>) {
         let _running = self.tracker.token();
         let mut kind = SliceKind::Backfill;
+        // Whether each kind's last slice found nothing to do; the loop waits only when both did, so a dry sweep never throttles a backfill with a backlog and a blocked backfill never spins while the sweep is also dry.
+        let mut idle = Idle::default();
         loop {
             if self.shutdown.is_cancelled() {
                 self.stop_with(Stop::Shutdown);
@@ -172,13 +192,12 @@ impl EmbeddingSupervisor {
                 }
             };
             self.slices.fetch_add(1, Ordering::SeqCst);
-            let idle = match joined {
+            match joined {
                 Ok(Ok(outcome)) => {
-                    let idle = idle_after(&outcome);
+                    idle.record(kind, idle_after(&outcome));
                     let _ = self
                         .events
                         .send(SupervisorEvent::SliceEnded { kind, outcome });
-                    idle
                 }
                 Ok(Err(stop)) => {
                     self.stop_with(stop);
@@ -203,7 +222,7 @@ impl EmbeddingSupervisor {
                 SliceKind::Backfill => SliceKind::Sweep,
                 SliceKind::Sweep => SliceKind::Backfill,
             };
-            if idle {
+            if idle.both() {
                 tokio::select! {
                     biased;
                     () = self.shutdown.cancelled() => {}
@@ -224,56 +243,73 @@ impl EmbeddingSupervisor {
         match kind {
             SliceKind::Backfill => {
                 let mut dispatcher = EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.synapse);
-                let (mut admitted, mut published) = (0, 0);
-                let end = dispatcher
-                    .run_pass(
-                        EligibilityBinding {
-                            project: &m.project,
-                            destination: m.destination,
-                        },
-                        &self.bounds.dispatch,
-                        budget,
-                        (self.now)(),
-                        &mut |event| match event {
-                            // The host owns native work from submission, whatever the charge decides.
-                            DispatchEvent::Submitted {
+                if self.fail_next_read.swap(false, Ordering::SeqCst) {
+                    #[cfg(feature = "test-support")]
+                    dispatcher.fail_next_read_for_test();
+                }
+                let (mut admitted, mut published, mut dispositions) = (0, 0, 0);
+                let end = dispatcher.run_pass(
+                    EligibilityBinding {
+                        project: &m.project,
+                        destination: m.destination,
+                    },
+                    &self.bounds.dispatch,
+                    budget,
+                    (self.now)(),
+                    &mut |event| match event {
+                        // The host owns native work from submission, whatever the charge decides.
+                        DispatchEvent::Submitted {
+                            job_id,
+                            host_job_id,
+                        } => {
+                            self.lock_admitted().insert(
                                 job_id,
-                                host_job_id,
-                            } => {
-                                self.lock_admitted().insert(job_id, host_job_id);
+                                HostJob {
+                                    host_job_id,
+                                    result_expected: true,
+                                },
+                            );
+                        }
+                        DispatchEvent::Admitted { .. } => admitted += 1,
+                        DispatchEvent::Published { job_id, .. } => {
+                            published += 1;
+                            self.lock_admitted().remove(&job_id);
+                        }
+                        // A retried or stopped job stays tracked: the host still runs its call, and only the host's status retires it.
+                        DispatchEvent::Retried { job_id, .. }
+                        | DispatchEvent::Stopped { job_id, .. } => {
+                            dispositions += 1;
+                            if let Some(job) = self.lock_admitted().get_mut(&job_id) {
+                                job.result_expected = false;
                             }
-                            DispatchEvent::Admitted { .. } => admitted += 1,
-                            DispatchEvent::Published { job_id, .. } => {
-                                published += 1;
-                                self.lock_admitted().remove(&job_id);
-                            }
-                            // A retried or stopped row no longer expects its host job's result.
-                            DispatchEvent::Retried { job_id, .. }
-                            | DispatchEvent::Stopped { job_id, .. } => {
-                                self.lock_admitted().remove(&job_id);
-                            }
-                            _ => {}
-                        },
-                    )
-                    .map_err(|error| match error {
-                        DispatchError::Quarantined(quarantine) => Stop::Quarantined(quarantine),
-                        other => Stop::Failed(other.to_string()),
-                    })?;
-                Ok(SliceOutcome::Backfill {
-                    end,
-                    admitted,
-                    published,
-                })
+                        }
+                        _ => {}
+                    },
+                );
+                match end {
+                    Ok(end) => Ok(SliceOutcome::Backfill {
+                        end,
+                        admitted,
+                        published,
+                        dispositions,
+                    }),
+                    // A failed read decided nothing, so the pass simply runs again; only quarantine and the kernel are terminal.
+                    Err(DispatchError::Read(error)) => {
+                        Ok(SliceOutcome::ReadFailed(error.to_string()))
+                    }
+                    Err(DispatchError::Quarantined(quarantine)) => {
+                        Err(Stop::Quarantined(quarantine))
+                    }
+                    Err(other) => Err(Stop::Failed(other.to_string())),
+                }
             }
             SliceKind::Sweep => {
                 let mut sweeper = IdentitySweeper::new(&m.projection, &m.synapse);
-                sweeper
-                    .run_sweep(self.bounds.sweep_candidates, budget)
-                    .map(SliceOutcome::Sweep)
-                    .map_err(|error| match error {
-                        SweepError::Quarantined(quarantine) => Stop::Quarantined(quarantine),
-                        other => Stop::Failed(other.to_string()),
-                    })
+                match sweeper.run_sweep(self.bounds.sweep_candidates, budget) {
+                    Ok(report) => Ok(SliceOutcome::Sweep(report)),
+                    Err(SweepError::Read(error)) => Ok(SliceOutcome::ReadFailed(error.to_string())),
+                    Err(SweepError::Quarantined(quarantine)) => Err(Stop::Quarantined(quarantine)),
+                }
             }
         }
     }
@@ -323,36 +359,71 @@ impl EmbeddingSupervisor {
         })
     }
 
-    /// `(running, ready)` counts over the host jobs this supervisor admitted and has not seen published.
+    /// `(running, held)` counts over the host jobs this supervisor submitted and has not seen published: calls the host still owns, and settled results an admitted row still expects.
     fn native_census(&self) -> (usize, usize) {
         let admitted = self.lock_admitted();
-        admitted
-            .values()
-            .fold((0, 0), |(running, ready), host_job_id| {
-                // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
-                match self.maintained.synapse.job_status(host_job_id) {
-                    None | Some("failed") => (running, ready),
-                    Some("ready") => (running, ready + 1),
-                    Some(_) => (running + 1, ready),
-                }
-            })
+        admitted.values().fold((0, 0), |(running, held), job| {
+            // Anything the table still holds that is not a settled result counts as owned native work, so an unknown status word fails closed.
+            match self.maintained.synapse.job_status(&job.host_job_id) {
+                None | Some("failed") => (running, held),
+                Some("ready") => (running, held + usize::from(job.result_expected)),
+                Some(_) => (running + 1, held),
+            }
+        })
     }
 
-    fn lock_admitted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
+    fn lock_admitted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, HostJob>> {
         self.admitted
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
-/// A slice that found no work admits an idle wait; one that made progress yields and runs the next kind at once.
+/// The last verdict of each slice kind; both start idle so the first dry slice of either kind can wait.
+struct Idle {
+    backfill: bool,
+    sweep: bool,
+}
+
+impl Default for Idle {
+    fn default() -> Self {
+        Self {
+            backfill: true,
+            sweep: true,
+        }
+    }
+}
+
+impl Idle {
+    fn record(&mut self, kind: SliceKind, idle: bool) {
+        match kind {
+            SliceKind::Backfill => self.backfill = idle,
+            SliceKind::Sweep => self.sweep = idle,
+        }
+    }
+
+    fn both(&self) -> bool {
+        self.backfill && self.sweep
+    }
+}
+
+/// A blocked backfill is idle because the next slice cannot clear its blocker; a slice of either kind that its budget cut short is not idle.
 fn idle_after(outcome: &SliceOutcome) -> bool {
     match outcome {
         SliceOutcome::Backfill {
             admitted,
             published,
+            dispositions,
             end,
-        } => *admitted == 0 && *published == 0 && end.is_none(),
-        SliceOutcome::Sweep(report) => report.jobs_reclaimed == 0 && report.candidates == 0,
+        } => {
+            *admitted == 0
+                && *published == 0
+                && *dispositions == 0
+                && *end != Some(Blocked::BudgetExhausted)
+        }
+        SliceOutcome::Sweep(report) => {
+            report.jobs_reclaimed == 0 && report.vectors_reclaimed == 0 && !report.budget_exhausted
+        }
+        SliceOutcome::ReadFailed(_) => true,
     }
 }

@@ -21,6 +21,8 @@ pub struct SweepReport {
     pub jobs_reclaimed: usize,
     /// Candidates whose eligibility no longer held when the delete ran.
     pub survivors: usize,
+    /// The budget ended before selection or before the write; whatever it left is ready for the next sweep.
+    pub budget_exhausted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,7 +58,7 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Selects at most `max_candidates` identities and reclaims those no holder protects. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves every free candidate as a survivor for the next sweep.
+    /// Selects at most `max_candidates` identities and reclaims those no holder protects. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves every free candidate as a survivor for the next sweep, and the report says the budget ended it.
     ///
     /// # Errors
     ///
@@ -70,7 +72,10 @@ impl<'a> IdentitySweeper<'a> {
             return Err(SweepError::Quarantined(quarantine.clone()));
         }
         if budget.is_exhausted() {
-            return Ok(SweepReport::default());
+            return Ok(SweepReport {
+                budget_exhausted: true,
+                ..SweepReport::default()
+            });
         }
         let selected = self
             .projection
@@ -89,6 +94,7 @@ impl<'a> IdentitySweeper<'a> {
         }
         if budget.is_exhausted() {
             report.survivors = free.len();
+            report.budget_exhausted = true;
             return Ok(report);
         }
         let reclaimed = self.projection.write(|conn| reclaim(conn, &free));
