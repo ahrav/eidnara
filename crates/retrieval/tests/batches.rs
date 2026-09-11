@@ -11,7 +11,7 @@ use kernel::source_identity::{Occurrence, Span};
 use retrieval::batch::{
     BatchBounds, BatchFault, BatchOutcome, BatchStatus, Invalidation, MutationIdentity,
     ProjectionBatch, VectorGeneration, apply_batch, apply_batch_with_fault_for_test, batch_status,
-    pending_jobs, register_generation,
+    register_generation,
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
@@ -240,11 +240,13 @@ fn durable(conn: &GuardedConn<'_>) -> Durable {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .ok();
-    let pending = pending_jobs(conn)
-        .unwrap()
-        .into_iter()
-        .map(|(_, occurrence)| occurrence)
-        .collect();
+    let pending = rows(
+        conn,
+        "SELECT occurrence_id FROM embedding_jobs WHERE state='pending'",
+        |row| row.get(0),
+    )
+    .into_iter()
+    .collect();
     let jobs = rows(
         conn,
         "SELECT occurrence_id,generation_id,state FROM embedding_jobs ORDER BY 1,2",
@@ -590,6 +592,25 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
         }],
         generation_id: Some(GENERATION),
     };
+    for at in [1, 2, 5] {
+        let mut outside_window = batch.clone();
+        outside_window.invalidations[0]
+            .tombstone
+            .invalidated_commit_seq = at;
+        let result = store
+            .with_conn_fenced(|conn| Ok(apply_batch(conn, &outside_window, bounds(), 5)))
+            .unwrap();
+        assert_eq!(
+            result,
+            Err(ProjectionError::MutationConflict),
+            "invalidation at {at} is outside (2, 4]"
+        );
+        assert_eq!(
+            store.with_conn(|conn| Ok(durable(conn))).unwrap(),
+            prior,
+            "a handled admission error commits no batch writes"
+        );
+    }
     for fault in [
         BatchFault::AfterAdmission,
         BatchFault::AfterRows,
@@ -677,6 +698,13 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
             text: "b1".into(),
             created: 3,
         },
+        Source {
+            class: "raw_tool_spans",
+            key: "raw".into(),
+            revision: 1,
+            text: "raw output".into(),
+            created: 3,
+        },
     ];
     let arena = Arena::new(&sources);
     let borrowed = borrow(&arena);
@@ -712,6 +740,15 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
         generation_id: Some(GENERATION),
     };
     apply(&store, &batch2, 2).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE vector_generations SET state='retired' WHERE generation_id=?1",
+                [GENERATION],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     let settled = store.with_conn(|conn| Ok(durable(conn))).unwrap();
     assert_eq!(
         settled.jobs[&(a1.clone(), GENERATION.to_string())],
@@ -721,7 +758,7 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
     // Replaying the old prefix that created a1 neither revives it nor queues
     // it again, and the checkpoint stays where it was.
     let replay = apply(&store, &batch1, 3).unwrap();
-    assert_eq!(replay.rows_replayed, 2);
+    assert_eq!(replay.rows_replayed, 3);
     assert_eq!(replay.pending_created, 0);
     assert_eq!(replay.checkpoint_commit_seq, 5);
     store
@@ -765,6 +802,15 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
     );
     let mut other_kernel = batch2.clone();
     other_kernel.identity.kernel_incarnation_id = "kernel-2".to_string();
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                batch_status(conn, &other_kernel.identity),
+                Err(ProjectionError::IdentityMismatch)
+            );
+            Ok(())
+        })
+        .unwrap();
     other_kernel.identity.through_commit_seq = 7;
     assert_eq!(
         apply(&store, &other_kernel, 5),
@@ -785,9 +831,27 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
         apply(&store, &backwards, 5),
         Err(ProjectionError::MutationConflict)
     );
+    let mut new_work = batch2.clone();
+    new_work.identity.through_commit_seq = 7;
+    new_work.records[0].occurrence.revision = "3";
+    assert_eq!(
+        store
+            .with_conn_fenced(|conn| Ok(apply_batch(conn, &new_work, bounds(), 5)))
+            .unwrap(),
+        Err(ProjectionError::UnknownGeneration {
+            generation_id: GENERATION.to_string(),
+        }),
+        "a retired generation cannot receive new work"
+    );
     store
         .with_conn(|conn| {
             assert_eq!(durable(conn), after);
+            let state: String = conn.query_row(
+                "SELECT state FROM vector_generations WHERE generation_id=?1",
+                [GENERATION],
+                |row| row.get(0),
+            )?;
+            assert_eq!(state, "retired");
             Ok(())
         })
         .unwrap();
@@ -1205,7 +1269,7 @@ fn the_pending_charge_counts_only_work_the_batch_will_queue() {
         .unwrap();
     let swap = ProjectionBatch {
         identity: mutation(2, 4),
-        records: all[6..7].to_vec(),
+        records: vec![all[6].clone(), all[6].clone(), all[1].clone()],
         invalidations: vec![Invalidation {
             occurrence_id: ids[0].clone(),
             tombstone: Tombstone {
@@ -1217,6 +1281,7 @@ fn the_pending_charge_counts_only_work_the_batch_will_queue() {
     };
     let outcome = apply_bounded(&swap, 3).expect("work the batch obsoletes is credited");
     assert_eq!((outcome.pending_created, outcome.pending_obsoleted), (1, 1));
+    assert_eq!((outcome.rows_inserted, outcome.rows_replayed), (1, 2));
     store
         .with_conn(|conn| {
             let state = durable(conn);
@@ -1392,6 +1457,23 @@ fn rows_map_to_a_batch_at_the_window_edges_and_selected_text_persists_under_its_
         batch_from_rows(&rows, &long, mutation(snapshot, through), None).unwrap_err(),
         ProjectionError::MalformedBatch
     );
+    for index in [1, 4] {
+        let mut swapped = identities.clone();
+        swapped.swap(index, index + 1);
+        assert_eq!(
+            batch_from_rows(&rows, &swapped, mutation(snapshot, through), None).err(),
+            Some(ProjectionError::MalformedBatch),
+            "borrowed identity belongs to another row at {index}"
+        );
+        let mut malformed = rows.clone();
+        malformed[index].detail.occurrence_id = "not-an-occurrence-id".to_string();
+        let borrowed = row_identities(&malformed);
+        assert_eq!(
+            batch_from_rows(&malformed, &borrowed, mutation(snapshot, through), None).err(),
+            Some(ProjectionError::MalformedBatch),
+            "descriptor identity must match its encoded fields at {index}"
+        );
+    }
 
     // Selected text persists under the kernel's own occurrence identity and
     // span; a selection whose length disagrees with its span is refused

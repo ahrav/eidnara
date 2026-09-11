@@ -369,6 +369,7 @@ pub fn persist_occurrences_with_digests_for_test(
 struct Prepared<'a> {
     record: &'a OccurrenceRecord<'a>,
     encoded: EncodedOccurrence,
+    span: Option<(i64, i64)>,
     selected: &'a [u8],
     occurrence_id: String,
     payload_id: String,
@@ -393,11 +394,14 @@ pub(crate) fn encode_record<'a>(
             select(record.occurrence.span, buffer)
         }
         Payload::Selected(text) => {
-            let span_len = encoded.span.map_or(text.len() as u64, |span| {
-                span.end.saturating_sub(span.start)
-            });
-            if span_len != text.len() as u64 {
-                return Err(OccurrenceRefusal::SpanOutOfRange.into());
+            if let Some(span) = encoded.span {
+                let span_len = span
+                    .end
+                    .checked_sub(span.start)
+                    .ok_or(OccurrenceRefusal::SpanReversed)?;
+                if span_len != text.len() as u64 {
+                    return Err(OccurrenceRefusal::SpanOutOfRange.into());
+                }
             }
             text.as_bytes()
         }
@@ -424,6 +428,15 @@ fn persist_with_digests(
             return Err(ProjectionError::NonPositiveSequence { index });
         }
         let (encoded, selected) = encode_record(record)?;
+        let span = encoded
+            .span
+            .map(|span| {
+                Ok::<_, ProjectionError>((
+                    i64::try_from(span.start).map_err(|_| ProjectionError::CorruptRow)?,
+                    i64::try_from(span.end).map_err(|_| ProjectionError::CorruptRow)?,
+                ))
+            })
+            .transpose()?;
         if encoded.tuple.len() > bounds.max_tuple_bytes.get() {
             return Err(ProjectionError::OverBound {
                 index,
@@ -442,6 +455,7 @@ fn persist_with_digests(
         prepared.push(Prepared {
             record,
             encoded,
+            span,
             selected,
             occurrence_id,
             payload_id,
@@ -533,16 +547,6 @@ fn insert_occurrence(
     persisted_at: i64,
 ) -> Result<(), ProjectionError> {
     let record = item.record;
-    let span = item
-        .encoded
-        .span
-        .map(|span| {
-            Ok::<_, ProjectionError>((
-                i64::try_from(span.start).map_err(|_| ProjectionError::CorruptRow)?,
-                i64::try_from(span.end).map_err(|_| ProjectionError::CorruptRow)?,
-            ))
-        })
-        .transpose()?;
     conn.execute(
         "INSERT INTO occurrences(
              occurrence_id,tuple,lineage_id,class,revision,representation,
@@ -556,8 +560,8 @@ fn insert_occurrence(
             item.encoded.class.code(),
             item.encoded.revision,
             record.occurrence.representation,
-            span.map(|(start, _)| start),
-            span.map(|(_, end)| end),
+            item.span.map(|(start, _)| start),
+            item.span.map(|(_, end)| end),
             item.payload_id,
             record.domain_id,
             record.sensitivity.as_str(),

@@ -498,8 +498,8 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
 {
     use kernel::source_identity::OccurrenceClass;
     use retrieval::batch::{
-        BatchBounds, BatchStatus, MutationIdentity, VectorGeneration, batch_from_rows,
-        pending_jobs, register_generation, row_identities,
+        BatchBounds, BatchStatus, Invalidation, MutationIdentity, ProjectionBatch,
+        VectorGeneration, batch_from_rows, register_generation, row_identities,
     };
     let dir = tempfile::tempdir().unwrap();
     let kernel = KernelStore::open(dir.path().join("kernel")).unwrap();
@@ -622,6 +622,10 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         )
         .unwrap();
     assert_eq!(page.rows.len(), 2);
+    assert!(
+        page.next.is_none(),
+        "the batch requires the entire snapshot"
+    );
     let kernel_checkpoint = || -> i64 {
         rusqlite::Connection::open_with_flags(
             dir.path().join("kernel").join("kernel.sqlite"),
@@ -700,9 +704,13 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         .unwrap();
     projection
         .read(|conn| {
-            let pending = pending_jobs(conn)?;
+            let mut statement =
+                conn.prepare("SELECT occurrence_id FROM embedding_jobs WHERE state='pending'")?;
+            let pending = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             assert_eq!(pending.len(), 1);
-            assert_eq!(pending[0].1, message_row.detail.occurrence_id);
+            assert_eq!(pending[0], message_row.detail.occurrence_id);
             let tool = page
                 .rows
                 .iter()
@@ -826,6 +834,10 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         )
         .unwrap();
     let identities = row_identities(&catch_up.rows);
+    assert!(
+        catch_up.next.is_none(),
+        "the batch requires the entire window"
+    );
     let mutation = MutationIdentity {
         through_commit_seq: through,
         ..mutation
@@ -882,4 +894,64 @@ fn a_kernel_export_applies_as_one_batch_with_pending_only_for_dense_inputs_and_n
         checkpoint_before,
         "still no acknowledgement"
     );
+
+    let deleted = kernel
+        .delete_artifact(kernel::ArtifactDeletionRequest {
+            intent: intent("delete-message-evidence"),
+            identity: kernel::ArtifactDeletionIdentity::EvidenceId("evidence-m2".to_string()),
+            kind: kernel::ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: hold.captured_at,
+        })
+        .unwrap();
+    let deleted_occurrence = &catch_up
+        .rows
+        .iter()
+        .find(|row| row.detail.artifact_digest == deleted.digest)
+        .unwrap()
+        .detail
+        .occurrence_id;
+    let tombstone = retrieval::Tombstone {
+        invalidated_commit_seq: deleted.commit_seq,
+        reason: retrieval::TombstoneReason::EvidenceInvalidated,
+    };
+    // The fixture supplies artifact deletion as a canonical control fact, separate from descriptor retirement.
+    let deletion_batch = ProjectionBatch {
+        identity: MutationIdentity {
+            through_commit_seq: deleted.commit_seq,
+            ..mutation
+        },
+        records: vec![],
+        invalidations: vec![Invalidation {
+            occurrence_id: deleted_occurrence.clone(),
+            tombstone,
+        }],
+        generation_id: None,
+    };
+    let outcome = projection.apply_batch(&deletion_batch, bounds, 5).unwrap();
+    assert_eq!(outcome.tombstones_recorded, 1);
+    assert_eq!(outcome.pending_obsoleted, 1);
+    assert_eq!(outcome.checkpoint_commit_seq, deleted.commit_seq);
+    let replay = projection.apply_batch(&batch, bounds, 6).unwrap();
+    assert_eq!(replay.rows_inserted, 0);
+    assert_eq!(replay.pending_created, 0);
+    assert_eq!(replay.checkpoint_commit_seq, deleted.commit_seq);
+    drop(projection);
+    let reopened = SearchProjection::open(dir.path()).unwrap();
+    reopened
+        .read(|conn| {
+            let stored = read_occurrence(conn, deleted_occurrence)?.unwrap();
+            assert_eq!(stored.tombstone, Some(tombstone));
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM embedding_jobs WHERE state='pending'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(pending, 0);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(kernel_checkpoint(), checkpoint_before);
 }

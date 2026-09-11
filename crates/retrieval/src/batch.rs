@@ -46,8 +46,8 @@ pub struct Invalidation {
     pub tombstone: Tombstone,
 }
 
-/// A complete prefix to apply. Rows and invalidations are the window's, in
-/// export order.
+/// Contains every source row and invalidation through `identity.through_commit_seq`.
+/// The local writer cannot detect omitted source pages or control events.
 #[derive(Clone)]
 pub struct ProjectionBatch<'a> {
     pub identity: MutationIdentity,
@@ -122,6 +122,12 @@ fn job_id(occurrence_id: &str, generation_id: &str) -> String {
 /// over their selected text, rows invalidated inside the window become
 /// invalidations, and a row that is both is both. `identities` holds each
 /// row's identity fields in borrowed form, one entry per row.
+///
+/// The caller must collect every page from the window's start through its terminal page before applying the batch.
+/// Source pages are keyset-ordered, not commit-ordered; a partial page cannot justify a complete checkpoint.
+/// Artifact deletion and other control events come from canonical commit history, not descriptor rows.
+/// The caller must add their invalidations before applying the batch.
+/// This mapper cannot verify either completeness obligation from a row slice.
 pub fn batch_from_rows<'a>(
     rows: &'a [SourceRow],
     identities: &'a [Vec<(&'a str, &'a str)>],
@@ -134,6 +140,14 @@ pub fn batch_from_rows<'a>(
     let mut records = Vec::new();
     let mut invalidations = Vec::new();
     for (row, fields) in rows.iter().zip(identities) {
+        if !fields.iter().copied().eq(row
+            .detail
+            .identity
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())))
+        {
+            return Err(ProjectionError::MalformedBatch);
+        }
         let occurrence = Occurrence {
             class: &row.detail.class,
             identity: fields,
@@ -141,6 +155,9 @@ pub fn batch_from_rows<'a>(
             representation: &row.detail.representation,
             span: row.detail.span.map(|(start, end)| Span { start, end }),
         };
+        if kernel::source_identity::encode(&occurrence)?.occurrence_id != row.detail.occurrence_id {
+            return Err(ProjectionError::MalformedBatch);
+        }
         if let Some(text) = row.text.as_deref() {
             records.push(OccurrenceRecord {
                 occurrence,
@@ -196,11 +213,12 @@ pub fn row_identities(rows: &[SourceRow]) -> Vec<Vec<(&str, &str)>> {
 /// Whether the batch's end is already inside the durable checkpoint under the
 /// batch's hold and snapshot. Reconciles an unknown commit outcome from the
 /// durable contents rather than assuming a rollback.
+/// A missing or different installed kernel incarnation is an identity error.
 pub fn batch_status(
     conn: &GuardedConn<'_>,
     identity: &MutationIdentity,
 ) -> Result<BatchStatus, ProjectionError> {
-    let stored = read_checkpoint(conn)?;
+    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
     Ok(match stored {
         Some(checkpoint)
             if checkpoint.hold_id == identity.hold_id
@@ -219,7 +237,14 @@ struct Checkpoint {
     hold_id: String,
 }
 
-fn read_checkpoint(conn: &GuardedConn<'_>) -> Result<Option<Checkpoint>, ProjectionError> {
+fn read_checkpoint(
+    conn: &GuardedConn<'_>,
+    kernel_incarnation_id: &str,
+) -> Result<Option<Checkpoint>, ProjectionError> {
+    let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
+    if installed.kernel_incarnation_id != kernel_incarnation_id {
+        return Err(ProjectionError::IdentityMismatch);
+    }
     conn.query_row(
         "SELECT snapshot_commit_seq,checkpoint_commit_seq,hold_id FROM projection_checkpoint WHERE singleton=1",
         [],
@@ -239,6 +264,8 @@ fn read_checkpoint(conn: &GuardedConn<'_>) -> Result<Option<Checkpoint>, Project
 /// comes first, then the identity checks, then rows, tombstones, pending work,
 /// and the checkpoint, in that order; any refusal leaves the caller to roll
 /// back with nothing of the batch durable.
+/// The caller must establish the source completeness required by [`ProjectionBatch`] before calling.
+/// Admission checks local bounds and identities, not canonical history coverage.
 pub fn apply_batch(
     conn: &GuardedConn<'_>,
     batch: &ProjectionBatch<'_>,
@@ -342,6 +369,10 @@ fn admit<'a>(
     if identity.through_commit_seq < identity.snapshot_commit_seq
         || identity.snapshot_commit_seq < 0
         || identity.hold_id.is_empty()
+        || batch.invalidations.iter().any(|invalidation| {
+            let at = invalidation.tombstone.invalidated_commit_seq;
+            at <= identity.snapshot_commit_seq || at > identity.through_commit_seq
+        })
     {
         return Err(ProjectionError::MutationConflict);
     }
@@ -393,7 +424,7 @@ fn admit<'a>(
             )?;
             obsoleting += usize::try_from(queued).map_err(|_| ProjectionError::CorruptRow)?;
         }
-        let mut new_jobs = 0;
+        let mut new_jobs = HashSet::new();
         for (record, occurrence_id) in batch.records.iter().zip(&occurrence_ids) {
             if !queues_work(conn, record.occurrence.class, occurrence_id, &tombstoned)? {
                 continue;
@@ -404,12 +435,12 @@ fn admit<'a>(
                 |row| row.get(0),
             )?;
             if !queued {
-                new_jobs += 1;
+                new_jobs.insert(occurrence_id);
             }
         }
         let total = outstanding
             .saturating_sub(obsoleting)
-            .saturating_add(new_jobs);
+            .saturating_add(new_jobs.len());
         if total > bounds.max_pending.get() {
             return Err(ProjectionError::BatchOverBound {
                 bound: "pending",
@@ -417,8 +448,9 @@ fn admit<'a>(
             });
         }
         let known: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM vector_generations WHERE generation_id=?1 AND state<>'retired')",
-            [generation],
+            "SELECT EXISTS(SELECT 1 FROM vector_generations
+             WHERE generation_id=?1 AND (state<>'retired' OR ?2))",
+            params![generation, new_jobs.is_empty()],
             |row| row.get(0),
         )?;
         if !known {
@@ -429,11 +461,7 @@ fn admit<'a>(
     }
     // The projection this batch belongs to: same incarnation, same hold and
     // snapshot as every earlier batch, never a checkpoint moving backward.
-    let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
-    if installed.kernel_incarnation_id != identity.kernel_incarnation_id {
-        return Err(ProjectionError::IdentityMismatch);
-    }
-    let stored = read_checkpoint(conn)?;
+    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
     if let Some(stored) = &stored
         && (stored.hold_id != identity.hold_id
             || stored.snapshot_commit_seq != identity.snapshot_commit_seq)
@@ -610,16 +638,4 @@ pub struct VectorGeneration {
     pub tokenizer_fingerprint: String,
     pub vector_dimension: u32,
     pub generation_epoch: u64,
-}
-
-/// Pending jobs in dispatch order, for the process-local job table to admit.
-pub fn pending_jobs(conn: &GuardedConn<'_>) -> Result<Vec<(String, String)>, ProjectionError> {
-    let mut statement = conn.prepare(
-        "SELECT job_id,occurrence_id FROM embedding_jobs WHERE state='pending'
-         ORDER BY next_attempt_at,job_id",
-    )?;
-    let jobs = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(jobs)
 }

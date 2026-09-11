@@ -842,6 +842,96 @@ fn malformed_and_oversized_records_refuse_before_anything_is_written() {
             OccurrenceRefusal::SpanNotUtf8Aligned
         ))
     );
+
+    let mut results = Vec::new();
+    let mut counts = Vec::new();
+    for (span, text) in [
+        (Span { start: 2, end: 1 }, ""),
+        (
+            Span {
+                start: i64::MAX as u64,
+                end: i64::MAX as u64 + 1,
+            },
+            "x",
+        ),
+        (
+            Span {
+                start: i64::MAX as u64 + 1,
+                end: i64::MAX as u64 + 1,
+            },
+            "",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        let mut selected = good.record(&good_identity);
+        selected.occurrence.span = Some(span);
+        selected.payload = Payload::Selected(text);
+        results.push(
+            store
+                .with_conn_fenced(|conn| {
+                    Ok(persist_occurrences(
+                        conn,
+                        &[good.record(&good_identity), selected],
+                        bounds(),
+                        1,
+                    ))
+                })
+                .unwrap(),
+        );
+        counts.push(
+            store
+                .with_conn(|conn| {
+                    Ok((
+                        conn.query_row("SELECT COUNT(*) FROM occurrences", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?,
+                        conn.query_row("SELECT COUNT(*) FROM payloads", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?,
+                    ))
+                })
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        counts,
+        [(0, 0); 3],
+        "committing a handled span error writes neither the earlier valid row nor any payload"
+    );
+    assert_eq!(
+        results,
+        [
+            Err(ProjectionError::Occurrence(OccurrenceRefusal::SpanReversed)),
+            Err(ProjectionError::CorruptRow),
+            Err(ProjectionError::CorruptRow),
+        ]
+    );
+
+    for span in [
+        Span { start: 0, end: 6 },
+        Span {
+            start: i64::MAX as u64 - 6,
+            end: i64::MAX as u64,
+        },
+    ] {
+        let mut selected = good.record(&good_identity);
+        selected.occurrence.span = Some(span);
+        selected.payload = Payload::Selected("héllo");
+        let expected = kernel::source_identity::encode(&selected.occurrence).unwrap();
+        store
+            .with_conn_fenced(|conn| {
+                let persisted = persist_occurrences(conn, &[selected], bounds(), 1).unwrap();
+                assert_eq!(persisted[0].occurrence_id, expected.occurrence_id);
+                let stored = read_occurrence(conn, &expected.occurrence_id)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.span, Some((span.start, span.end)));
+                assert_eq!(stored.bytes, "héllo".as_bytes());
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]
