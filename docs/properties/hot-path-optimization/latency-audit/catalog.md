@@ -457,10 +457,10 @@ for the session equals `store.load_tags_for_session(session)` for the
 [`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
 rows with `tag_number = max + offset + 1` in projection block order; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7186-7191`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([`:7195-7200`][mint-input]).
 `always` because the entry is read on the next pass of the same session and
 a stale or speculative row changes the active-tag match at
-[`:7380`][active-match].
+[`:7389`][active-match].
 Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
 [`snapshot`][tag-snapshot] holds a second reference. A design that appends
 in place, or stores the pass's `Arc` back before commit, exposes rows the
@@ -1681,9 +1681,9 @@ rotation at [`GENERATION_CAP = 65_536`][tc-cap] while a promote-on-hit insert
 runs; a sharded replacement that omits its term from the declaration. The
 direct `tokenizer::estimate_tokens` calls in production transform code at
 HEAD are the SOFT predicate's `m0_tokens` and `m1_tokens` at
-[`:4331-4342`][soft-direct] (W9), the tag-mint `token_count` at
-[`:7190`][mint-direct], and `ActiveTagForNudge.token_count` at
-[`:8588`][nudge-direct]; the tokenizer crate exposes no call counter
+[`:4339-4350`][soft-direct] (W9), the tag-mint `token_count` at
+[`:7199`][mint-direct], and `ActiveTagForNudge.token_count` at
+[`:8598`][nudge-direct]; the tokenizer crate exposes no call counter
 ([`estimate_tokens`][tok-fn]).
 Required faults and enabling state: Two concurrent transform passes; 65_536
 distinct digests; a pass minting new tags on the tail; a pass whose SOFT
@@ -1702,7 +1702,7 @@ declaration undercounts a cache.
 Open questions:
 - Is there any measured lock contention at HEAD? The comment is conditional;
   the audit should measure before sharding.
-- Should the `:7190` and `:8588` calls stay direct because their inputs are
+- Should the `:7199` and `:8598` calls stay direct because their inputs are
   new tail blocks that miss the cache anyway, or route through the interface
   for accounting? (needs human input)
 - Extend the source-scan test to the whole `apply_once` body, or replace it
@@ -1965,7 +1965,7 @@ a frozen reference, and the parent's H records follow the estimator into
 Guarantee: The SOFT pass's pressure-refold classification is preserved for
 fixed frozen m0, composed m1, budget, and update count.
 Check: `always` - For every SOFT pass, `pressure_refold` equals a frozen copy
-of the predicate at [`:4331-4349`][soft-predicate], kept as a test-only
+of the predicate at [`:4339-4357`][soft-predicate], kept as a test-only
 reference function, evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
 `m1.body`: `m1.memory_update_count > 40`, or `m1` has content and
@@ -1989,7 +1989,7 @@ store with no `m0` frozen unit.
 Confidence: high - [Evidence](evidence/soft-pressure-refold-predicate-preserves-its-classification.md).
 The predicate, its two direct tokenizer calls, and the `M1_PLACEHOLDER`
 guard are source-verified; the m1 composition itself receives
-`cached_estimate_tokens` at [`:4328`][soft-m1-compose].
+`cached_estimate_tokens` at [`:4336`][soft-m1-compose].
 Existing check: none found for the predicate; [H2][h2] states the SOFT and
 refold boundaries and [H1][h1] the cache-equals-direct clause for history
 rendering.
@@ -2434,21 +2434,21 @@ evaluation of this area and its disposition are recorded in
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2020
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2117-L2133
-[sel-item]: ../../../../crates/daemon/src/transform.rs#L6347-L6376
-[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6813-L6838
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6858-L6863
-[load-tags]: ../../../../crates/daemon/src/transform.rs#L6930-L6988
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7187-L7192
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7292-L7313
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7317-L7341
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7381
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7916-L7917
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27571
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27323
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22855
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23122
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28645
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2125-L2141
+[sel-item]: ../../../../crates/daemon/src/transform.rs#L6355-L6384
+[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
+[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
+[load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7195-L7200
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7300-L7321
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7389
+[make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27579
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27331
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22851
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23118
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28653
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L114-L127
 [reattach]: ../../../../crates/daemon/src/wire.rs#L145-L186
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L329-L337
@@ -2495,10 +2495,10 @@ evaluation of this area and its disposition are recorded in
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1940-L1979
 [stable-call]: ../../../../crates/daemon/src/transform.rs#L1819-L1843
-[descend]: ../../../../crates/daemon/src/transform.rs#L2953-L2964
-[value-compare]: ../../../../crates/daemon/src/transform.rs#L3217
-[truncate]: ../../../../crates/daemon/src/transform.rs#L4122-L4128
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13595
+[descend]: ../../../../crates/daemon/src/transform.rs#L2961-L2972
+[value-compare]: ../../../../crates/daemon/src/transform.rs#L3225
+[truncate]: ../../../../crates/daemon/src/transform.rs#L4130-L4136
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13603
 [received]: ../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6496-L6514
@@ -2654,16 +2654,16 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12409-L12414
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L27696-L27701
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12417-L12422
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L27704-L27709
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8463-L8488
 [respond]: ../../../../crates/daemon/src/lib.rs#L14404
 [tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1199-L1210
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
-[snap-add]: ../../../../crates/daemon/src/transform.rs#L2402
-[snap-once]: ../../../../crates/daemon/src/transform.rs#L2882
+[snap-add]: ../../../../crates/daemon/src/transform.rs#L2410
+[snap-once]: ../../../../crates/daemon/src/transform.rs#L2890
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
@@ -2677,13 +2677,13 @@ evaluation of this area and its disposition are recorded in
 [tc-inject]: ../../../../crates/daemon/src/transform.rs#L1799-L1815
 [declared-doc]: ../../../../crates/daemon/src/lib.rs#L2236-L2241
 [declared]: ../../../../crates/daemon/src/lib.rs#L2243-L2257
-[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2866-L2870
-[soft-direct]: ../../../../crates/daemon/src/transform.rs#L4331-L4342
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4331-L4349
-[soft-m1-compose]: ../../../../crates/daemon/src/transform.rs#L4328
-[mint-direct]: ../../../../crates/daemon/src/transform.rs#L7191
-[nudge-direct]: ../../../../crates/daemon/src/transform.rs#L8590
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24223-L24234
+[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2874-L2878
+[soft-direct]: ../../../../crates/daemon/src/transform.rs#L4339-L4350
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4339-L4357
+[soft-m1-compose]: ../../../../crates/daemon/src/transform.rs#L4336
+[mint-direct]: ../../../../crates/daemon/src/transform.rs#L7199
+[nudge-direct]: ../../../../crates/daemon/src/transform.rs#L8598
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24231-L24242
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
@@ -2771,7 +2771,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L10981-L10985
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5900-L5909
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35838
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35834
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261

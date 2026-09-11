@@ -22256,11 +22256,7 @@ mod tests {
             corrupt.replace_from,
         )
         .expect("corrupt incremental projection still parses");
-        transform::assert_prefix_projection_equivalent(
-            &incremental,
-            &crate::wire::MessageProjection::new(&changed.messages),
-        )
-        .unwrap();
+        transform::assert_prefix_projection_equivalent(&incremental, &changed.messages).unwrap();
     }
 
     #[cfg(debug_assertions)]

@@ -2019,7 +2019,15 @@ fn prefix_projection_differential_enabled() -> bool {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn assert_prefix_projection_equivalent(
+    incremental: &FlatProjection,
+    messages: &[IngressMessage],
+) -> Result<(), WireError> {
+    assert_message_projection_equivalent(incremental, &wire::MessageProjection::new(messages))
+}
+
+fn assert_message_projection_equivalent(
     incremental: &FlatProjection,
     messages: &wire::MessageProjection<'_>,
 ) -> Result<(), WireError> {
@@ -2909,7 +2917,7 @@ fn apply_once(
         .len()
         .saturating_sub(timings.projection_reused_messages);
     if reusable_projection.is_some() && prefix_projection_differential_enabled() {
-        assert_prefix_projection_equivalent(&initial_projection, &ingress_req.projection)?;
+        assert_message_projection_equivalent(&initial_projection, &ingress_req.projection)?;
     }
     if ingress_req.lineage_switched && ingress_req.is_subagent {
         return Ok(lineage_protocol_passthrough(

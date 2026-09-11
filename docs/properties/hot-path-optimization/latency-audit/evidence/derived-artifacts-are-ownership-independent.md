@@ -25,15 +25,15 @@ never of the allocation or the lane that produced them.
 - [`sel_item_from_flat`][sel-item] reads `input` from `block.wire.kind()`;
   [`sel_kind_for_flat`][sel-kind] reads `block.tool_input`. Both must be built
   from the same block for their consumers to agree.
-- The prefix differential [`assert_prefix_projection_equivalent`][assert-prefix]
+- The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2879-2881`][prefix-call] when a reusable projection exists and
+  [`:2919-2921`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
   blocks with `WireMessage::from_parts`, so a rebuilt shell has no `original`;
   its [doc][reattach-doc] says unknown top-level fields are dropped.
-- The native differential at [`:13315-13332`][native-diff] compares
+- The native differential at [`:13316-13333`][native-diff] compares
   `to_vec(incremental)` with `to_vec(encode_full_native_messages(..))` under
   [`native_attachment_differential_enabled`][gate-native], the same gate shape.
 - [`native_ingress_chunks`][ingress-chunks] shares an output chunk for index
@@ -52,7 +52,7 @@ never of the allocation or the lane that produced them.
 - [`Serialize for ServedMessage`][ser-served] re-serializes the inner
   `WireMessage`, not `canonical_bytes`. The handler avoids that path by taking
   `messages` out of the response before `to_value(response)`
-  ([`:14427-14442`][segments-take]) and writing each through
+  ([`:14428-14443`][segments-take]) and writing each through
   [`PreparedSegment::served`][segment-served] ([`:14448-14454`][segments]),
   whose `bytes()` returns `canonical_bytes`.
 
@@ -61,7 +61,7 @@ never of the allocation or the lane that produced them.
 A projector that reuses an ingress `Arc<WireBlock>` but computes `bytes` from
 a different serialization breaks `bytes == to_string(wire)` and every digest
 keyed on it. A chunk-sharing decision by pointer identity diverges from the
-value test at [`:13057`][chunk-eq] for a message equal by value but not by
+value test at [`:13058`][chunk-eq] for a message equal by value but not by
 pointer. A sidecar merge that reorders a repeated mid changes `order`. A
 direct `to_vec(&message)` on a typed shell emits struct field order where the
 `to_value` round trip emits sorted keys, so bytes and `canonical_hash` change
@@ -123,28 +123,28 @@ both differentials and fingerprint reuse; none covers the four added oracles.
 
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
 [flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
-[flatproj]: ../../../../../crates/daemon/src/wire.rs#L115-L128
-[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L142-L145
-[reattach]: ../../../../../crates/daemon/src/wire.rs#L146-L187
-[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L330-L338
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L622-L685
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L775-L786
+[flatproj]: ../../../../../crates/daemon/src/wire.rs#L114-L127
+[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L141-L144
+[reattach]: ../../../../../crates/daemon/src/wire.rs#L145-L186
+[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L329-L337
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L736
+[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L826-L835
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2013-L2020
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2022-L2037
-[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2879-L2881
-[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6315-L6344
-[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16628-L16643
-[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13026-L13070
-[chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13057
-[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13072-L13079
-[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13315-L13332
-[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14427-L14442
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2030-L2045
+[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2919-L2921
+[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6355-L6384
+[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16629-L16644
+[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13027-L13071
+[chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13058
+[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13073-L13080
+[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13316-L13333
+[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14428-L14443
 [segments]: ../../../../../crates/daemon/src/lib.rs#L14448-L14454
 [t-astro]: ../../../../../crates/daemon/src/lib.rs#L20948
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L293
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L277-L291
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
-[serde-features]: ../../../../../Cargo.toml#L45
+[serde-features]: ../../../../../Cargo.toml#L47

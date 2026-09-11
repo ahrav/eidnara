@@ -196,11 +196,8 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
             request.messages.len(),
         )
         .expect("DG incremental projection must succeed");
-        crate::transform::assert_prefix_projection_equivalent(
-            &incremental,
-            &crate::wire::MessageProjection::new(&appended),
-        )
-        .expect("DG full projection must succeed");
+        crate::transform::assert_prefix_projection_equivalent(&incremental, &appended)
+            .expect("DG full projection must succeed");
     }
 }
 
