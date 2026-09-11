@@ -557,7 +557,7 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [truncate]: ../../../../../crates/daemon/src/transform.rs#L4089-L4095
 [truncate-reload]: ../../../../../crates/daemon/src/transform.rs#L4107
 [main-commit]: ../../../../../crates/daemon/src/transform.rs#L4939
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13564
+[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13567
 
 [received]: ../../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6484
@@ -624,7 +624,7 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23523
 [t-status]: ../../../../../crates/daemon/src/lib.rs#L23556
 [t-divergence]: ../../../../../crates/daemon/src/lib.rs#L31641
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13521
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13524
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L16453
 [t-snap-keeps]: ../../../../../crates/memory-store/src/lib.rs#L16507

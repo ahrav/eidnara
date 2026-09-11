@@ -27,7 +27,7 @@ never of the allocation or the lane that produced them.
   from the same block for their consumers to agree.
 - The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2919-2921`][prefix-call] when a reusable projection exists and
+  [`:2910-2912`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached

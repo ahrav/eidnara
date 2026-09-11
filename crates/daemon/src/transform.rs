@@ -7173,6 +7173,7 @@ fn tag_mint_inputs_from(
         frontier_memo.as_deref(),
     )
     .unwrap_or((0, 0));
+    let tokenized_bytes_at_start = crate::token_cache::local_stats().tokenized_bytes;
     let mut work = TagMintWork {
         candidate_count: prefix_candidates,
         ..TagMintWork::default()
@@ -7192,7 +7193,6 @@ fn tag_mint_inputs_from(
             continue;
         };
         work.candidate_count = work.candidate_count.saturating_add(1);
-        work.tokenized_bytes = work.tokenized_bytes.saturating_add(source.len());
         work.inputs.push(TagMintInput {
             block_id: block.id.clone(),
             kind: kind.as_store_kind().to_string(),
@@ -7200,6 +7200,9 @@ fn tag_mint_inputs_from(
             source_bytes: source.as_bytes().to_vec(),
         });
     }
+    // Cache hits tokenize nothing, so the cost metric is the tokenizer's byte delta.
+    work.tokenized_bytes =
+        (crate::token_cache::local_stats().tokenized_bytes - tokenized_bytes_at_start) as usize;
     if let Some(memo) = frontier_memo {
         let newly_minted = work
             .inputs
@@ -29167,6 +29170,32 @@ pub(crate) mod tests {
         assert_ne!(
             channel2_directive_id("ses", 1),
             channel2_directive_id("other", 1)
+        );
+    }
+
+    #[test]
+    fn tag_mint_tokenized_bytes_counts_only_cache_misses_and_bypasses() {
+        // Two new blocks with identical cacheable content: the second lookup is a
+        // cache hit and tokenizes nothing.
+        let source = format!("tag mint duplicate source {}", "payload ".repeat(16));
+        assert!(source.len() >= 64);
+        let messages = vec![item("dup-a", 1, &source), item("dup-b", 2, &source)];
+        let request = req("tag-mint-dup", "cfg0", messages);
+        let projection = project_messages(&request.messages).unwrap();
+        let core = CoreState::empty();
+        let before = crate::token_cache::local_stats();
+        let work = tag_mint_inputs(&projection, &core, None, &HashSet::new());
+        let after = crate::token_cache::local_stats();
+        assert_eq!(work.inputs.len(), 2);
+        assert_eq!(after.calls - before.calls, 2);
+        assert!(
+            after.hits - before.hits >= 1,
+            "the duplicate must hit the cache"
+        );
+        assert_eq!(
+            work.tokenized_bytes as u64,
+            after.tokenized_bytes - before.tokenized_bytes,
+            "tag_mint_tokenized_bytes must equal the bytes the tokenizer received"
         );
     }
 }

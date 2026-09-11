@@ -462,10 +462,10 @@ for the session equals `store.load_tags_for_session(session)` for the
 [`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
 rows with `tag_number = max + offset + 1` in projection block order; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7195-7200`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([`:7196-7201`][mint-input]).
 `always` because the entry is read on the next pass of the same session and
 a stale or speculative row changes the active-tag match at
-[`:7389`][active-match].
+[`:7392`][active-match].
 Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
 [`snapshot`][tag-snapshot] holds a second reference. A design that appends
 in place, or stores the pass's `Arc` back before commit, exposes rows the
@@ -2445,16 +2445,16 @@ evaluation of this area and its disposition are recorded in
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
 [tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7195-L7200
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7300-L7321
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7389
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27904
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27655
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7196-L7201
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7303-L7324
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7328-L7352
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7392
+[make-mut]: ../../../../crates/daemon/src/transform.rs#L7927-L7928
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27907
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27658
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28980
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28983
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L112-L125
 [reattach]: ../../../../crates/daemon/src/wire.rs#L143-L184
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L322-L330
@@ -2504,7 +2504,7 @@ evaluation of this area and its disposition are recorded in
 [descend]: ../../../../crates/daemon/src/transform.rs#L2952-L2963
 [value-compare]: ../../../../crates/daemon/src/transform.rs#L3216
 [truncate]: ../../../../crates/daemon/src/transform.rs#L4121-L4127
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13603
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13606
 [received]: ../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6496-L6514
@@ -2660,8 +2660,8 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12417-L12422
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28029-L28034
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12420-L12425
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28032-L28037
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8463-L8488
 [respond]: ../../../../crates/daemon/src/lib.rs#L14404
@@ -2685,14 +2685,14 @@ evaluation of this area and its disposition are recorded in
 [declared]: ../../../../crates/daemon/src/lib.rs#L2243-L2257
 [ao-sig]: ../../../../crates/daemon/src/transform.rs#L2865
 [soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6315
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24264
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24516
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24267
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24519
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2071
-[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24293
-[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24318
-[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24453
-[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21408
-[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28244
+[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24296
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24321
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24456
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21411
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28247
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128

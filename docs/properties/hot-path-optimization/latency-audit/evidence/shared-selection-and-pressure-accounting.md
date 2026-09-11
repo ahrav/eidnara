@@ -218,7 +218,7 @@ contains no conflict markers; the unmerged index is deliberately untouched.
 [historian]: ../../../../../crates/daemon/src/lib.rs#L16630
 [pressure]: ../../../../../crates/daemon/src/transform.rs#L6315
 [sidecar]: ../../../../../crates/daemon/src/codec/opencode.rs#L2071
-[thresholds]: ../../../../../crates/daemon/src/transform.rs#L24318
+[thresholds]: ../../../../../crates/daemon/src/transform.rs#L24321
 [wire-deser]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L732
 [wire-bytes]: ../../../../../crates/daemon/src/retained_size.rs#L193-L198
