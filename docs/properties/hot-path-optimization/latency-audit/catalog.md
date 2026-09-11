@@ -981,10 +981,12 @@ without waiting for GC; repeated `get`/`all` calls reprepare when needed.
 native statements must never execute.
 Fault/timing angle: [`isMidTurnFromOpenCodeDb`][midturndb] reads two tables
 without a transaction, so a writer landing between the assistant query and
-the [candidate query][newer] can make the reads inconsistent. Two statements
-remain, one per candidate class, with same-session part joins and exclusion.
-No jointly atomic snapshot is promised. The reference reads assistant parts
-last; the collapsed query reads them first. Static equivalence does not imply
+the [candidate query][newer] can make the reads inconsistent. The user
+candidate class is one statement with a same-session part join and exclusion;
+the assistant row and, only for a completed non-`tool-calls` assistant, its
+parts are two more, in the reference's order. A streaming or `tool-calls`
+assistant answers from its row without reading `part`. No jointly atomic
+snapshot is promised. Static equivalence does not imply
 equal answers under arbitrary concurrent-writer schedules. A stat before and
 after every native open checks replacement, including Node connection
 recycling. Bun finalizes retired statements; Node lacks a statement finalizer
@@ -1005,7 +1007,9 @@ bounded array binds, named binds, and a partless user on both native adapters;
 normal 800-ID time/part chunks between mid-turn reads, with native prepare and
 close counters and connection identities observed on both runtimes; lists
 growing from 801 to 870 IDs across 70 final-chunk widths, with exact returned
-maps, ordered message/part contents, frozen inputs and stable native identities.
+maps, ordered message/part contents, frozen inputs and stable native identities;
+a streaming and a `tool-calls` assistant each holding 40 tool parts, with the
+rows every read materializes counted.
 Confidence: medium - [Evidence](evidence/mid-turn-read-is-invariant-under-query-collapse-and-statement-caching.md).
 The local differential and native lifetime checks pass. No production latency
 or native-heap-size claim follows from those checks.
@@ -2516,8 +2520,8 @@ evaluation of this area and its disposition are recorded in
 [hookclient]: ../../../../packages/opencode-plugin/src/hooks/context/hook.ts#L138-L139
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L218-L226
 [dbcache]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L32-L215
-[midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L280
-[newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L293-L331
+[midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L282
+[newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L295-L333
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L9-L10

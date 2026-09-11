@@ -230,9 +230,9 @@ export function isMidTurnFromOpenCodeDb(db: SqliteReader, sessionId: string): bo
     // resolves two assistant rows that share a millisecond.
     // A compaction summary is written mid-turn and would otherwise hide the `tool-calls`
     // assistant that is still the active fence.
-    const assistantRows = db
+    const latestAssistant = db
         .prepare(
-            `WITH latest AS (SELECT id,
+            `SELECT id,
                     json_extract(data, '$.finish') as finish,
                     json_extract(data, '$.time.completed') as timeCompleted,
                     time_created as timeCreated
@@ -244,12 +244,9 @@ export function isMidTurnFromOpenCodeDb(db: SqliteReader, sessionId: string): bo
                  AND COALESCE(${jsonField("data", "$.finish")}, '') = 'stop'
                )
              ORDER BY time_created DESC, id DESC
-             LIMIT 1)
-             SELECT a.id, a.finish, a.timeCompleted, a.timeCreated, p.data FROM latest a
-             LEFT JOIN part p ON p.session_id = ? AND p.message_id = a.id`,
+             LIMIT 1`,
         )
-        .all(sessionId, sessionId) as (AssistantMidTurnRow & PartDataRow)[];
-    const latestAssistant = assistantRows[0];
+        .get(sessionId) as AssistantMidTurnRow | null;
 
     // The fallback tuple lets a first user prompt count before an assistant exists.
     if (
@@ -267,8 +264,13 @@ export function isMidTurnFromOpenCodeDb(db: SqliteReader, sessionId: string): bo
     if (typeof latestAssistant.timeCompleted !== "number") return true;
     if (latestAssistant.finish === "tool-calls") return true;
 
+    // Only completed assistants require part classification.
+    const partRows = db
+        .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
+        .all(sessionId, latestAssistant.id) as PartDataRow[];
+
     // A synthetic tool part is the daemon's own bookkeeping, not a local call still in flight.
-    return assistantRows.some((row) => {
+    return partRows.some((row) => {
         const part = parsePart(row);
         return (
             part !== null &&
