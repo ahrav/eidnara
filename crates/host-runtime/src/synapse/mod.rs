@@ -396,6 +396,9 @@ impl SynapseComponent {
         let state = match &*self.inner.lock_state() {
             LaneState::Ready(lane) => return Ok(Arc::clone(lane)),
             LaneState::Starting => LaneUnavailableState::Starting,
+            LaneState::Disabled { reason } if is_unsupported_reason(reason) => {
+                LaneUnavailableState::Unsupported
+            }
             LaneState::Disabled { .. } => LaneUnavailableState::Disabled,
             LaneState::Failing { .. } => LaneUnavailableState::Failing,
         };
@@ -524,6 +527,14 @@ const STARTING_REASON: &str = "the synapse lane is still starting";
 const BUSY_REASON: &str = "the synapse lane is busy";
 
 const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
+
+/// The disabled reason the host passes to `SynapseComponent::unsupported` on a platform with no lane.
+/// Both the `synapse_state` health metric and `LaneUnavailableState` classify a disabled lane by this reason, so the two projections cannot disagree.
+const UNSUPPORTED_REASON: &str = "synapse_unsupported";
+
+fn is_unsupported_reason(reason: &str) -> bool {
+    reason == UNSUPPORTED_REASON
+}
 
 /// Engines supplied through `ready_with_engine` bypass `Backend`'s own output checks, so the served-vector contract is enforced here for every engine: one row per input text, each with `dims` finite unit-norm components. A violation quarantines the lane like any other invariant failure.
 fn check_engine_vectors(
@@ -1215,7 +1226,7 @@ impl CompositeComponent for SynapseComponent {
             SynapseStatus::Disabled { reason } => HealthReport {
                 status: HealthStatus::Degraded,
                 metrics: Some(serde_json::json!({
-                    "synapse_state": if reason == "synapse_unsupported" {
+                    "synapse_state": if is_unsupported_reason(&reason) {
                         "unsupported"
                     } else {
                         "degraded"

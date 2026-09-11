@@ -46,7 +46,16 @@ fn fixture_counter() -> UntruncatedTokenizer {
     UntruncatedTokenizer::from_tokenizer(inference_shaped(Some(4), PaddingStrategy::BatchLongest))
 }
 
-/// The fixture tokenizer as inference configures it: padded, truncated at `window`, and with every `special_tokens_map.json` entry added after loading, the way the inference engine registers them.
+/// The test oracle bypasses `UntruncatedTokenizer`, so the pinned ids and masks validate its count independently.
+fn cleared_oracle() -> Tokenizer {
+    let mut tokenizer = inference_shaped(None, PaddingStrategy::BatchLongest);
+    tokenizer.with_padding(None);
+    tokenizer
+}
+
+/// The fixture tokenizer as inference configures it: padded, truncated at `window`, and with the `special_tokens_map.json` entries the inference engine registers after loading.
+///
+/// This mirrors fastembed's `load_tokenizer`: a string value is added as a special token; an object value is added only when it carries `content`, `single_word`, `lstrip`, `rstrip`, and `normalized`; every other value, including the `additional_special_tokens` array, is skipped.
 fn inference_shaped(window: Option<usize>, padding: PaddingStrategy) -> Tokenizer {
     let mut tokenizer =
         Tokenizer::from_bytes(read("embed-tokens", "tokenizer.json")).expect("tokenizer");
@@ -67,19 +76,41 @@ fn inference_shaped(window: Option<usize>, padding: PaddingStrategy) -> Tokenize
     let map: serde_json::Value =
         serde_json::from_slice(&read("embed-tokens", "special_tokens_map.json")).unwrap();
     for value in map.as_object().unwrap().values() {
-        let contents: Vec<&str> = match value {
-            serde_json::Value::String(content) => vec![content.as_str()],
-            serde_json::Value::Array(items) => items.iter().map(|i| i.as_str().unwrap()).collect(),
-            serde_json::Value::Object(object) => vec![object["content"].as_str().unwrap()],
-            _ => unreachable!(),
-        };
-        for content in contents {
-            tokenizer.add_special_tokens(&[AddedToken {
-                content: content.to_owned(),
+        let added = match value {
+            serde_json::Value::String(content) => AddedToken {
+                content: content.clone(),
                 special: true,
                 ..Default::default()
-            }]);
-        }
+            },
+            serde_json::Value::Object(object) => {
+                let (
+                    Some(content),
+                    Some(single_word),
+                    Some(lstrip),
+                    Some(rstrip),
+                    Some(normalized),
+                ) = (
+                    object["content"].as_str(),
+                    object["single_word"].as_bool(),
+                    object["lstrip"].as_bool(),
+                    object["rstrip"].as_bool(),
+                    object["normalized"].as_bool(),
+                )
+                else {
+                    continue;
+                };
+                AddedToken {
+                    content: content.to_owned(),
+                    special: true,
+                    single_word,
+                    lstrip,
+                    rstrip,
+                    normalized,
+                }
+            }
+            _ => continue,
+        };
+        tokenizer.add_special_tokens(&[added]);
     }
     tokenizer
 }
@@ -87,36 +118,51 @@ fn inference_shaped(window: Option<usize>, padding: PaddingStrategy) -> Tokenize
 #[test]
 fn pinned_token_sequences_certify_full_counts_special_tokens_and_padding() {
     let counter = fixture_counter();
+    let oracle = cleared_oracle();
     let expected = expected();
     let cases = expected["sequences"].as_array().expect("sequences");
-    assert_eq!(cases.len(), 10, "every pinned sequence is exercised");
+    assert_eq!(cases.len(), 11, "every pinned sequence is exercised");
     for case in cases {
         let label = case["label"].as_str().unwrap();
         let text = case["text"].as_str().unwrap();
-        let sequence = counter
-            .encode(text)
+        let ids = u32s(&case["ids"]);
+        let sequence = oracle
+            .encode(text, true)
             .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(sequence.ids(), u32s(&case["ids"]), "{label}: ids");
+        assert_eq!(sequence.get_ids(), ids.as_slice(), "{label}: ids");
         assert_eq!(
-            sequence.attention_mask(),
-            u32s(&case["attention_mask"]),
+            sequence.get_attention_mask(),
+            u32s(&case["attention_mask"]).as_slice(),
             "{label}: attention"
         );
         assert_eq!(
-            sequence.special_tokens_mask(),
-            u32s(&case["special_tokens_mask"]),
+            sequence.get_special_tokens_mask(),
+            u32s(&case["special_tokens_mask"]).as_slice(),
             "{label}: special tokens"
         );
         assert_eq!(
-            sequence.tokens(),
-            EmbedTokens::new(sequence.ids().len() as u32)
-        );
-        assert_eq!(
             counter.count(text).unwrap(),
-            EmbedTokens::new(u32s(&case["ids"]).len() as u32),
+            EmbedTokens::new(ids.len() as u32),
             "{label}: count is the pinned sequence length"
         );
     }
+
+    // Negative control: the map-registered token is visible only through the inference tokenizer clone.
+    let map_only = cases
+        .iter()
+        .find(|case| case["label"] == "map-only special token")
+        .expect("map-only case");
+    let map_only_text = map_only["text"].as_str().unwrap();
+    let pinned = EmbedTokens::new(u32s(&map_only["ids"]).len() as u32);
+    let bytes_only = UntruncatedTokenizer::from_tokenizer(
+        Tokenizer::from_bytes(read("embed-tokens", "tokenizer.json")).unwrap(),
+    );
+    assert_ne!(
+        bytes_only.count(map_only_text).unwrap(),
+        pinned,
+        "tokenizer.json alone cannot see the map-registered token"
+    );
+    assert_eq!(counter.count(map_only_text).unwrap(), pinned);
 
     // A padded batch pads to its longest member; each count is that text's own length.
     let batch = &expected["padded_batch"];
@@ -464,17 +510,31 @@ fn byte_overflow_missing_identity_empty_input_and_lane_failures_have_exact_dispo
         .unwrap_err();
     assert_eq!(refusal, DenseUnavailable::ZeroTokens { bytes: 3 });
 
-    // No verified identity: a lane that never loaded, and a lane the platform does not support.
     let not_initialized = SynapseComponent::new(None);
+    let disabled = not_initialized
+        .preflight_embedding(limits, "alpha")
+        .unwrap_err();
     assert_eq!(
-        not_initialized.preflight_embedding(limits, "alpha"),
-        Err(DenseUnavailable::LaneUnavailable {
+        disabled,
+        DenseUnavailable::LaneUnavailable {
             state: LaneUnavailableState::Disabled,
-        })
+        }
     );
+    assert_eq!(disabled.to_string(), "embedding lane is disabled");
     let unsupported = SynapseComponent::unsupported("synapse_unsupported");
+    let refused = unsupported
+        .preflight_embedding(limits, "alpha")
+        .unwrap_err();
     assert_eq!(
-        unsupported.preflight_embedding(limits, "alpha"),
+        refused,
+        DenseUnavailable::LaneUnavailable {
+            state: LaneUnavailableState::Unsupported,
+        }
+    );
+    assert_eq!(refused.to_string(), "embedding lane is unsupported");
+    let other_reason = SynapseComponent::unsupported("some other reason");
+    assert_eq!(
+        other_reason.preflight_embedding(limits, "alpha"),
         Err(DenseUnavailable::LaneUnavailable {
             state: LaneUnavailableState::Disabled,
         })
