@@ -10526,7 +10526,7 @@ fn enforce_unique_tool_use_ids(
             .collect::<HashSet<_>>();
         for (id, message_index, _) in &duplicates {
             let owner_becomes_empty = messages[*message_index]
-                .content
+                .content()
                 .iter()
                 .enumerate()
                 .all(|(block_index, _)| remove_positions.contains(&(*message_index, block_index)));
@@ -10534,9 +10534,9 @@ fn enforce_unique_tool_use_ids(
                 continue;
             }
             if let Some(result) = messages.get(message_index + 1) {
-                for (block_index, block) in result.content.iter().enumerate() {
+                for (block_index, block) in result.content().iter().enumerate() {
                     if matches!(
-                        &block.kind,
+                        block.kind(),
                         wire::BlockKind::ToolResult { id: result_id, .. } if result_id == id
                     ) {
                         remove_positions.insert((message_index + 1, block_index));
@@ -10555,15 +10555,15 @@ fn enforce_unique_tool_use_ids(
                 continue;
             }
             let mut rendered = served.into_message();
-            rendered.content = rendered
-                .content
+            let content = std::mem::take(rendered.content_mut())
                 .into_iter()
                 .enumerate()
                 .filter_map(|(block_index, block)| {
                     (!remove_positions.contains(&(message_index, block_index))).then_some(block)
                 })
                 .collect();
-            if !rendered.content.is_empty() {
+            *rendered.content_mut() = content;
+            if !rendered.content().is_empty() {
                 messages.push(ServedMessage::from_message(rendered));
             }
         }
