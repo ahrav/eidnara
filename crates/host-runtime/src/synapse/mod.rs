@@ -444,9 +444,14 @@ impl SynapseComponent {
         )
     }
 
-    /// Whether this component's job table still holds `job_id`: queued, running, or retaining a result. A job identifier from another incarnation is never held. The answer does not refresh the job's retention rank.
+    /// Whether this component's job table still holds `job_id`: queued, running, retaining a result, or completed with a served result page still alive. A job identifier from another incarnation is never held. The answer does not refresh the job's retention rank.
     pub fn holds_job(&self, job_id: &str) -> bool {
         self.inner.jobs.retains(job_id)
+    }
+
+    /// Whether a result page served for `job_id` is still alive. The job's own retained result does not count; only a page a caller still holds does.
+    pub fn holds_result_page(&self, job_id: &str) -> bool {
+        self.inner.jobs.result_in_use(job_id)
     }
 
     /// Polls the job `submit_admitted` issued for `item_id` and `text`, recomputing the request key from them so the caller persists only the job identifier.

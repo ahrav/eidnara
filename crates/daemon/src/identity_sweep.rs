@@ -1,6 +1,6 @@
 //! Runs one bounded identity sweep over the search projection: selects finished, unreferenced embedding identities, asks the in-process Synapse host whether it still holds any of them, and reclaims the rest inside one fenced write transaction that rechecks eligibility row by row.
 //!
-//! A host job is a physical holder: while this component's table still holds it, its native input or result lease is alive, so a row cut short while the job ran stays whatever its logical state says. A job issued by another incarnation has no holder left. An `obsolete` row never gains a holder again, because only pending rows are admitted, so a holder check taken before the write transaction cannot go stale in the deleting direction. A reclamation whose COMMIT reply is lost is reconciled from the rows themselves; deleting the same identity twice has no second effect. Integrity and storage failures quarantine the sweeper and retain every cleanup obligation.
+//! A live native lease, component-table entry, or served result page prevents row reclamation. A holder check taken before the write transaction cannot go stale in the deleting direction: only pending rows are admitted, so an `obsolete` row never gains a holder again, and the dispatcher obtains the page it holds across publication before the row finishes, so a finished row's protecting page exists at check time. A job issued by another incarnation has no holder left. Lost COMMIT replies reconcile from stored rows, and repeated deletion is idempotent. Integrity or storage failures quarantine the sweeper and preserve cleanup obligations.
 
 use std::num::NonZeroUsize;
 
@@ -55,7 +55,7 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Selects at most `max_candidates` identities and reclaims those no holder protects.
+    /// Selects finished, unreferenced identities and reclaims at most `max_candidates` of those no holder protects. Held rows do not consume the bound: selection resumes past them, so a long-held row cannot starve reclaimable identities that sort after it.
     ///
     /// # Errors
     ///
@@ -64,18 +64,28 @@ impl<'a> IdentitySweeper<'a> {
         if let Some(quarantine) = &self.quarantine {
             return Err(SweepError::Quarantined(quarantine.clone()));
         }
-        let selected = self
-            .projection
-            .read(|conn| candidates(conn, max_candidates))
-            .map_err(SweepError::Read)?;
-        let mut report = SweepReport {
-            candidates: selected.len(),
-            ..SweepReport::default()
-        };
-        let (held, free): (Vec<Candidate>, Vec<Candidate>) = selected
-            .into_iter()
-            .partition(|candidate| self.holds(candidate));
-        report.held = held;
+        let mut report = SweepReport::default();
+        let mut free: Vec<Candidate> = Vec::new();
+        let mut cursor: Option<String> = None;
+        while let Some(remaining) = NonZeroUsize::new(max_candidates.get() - free.len()) {
+            let page = self
+                .projection
+                .read(|conn| candidates(conn, remaining, cursor.as_deref()))
+                .map_err(SweepError::Read)?;
+            report.candidates += page.len();
+            let exhausted = page.len() < remaining.get();
+            cursor = page.last().map(|candidate| candidate.job_id.clone());
+            for candidate in page {
+                if self.holds(&candidate) {
+                    report.held.push(candidate);
+                } else {
+                    free.push(candidate);
+                }
+            }
+            if exhausted {
+                break;
+            }
+        }
         if free.is_empty() {
             return Ok(report);
         }
@@ -119,13 +129,16 @@ impl<'a> IdentitySweeper<'a> {
         Ok(report)
     }
 
-    /// Whether this host still holds the candidate's job. A consumed result (`embedded`, `published`) has no holder left that matters; an `obsolete` row was cut short, and its job is held while this component's table still answers for it. A job another incarnation issued is never held.
+    /// Whether this host still holds the candidate's job. An `obsolete` row is held while the component's table answers for its job or a served page keeps its result alive. Any other finished row is held only while a served result page for its job is alive. A job another incarnation issued is never held.
     fn holds(&self, candidate: &Candidate) -> bool {
-        candidate.state == "obsolete"
-            && candidate
-                .host_job_id
-                .as_deref()
-                .is_some_and(|job_id| self.synapse.holds_job(job_id))
+        let Some(job_id) = candidate.host_job_id.as_deref() else {
+            return false;
+        };
+        if candidate.state == "obsolete" {
+            self.synapse.holds_job(job_id)
+        } else {
+            self.synapse.holds_result_page(job_id)
+        }
     }
 
     fn enter_quarantine(

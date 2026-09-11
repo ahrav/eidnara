@@ -43,6 +43,8 @@ pub struct Candidate {
     /// The host job the row last named; the caller decides whether that host still holds it.
     pub host_job_id: Option<String>,
     pub has_vector: bool,
+    /// The row's job identifier, the selection cursor: passing it as `after` resumes selection past this row.
+    pub job_id: String,
 }
 
 /// `CROSS JOIN` keeps `occurrence_tombstones` and `vector_generations` as the outer tables, avoiding a scan of all
@@ -51,14 +53,15 @@ pub struct Candidate {
 fn candidates_statement() -> String {
     format!(
         "SELECT c.occurrence_id,c.generation_id,c.state,c.host_job_id,
-                EXISTS(SELECT 1 FROM occurrence_vectors v WHERE v.occurrence_id=c.occurrence_id AND v.generation_id=c.generation_id)
+                EXISTS(SELECT 1 FROM occurrence_vectors v WHERE v.occurrence_id=c.occurrence_id AND v.generation_id=c.generation_id),
+                c.job_id
          FROM (SELECT * FROM (SELECT j.job_id,j.occurrence_id,j.generation_id,j.state,j.host_job_id
                               FROM occurrence_tombstones t CROSS JOIN embedding_jobs j ON j.occurrence_id=t.occurrence_id
-                              WHERE {FINISHED_JOB} ORDER BY j.job_id LIMIT ?1)
+                              WHERE {FINISHED_JOB} AND (?2 IS NULL OR j.job_id>?2) ORDER BY j.job_id LIMIT ?1)
                UNION
                SELECT * FROM (SELECT j.job_id,j.occurrence_id,j.generation_id,j.state,j.host_job_id
                               FROM vector_generations g CROSS JOIN embedding_jobs j ON j.generation_id=g.generation_id
-                              WHERE {RETIRED_GENERATION} AND {FINISHED_JOB} ORDER BY j.job_id LIMIT ?1)) c
+                              WHERE {RETIRED_GENERATION} AND {FINISHED_JOB} AND (?2 IS NULL OR j.job_id>?2) ORDER BY j.job_id LIMIT ?1)) c
          ORDER BY c.job_id LIMIT ?1"
     )
 }
@@ -69,19 +72,23 @@ pub fn candidates_sql() -> String {
     candidates_statement()
 }
 
-/// The finished, unreferenced identities in job identifier order, at most `limit`.
+/// The finished, unreferenced identities in job identifier order, at most `limit`, restricted to rows after the `after` cursor when one is given.
 pub fn candidates(
     conn: &GuardedConn<'_>,
     limit: NonZeroUsize,
+    after: Option<&str>,
 ) -> Result<Vec<Candidate>, ProjectionError> {
     let mut statement = conn.prepare(&candidates_statement())?;
-    let rows = statement.query_map([limit.get() as i64], |row| {
+    // A limit above `i64::MAX` clamps instead of wrapping: SQLite reads a negative limit as no limit at all.
+    let limit = i64::try_from(limit.get()).unwrap_or(i64::MAX);
+    let rows = statement.query_map(params![limit, after], |row| {
         Ok(Candidate {
             occurrence_id: row.get(0)?,
             generation_id: row.get(1)?,
             state: row.get(2)?,
             host_job_id: row.get(3)?,
             has_vector: row.get(4)?,
+            job_id: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

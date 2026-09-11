@@ -116,7 +116,9 @@ fn steps(store: &SqliteStore, limit: usize) -> i32 {
         .with_conn(|conn| {
             let mut statement = conn.prepare(&candidates_sql())?;
             let found: Vec<String> = statement
-                .query_map([limit as i64], |row| row.get(0))?
+                .query_map(rusqlite::params![limit as i64, None::<String>], |row| {
+                    row.get(0)
+                })?
                 .collect::<rusqlite::Result<_>>()?;
             assert_eq!(found, vec!["gone".to_string()]);
             Ok(statement.get_status(StatementStatus::VmStep))
@@ -165,7 +167,7 @@ fn an_identity_eligible_on_both_counts_is_named_once() {
         })
         .unwrap();
     let found = store
-        .with_conn(|conn| Ok(candidates(conn, NonZeroUsize::new(10).unwrap()).unwrap()))
+        .with_conn(|conn| Ok(candidates(conn, NonZeroUsize::new(10).unwrap(), None).unwrap()))
         .unwrap();
     assert_eq!(
         pairs(&found),
@@ -189,7 +191,7 @@ fn the_limit_and_order_span_both_eligibility_sources() {
         })
         .unwrap();
     let found = store
-        .with_conn(|conn| Ok(candidates(conn, NonZeroUsize::new(3).unwrap()).unwrap()))
+        .with_conn(|conn| Ok(candidates(conn, NonZeroUsize::new(3).unwrap(), None).unwrap()))
         .unwrap();
     assert_eq!(
         pairs(&found),
