@@ -288,6 +288,111 @@ fn byte_admission_stops_raw_candidate_reads_at_the_deferred_row() {
     }
 }
 
+#[test]
+fn snapshot_pages_hide_invalidations_after_s() {
+    let mut fixture = Fixture::open();
+    let first = fixture.publish("canonical_claims", "first", 1, "first");
+    let corrected = fixture.publish("messages", "corrected", 1, "original message");
+    let retired = fixture.publish("raw_tool_spans", "retired", 1, "original tool");
+    let hold = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), wide())
+        .unwrap();
+    let bounds = page_bounds(1, 1024);
+    let before = walk(&mut fixture, &hold, ExportWindow::Snapshot, bounds);
+    assert_eq!(before.len(), 3);
+    assert_eq!(before[0].rows[0].object_id, first);
+    let after = all_pages(
+        &mut fixture,
+        &hold,
+        ExportWindow::Snapshot,
+        bounds,
+        |fixture, page| {
+            if page.rows[0].object_id == first {
+                fixture.publish("messages", "corrected", 2, "replacement message");
+                fixture.retire(&retired);
+            }
+        },
+    );
+    for object_id in [&corrected, &retired] {
+        assert!(fixture.ledger[object_id].invalidated.unwrap() > hold.snapshot);
+    }
+    let invalidations: Vec<_> = after
+        .iter()
+        .flat_map(|page| page.rows.iter().map(|row| row.invalidated_commit_seq))
+        .collect();
+    assert_eq!(
+        invalidations,
+        vec![None; 3],
+        "snapshot metadata cannot include invalidations after S"
+    );
+    assert_eq!(
+        after, before,
+        "snapshot pages are independent of read timing"
+    );
+}
+
+#[test]
+fn catch_up_pages_bound_invalidation_metadata_by_through() {
+    let mut fixture = Fixture::open();
+    let baseline = fixture.publish("canonical_claims", "baseline", 1, "baseline");
+    let hold = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), wide())
+        .unwrap();
+    let baseline_retirement = fixture.retire(&baseline);
+    let corrected = fixture.publish("messages", "corrected", 1, "original message");
+    let retired = fixture.publish("raw_tool_spans", "retired", 1, "original tool");
+    let within = fixture.publish("promoted_memory", "within", 1, "within window");
+    let through = fixture.retire(&within);
+    fixture
+        .store
+        .extend_source_hold(&hold.binding, &hold.hold_id, through, wide_admission())
+        .unwrap();
+    let window = ExportWindow::CatchUp { through };
+    let bounds = page_bounds(1, 1024);
+    let before = walk(&mut fixture, &hold, window, bounds);
+    assert_eq!(before.len(), 4);
+    assert_eq!(before[0].rows[0].object_id, baseline);
+    for (object_id, text, invalidated) in [
+        (&baseline, None, Some(baseline_retirement)),
+        (&corrected, Some("original message"), None),
+        (&within, Some("within window"), Some(through)),
+        (&retired, Some("original tool"), None),
+    ] {
+        let row = before
+            .iter()
+            .flat_map(|page| &page.rows)
+            .find(|row| &row.object_id == object_id)
+            .unwrap();
+        assert_eq!(row.text.as_deref(), text);
+        assert_eq!(row.invalidated_commit_seq, invalidated);
+    }
+    assert!(fixture.ledger[&within].created > hold.snapshot);
+    let after = all_pages(&mut fixture, &hold, window, bounds, |fixture, page| {
+        if page.rows[0].object_id == baseline {
+            fixture.publish("messages", "corrected", 2, "replacement message");
+            fixture.retire(&retired);
+        }
+    });
+    for object_id in [&corrected, &retired] {
+        assert!(fixture.ledger[object_id].invalidated.unwrap() > through);
+    }
+    let invalidations: Vec<_> = after
+        .iter()
+        .flat_map(|page| page.rows.iter().map(|row| row.invalidated_commit_seq))
+        .collect();
+    assert_eq!(
+        invalidations,
+        vec![Some(baseline_retirement), None, Some(through), None],
+        "catch-up metadata preserves in-window invalidations and masks future ones"
+    );
+    assert_eq!(
+        after, before,
+        "catch-up pages are independent of read timing"
+    );
+}
+
 fn page_bounds(max_rows: usize, max_decoded_bytes: u64) -> SourcePageBounds {
     SourcePageBounds {
         max_rows: NonZeroUsize::new(max_rows).unwrap(),
@@ -325,7 +430,7 @@ struct Expected {
     invalidated: Option<i64>,
 }
 
-fn expected_row(entry: &LedgerEntry, with_text: bool) -> Expected {
+fn expected_row(entry: &LedgerEntry, with_text: bool, end: i64) -> Expected {
     Expected {
         class: entry.class.clone(),
         object_id: entry.object_id.clone(),
@@ -337,7 +442,7 @@ fn expected_row(entry: &LedgerEntry, with_text: bool) -> Expected {
         representation: representation(&entry.class),
         span: entry.span,
         text: with_text.then(|| entry.selected_text().to_string()),
-        invalidated: entry.invalidated,
+        invalidated: entry.invalidated.filter(|at| *at <= end),
     }
 }
 
@@ -382,7 +487,7 @@ fn expected_snapshot(fixture: &Fixture, snapshot: i64) -> Vec<Expected> {
             .filter(|e| {
                 e.created <= snapshot && live(e.invalidated) && live(e.evidence_invalidated)
             })
-            .map(|e| expected_row(e, true))
+            .map(|e| expected_row(e, true, snapshot))
             .collect(),
     )
 }
@@ -402,9 +507,9 @@ fn expected_catch_up(fixture: &Fixture, snapshot: i64, through: i64) -> Vec<Expe
                         .is_some_and(|at| at > snapshot && at <= through)
                     && e.evidence_invalidated.is_none_or(|at| at > snapshot);
                 if created_in_window {
-                    Some(expected_row(e, true))
+                    Some(expected_row(e, true, through))
                 } else if invalidated_in_window {
-                    Some(expected_row(e, false))
+                    Some(expected_row(e, false, through))
                 } else {
                     None
                 }
@@ -527,12 +632,7 @@ fn concatenated_pages_equal_the_five_class_ledger_at_s_while_sources_mutate() {
         CLASSES.len()
     );
 
-    // Within one row-at-a-time walk the writer publishes a new row, revises
-    // a row already read and a row not yet read, and retires one not yet
-    // read; the walk still equals the ledger at S, invalidation facts
-    // included, and so does every later walk at other bounds.
     let mut mid_walk = 0;
-    let mut tip_at_read = Vec::new();
     let walked = all_pages(
         &mut fixture,
         &hold,
@@ -540,7 +640,6 @@ fn concatenated_pages_equal_the_five_class_ledger_at_s_while_sources_mutate() {
         page_bounds(1, 1 << 20),
         |fixture, page| {
             mid_walk += 1;
-            tip_at_read.push(fixture.store.tip().unwrap());
             let read = &page.rows[0];
             if mid_walk == 1 {
                 assert_eq!(
@@ -560,30 +659,7 @@ fn concatenated_pages_equal_the_five_class_ledger_at_s_while_sources_mutate() {
             }
         },
     );
-    let expected = expected_snapshot(&fixture, hold.snapshot);
-    // A row read before its supersession carries no fact yet; one read after
-    // carries it. The ledger predicts each from the tip at read time.
-    let expected_when_read: Vec<Expected> = expected
-        .iter()
-        .zip(&tip_at_read)
-        .map(|(row, tip)| Expected {
-            invalidated: row.invalidated.filter(|at| at <= tip),
-            ..row.clone()
-        })
-        .collect();
-    assert_eq!(concatenated(&walked), expected_when_read);
-    assert!(
-        expected_when_read.iter().any(|e| e.invalidated.is_some()),
-        "a row read after its supersession carries the fact"
-    );
-    assert!(
-        expected.iter().filter(|e| e.invalidated.is_some()).count()
-            > expected_when_read
-                .iter()
-                .filter(|e| e.invalidated.is_some())
-                .count(),
-        "a row read before its supersession did not"
-    );
+    assert_eq!(concatenated(&walked), expected);
     for bounds in [page_bounds(1, 1 << 20), page_bounds(3, 40), roomy()] {
         let pages = walk(&mut fixture, &hold, ExportWindow::Snapshot, bounds);
         assert_eq!(concatenated(&pages), expected, "{bounds:?}");

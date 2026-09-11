@@ -80,8 +80,8 @@ pub struct SourceRow {
     /// A spanned invalidation-only row carries a format-checked `payload_id`; its absent payload bytes cannot be verified.
     pub detail: SourceDescriptorDetail,
     pub created_commit_seq: i64,
-    /// The commit that invalidated this descriptor, when one has, at any
-    /// point through the window's end or after it.
+    /// The invalidating commit at or before the export window's end, or `None`
+    /// if the descriptor is live at that boundary.
     pub invalidated_commit_seq: Option<i64>,
     /// The exact UTF-8 text the descriptor's span selects, present exactly
     /// when the row's creation lies inside the exported window.
@@ -308,7 +308,8 @@ struct RawRow {
 
 const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence_id,
      e.artifact_digest,e.byte_length,b.observation_payload,
-     b.created_commit_seq,b.invalidated_commit_seq";
+     b.created_commit_seq,
+     CASE WHEN b.invalidated_commit_seq<=?1 THEN b.invalidated_commit_seq END";
 
 /// The catch-up window as one row source: the descriptors created in
 /// `(S, through]` exactly as the hold pins them, or the descriptors live at S
