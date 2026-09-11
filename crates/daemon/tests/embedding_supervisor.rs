@@ -176,10 +176,11 @@ async fn sticky_cancellation_stops_the_pass_and_keeps_native_work_owned() {
     );
     let held = row(dir.path(), occurrence);
     assert_eq!((held.0.as_str(), held.1), ("admitted", 1));
-    assert_eq!(
+    // The host owns the call whether its worker has taken the CPU permit yet or is still queued for it.
+    assert!(matches!(
         synapse.job_status(held.2.as_deref().unwrap()),
-        Some("running")
-    );
+        Some("queued" | "running")
+    ));
     TestEngine::release(&gate);
     let end = tokio::task::block_in_place(|| {
         dispatcher
@@ -1119,9 +1120,8 @@ async fn a_held_head_of_the_sweep_order_does_not_starve_identities_behind_it() {
             .collect::<Result<Vec<String>, _>>()
             .unwrap()
     };
-    let (held, free) = ordered.split_at(3);
-    // The free identity dies before dispatch, so no host ever holds it.
-    tombstone(&projection, &free[0], 50);
+    // The free identity sorts last and dies before dispatch, so no host ever holds it; the three ahead of it are retired as they are admitted.
+    tombstone(&projection, &ordered[3], 50);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
@@ -1140,34 +1140,50 @@ async fn a_held_head_of_the_sweep_order_does_not_starve_identities_behind_it() {
         Arc::new(|| NOW),
         sender,
     );
+    // Each held identity is retired on the slice thread the moment its admission is charged, so the held prefix exists before the first sweep can start.
+    let retire_on_admission = Arc::clone(&projection);
+    let held_by_job: std::collections::BTreeMap<String, String> = {
+        let conn = inspect(dir.path());
+        let mut statement = conn
+            .prepare("SELECT job_id, occurrence_id FROM embedding_jobs")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    supervisor.tap_dispatch_events_for_test(move |event| {
+        if let DispatchEvent::Admitted { job_id, .. } = event {
+            tombstone(&retire_on_admission, &held_by_job[job_id], 60);
+        }
+    });
     let running = tokio::spawn(Arc::clone(&supervisor).run());
 
-    // The first backfill admits the three identities ahead of the free one into gated calls; retiring them afterwards leaves the host holding their jobs.
+    // The first backfill admits the three identities ahead of the free one into gated calls, and each is retired as it is admitted.
     assert!(matches!(
         ended(&mut events, SliceKind::Backfill).await,
         SliceOutcome::Backfill { admitted: 3, .. }
     ));
-    for occurrence in held {
-        tombstone(&projection, occurrence, 60);
-    }
 
-    // One candidate per sweep: the free identity is fourth in order, so its reclamation needs sweeps that resume where the last one ended.
-    let reclaimed = within(Duration::from_secs(30), async {
-        let mut sweeps = 0;
+    // One candidate per sweep: the three held identities are inspected first, one per sweep, and the free identity behind them is reclaimed by a sweep that resumed where the last one ended.
+    let traversal = within(Duration::from_secs(30), async {
+        let mut traversal = Vec::new();
         loop {
             let SliceOutcome::Sweep(report) = ended(&mut events, SliceKind::Sweep).await else {
                 panic!()
             };
-            sweeps += 1;
-            if report.jobs_reclaimed > 0 || sweeps == 8 {
-                break report.jobs_reclaimed;
+            traversal.push((report.held.len(), report.jobs_reclaimed));
+            if report.jobs_reclaimed > 0 || traversal.len() == 8 {
+                break traversal;
             }
         }
     })
     .await;
     assert_eq!(
-        reclaimed, 1,
-        "the free identity behind three held ones is reclaimed within a pass over the table"
+        traversal,
+        vec![(1, 0), (1, 0), (1, 0), (0, 1)],
+        "three held candidates are inspected before the free identity behind them is reclaimed"
     );
 
     supervisor
@@ -1351,7 +1367,13 @@ async fn a_submission_whose_charge_rolled_back_claims_no_result() {
         (uncharged.0.as_str(), uncharged.1, uncharged.2),
         ("pending", 0, None)
     );
-    assert_eq!(engine.calls(), 1, "the host runs the submitted call");
+    // The slice ends as soon as the charge is refused; the host's worker enters the gated call on its own schedule.
+    within(Duration::from_secs(10), async {
+        while engine.calls() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
     assert_eq!(supervisor.tracked_host_jobs_for_test(), 1);
 
     TestEngine::release(&gate);

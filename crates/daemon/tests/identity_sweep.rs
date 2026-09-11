@@ -838,6 +838,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let synapse = component(&engine, SynapseLimits::default());
     // The pass returns with the row admitted while the host still runs the job.
     pass(
