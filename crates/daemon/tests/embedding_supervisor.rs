@@ -1360,3 +1360,93 @@ async fn a_submission_whose_charge_rolled_back_claims_no_result() {
         .unwrap()
         .unwrap();
 }
+
+/// A census taken while a slice is still inside its charge write must not lose the claim that the charge is about to make: the result is ready but unclaimed at that instant, and once the charge commits the admitted row expects it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_census_during_a_blocked_charge_keeps_the_result_the_charge_then_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("charged late", "charged late text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        slice_bounds(Duration::from_secs(2)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    // On `Submitted`, another writer takes the projection file, so the charge that follows waits on the busy timeout while the ungated inference completes.
+    let blocker: Arc<std::sync::Mutex<Option<Connection>>> = Arc::new(std::sync::Mutex::new(None));
+    let submitted: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let search = search_path(dir.path());
+    let (hold, seen) = (Arc::clone(&blocker), Arc::clone(&submitted));
+    supervisor.tap_dispatch_events_for_test(move |event| {
+        if let DispatchEvent::Submitted { host_job_id, .. } = event {
+            let conn = Connection::open(&search).unwrap();
+            conn.busy_timeout(Duration::ZERO).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            *hold.lock().unwrap() = Some(conn);
+            *seen.lock().unwrap() = Some(host_job_id.clone());
+        }
+    });
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Backfill,
+        deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
+    let host_job = within(Duration::from_secs(10), async {
+        loop {
+            if let Some(host_job) = submitted.lock().unwrap().clone() {
+                break host_job;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    within(Duration::from_secs(10), async {
+        while synapse.job_status(&host_job) != Some("ready") {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    // The grace ends with the slice still inside its charge: the result is ready and no row has claimed it yet.
+    assert_eq!(
+        supervisor.shutdown(Duration::from_millis(200)).await,
+        Err(Unresolved {
+            slices: 1,
+            native: 0
+        })
+    );
+
+    // The charge commits after the slice's deadline, so the guard refuses the publication and the admitted row keeps the ready result as a held lease.
+    tokio::time::sleep_until((deadline + Duration::from_millis(100)).into()).await;
+    blocker
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .execute_batch("COMMIT")
+        .unwrap();
+    let report = supervisor.shutdown(Duration::from_secs(10)).await.unwrap();
+    let settled = row(dir.path(), &occurrence);
+    assert_eq!(
+        (settled.0.as_str(), settled.2.as_deref()),
+        ("admitted", Some(host_job.as_str()))
+    );
+    assert_eq!(
+        report.held_results, 1,
+        "the row admitted by the late charge expects the ready result"
+    );
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}

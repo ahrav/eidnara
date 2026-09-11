@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use daemon::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
-    lane_binding,
+    Stage, lane_binding,
 };
 use daemon::embedding_publication::{ObsoleteCause, Publication};
 use daemon::search_projection::SearchProjection;
@@ -1723,6 +1723,18 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
     assert_eq!(
         published(&events),
         vec![(held.job_id.clone(), Publication::Embedded)]
+    );
+    // The replacement job is polled in its own poll stage: the stale poll, the re-admission, the new poll, then publication.
+    let stages: Vec<Stage> = events
+        .iter()
+        .filter_map(|event| match event {
+            DispatchEvent::Stage { stage, .. } => Some(*stage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stages,
+        vec![Stage::Poll, Stage::Admit, Stage::Poll, Stage::Publish]
     );
     let done = ledger(dir.path(), occurrence);
     assert_eq!(

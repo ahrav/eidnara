@@ -127,7 +127,12 @@ pub struct EmbeddingSupervisor {
     sweep_cursor: Mutex<Option<String>>,
     panic_next_slice: AtomicBool,
     dispatch_fault: Mutex<Option<DispatchFault>>,
+    #[cfg(feature = "test-support")]
+    dispatch_tap: Mutex<Option<DispatchTap>>,
 }
+
+#[cfg(feature = "test-support")]
+type DispatchTap = Arc<dyn Fn(&DispatchEvent) + Send + Sync>;
 
 impl EmbeddingSupervisor {
     pub fn new(
@@ -149,6 +154,8 @@ impl EmbeddingSupervisor {
             sweep_cursor: Mutex::new(None),
             panic_next_slice: AtomicBool::new(false),
             dispatch_fault: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            dispatch_tap: Mutex::new(None),
         })
     }
 
@@ -273,44 +280,63 @@ impl EmbeddingSupervisor {
                     &self.bounds.dispatch,
                     budget,
                     (self.now)(),
-                    &mut |event| match event {
-                        // The host owns native work from submission, whatever the charge decides.
-                        DispatchEvent::Submitted {
-                            job_id,
-                            host_job_id,
-                        } => {
-                            self.lock_admitted().insert(
+                    &mut |event| {
+                        #[cfg(feature = "test-support")]
+                        if let Some(tap) = self
+                            .dispatch_tap
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .as_ref()
+                        {
+                            tap(&event);
+                        }
+                        match event {
+                            // The host owns native work from submission, whatever the charge decides.
+                            DispatchEvent::Submitted {
+                                job_id,
                                 host_job_id,
-                                HostJob {
-                                    job_id,
-                                    result_expected: false,
-                                },
-                            );
-                        }
-                        // Only a charged admission binds the row to this job's result.
-                        DispatchEvent::Admitted { host_job_id, .. } => {
-                            admitted += 1;
-                            if let Some(job) = self.lock_admitted().get_mut(&host_job_id) {
-                                job.result_expected = true;
+                            } => {
+                                self.lock_admitted().insert(
+                                    host_job_id,
+                                    HostJob {
+                                        job_id,
+                                        result_expected: false,
+                                    },
+                                );
                             }
-                        }
-                        DispatchEvent::Published { host_job_id, .. } => {
-                            published += 1;
-                            self.lock_admitted().remove(&host_job_id);
-                        }
-                        // A retried or stopped job stays tracked: the host still runs its call, and only the host's status retires it. Every host job the row submitted loses its claim on a result.
-                        DispatchEvent::Retried { job_id, .. }
-                        | DispatchEvent::Stopped { job_id, .. } => {
-                            dispositions += 1;
-                            for job in self
-                                .lock_admitted()
-                                .values_mut()
-                                .filter(|job| job.job_id == job_id)
-                            {
-                                job.result_expected = false;
+                            // Only a charged admission binds the row to this job's result. The entry is recreated if a census ran between the submission and this charge and retired a result no row expected yet.
+                            DispatchEvent::Admitted {
+                                job_id,
+                                host_job_id,
+                                ..
+                            } => {
+                                admitted += 1;
+                                self.lock_admitted()
+                                    .entry(host_job_id)
+                                    .or_insert(HostJob {
+                                        job_id,
+                                        result_expected: false,
+                                    })
+                                    .result_expected = true;
                             }
+                            DispatchEvent::Published { host_job_id, .. } => {
+                                published += 1;
+                                self.lock_admitted().remove(&host_job_id);
+                            }
+                            // A retried or stopped job stays tracked: the host still runs its call, and only the host's status retires it. Every host job the row submitted loses its claim on a result.
+                            DispatchEvent::Retried { job_id, .. }
+                            | DispatchEvent::Stopped { job_id, .. } => {
+                                dispositions += 1;
+                                for job in self
+                                    .lock_admitted()
+                                    .values_mut()
+                                    .filter(|job| job.job_id == job_id)
+                                {
+                                    job.result_expected = false;
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     },
                 );
                 // Host jobs the host has settled and no row expects leave the census here, so it holds only live obligations rather than every job ever submitted.
@@ -430,6 +456,18 @@ impl EmbeddingSupervisor {
     #[cfg(feature = "test-support")]
     pub fn tracked_host_jobs_for_test(&self) -> usize {
         self.lock_admitted().len()
+    }
+
+    /// Observes every dispatch event on the slice thread, before the supervisor acts on it.
+    #[cfg(feature = "test-support")]
+    pub fn tap_dispatch_events_for_test(
+        &self,
+        tap: impl Fn(&DispatchEvent) + Send + Sync + 'static,
+    ) {
+        *self
+            .dispatch_tap
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(tap));
     }
 
     fn lock_admitted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, HostJob>> {

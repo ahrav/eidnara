@@ -378,6 +378,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                         host_job_id = rebound;
                         readmitted = true;
                         started = Instant::now();
+                        // The replacement job is polled under its own poll stage, so the trace keeps the admit-poll-publish order per host job.
+                        pass.stage(job, Stage::Poll, observer);
                     }
                     Err(blocked) => return Ok(blocked),
                 },
