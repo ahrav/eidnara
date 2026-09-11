@@ -9,13 +9,14 @@ use std::time::{Duration, Instant};
 
 use host_runtime::synapse::{
     DenseUnavailable, EmbeddingInputLimits, InferenceFailureKind, LaneInfo, LaneUnavailableState,
-    PollOutcome, SubmitOutcome, SynapseComponent, SynapseStatus,
+    PollOutcome, SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
 };
 use kernel::{CurrentInputExpectation, EligibilityBinding, KernelError, KernelStore};
 use retrieval::ProjectionError;
 use retrieval::dispatch::{
     Admission, BindingOutcome, DispatchJob, Disposition, EXHAUSTED, EpisodeGrant, LaneBinding,
-    bind_lane, charge_admission, eligible_jobs, job_ledger, record_retry, stop_job,
+    bind_lane, charge_admission, eligible_jobs, job_ledger, rebind_host_job, record_retry,
+    stop_job,
 };
 use retrieval::vectors::obsolete_embedding;
 
@@ -38,20 +39,10 @@ pub struct DispatchBounds {
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-/// The permanent failure codes the host publishes for a job; any other code is recorded as `host_failure`.
-const HOST_STOP_CODES: [&str; 6] = [
-    "artifact_invalid",
-    "substitution_rejected",
-    "schema_violation",
-    "not_certified",
-    "probe_required",
-    "idempotency_conflict",
-];
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum DispatchEvent {
     Bound(BindingOutcome),
-    /// The host holds the job and the row's episode carries `attempts` charged so far.
+    /// The host holds the job and the row's episode carries `attempts` charged so far; re-admission after a job-table eviction reports the same count.
     Admitted {
         job_id: String,
         host_job_id: String,
@@ -89,20 +80,30 @@ pub enum Blocked {
 pub enum DispatchError {
     #[error("embedding dispatch is quarantined: {}", .0.detail)]
     Quarantined(Quarantine),
-    /// A ledger read failed before anything was decided; nothing is uncertain and the pass may simply run again.
+    /// The store refused the lane binding or eligible-row read before any disposition, so the pass can run again.
     #[error(transparent)]
-    Read(SearchProjectionError),
+    Retryable(SearchProjectionError),
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
 
-/// Runs passes over the projection's pending rows against one kernel, one projection, and one in-process Synapse component. `run_pass` blocks and belongs on a blocking thread inside a Tokio runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchFault {
+    /// The lane binding's store call fails before it runs.
+    RefuseBinding,
+    /// The admission charge's statement fails, so its transaction rolls back and the row stays pending.
+    RefuseChargeStatement,
+    /// The admission charge commits, then its reply arrives as a store failure.
+    LoseChargeReply,
+}
+
+/// `run_pass` blocks and requires a multi-threaded Tokio runtime; `block_in_place` yields the worker while the pass waits.
 pub struct EmbeddingDispatcher<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
     quarantine: Option<Quarantine>,
-    lose_charge_reply: bool,
+    fault: Option<DispatchFault>,
 }
 
 impl<'a> EmbeddingDispatcher<'a> {
@@ -116,22 +117,43 @@ impl<'a> EmbeddingDispatcher<'a> {
             projection,
             synapse,
             quarantine: None,
-            lose_charge_reply: false,
+            fault: None,
         }
     }
 
-    /// Makes the next admission charge return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.
+    /// Arms `fault` for the next store call it names; the fault is consumed when it fires.
     #[cfg(feature = "test-support")]
-    pub fn lose_next_charge_reply_for_test(&mut self) {
-        self.lose_charge_reply = true;
+    pub fn inject_fault_for_test(&mut self, fault: DispatchFault) {
+        self.fault = Some(fault);
+    }
+
+    fn take_fault(&mut self, fault: DispatchFault) -> bool {
+        if self.fault == Some(fault) {
+            self.fault = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Runs one pass and reports what stopped it early, if anything; every job's disposition reaches `observer`.
     ///
+    /// The pass sleeps while it polls, so it must not keep a runtime worker: on a worker it hands the worker's tasks off first, on a blocking thread it runs directly, and on a `current_thread` runtime it panics rather than starve the inference it waits for.
+    ///
     /// # Errors
     ///
-    /// Returns [`DispatchError::Read`] when the eligible rows cannot be read, [`DispatchError::Quarantined`] once any disposition write fails or is refused and on every later call of this dispatcher, and [`DispatchError::Kernel`] when the kernel guard fails for a reason other than its deadline.
+    /// Returns [`DispatchError::Retryable`] when the store refuses the lane binding or the eligible-row read, [`DispatchError::Quarantined`] once any disposition write fails or is refused and on every later call of this dispatcher, and [`DispatchError::Kernel`] when the kernel guard fails for a reason other than its deadline.
     pub fn run_pass(
+        &mut self,
+        eligibility: EligibilityBinding<'_>,
+        bounds: &DispatchBounds,
+        now: i64,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Option<Blocked>, DispatchError> {
+        tokio::task::block_in_place(|| self.pass(eligibility, bounds, now, observer))
+    }
+
+    fn pass(
         &mut self,
         eligibility: EligibilityBinding<'_>,
         bounds: &DispatchBounds,
@@ -146,15 +168,22 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(state) => return Ok(Some(Blocked::LaneUnavailable(state))),
         };
         let binding = lane_binding(&lane, self.synapse.host_incarnation());
-        match self.write(|conn| bind_lane(conn, &binding, now))? {
+        let bound = if self.take_fault(DispatchFault::RefuseBinding) {
+            Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                "database is locked".to_owned(),
+            )))
+        } else {
+            self.projection.write(|conn| bind_lane(conn, &binding, now))
+        };
+        match self.before_dispositions(bound)? {
             BindingOutcome::Mismatch => return Ok(Some(Blocked::BindingMismatch)),
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
             outcome => observer(DispatchEvent::Bound(outcome)),
         }
         let jobs = self
             .projection
-            .read(|conn| eligible_jobs(conn, bounds.max_jobs, now))
-            .map_err(DispatchError::Read)?;
+            .read(|conn| eligible_jobs(conn, bounds.max_jobs, now));
+        let jobs = self.before_dispositions(jobs)?;
         let pass = Pass {
             lane: &lane,
             binding: &binding,
@@ -168,6 +197,21 @@ impl<'a> EmbeddingDispatcher<'a> {
             }
         }
         Ok(None)
+    }
+
+    /// Store failures before any disposition are retryable because nothing about the ledger is uncertain yet.
+    fn before_dispositions<T>(
+        &mut self,
+        result: Result<T, SearchProjectionError>,
+    ) -> Result<T, DispatchError> {
+        result.map_err(|error| match &error {
+            SearchProjectionError::Projection(refusal)
+                if !matches!(classify(refusal), Refusal::Storage) =>
+            {
+                self.enter_quarantine(QuarantineKind::Integrity, &error)
+            }
+            _ => DispatchError::Retryable(error),
+        })
     }
 
     /// Takes one job as far as this pass can: through admission and charging for a pending row, then through the result poll and publication.
@@ -193,22 +237,31 @@ impl<'a> EmbeddingDispatcher<'a> {
             });
             return Ok(None);
         }
-        // A closed episode is judged before the host is asked or polled, so no inference runs that no attempt pays for and no expired episode completes.
-        if let Some(reason) = job.episode_refusal(pass.bounds.grant, pass.now) {
-            return self.stop(job, reason, pass.now, observer);
-        }
-        let host_job_id = match &job.host_job_id {
-            Some(host_job_id) if job.state == "admitted" => host_job_id.clone(),
-            _ => match self.admit(job, pass, observer)? {
-                Ok(host_job_id) => host_job_id,
-                Err(blocked) => return Ok(blocked),
-            },
+        let mut host_job_id = match &job.host_job_id {
+            Some(host_job_id) if job.state == "admitted" => {
+                if let Some(reason) = job.completion_refusal(pass.bounds.grant, pass.now) {
+                    return self.stop(job, reason, pass.now, observer);
+                }
+                host_job_id.clone()
+            }
+            _ => {
+                // Refuse the episode before host admission to avoid inference for refused work.
+                if let Some(reason) = job.episode_refusal(pass.bounds.grant, pass.now) {
+                    return self.stop(job, reason, pass.now, observer);
+                }
+                match self.admit(job, pass, observer)? {
+                    Ok(host_job_id) => host_job_id,
+                    Err(blocked) => return Ok(blocked),
+                }
+            }
         };
-        let started = Instant::now();
+        let item_id = job.item_id();
+        let mut readmitted = false;
+        let mut started = Instant::now();
         loop {
             match self
                 .synapse
-                .poll_admitted(&host_job_id, &job.episode, &job.text)
+                .poll_admitted(&host_job_id, &item_id, &job.text)
             {
                 PollOutcome::Pending { .. } if started.elapsed() < pass.bounds.result_wait => {
                     std::thread::sleep(POLL_INTERVAL);
@@ -217,7 +270,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 PollOutcome::Pending { .. } => return Ok(None),
                 PollOutcome::Page(page) => {
                     let Some((_, _, vector)) =
-                        page.vectors.iter().find(|(id, _, _)| id == &job.episode)
+                        page.vectors.iter().find(|(id, _, _)| id == &item_id)
                     else {
                         return self.stop(job, "malformed_request", pass.now, observer);
                     };
@@ -247,25 +300,26 @@ impl<'a> EmbeddingDispatcher<'a> {
                     };
                     return self.publish(job, &publication, pass, observer);
                 }
-                PollOutcome::Failed { code, .. } if code == "internal_error" => {
+                PollOutcome::Failed { code, .. } if !failure_is_permanent(&code) => {
                     return self.retry(job, "execution_failure", pass, observer);
                 }
                 // A worker that found the lane down fails its job with the lane's reason; that is the lane's disposition, not the input's, so the row keeps its admitted state until a serving host reconciles it.
                 PollOutcome::Failed { code, .. } => {
-                    // Only the host's closed failure vocabulary reaches the durable row.
-                    let reason = HOST_STOP_CODES
-                        .iter()
-                        .find(|known| **known == code)
-                        .copied()
-                        .unwrap_or("host_failure");
                     return match serving(self.synapse.status()) {
-                        Ok(_) => self.stop(job, reason, pass.now, observer),
+                        Ok(_) => self.stop(job, &code, pass.now, observer),
                         Err(state) => Ok(Some(Blocked::LaneUnavailable(state))),
                     };
                 }
-                PollOutcome::Restarted => {
-                    return self.retry(job, "host_restarted", pass, observer);
-                }
+                // One re-admission per pass keeps the pass finite.
+                PollOutcome::Restarted if readmitted => return Ok(None),
+                PollOutcome::Restarted => match self.readmit(job, &host_job_id, pass, observer)? {
+                    Ok(rebound) => {
+                        host_job_id = rebound;
+                        readmitted = true;
+                        started = Instant::now();
+                    }
+                    Err(blocked) => return Ok(blocked),
+                },
                 PollOutcome::KeyMismatch | PollOutcome::BadCursor => {
                     return self.stop(job, "malformed_request", pass.now, observer);
                 }
@@ -273,8 +327,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
     }
 
-    /// Preflights a pending row's input exactly, admits its stable identity to the job table, and charges one attempt; a refusal at any step is the row's disposition.
-    fn admit(
+    fn submit(
         &mut self,
         job: &DispatchJob,
         pass: &Pass<'_>,
@@ -292,44 +345,64 @@ impl<'a> EmbeddingDispatcher<'a> {
             }
         };
         // The host item is the episode, so a new episode never reuses a job the table retains from a stopped one.
-        let host_job_id = match self.synapse.submit_admitted(&admitted, &job.episode) {
-            Ok(SubmitOutcome::Queued { job_id }) => job_id,
-            Ok(SubmitOutcome::Full { .. }) => {
-                return self.retry(job, "admission_full", pass, observer).map(Err);
-            }
-            Ok(SubmitOutcome::Refused(reason)) => {
-                return self.stop(job, reason, pass.now, observer).map(Err);
-            }
-            Ok(SubmitOutcome::Closing) => return Ok(Err(Some(Blocked::HostClosing))),
-            Err(refusal) => {
-                return self
+        Ok(
+            match self.synapse.submit_admitted(&admitted, &job.item_id()) {
+                Ok(SubmitOutcome::Queued { job_id }) => Ok(job_id),
+                Ok(SubmitOutcome::Full) => {
+                    self.retry(job, "admission_full", pass, observer).map(Err)?
+                }
+                Ok(SubmitOutcome::Refused(reason)) => {
+                    self.stop(job, reason, pass.now, observer).map(Err)?
+                }
+                Ok(SubmitOutcome::Closing) => Err(Some(Blocked::HostClosing)),
+                Err(refusal) => self
                     .dense_unavailable(job, refusal, pass, observer)
-                    .map(Err);
-            }
+                    .map(Err)?,
+            },
+        )
+    }
+
+    fn admit(
+        &mut self,
+        job: &DispatchJob,
+        pass: &Pass<'_>,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
+        let host_job_id = match self.submit(job, pass, observer)? {
+            Ok(host_job_id) => host_job_id,
+            Err(blocked) => return Ok(Err(blocked)),
         };
-        let charged = self.projection.write(|conn| {
-            charge_admission(
-                conn,
-                &job.job_id,
-                pass.binding,
-                &host_job_id,
-                pass.bounds.grant,
-                pass.now,
-            )
-        });
-        let charged = if std::mem::take(&mut self.lose_charge_reply) && charged.is_ok() {
-            Err(SearchProjectionError::Store(storage::StoreError::Backend(
+        let charged = if self.take_fault(DispatchFault::RefuseChargeStatement) {
+            Err(SearchProjectionError::Projection(ProjectionError::Sqlite(
                 "database is locked".to_owned(),
             )))
         } else {
-            charged
+            let charged = self.projection.write(|conn| {
+                charge_admission(
+                    conn,
+                    &job.job_id,
+                    pass.binding,
+                    &host_job_id,
+                    pass.bounds.grant,
+                    pass.now,
+                )
+            });
+            if self.take_fault(DispatchFault::LoseChargeReply) && charged.is_ok() {
+                Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                    "database is locked".to_owned(),
+                )))
+            } else {
+                charged
+            }
         };
         let charged = match charged {
             Ok(charged) => charged,
-            Err(SearchProjectionError::Projection(error)) => {
+            Err(SearchProjectionError::Projection(error))
+                if !matches!(classify(&error), Refusal::Storage) =>
+            {
                 return Err(self.enter_quarantine(QuarantineKind::Integrity, &error));
             }
-            // The reply to the charge was lost: the row, not the error, says whether it committed. A row still pending was not charged and is re-admitted by the next pass; anything else is unknown and stops dispatch.
+            // The charge's statement failed or its reply was lost: the row, not the error, says whether it committed. A row still pending was not charged and is re-admitted by the next pass; anything else is unknown and stops dispatch.
             Err(lost) => match self.projection.read(|conn| job_ledger(conn, &job.job_id)) {
                 Ok(Some(ledger))
                     if ledger.state == "admitted"
@@ -357,6 +430,30 @@ impl<'a> EmbeddingDispatcher<'a> {
             job_id: job.job_id.clone(),
             host_job_id: host_job_id.clone(),
             attempts,
+        });
+        Ok(Ok(host_job_id))
+    }
+
+    fn readmit(
+        &mut self,
+        job: &DispatchJob,
+        evicted: &str,
+        pass: &Pass<'_>,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
+        let host_job_id = match self.submit(job, pass, observer)? {
+            Ok(host_job_id) => host_job_id,
+            Err(blocked) => return Ok(Err(blocked)),
+        };
+        let rebound =
+            self.write(|conn| rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now))?;
+        if !rebound {
+            return Ok(Err(None));
+        }
+        observer(DispatchEvent::Admitted {
+            job_id: job.job_id.clone(),
+            host_job_id: host_job_id.clone(),
+            attempts: job.attempts,
         });
         Ok(Ok(host_job_id))
     }

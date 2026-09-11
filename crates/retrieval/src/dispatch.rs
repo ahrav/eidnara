@@ -96,6 +96,43 @@ pub struct EpisodeGrant {
     pub deadline: i64,
 }
 
+/// The episode a row runs under. An episode is open only when its id and deadline are both stored; a row without one stores allowance 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Episode {
+    /// The host item identity the row is admitted and polled under.
+    pub id: String,
+    pub allowance: u32,
+    pub deadline: i64,
+}
+
+impl Episode {
+    fn from_columns(
+        id: Option<String>,
+        allowance: u32,
+        deadline: Option<i64>,
+    ) -> Result<Option<Self>, ProjectionError> {
+        match (id, deadline) {
+            (Some(id), Some(deadline)) => Ok(Some(Self {
+                id,
+                allowance,
+                deadline,
+            })),
+            (None, None) if allowance == 0 => Ok(None),
+            _ => Err(ProjectionError::CorruptRow),
+        }
+    }
+}
+
+/// The episode a row's first admission opens.
+pub fn first_episode_id(job_id: &str) -> String {
+    format!("{job_id}/1")
+}
+
+/// Authorized episodes have their own namespace, so no reference can name the first episode.
+fn authorized_episode_id(job_id: &str, authorization_ref: &str) -> String {
+    format!("{job_id}/auth/{authorization_ref}")
+}
+
 /// A job row the dispatcher may act on, with the input it embeds and the
 /// current-input identity the completion is guarded by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,38 +146,47 @@ pub struct DispatchJob {
     pub source_artifact_digest: String,
     pub text: String,
     pub state: String,
-    /// The episode the row runs under, or the one its first admission opens.
-    pub episode: String,
     pub attempts: u32,
-    pub episode_allowance: u32,
-    pub episode_deadline: Option<i64>,
+    /// A row has no open episode until its first admission.
+    pub episode: Option<Episode>,
     pub host_job_id: Option<String>,
 }
 
 impl DispatchJob {
-    /// Why the row's episode admits no further attempt at `now`, or `None` when it does. A row without an episode is judged against the grant that would open one.
+    /// The host item identity is the open episode, or the first episode the row's admission opens.
+    pub fn item_id(&self) -> String {
+        match &self.episode {
+            Some(episode) => episode.id.clone(),
+            None => first_episode_id(&self.job_id),
+        }
+    }
+
+    /// Returns the reason no further attempt may be admitted at `now`; a row without an episode uses the grant that admission would open.
     pub fn episode_refusal(&self, grant: EpisodeGrant, now: i64) -> Option<&'static str> {
-        refusal(
-            self.attempts,
-            self.episode_allowance,
-            self.episode_deadline,
-            grant,
-            now,
-        )
+        refusal(self.attempts, self.episode.as_ref(), grant, now)
+    }
+
+    /// An admitted row's charged attempt expires only at its deadline; exhaustion refuses new attempts, not this one.
+    pub fn completion_refusal(&self, grant: EpisodeGrant, now: i64) -> Option<&'static str> {
+        let (_, deadline) = bounds(self.episode.as_ref(), grant);
+        (now > deadline).then_some(DEADLINE_EXPIRED)
+    }
+}
+
+fn bounds(episode: Option<&Episode>, grant: EpisodeGrant) -> (u32, i64) {
+    match episode {
+        Some(episode) => (episode.allowance, episode.deadline),
+        None => (grant.allowance.get(), grant.deadline),
     }
 }
 
 fn refusal(
     attempts: u32,
-    allowance: u32,
-    deadline: Option<i64>,
+    episode: Option<&Episode>,
     grant: EpisodeGrant,
     now: i64,
 ) -> Option<&'static str> {
-    let (allowance, deadline) = match deadline {
-        Some(deadline) => (allowance, deadline),
-        None => (grant.allowance.get(), grant.deadline),
-    };
+    let (allowance, deadline) = bounds(episode, grant);
     if attempts >= allowance {
         Some(EXHAUSTED)
     } else if now > deadline {
@@ -150,53 +196,71 @@ fn refusal(
     }
 }
 
-/// The pending rows whose retry time has come and the admitted rows still
-/// held by a host, oldest job identifier first. Stopped rows never appear.
+/// The identity query limits the payload query to `limit` rows, avoiding text loads for rows this pass will not take.
 pub fn eligible_jobs(
     conn: &GuardedConn<'_>,
     limit: NonZeroUsize,
     now: i64,
 ) -> Result<Vec<DispatchJob>, ProjectionError> {
+    let mut identities = conn.prepare(
+        "SELECT job_id FROM embedding_jobs
+         WHERE stop_reason IS NULL
+           AND ((state='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?1))
+                OR (state='admitted' AND host_job_id IS NOT NULL))
+         ORDER BY created_at,job_id LIMIT ?2",
+    )?;
+    let job_ids: Vec<String> = identities
+        .query_map(params![now, limit.get() as i64], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
     let mut statement = conn.prepare(
         "SELECT j.job_id,j.occurrence_id,o.payload_id,o.source_object_id,o.revision,o.source_artifact_digest,
                 CAST(p.bytes AS TEXT),j.state,j.attempts,j.episode_allowance,j.episode_deadline,j.host_job_id,
                 g.generation_id,g.embedding_model,g.tokenizer_fingerprint,g.vector_dimension,g.generation_epoch,
-                COALESCE(j.episode_id,j.job_id||'/1')
+                j.episode_id
          FROM embedding_jobs j
          JOIN occurrences o ON o.occurrence_id=j.occurrence_id
          JOIN payloads p ON p.payload_id=o.payload_id
          JOIN vector_generations g ON g.generation_id=j.generation_id
-         WHERE j.stop_reason IS NULL
-           AND ((j.state='pending' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?1))
-                OR (j.state='admitted' AND j.host_job_id IS NOT NULL))
-         ORDER BY j.job_id LIMIT ?2",
+         WHERE j.job_id=?1",
     )?;
-    let rows = statement.query_map(params![now, limit.get() as i64], |row| {
-        let epoch: i64 = row.get(16)?;
-        Ok(DispatchJob {
-            job_id: row.get(0)?,
-            occurrence_id: row.get(1)?,
-            generation: VectorGeneration {
-                generation_id: row.get(12)?,
-                embedding_model: row.get(13)?,
-                tokenizer_fingerprint: row.get(14)?,
-                vector_dimension: row.get(15)?,
-                generation_epoch: epoch.unsigned_abs(),
-            },
-            payload_id: row.get(2)?,
-            source_object_id: row.get(3)?,
-            revision: row.get(4)?,
-            source_artifact_digest: row.get(5)?,
-            text: row.get(6)?,
-            state: row.get(7)?,
-            episode: row.get(17)?,
-            attempts: row.get(8)?,
-            episode_allowance: row.get(9)?,
-            episode_deadline: row.get(10)?,
-            host_job_id: row.get(11)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let mut jobs = Vec::with_capacity(job_ids.len());
+    for job_id in &job_ids {
+        let row = statement
+            .query_row([job_id], |row| {
+                let epoch: i64 = row.get(16)?;
+                let job = DispatchJob {
+                    job_id: row.get(0)?,
+                    occurrence_id: row.get(1)?,
+                    generation: VectorGeneration {
+                        generation_id: row.get(12)?,
+                        embedding_model: row.get(13)?,
+                        tokenizer_fingerprint: row.get(14)?,
+                        vector_dimension: row.get(15)?,
+                        generation_epoch: epoch.unsigned_abs(),
+                    },
+                    payload_id: row.get(2)?,
+                    source_object_id: row.get(3)?,
+                    revision: row.get(4)?,
+                    source_artifact_digest: row.get(5)?,
+                    text: row.get(6)?,
+                    state: row.get(7)?,
+                    attempts: row.get(8)?,
+                    episode: None,
+                    host_job_id: row.get(11)?,
+                };
+                let episode_id: Option<String> = row.get(17)?;
+                let allowance: u32 = row.get(9)?;
+                let deadline: Option<i64> = row.get(10)?;
+                Ok((job, episode_id, allowance, deadline))
+            })
+            .optional()?;
+        let Some((mut job, episode_id, allowance, deadline)) = row else {
+            return Err(ProjectionError::CorruptRow);
+        };
+        job.episode = Episode::from_columns(episode_id, allowance, deadline)?;
+        jobs.push(job);
+    }
+    Ok(jobs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,34 +297,50 @@ pub fn charge_admission(
         return Ok(Admission::NotPending);
     }
     let attempts = ledger.attempts;
-    if let Some(reason) = refusal(
-        attempts,
-        ledger.episode_allowance,
-        ledger.episode_deadline,
-        grant,
-        now,
-    ) {
+    let episode = ledger.episode()?;
+    if let Some(reason) = refusal(attempts, episode.as_ref(), grant, now) {
         stop_job(conn, job_id, reason, now)?;
         return Ok(Admission::Stopped(reason));
     }
-    let (episode_id, allowance, deadline) = match ledger.episode_id {
-        Some(id) => (id, ledger.episode_allowance, ledger.episode_deadline),
-        None => (
-            format!("{job_id}/1"),
-            grant.allowance.get(),
-            Some(grant.deadline),
-        ),
-    };
+    let episode = episode.unwrap_or_else(|| Episode {
+        id: first_episode_id(job_id),
+        allowance: grant.allowance.get(),
+        deadline: grant.deadline,
+    });
     let epoch = i64::try_from(host.table_epoch).map_err(|_| ProjectionError::CorruptRow)?;
     conn.execute(
         "UPDATE embedding_jobs SET state='admitted',attempts=attempts+1,host_job_id=?2,host_incarnation=?3,admitted_epoch=?4,
                 episode_id=?5,episode_allowance=?6,episode_deadline=?7,next_attempt_at=NULL,updated_at=?8
          WHERE job_id=?1 AND state='pending'",
-        params![job_id, host_job_id, host.host_incarnation, epoch, episode_id, allowance, deadline, now],
+        params![
+            job_id,
+            host_job_id,
+            host.host_incarnation,
+            epoch,
+            episode.id,
+            episode.allowance,
+            episode.deadline,
+            now
+        ],
     )?;
     Ok(Admission::Charged {
         attempts: attempts + 1,
     })
+}
+
+pub fn rebind_host_job(
+    conn: &GuardedConn<'_>,
+    job_id: &str,
+    evicted_host_job_id: &str,
+    host_job_id: &str,
+    now: i64,
+) -> Result<bool, ProjectionError> {
+    let changed = conn.execute(
+        "UPDATE embedding_jobs SET host_job_id=?3,updated_at=?4
+         WHERE job_id=?1 AND state='admitted' AND host_job_id=?2",
+        params![job_id, evicted_host_job_id, host_job_id, now],
+    )?;
+    Ok(changed == 1)
 }
 
 /// Stop reason recorded when an episode's attempts are all consumed.
@@ -294,9 +374,10 @@ pub fn record_retry(
     if ledger.state != "pending" && ledger.state != "admitted" {
         return Ok(Disposition::NotOpen);
     }
-    let (attempts, allowance) = (ledger.attempts, ledger.episode_allowance);
     // A row that never opened an episode has no allowance to exhaust yet.
-    if allowance > 0 && attempts >= allowance {
+    if let Some(episode) = ledger.episode()?
+        && ledger.attempts >= episode.allowance
+    {
         stop_job(conn, job_id, EXHAUSTED, now)?;
         return Ok(Disposition::Exhausted);
     }
@@ -324,6 +405,18 @@ pub fn stop_job(
     Ok(changed == 1)
 }
 
+/// The episode identity is the host's item identity, which the host bounds at 256 bytes: a 64-byte job identity, `/auth/`, and a 128-byte reference total 198.
+pub const MAX_AUTHORIZATION_REF_BYTES: usize = 128;
+
+/// One token of `[A-Za-z0-9._:-]`, so a reference carries no separator, whitespace, or control byte into the episode identity.
+fn valid_authorization_ref(authorization_ref: &str) -> bool {
+    !authorization_ref.is_empty()
+        && authorization_ref.len() <= MAX_AUTHORIZATION_REF_BYTES
+        && authorization_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recovery {
     /// A new episode is open under `authorization_ref`.
@@ -332,6 +425,8 @@ pub enum Recovery {
     Replayed,
     /// The row is not stopped.
     NotStopped,
+    /// The reference is empty, over [`MAX_AUTHORIZATION_REF_BYTES`], or not one token of `[A-Za-z0-9._:-]`; nothing changed.
+    InvalidReference,
 }
 
 /// Opens a new episode for a stopped row under an external authorization
@@ -344,6 +439,9 @@ pub fn authorize_recovery(
     grant: EpisodeGrant,
     now: i64,
 ) -> Result<Recovery, ProjectionError> {
+    if !valid_authorization_ref(authorization_ref) {
+        return Ok(Recovery::InvalidReference);
+    }
     let Some(ledger) = job_ledger(conn, job_id)? else {
         return Ok(Recovery::NotStopped);
     };
@@ -353,7 +451,7 @@ pub fn authorize_recovery(
     if ledger.state != "failed" {
         return Ok(Recovery::NotStopped);
     }
-    let episode_id = format!("{job_id}/{authorization_ref}");
+    let episode_id = authorized_episode_id(job_id, authorization_ref);
     conn.execute(
         "UPDATE embedding_jobs SET state='pending',attempts=0,episode_id=?2,episode_allowance=?3,episode_deadline=?4,
                 authorization_ref=?5,stop_reason=NULL,last_failure_kind=NULL,next_attempt_at=NULL,host_job_id=NULL,host_incarnation=NULL,updated_at=?6
@@ -376,6 +474,19 @@ pub struct JobLedger {
     pub last_failure_kind: Option<String>,
     pub stop_reason: Option<String>,
     pub authorization_ref: Option<String>,
+}
+
+impl JobLedger {
+    /// # Errors
+    ///
+    /// [`ProjectionError::CorruptRow`] when the episode columns disagree about whether an episode is open.
+    pub fn episode(&self) -> Result<Option<Episode>, ProjectionError> {
+        Episode::from_columns(
+            self.episode_id.clone(),
+            self.episode_allowance,
+            self.episode_deadline,
+        )
+    }
 }
 
 pub fn job_ledger(

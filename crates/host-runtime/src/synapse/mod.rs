@@ -30,7 +30,7 @@ use crate::handler::{
 pub use embed_tokens::EmbedTokens;
 use inference::{Backend, InferenceError, OrtIdentity};
 use jobs::{AdmitOutcome, JobTable};
-pub use jobs::{PollOutcome, ResultLease, ResultPage};
+pub use jobs::{PollOutcome, ResultLease, ResultPage, failure_is_permanent};
 pub use preflight::{
     AdmittedInput, DenseUnavailable, EmbeddingIdentity, EmbeddingInputLimits, InferenceFailureKind,
     LaneUnavailableState,
@@ -413,6 +413,10 @@ impl SynapseComponent {
         if !admitted.identity().matches(&lane.lane) {
             return Err(DenseUnavailable::IdentityChanged);
         }
+        // The wire path bounds item identities in `parse_batch`; the in-process path bounds them here so the retained-metadata sizing holds for both.
+        if item_id.len() > jobs::MAX_ITEM_ID_BYTES {
+            return Ok(SubmitOutcome::Refused("unsupported_shape"));
+        }
         let item = local_item(item_id, admitted.text());
         let key = local_key(&item);
         let dims = lane.lane.dims;
@@ -435,9 +439,7 @@ impl SynapseComponent {
                 AdmitOutcome::Conflict | AdmitOutcome::KeyMismatch => {
                     SubmitOutcome::Refused("idempotency_conflict")
                 }
-                AdmitOutcome::Full => SubmitOutcome::Full {
-                    retry_after_ms: self.inner.limits.retry_after_ms,
-                },
+                AdmitOutcome::Full => SubmitOutcome::Full,
                 AdmitOutcome::ResultTooLarge => SubmitOutcome::Refused("unsupported_shape"),
                 AdmitOutcome::Closed => SubmitOutcome::Closing,
             },
@@ -574,9 +576,9 @@ fn mark_disabled(inner: &SynapseInner, mut reason: String) {
 pub enum SubmitOutcome {
     /// The job is queued, running, or already complete; poll it with [`SynapseComponent::poll_admitted`].
     Queued { job_id: String },
-    /// Admission or result capacity is exhausted; the same submission may succeed after `retry_after_ms`.
-    Full { retry_after_ms: u64 },
-    /// The table refuses the item for good: `idempotency_conflict` when its key is retained with a different payload, `unsupported_shape` when its single result exceeds the retained-result byte limit.
+    /// Admission or result capacity is exhausted; the same submission may succeed once the table drains.
+    Full,
+    /// The table refuses the item for good: `idempotency_conflict` when its key is retained with a different payload, `unsupported_shape` when its identity exceeds [`jobs::MAX_ITEM_ID_BYTES`] or its single result exceeds the retained-result byte limit.
     Refused(&'static str),
     /// The component is shutting down and admits nothing.
     Closing,
