@@ -31,7 +31,7 @@ jobs:
   # `steps.filter` runs only for pull requests; missing outputs make every job run.
   #
   # `docs/` stays out of the Rust filters: the schema-migration step in `gates` rejects any manifest path or `include!` that reaches `docs/` or a `.md` file.
-  # `test` also lists the non-Rust files the kernel tests open at runtime: `release/` manifests, `docs/host-wire-protocol.md`, and the search-projection fault maps, witness matrix, and specification traceability. A change to any of them must rerun the tests even though no `rust` path changed.
+  # `test` also lists the non-Rust files the kernel and retrieval tests open at runtime: `release/` manifests, `docs/host-wire-protocol.md`, and the search-projection fault maps, witness matrix, specification traceability, and frozen schema inventory. A change to any of them must rerun the tests even though no `rust` path changed.
   changes:
     name: changed paths
     runs-on: ubuntu-latest
@@ -81,6 +81,7 @@ jobs:
               - 'docs/properties/search-projection/*/fault-map.md'
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
+              - 'docs/properties/search-projection/projection-schema.md'
             native:
               - *workflow
               - *cargo

@@ -310,6 +310,53 @@ fn the_baseline_matches_the_frozen_inventory_field_for_field() {
     }
 }
 
+/// The `CHECK` lists are exactly the Rust vocabularies, so a variant added or
+/// respelled on one side fails here rather than at write time.
+#[test]
+fn the_check_vocabularies_equal_the_rust_enums() {
+    let stored = stored(retrieval::BASELINE);
+    let check = |table: &str, column: &str| {
+        stored[table]
+            .columns
+            .iter()
+            .find(|c| c.name == column)
+            .unwrap()
+            .constraint
+            .clone()
+    };
+    let list = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let sensitivities: Vec<&str> = kernel::Sensitivity::ALL
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    assert_eq!(
+        check("occurrences", "sensitivity"),
+        format!("CHECK(sensitivity IN ({}))", list(&sensitivities))
+    );
+    let classes: Vec<&str> = kernel::source_identity::OccurrenceClass::ALL
+        .iter()
+        .map(|c| c.code())
+        .collect();
+    assert_eq!(
+        check("occurrences", "class"),
+        format!("CHECK(class IN ({}))", list(&classes))
+    );
+    let reasons: Vec<&str> = retrieval::TombstoneReason::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .collect();
+    assert_eq!(
+        check("occurrence_tombstones", "reason"),
+        format!("CHECK(reason IN ({}))", list(&reasons))
+    );
+}
+
 #[test]
 fn an_omitted_field_or_constraint_fails_the_inventory() {
     let documented = with_implied_not_null(documented());
