@@ -604,6 +604,7 @@ pub(crate) fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::MalformedBatch
         | ProjectionError::BatchOverBound { .. }
         | ProjectionError::UnknownGeneration { .. }
+        | ProjectionError::RetiredGeneration { .. }
         | ProjectionError::NoPendingWork { .. } => Refusal::Admission,
         ProjectionError::InvalidVector { .. } | ProjectionError::VectorConflict { .. } => {
             Refusal::OperatorRepair

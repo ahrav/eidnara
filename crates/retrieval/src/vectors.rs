@@ -66,11 +66,11 @@ pub enum CompletionPhase {
 }
 
 /// Completes the job for `completion.occurrence_id` under `completion.generation` inside the caller's transaction, reporting each mutation to `observer` as it lands while the transaction is still open.
-/// Only a `pending` or `admitted` job accepts a vector; a job already `embedded` or `published` with the same vector is a replay, and a job in any other state is closed to completion.
+/// Only a `pending` or `admitted` job accepts a vector or becomes obsolete; a job already `embedded` or `published` is judged by its stored vector alone (a replay or a conflict), and a job in any other state is closed to completion.
 ///
 /// # Errors
 ///
-/// In the order checked: [`ProjectionError::InvalidVector`] when the vector is not `vector_dimension` finite values, [`ProjectionError::UnknownGeneration`] or [`ProjectionError::IdentityMismatch`] when the generation is missing or registered under another identity, [`ProjectionError::UnknownOccurrence`] when the occurrence is not stored, [`ProjectionError::NoPendingWork`] when no job is open for the pair, and [`ProjectionError::VectorConflict`] when a different vector is already durable for the pair.
+/// In the order checked: [`ProjectionError::InvalidVector`] when the vector is not `vector_dimension` finite values, [`ProjectionError::UnknownGeneration`], [`ProjectionError::IdentityMismatch`], or [`ProjectionError::RetiredGeneration`] when the generation is missing, registered under another identity, or retired, [`ProjectionError::UnknownOccurrence`] when the occurrence is not stored, [`ProjectionError::NoPendingWork`] when no job is open for the pair, and [`ProjectionError::VectorConflict`] when a different vector is already durable for the pair.
 pub fn complete_embedding_observed(
     conn: &GuardedConn<'_>,
     completion: &VectorCompletion<'_>,
@@ -125,7 +125,10 @@ pub fn complete_embedding_observed(
     } else {
         None
     };
-    if let Some(reason) = obsolete {
+    // A completed job is closed to obsoletion as it is to completion; the stored vector alone judges a redelivery to it.
+    if let Some(reason) = obsolete
+        && open
+    {
         conn.execute(
             "UPDATE embedding_jobs SET state='obsolete',updated_at=?3
              WHERE occurrence_id=?1 AND generation_id=?2 AND state IN ('pending','admitted')",
@@ -250,17 +253,25 @@ pub fn obsolete_embedding(
     })
 }
 
+/// A retired generation's files may already be reclaimed, so it accepts no completion; the same rule keeps `apply_batch` from queuing new work for it.
 fn check_generation(
     conn: &GuardedConn<'_>,
     generation: &VectorGeneration,
 ) -> Result<(), ProjectionError> {
-    match registered_generation(conn, generation)? {
-        Some(true) => Ok(()),
-        Some(false) => Err(ProjectionError::IdentityMismatch),
-        None => Err(ProjectionError::UnknownGeneration {
+    let Some(registered) = registered_generation(conn, generation)? else {
+        return Err(ProjectionError::UnknownGeneration {
             generation_id: generation.generation_id.clone(),
-        }),
+        });
+    };
+    if !registered.identity_matches {
+        return Err(ProjectionError::IdentityMismatch);
     }
+    if registered.is_retired() {
+        return Err(ProjectionError::RetiredGeneration {
+            generation_id: generation.generation_id.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Little-endian f32 values, four bytes each, as the schema stores them.

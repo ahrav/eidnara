@@ -1084,17 +1084,19 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
     assert!(publisher.quarantine().is_none());
     assert_kernel_writable(&corpus, "after-conflict");
 
-    // A BUSY local commit under a held write lock never committed: the job stays pending, no vector exists, and the guard is released.
     let row = row_for(&rows, &busy);
-    let blocker = hold_write_lock(&search_path(dir.path()));
-    let (result, events) = publish_once(
-        &mut publisher,
+    let mut events = Vec::new();
+    let result = publisher.publish_with_fault_for_test(
         &publication(row, &generation, &vector),
-        &project,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| events.push(event),
+        PublicationFault::LoseLocalCommit,
     );
     assert!(
         matches!(result, Err(PublicationError::LocalCommitUnresolved)),
-        "{result:?}"
+        "a rolled-back commit whose reply is lost is unresolved: {result:?}"
     );
     assert_eq!(
         &events[events.len() - 2..],
@@ -1104,11 +1106,64 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
         ],
         "the guard is released before the durable rows are consulted"
     );
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None)
+    );
+    assert!(publisher.quarantine().is_none());
+    assert_kernel_writable(&corpus, "after-lost-commit");
+
+    let blocker = hold_write_lock(&search_path(dir.path()));
+    let mut events = Vec::new();
+    let mut held = None;
+    let started = Instant::now();
+    let result = publisher.publish(
+        &publication(row, &generation, &vector),
+        eligibility(&project),
+        started + Duration::from_millis(300),
+        3,
+        &mut |event| {
+            match event {
+                PublicationEvent::GuardAcquired => held = Some(Instant::now()),
+                PublicationEvent::GuardReleased => {
+                    let held = held.take().expect("the guard was acquired");
+                    assert!(
+                        held.elapsed() < Duration::from_secs(2),
+                        "the kernel writer was held for {:?} behind a held search write lock",
+                        held.elapsed()
+                    );
+                }
+                _ => {}
+            }
+            events.push(event);
+        },
+    );
+    assert!(
+        matches!(result, Err(PublicationError::SearchDeadline)),
+        "a search write lock held past the deadline writes nothing: {result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "publish took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        events,
+        [
+            PublicationEvent::VectorValidated,
+            PublicationEvent::GuardRequested,
+            PublicationEvent::GuardAcquired,
+            PublicationEvent::LocalReleased,
+            PublicationEvent::GuardReleased,
+        ],
+        "nothing is staged and nothing is reconciled"
+    );
     drop(blocker);
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("pending".to_string()), None)
     );
+    assert!(publisher.quarantine().is_none());
     assert_kernel_writable(&corpus, "after-busy");
     let (result, _) = publish_once(
         &mut publisher,
@@ -1215,8 +1270,55 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
     holder.join().unwrap();
     assert_kernel_writable(&corpus, "after-deadline");
 
-    // A stale input whose obsoletion cannot be recorded quarantines the publisher, and the quarantine is sticky.
+    // A search write lock held past the deadline defers the obsoletion.
     let blocker = hold_write_lock(&search_path(dir.path()));
+    let started = Instant::now();
+    let deferred = publisher.publish(
+        &publication(row, &generation, &vector),
+        eligibility(&project),
+        started + Duration::from_millis(300),
+        9,
+        &mut |_| {},
+    );
+    assert!(
+        matches!(deferred, Err(PublicationError::SearchDeadline)),
+        "a stale input whose obsoletion cannot be written yet keeps its lease: {deferred:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the obsoletion waited {:?}",
+        started.elapsed()
+    );
+    assert!(
+        publisher.quarantine().is_none(),
+        "a held lock is contention, not a storage failure"
+    );
+    let completed = (Some("embedded".to_string()), Some(encode(&vector)));
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        completed,
+        "nothing changed while the lock was held"
+    );
+    drop(blocker);
+    let (marked, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    assert_eq!(
+        marked.unwrap(),
+        Publication::Obsolete(ObsoleteCause::Canonical(StaleInput::Retracted))
+    );
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        completed,
+        "a completed job keeps its vector when its input is retired"
+    );
+
+    // A stale input whose obsoletion fails in the store quarantines the publisher, and the quarantine is sticky.
+    mutate(&search_path(dir.path()))
+        .execute_batch("ALTER TABLE embedding_jobs RENAME TO embedding_jobs_unavailable")
+        .unwrap();
     let (quarantined, _) = publish_once(
         &mut publisher,
         &publication(row, &generation, &vector),
@@ -1229,7 +1331,9 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
         quarantine.kind,
         daemon::search_writer::QuarantineKind::Storage
     );
-    drop(blocker);
+    mutate(&search_path(dir.path()))
+        .execute_batch("ALTER TABLE embedding_jobs_unavailable RENAME TO embedding_jobs")
+        .unwrap();
     let (again, events) = publish_once(
         &mut publisher,
         &publication(row, &generation, &vector),
@@ -1302,6 +1406,78 @@ fn generation_identity_and_missing_work_are_refused_before_any_write() {
         );
         assert!(publisher.quarantine().is_none(), "{label}");
     }
+    // A binding for another project judges the input `WrongScope`; the verdict follows the binding, so the job is left open rather than obsoleted.
+    let other_project = ProjectScope::new(&"b".repeat(64)).unwrap();
+    let (result, events) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &other_project,
+    );
+    assert!(
+        matches!(result, Err(PublicationError::WrongScope)),
+        "{result:?}"
+    );
+    assert_eq!(
+        events,
+        [
+            PublicationEvent::VectorValidated,
+            PublicationEvent::GuardRequested
+        ],
+        "the guard is released without being handed out"
+    );
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+        "a job judged under a wrong binding keeps its work"
+    );
+    assert!(publisher.quarantine().is_none());
+
+    // A retired generation rejects new vectors.
+    let search = search_path(dir.path());
+    mutate(&search)
+        .execute(
+            "UPDATE vector_generations SET state='retired' WHERE generation_id=?1",
+            [&generation.generation_id],
+        )
+        .unwrap();
+    let (result, events) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PublicationError::Refused(
+                ProjectionError::RetiredGeneration { .. }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(events.last(), Some(&PublicationEvent::GuardReleased));
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+        "a retired generation leaves the job and its vector table untouched"
+    );
+    mutate(&search)
+        .execute(
+            "UPDATE vector_generations SET state='building' WHERE generation_id=?1",
+            [&generation.generation_id],
+        )
+        .unwrap();
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    assert_eq!(
+        result.unwrap(),
+        Publication::Embedded,
+        "the same result completes under the right binding"
+    );
+
     // A job the batch never queued has nothing to complete.
     let other = corpus.publish("b", "msg-b", "1", "second message");
     let fresh = row_for(&corpus.export(), &other).clone();
@@ -1345,6 +1521,7 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
     corpus.seed();
     let object = corpus.publish("a", "msg-a", "1", "first message");
     let tombstoned = corpus.publish("b", "msg-b", "1", "second message");
+    let completed = corpus.publish("c", "msg-c", "1", "third message");
     let generation = generation(8);
     let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
     let project = ProjectScope::new(PROJECT).unwrap();
@@ -1376,6 +1553,48 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
         (Some("obsolete".to_string()), None)
     );
     assert_kernel_writable(&corpus, "after-tombstone");
+
+    // A tombstone recorded after the job completed reports what the redelivered vector is, not a transition that did not happen: the completed job keeps its state and its vector.
+    let row = row_for(&rows, &completed);
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    assert_eq!(result.unwrap(), Publication::Embedded);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 5)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let embedded = (Some("embedded".to_string()), Some(encode(&vector)));
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    assert_eq!(
+        result.unwrap(),
+        Publication::Replayed,
+        "the same vector for a completed job is a replay, tombstone or not"
+    );
+    assert_eq!(durable(dir.path(), &row.detail.occurrence_id), embedded);
+    let mut other = unit(8);
+    other[0] = 0.0;
+    other[2] = 1.0;
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &other),
+        &project,
+    );
+    assert!(
+        matches!(result, Err(PublicationError::IdempotencyConflict)),
+        "a different vector for a completed job is a conflict, tombstone or not: {result:?}"
+    );
+    assert_eq!(durable(dir.path(), &row.detail.occurrence_id), embedded);
+    assert!(publisher.quarantine().is_none());
 
     let row = row_for(&rows, &object);
     // A payload the vector was not produced from is obsolete, not completed.

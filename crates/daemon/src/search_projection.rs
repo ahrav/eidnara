@@ -8,6 +8,7 @@
 //! outside this disposable database.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
 use retrieval::{BASELINE, ProjectionError};
@@ -192,6 +193,20 @@ impl SearchProjection {
         self.run(f, Access::Write)
     }
 
+    /// [`Self::write`] whose connection and write-lock acquisition end at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when the
+    /// connection or the write lock is still held at `deadline`; nothing was written.
+    pub fn write_within<T>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
+        self.run(f, Access::WriteWithin(deadline))
+    }
+
     /// One query-only read transaction on the same connection; a write inside
     /// it is refused by the store's authorizer.
     pub fn read<T>(
@@ -221,6 +236,7 @@ impl SearchProjection {
         };
         let store_result = match access {
             Access::Write => self.store.with_conn_fenced(inner),
+            Access::WriteWithin(deadline) => self.store.with_conn_fenced_within(deadline, inner),
             Access::Read => self.store.with_conn(inner),
         };
         match outcome {
@@ -242,5 +258,6 @@ impl SearchProjection {
 #[derive(Clone, Copy)]
 enum Access {
     Write,
+    WriteWithin(Instant),
     Read,
 }

@@ -7,7 +7,10 @@
 use std::time::Instant;
 
 use host_runtime::synapse::inference::validate_unit_vector;
-use kernel::{CurrentInputExpectation, EligibilityBinding, KernelError, KernelStore, StaleInput};
+use kernel::{
+    CurrentInputExpectation, EligibilityBinding, EligibilityVerdict, KernelError, KernelStore,
+    StaleInput,
+};
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::vectors::{
@@ -77,7 +80,13 @@ pub enum PublicationError {
     /// The kernel writer stayed held past the deadline; the result lease is retained and the publication can be tried again.
     #[error("the kernel writer was not acquired before the deadline")]
     GuardDeadline,
-    /// The search transaction may or may not have committed and the durable rows show no vector; the result lease is retained.
+    /// The eligibility binding's project does not name the input's scope. That verdict follows the binding rather than the input, so the job is left open and the result lease is retained.
+    #[error("the eligibility binding's project does not name the input's scope")]
+    WrongScope,
+    /// The search connection or its write lock stayed held past the deadline; nothing was written and the result lease is retained.
+    #[error("the search write lock was not acquired before the deadline")]
+    SearchDeadline,
+    /// The search transaction may or may not have committed and the durable rows do not show its effect; the result lease is retained.
     #[error("the local commit outcome is unresolved")]
     LocalCommitUnresolved,
     /// The projection refused the completion before writing: no job, no occurrence, or another generation.
@@ -112,6 +121,8 @@ pub struct EmbeddingPublisher<'a> {
 pub enum PublicationFault {
     /// The transaction commits, then its reply arrives as a store failure.
     LoseLocalCommitReply,
+    /// The transaction rolls back at COMMIT, and its reply arrives as a store failure.
+    LoseLocalCommit,
 }
 
 impl<'a> EmbeddingPublisher<'a> {
@@ -187,12 +198,16 @@ impl<'a> EmbeddingPublisher<'a> {
                 .guard_current_input(&publication.expectation, eligibility, deadline)
             {
                 Ok(Ok(guard)) => guard,
-                Ok(Err(stale)) => return self.obsolete(publication, now, stale),
+                // Every other stale verdict is a fact about the input; this one is a fact about the binding.
+                Ok(Err(StaleInput::Ineligible(EligibilityVerdict::WrongScope))) => {
+                    return Err(PublicationError::WrongScope);
+                }
+                Ok(Err(stale)) => return self.obsolete(publication, deadline, now, stale),
                 Err(KernelError::Deadline) => return Err(PublicationError::GuardDeadline),
                 Err(error) => return Err(error.into()),
             };
         observer(PublicationEvent::GuardAcquired);
-        let outcome = self.commit(publication, now, observer);
+        let outcome = self.commit(publication, deadline, now, observer);
         drop(guard);
         observer(PublicationEvent::GuardReleased);
         match outcome {
@@ -220,9 +235,12 @@ impl<'a> EmbeddingPublisher<'a> {
     }
 
     /// Runs the completion in one fenced search transaction and reports [`PublicationEvent::LocalReleased`] once it is over, whichever way it ended.
+    ///
+    /// The kernel writer is held throughout, so acquiring the search connection and its write lock is bounded by the same `deadline` that bounded the guard; a wait past it writes nothing.
     fn commit(
         &mut self,
         publication: &VectorPublication<'_>,
+        deadline: Instant,
         now: i64,
         observer: &mut dyn FnMut(PublicationEvent),
     ) -> Result<Settled, PublicationError> {
@@ -234,16 +252,27 @@ impl<'a> EmbeddingPublisher<'a> {
             input_bytes: publication.input_bytes,
             input_tokens: publication.input_tokens,
         };
-        let mut applied = self.projection.write(|conn| {
-            complete_embedding_observed(conn, &completion, now, &mut |phase| {
+        let roll_back = self.fault == Some(PublicationFault::LoseLocalCommit);
+        let mut applied = self.projection.write_within(deadline, |conn| {
+            let outcome = complete_embedding_observed(conn, &completion, now, &mut |phase| {
                 observer(match phase {
                     CompletionPhase::VectorInserted => PublicationEvent::VectorStaged,
                     CompletionPhase::JobEmbedded => PublicationEvent::LocalStaged,
                 })
-            })
+            })?;
+            if roll_back {
+                // A refusal from the closure rolls the transaction back; the reply is replaced below.
+                return Err(ProjectionError::Sqlite("fault: rolled back".to_owned()));
+            }
+            Ok(outcome)
         });
         observer(PublicationEvent::LocalReleased);
-        if self.fault == Some(PublicationFault::LoseLocalCommitReply) && applied.is_ok() {
+        let lost_reply = match self.fault {
+            Some(PublicationFault::LoseLocalCommitReply) => applied.is_ok(),
+            Some(PublicationFault::LoseLocalCommit) => true,
+            None => false,
+        };
+        if lost_reply {
             applied = Err(SearchProjectionError::Store(storage::StoreError::Backend(
                 "database is locked".to_owned(),
             )));
@@ -267,24 +296,28 @@ impl<'a> EmbeddingPublisher<'a> {
                 Refusal::Integrity => self.enter_quarantine(QuarantineKind::Integrity, &error),
                 Refusal::Storage => self.enter_quarantine(QuarantineKind::Storage, &error),
             }),
+            // BEGIN never ran, so nothing of the completion is durable.
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Err(PublicationError::SearchDeadline)
+            }
             Err(_) => Ok(Settled::Unresolved),
         }
     }
 
     /// Records that the job's input is gone from the kernel, outside any guard.
+    ///
+    /// The obsoletion is one keyed, state-predicated update, so a store failure whose effect is unknown is settled from the durable job state rather than by quarantine; only a refusal the store classifies as integrity or storage damage quarantines.
     fn obsolete(
         &mut self,
         publication: &VectorPublication<'_>,
+        deadline: Instant,
         now: i64,
         stale: StaleInput,
     ) -> Result<Publication, PublicationError> {
-        let marked = self.projection.write(|conn| {
-            obsolete_embedding(
-                conn,
-                &publication.expectation.occurrence_id,
-                &publication.generation.generation_id,
-                now,
-            )
+        let occurrence_id = &publication.expectation.occurrence_id;
+        let generation_id = &publication.generation.generation_id;
+        let marked = self.projection.write_within(deadline, |conn| {
+            obsolete_embedding(conn, occurrence_id, generation_id, now)
         });
         match marked {
             Ok(Obsoletion::Marked | Obsoletion::AlreadyTerminal) => {
@@ -292,10 +325,32 @@ impl<'a> EmbeddingPublisher<'a> {
             }
             Ok(Obsoletion::NoJob) => {
                 Err(PublicationError::Refused(ProjectionError::NoPendingWork {
-                    occurrence_id: publication.expectation.occurrence_id.clone(),
+                    occurrence_id: occurrence_id.clone(),
                 }))
             }
-            Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
+            Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
+                Refusal::Integrity => self.enter_quarantine(QuarantineKind::Integrity, &error),
+                Refusal::Storage => self.enter_quarantine(QuarantineKind::Storage, &error),
+                Refusal::Admission | Refusal::Identity | Refusal::OperatorRepair => {
+                    PublicationError::Refused(error)
+                }
+            }),
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                Err(PublicationError::SearchDeadline)
+            }
+            // The store failed between BEGIN and COMMIT; the durable job state, not the error, says whether the update took effect.
+            Err(_) => {
+                let status = self
+                    .projection
+                    .read(|conn| completion_status(conn, occurrence_id, generation_id));
+                match status {
+                    Ok(status) if status.job_state.as_deref() == Some("obsolete") => {
+                        Ok(Publication::Obsolete(ObsoleteCause::Canonical(stale)))
+                    }
+                    Ok(_) => Err(PublicationError::LocalCommitUnresolved),
+                    Err(error) => Err(self.enter_quarantine(QuarantineKind::Storage, &error)),
+                }
+            }
         }
     }
 

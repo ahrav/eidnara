@@ -657,8 +657,11 @@ pub fn register_generation(
     now: i64,
 ) -> Result<bool, ProjectionError> {
     match registered_generation(conn, generation)? {
-        Some(true) => Ok(false),
-        Some(false) => Err(ProjectionError::IdentityMismatch),
+        Some(RegisteredGeneration {
+            identity_matches: true,
+            ..
+        }) => Ok(false),
+        Some(_) => Err(ProjectionError::IdentityMismatch),
         None => {
             conn.execute(
                 "INSERT INTO vector_generations(
@@ -680,25 +683,51 @@ pub fn register_generation(
     }
 }
 
-/// Whether `generation.generation_id` is registered, and if so whether every identity field agrees with `generation`.
+/// The stored row for a generation id, judged against the identity a caller presents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegisteredGeneration {
+    /// Every identity field of the stored row agrees with the presented generation.
+    pub(crate) identity_matches: bool,
+    /// The stored lifecycle state: `building`, `verified`, `selected`, or `retired`.
+    pub(crate) state: String,
+}
+
+impl RegisteredGeneration {
+    pub(crate) fn is_retired(&self) -> bool {
+        self.state == "retired"
+    }
+}
+
+/// Reads `generation.generation_id`'s row, if registered, and compares its identity with `generation`.
 pub(crate) fn registered_generation(
     conn: &GuardedConn<'_>,
     generation: &VectorGeneration,
-) -> Result<Option<bool>, ProjectionError> {
-    let stored: Option<(String, String, i64, i64)> = conn
+) -> Result<Option<RegisteredGeneration>, ProjectionError> {
+    let stored: Option<(String, String, i64, i64, String)> = conn
         .query_row(
-            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
+            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch,state
              FROM vector_generations WHERE generation_id=?1",
             [&generation.generation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    Ok(stored.map(|(model, fingerprint, dimension, epoch)| {
-        model == generation.embedding_model
-            && fingerprint == generation.tokenizer_fingerprint
-            && dimension == i64::from(generation.vector_dimension)
-            && u64::try_from(epoch).ok() == Some(generation.generation_epoch)
-    }))
+    Ok(stored.map(
+        |(model, fingerprint, dimension, epoch, state)| RegisteredGeneration {
+            identity_matches: model == generation.embedding_model
+                && fingerprint == generation.tokenizer_fingerprint
+                && dimension == i64::from(generation.vector_dimension)
+                && u64::try_from(epoch).ok() == Some(generation.generation_epoch),
+            state,
+        },
+    ))
 }
 
 /// The identity of one vector generation.
