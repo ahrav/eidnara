@@ -49,8 +49,10 @@ not the handler.
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [`assert_message_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; production calls run under [`prefix_projection_differential_enabled`][gate-prefix], which is `cfg!(test) || env`. The test-only slice adapter `assert_prefix_projection_equivalent` delegates to this shared check. | unaudited |
+| [`assert_message_projection_equivalent`][assert-prefix] | Incremental and full projection equal by `differential_bytes` and by value; production calls run under [`prefix_projection_differential_enabled`][gate-prefix], which is enabled in tests or by `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL=1`. The test-only slice adapter `assert_prefix_projection_equivalent` delegates to this shared check. | unaudited |
 | [`incremental_projection_reuses_prefix_storage_and_preserves_tool_arc_state`][t-inc] | Reattached prefix equals `from_parts` inputs; incremental equals full; prefix `Arc`s are pointer-shared. | unaudited |
+| [`incremental_projection_checks_effective_synthetic_status`][t-synthetic-status] | Across all four cached/current effective synthetic-flag pairs, incremental and full projections agree; prefix `wire` and `bytes` `Arc`s are shared exactly when flags agree. | unaudited |
+| [`compaction_mode_projection_cache_reclassifies_synthetic_prefix`][t-compaction-cache] | Direct off/on/on/off/on changes to `ProducerContext.compaction_enabled` drive real transforms and the handler's cache lookup/store helpers. Checks full-projection equality, reattached flags, prefix `wire` reuse on the repeated on pass, and unchanged ingress bytes. On enabled passes, `(projection_reused_messages, projection_projected_messages)` is `(0, 4)` after a mode change and `(4, 0)` on stable reuse. No route binding or config reload. | unaudited |
 | [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach] | An unknown message-level field is dropped; a block-level field is kept. | unaudited |
 | [`projection_differential_catches_corrupt_first_changed_position`][t-projdiff] | A corrupt frontier is caught by the differential. | unaudited |
 | [`astro_scale_projection_cache_reuses_on_the_second_pass`][t-astro] | The second pass reuses the cached projection. | unaudited |
@@ -379,17 +381,19 @@ not a claim that no related check exists anywhere in the repository.
 
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2036
-[t-inc]: ../../../../crates/daemon/src/wire.rs#L1411
-[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1596
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22226
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L20954
+[t-inc]: ../../../../crates/daemon/src/wire.rs#L1418
+[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1617
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36402
+[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1603
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22228
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L20956
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19168
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23125
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27831
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22858
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13746
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13616
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54

@@ -207,6 +207,47 @@ fn edit_certified_manifest(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)
     });
 }
 
+#[test]
+fn bundles_require_bpe_dropout_to_be_disabled() {
+    for dropout in [None, Some(0.0), Some(0.001), Some(0.5), Some(1.0)] {
+        let dir = tempfile::tempdir().expect("temp bundle dir");
+        copy_fixture_to(dir.path());
+        let path = dir.path().join("tokenizer.json");
+        let mut tokenizer: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        tokenizer["model"] = serde_json::json!({
+            "type": "BPE",
+            "dropout": dropout,
+            "unk_token": "[UNK]",
+            "vocab": {"[PAD]": 0, "[UNK]": 1, "a": 2, "b": 3, "ab": 4},
+            "merges": [["a", "b"]]
+        });
+        let bytes = serde_json::to_vec(&tokenizer).unwrap();
+        tokenizers::Tokenizer::from_bytes(&bytes)
+            .expect("the dropout fixture is a valid tokenizer");
+        std::fs::write(path, &bytes).unwrap();
+        edit_certified_manifest(dir.path(), |m| {
+            m["tokenizer"]["tokenizer"]["sha256"] = sha256_hex(&bytes).into()
+        });
+        let result =
+            host_runtime::synapse::bundle::load_bundle(dir.path(), &SynapseLimits::default(), None);
+        if dropout.is_some_and(|p| p > 0.0) {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => {
+                    panic!("an exact-count bundle must reject enabled BPE dropout: {dropout:?}")
+                }
+            };
+            assert!(
+                error.to_string().contains("BPE dropout must be disabled"),
+                "{error}"
+            );
+        } else {
+            result.expect("a tokenizer with disabled dropout remains valid");
+        }
+    }
+}
+
 fn corpus() -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(fixture_dir().join("corpus.json")).expect("corpus"))
         .expect("corpus json")
@@ -633,6 +674,23 @@ async fn certified_bundle_loads_and_serves_expected_vectors() {
     for (a, b) in truncated[0].iter().zip(&overflowing[0]) {
         assert!((a - b).abs() <= tolerance);
     }
+
+    // The in-process count from the same verified bytes sees the whole text, so the preflight refuses what the wire path silently truncates.
+    let limits = host_runtime::synapse::EmbeddingInputLimits::of_lane(&lane);
+    let admitted = component
+        .preflight_embedding(limits, "alpha beta gamma delta epsilon zeta eta theta")
+        .expect("eight words fit the eight-token window");
+    assert_eq!(admitted.tokens().get(), 8);
+    assert_eq!(
+        component.preflight_embedding(
+            limits,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+        ),
+        Err(host_runtime::synapse::DenseUnavailable::TokenOverflow {
+            tokens: host_runtime::synapse::embed_tokens::EmbedTokens::new(10),
+            max_tokens: host_runtime::synapse::embed_tokens::EmbedTokens::new(8),
+        })
+    );
 
     // Zero-token inputs are refused before native inference.
     for text in ["", "   "] {

@@ -394,6 +394,169 @@ fn catch_up_pages_bound_invalidation_metadata_by_through() {
 }
 
 #[test]
+fn delta_pages_carry_exactly_one_step_of_the_catch_up_window() {
+    let mut fixture = Fixture::open();
+    let baseline = fixture.publish("canonical_claims", "baseline", 1, "baseline");
+    let hold = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), wide())
+        .unwrap();
+    let first = fixture.publish("messages", "first", 1, "first message");
+    let middle = fixture.retire(&baseline);
+    let second = fixture.publish("messages", "second", 1, "second message");
+    let through = fixture.retire(&first);
+    fixture
+        .store
+        .extend_source_hold(&hold.binding, &hold.hold_id, through, wide_admission())
+        .unwrap();
+    let bounds = page_bounds(8, 4096);
+
+    // The first step creates `first` and retires `baseline`.
+    let step_one = concatenated(&walk(
+        &mut fixture,
+        &hold,
+        ExportWindow::Delta {
+            after: hold.snapshot,
+            through: middle,
+        },
+        bounds,
+    ));
+    assert_eq!(
+        step_one
+            .iter()
+            .map(|row| row.object_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![baseline.as_str(), first.as_str()]
+    );
+    let retired_baseline = step_one
+        .iter()
+        .find(|row| row.object_id == baseline)
+        .unwrap();
+    assert_eq!(
+        retired_baseline.text, None,
+        "created before the step, no text"
+    );
+    assert_eq!(retired_baseline.invalidated, Some(middle));
+    let created_first = step_one.iter().find(|row| row.object_id == first).unwrap();
+    assert_eq!(created_first.text.as_deref(), Some("first message"));
+    assert_eq!(created_first.invalidated, None);
+    // The second step creates `second` and retires `first`, which was live at
+    // `middle`; `baseline` was already gone at `middle` and is not repeated.
+    let step_two = walk(
+        &mut fixture,
+        &hold,
+        ExportWindow::Delta {
+            after: middle,
+            through,
+        },
+        bounds,
+    );
+    let rows: Vec<_> = step_two.iter().flat_map(|page| &page.rows).collect();
+    assert_eq!(rows.len(), 2);
+    let retired_first = rows.iter().find(|row| row.object_id == first).unwrap();
+    assert_eq!(retired_first.text, None, "created before the step, no text");
+    assert_eq!(retired_first.invalidated_commit_seq, Some(through));
+    let created_second = rows.iter().find(|row| row.object_id == second).unwrap();
+    assert_eq!(created_second.text.as_deref(), Some("second message"));
+    assert_eq!(created_second.invalidated_commit_seq, None);
+
+    // Both steps together name every object the whole catch-up window names.
+    let whole = concatenated(&walk(
+        &mut fixture,
+        &hold,
+        ExportWindow::CatchUp { through },
+        bounds,
+    ));
+    let mut stepped: Vec<String> = step_one
+        .iter()
+        .map(|row| row.object_id.clone())
+        .chain(rows.iter().map(|row| row.object_id.clone()))
+        .collect();
+    stepped.sort();
+    stepped.dedup();
+    let mut named: Vec<String> = whole.iter().map(|row| row.object_id.clone()).collect();
+    named.sort();
+    assert_eq!(stepped, named);
+
+    // A step must start at or after S and end at or before `through`.
+    for after in [hold.snapshot - 1, through + 1] {
+        let error = fixture
+            .store
+            .export_source_page(
+                &hold.binding,
+                &hold.hold_id,
+                hold.captured_at,
+                ExportWindow::Delta { after, through },
+                None,
+                bounds,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            SourceExportError::Hold(SourceHoldError::InvalidRequest),
+            "after {after}"
+        );
+    }
+}
+
+/// A delta step reads bytes only for descriptors created inside the step, so its coverage proof stops at the step's start rather than at S.
+#[test]
+fn delta_coverage_is_proved_over_the_step_not_the_whole_catch_up() {
+    let mut fixture = Fixture::open();
+    fixture.publish("canonical_claims", "baseline", 1, "baseline");
+    let hold = fixture
+        .store
+        .capture_source_hold(&fixture.binding(), wide())
+        .unwrap();
+    let first = fixture.publish("messages", "first", 1, "first message");
+    let created = fixture.store.tip().unwrap();
+    let through = fixture.retire(&first);
+    let bounds = page_bounds(8, 4096);
+
+    // The hold references nothing after S; the step that creates `first` needs its bytes.
+    let error = fixture
+        .store
+        .export_source_page(
+            &hold.binding,
+            &hold.hold_id,
+            hold.captured_at,
+            ExportWindow::Delta {
+                after: hold.snapshot,
+                through,
+            },
+            None,
+            bounds,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        SourceExportError::Hold(SourceHoldError::ExtensionIncomplete { uncovered: 1 })
+    );
+
+    // The step after `created` only retires `first`, which exports no text, so the same unextended hold suffices.
+    let step = concatenated(&walk(
+        &mut fixture,
+        &hold,
+        ExportWindow::Delta {
+            after: created,
+            through,
+        },
+        bounds,
+    ));
+    assert_eq!(step.len(), 1);
+    assert_eq!(step[0].object_id, first);
+    assert_eq!(step[0].text, None);
+    assert_eq!(step[0].invalidated, Some(through));
+
+    // Acknowledging the same `through` still proves coverage from S.
+    let error = fixture
+        .store
+        .acknowledge_through_source_hold(&hold.binding, &hold.hold_id, through, 1)
+        .unwrap_err();
+    assert_eq!(error, SourceHoldError::ExtensionIncomplete { uncovered: 1 });
+}
+
+#[test]
 fn export_rejects_lifecycle_drift_even_when_observation_filters_would_hide_it() {
     let mut accepted = Vec::new();
     for mode in ["snapshot", "created", "invalidation"] {

@@ -278,16 +278,23 @@ pub fn batch_status(
     Ok(BatchStatus::Applied)
 }
 
-struct Checkpoint {
-    snapshot_commit_seq: i64,
-    checkpoint_commit_seq: i64,
-    hold_id: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionCheckpoint {
+    pub snapshot_commit_seq: i64,
+    pub checkpoint_commit_seq: i64,
+    pub hold_id: String,
 }
 
-fn read_checkpoint(
+/// Reads the durable local prefix, or `None` before any batch has committed.
+///
+/// # Errors
+///
+/// Returns [`ProjectionError::IdentityMismatch`] when no identity is installed
+/// or the installed identity names another kernel incarnation.
+pub fn read_checkpoint(
     conn: &GuardedConn<'_>,
     kernel_incarnation_id: &str,
-) -> Result<Option<Checkpoint>, ProjectionError> {
+) -> Result<Option<ProjectionCheckpoint>, ProjectionError> {
     let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;
     if installed.kernel_incarnation_id != kernel_incarnation_id {
         return Err(ProjectionError::IdentityMismatch);
@@ -296,7 +303,7 @@ fn read_checkpoint(
         "SELECT snapshot_commit_seq,checkpoint_commit_seq,hold_id FROM projection_checkpoint WHERE singleton=1",
         [],
         |row| {
-            Ok(Checkpoint {
+            Ok(ProjectionCheckpoint {
                 snapshot_commit_seq: row.get(0)?,
                 checkpoint_commit_seq: row.get(1)?,
                 hold_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),

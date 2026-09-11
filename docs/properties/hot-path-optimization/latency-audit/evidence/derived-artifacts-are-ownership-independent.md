@@ -145,8 +145,8 @@ and the production differential-panic policy remain outside this change.
 [reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L141-L144
 [reattach]: ../../../../../crates/daemon/src/wire.rs#L145-L186
 [diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L736
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L826-L835
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L680-L743
+[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011

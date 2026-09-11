@@ -9,8 +9,10 @@
 //! Shutdown drains the incarnation tracker before release.
 
 pub mod bundle;
+pub mod embed_tokens;
 pub mod inference;
 pub mod jobs;
+pub mod preflight;
 pub mod protocol;
 
 use std::path::PathBuf;
@@ -25,8 +27,13 @@ use crate::handler::{
     BindOutcome, HealthReport, HealthStatus, InitError, ManifestSnapshot, RequestCtx,
     RequestOutcome, RouteHandle, RouteIdentity,
 };
+pub use embed_tokens::EmbedTokens;
 use inference::{Backend, InferenceError, OrtIdentity};
 use jobs::{AdmitOutcome, JobTable, PollOutcome};
+pub use preflight::{
+    AdmittedInput, DenseUnavailable, EmbeddingIdentity, EmbeddingInputLimits, InferenceFailureKind,
+    LaneUnavailableState,
+};
 use protocol::{Request, RequestError};
 
 pub const SYNAPSE_MODULE_ID: &str = "synapse";
@@ -162,11 +169,18 @@ impl LaneInfo {
 /// Tests can substitute an `EmbeddingEngine` implementation.
 pub trait EmbeddingEngine: Send + Sync + 'static {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError>;
+
+    /// The full token count of `text` under the engine's own tokenizer, with nothing truncated and no padding.
+    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError>;
 }
 
 impl EmbeddingEngine for Backend {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
         Backend::embed(self, texts)
+    }
+
+    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+        Backend::untruncated_token_len(self, text)
     }
 }
 
@@ -198,9 +212,15 @@ pub enum SynapseStatus {
 
 enum LaneState {
     Starting,
-    Disabled { reason: String },
+    Disabled {
+        reason: String,
+    },
     Ready(Arc<ReadyLane>),
-    Failing { reason: String },
+    Failing {
+        reason: String,
+    },
+    /// Late count failures may escalate runtime disablement, but cannot replace completed shutdown.
+    ShutDown,
 }
 
 struct SynapseInner {
@@ -327,6 +347,9 @@ impl SynapseComponent {
             LaneState::Failing { reason } => SynapseStatus::Failing {
                 reason: reason.clone(),
             },
+            LaneState::ShutDown => SynapseStatus::Disabled {
+                reason: SHUT_DOWN_REASON.to_owned(),
+            },
         }
     }
 
@@ -335,6 +358,90 @@ impl SynapseComponent {
             LaneState::Ready(lane) => Some(Arc::clone(lane)),
             _ => None,
         }
+    }
+
+    /// Judges one text for embedding under the ready lane: bytes first, then the exact untruncated count from the lane's own tokenizer, then the window.
+    /// The count runs outside the `cpu` permit, so a refused text never contends with inference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable`] naming the first check that failed; the text is never part of the reason.
+    /// A count failure settles the lane by the same classes as inference: `Artifact` disables it and `Invariant` marks it failing, with fixed reasons because a count error message can echo the text.
+    /// Counter panics are quarantined as invariant failures. Invariants escalate runtime disablement, but completed shutdown remains disabled.
+    pub fn preflight_embedding<'t>(
+        &self,
+        limits: EmbeddingInputLimits,
+        text: &'t str,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        let admitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            preflight::admit(&lane.lane, &*lane.backend, limits, text)
+        }))
+        .map_err(|payload| {
+            crate::composite::discard_payload(payload);
+            mark_failing(&self.inner, "token counting panicked".to_owned());
+            DenseUnavailable::CountUnavailable(InferenceFailureKind::Invariant)
+        })?;
+        if let Err(DenseUnavailable::CountUnavailable(kind)) = &admitted {
+            match kind {
+                InferenceFailureKind::Artifact => mark_disabled(
+                    &self.inner,
+                    "token counting declared the artifact unusable".to_owned(),
+                ),
+                InferenceFailureKind::Invariant => {
+                    mark_failing(&self.inner, "token counting failed an invariant".to_owned())
+                }
+                InferenceFailureKind::Input | InferenceFailureKind::Execution => {}
+            }
+        }
+        admitted
+    }
+
+    /// Embeds one admitted text, byte for byte as admitted, under the lane it was admitted for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable::IdentityChanged`] when the serving lane is no longer the admitting one, [`DenseUnavailable::ByteOverflow`] when the admitted bytes exceed the serving lane's own cap, [`DenseUnavailable::LaneUnavailable`] when no lane serves, [`DenseUnavailable::LaneBusy`] when another call holds the lane's permit, and [`DenseUnavailable::Inference`] when inference refuses or fails.
+    pub fn embed_admitted(
+        &self,
+        admitted: &AdmittedInput<'_>,
+    ) -> Result<Vec<f32>, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        if !admitted.identity().matches(&lane.lane) {
+            return Err(DenseUnavailable::IdentityChanged);
+        }
+        // The byte cap is host configuration, not part of the identity, so a lane serving the
+        // same bundle under a narrower cap must re-judge the admitted bytes as its own.
+        if admitted.bytes() > lane.lane.max_text_bytes {
+            return Err(DenseUnavailable::ByteOverflow {
+                bytes: admitted.bytes(),
+                max_bytes: lane.lane.max_text_bytes,
+            });
+        }
+        let mut vectors = self
+            .run_inference(&lane, &[admitted.text()])
+            .map_err(|refusal| match refusal {
+                EmbedRefusal::Busy => DenseUnavailable::LaneBusy {
+                    retry_after_ms: self.inner.limits.query_retry_after_ms,
+                },
+                EmbedRefusal::Inference(error) => DenseUnavailable::Inference((&error).into()),
+            })?;
+        // `check_engine_vectors` accepted exactly one vector for the one text.
+        Ok(vectors.pop().expect("one vector for one admitted text"))
+    }
+
+    /// One lock acquisition answers both whether a lane serves and, if not, which state refuses.
+    fn ready_or_unavailable(&self) -> Result<Arc<ReadyLane>, DenseUnavailable> {
+        let state = match &*self.inner.lock_state() {
+            LaneState::Ready(lane) => return Ok(Arc::clone(lane)),
+            LaneState::Starting => LaneUnavailableState::Starting,
+            LaneState::Disabled { reason } if is_unsupported_reason(reason) => {
+                LaneUnavailableState::Unsupported
+            }
+            LaneState::Disabled { .. } | LaneState::ShutDown => LaneUnavailableState::Disabled,
+            LaneState::Failing { .. } => LaneUnavailableState::Failing,
+        };
+        Err(DenseUnavailable::LaneUnavailable { state })
     }
 
     /// `embed_blocking` shares the lane's single `cpu` permit with routed queries and batch workers, so at most one native call runs at a time.
@@ -378,25 +485,51 @@ impl SynapseComponent {
                 LaneState::Disabled { reason } | LaneState::Failing { reason } => {
                     return Err(InferenceError::Artifact(reason.clone()));
                 }
+                LaneState::ShutDown => {
+                    return Err(InferenceError::Artifact(SHUT_DOWN_REASON.to_owned()));
+                }
             }
         };
+        self.run_inference(&lane, texts)
+            .map_err(|refusal| match refusal {
+                EmbedRefusal::Busy => InferenceError::Artifact(BUSY_REASON.to_owned()),
+                EmbedRefusal::Inference(error) => error,
+            })
+    }
+
+    /// Runs one native call for `lane` under the single `cpu` permit, settling failures and panics into the lane state.
+    fn run_inference(
+        &self,
+        lane: &ReadyLane,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, EmbedRefusal> {
         let _permit = self
             .inner
             .cpu
             .try_acquire()
-            .map_err(|_| InferenceError::Artifact(BUSY_REASON.to_owned()))?;
+            .map_err(|_| EmbedRefusal::Busy)?;
         // A concurrent holder can mark the lane failing between the state read and this acquisition; the captured backend must not run after that transition.
         if let Some(reason) = lane_failure_reason(&self.inner) {
-            return Err(InferenceError::Artifact(reason));
+            return Err(InferenceError::Artifact(reason).into());
         }
         // A panicking backend is quarantined the same way the routed workers quarantine a panicked blocking task; the caller sees the same `Invariant` instead of an unwind that leaves the lane `Ready`.
         let joined =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lane.backend.embed(texts)))
                 .map_err(|_| PanickedBackend);
-        let vectors = settle_inference(&self.inner, joined)?;
-        check_engine_vectors(&self.inner, lane.lane.dims, texts.len(), &vectors)
-            .map_err(InferenceError::Invariant)?;
-        Ok(vectors)
+        settle_inference(&self.inner, lane.lane.dims, texts.len(), joined)
+            .map_err(EmbedRefusal::Inference)
+    }
+}
+
+/// Why one native call did not run to a vector: the permit was held, or inference itself refused or failed.
+enum EmbedRefusal {
+    Busy,
+    Inference(InferenceError),
+}
+
+impl From<InferenceError> for EmbedRefusal {
+    fn from(error: InferenceError) -> Self {
+        Self::Inference(error)
     }
 }
 
@@ -424,6 +557,7 @@ fn lane_failure_reason(inner: &SynapseInner) -> Option<String> {
         LaneState::Ready(_) => None,
         LaneState::Starting => Some(STARTING_REASON.to_owned()),
         LaneState::Disabled { reason } | LaneState::Failing { reason } => Some(reason.clone()),
+        LaneState::ShutDown => Some(SHUT_DOWN_REASON.to_owned()),
     }
 }
 
@@ -434,6 +568,14 @@ const STARTING_REASON: &str = "the synapse lane is still starting";
 const BUSY_REASON: &str = "the synapse lane is busy";
 
 const SHUT_DOWN_REASON: &str = "the synapse lane is shut down";
+
+/// The disabled reason the host passes to `SynapseComponent::unsupported` on a platform with no lane.
+/// Both the `synapse_state` health metric and `LaneUnavailableState` classify a disabled lane by this reason, so the two projections cannot disagree.
+const UNSUPPORTED_REASON: &str = "synapse_unsupported";
+
+fn is_unsupported_reason(reason: &str) -> bool {
+    reason == UNSUPPORTED_REASON
+}
 
 /// Engines supplied through `ready_with_engine` bypass `Backend`'s own output checks, so the served-vector contract is enforced here for every engine: one row per input text, each with `dims` finite unit-norm components. A violation quarantines the lane like any other invariant failure.
 fn check_engine_vectors(
@@ -471,10 +613,20 @@ impl From<tokio::task::JoinError> for PanickedBackend {
 /// `Invariant` failures and panicked backends mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
 fn settle_inference(
     inner: &SynapseInner,
+    dims: usize,
+    expected_rows: usize,
     joined: Result<Result<Vec<Vec<f32>>, InferenceError>, impl Into<PanickedBackend>>,
 ) -> Result<Vec<Vec<f32>>, InferenceError> {
     match joined {
-        Ok(Ok(vectors)) => Ok(vectors),
+        Ok(Ok(vectors)) => {
+            check_engine_vectors(inner, dims, expected_rows, &vectors)
+                .map_err(InferenceError::Invariant)?;
+            // The state lock orders validated completion against concurrent count failures.
+            match lane_failure_reason(inner) {
+                Some(reason) => Err(InferenceError::Artifact(reason)),
+                None => Ok(vectors),
+            }
+        }
         // Reasons are bounded once here so the retained state and the propagated error carry the same capped text; an oversized error would otherwise be downgraded to `internal_error` at the terminal.
         Ok(Err(InferenceError::Invariant(mut reason))) => {
             protocol::bound_diagnostic(&mut reason);
@@ -711,12 +863,7 @@ impl SynapseComponent {
                 tokio::task::spawn_blocking(move || lane_blocking.backend.embed(&[text.as_str()]))
                     .await;
             // The vector contract is checked here, while the permit is still held, so a malformed engine result quarantines the lane even when the handler has already expired or been cancelled and no later worker can slip past `lane_failure_reason` first.
-            let result = settle_inference(&inner, joined)
-                .and_then(|vectors| {
-                    check_engine_vectors(&inner, lane_task.lane.dims, 1, &vectors)
-                        .map(|()| vectors)
-                        .map_err(InferenceError::Invariant)
-                })
+            let result = settle_inference(&inner, lane_task.lane.dims, 1, joined)
                 .map_err(QueryFault::Engine);
             let _ = tx.send(result);
         });
@@ -870,17 +1017,8 @@ impl SynapseComponent {
                 lane_blocking.backend.embed(&texts)
             })
             .await;
-            match settle_inference(&inner, joined) {
-                Ok(vectors) => {
-                    match check_engine_vectors(&inner, lane.lane.dims, item_count, &vectors) {
-                        Ok(()) => inner.jobs.publish_ready(seq, vectors),
-                        Err(reason) => {
-                            inner
-                                .jobs
-                                .publish_failed(seq, "artifact_invalid".to_owned(), reason);
-                        }
-                    }
-                }
+            match settle_inference(&inner, lane.lane.dims, item_count, joined) {
+                Ok(vectors) => inner.jobs.publish_ready(seq, vectors),
                 Err(InferenceError::Input(reason)) => {
                     inner
                         .jobs
@@ -1125,7 +1263,7 @@ impl CompositeComponent for SynapseComponent {
             SynapseStatus::Disabled { reason } => HealthReport {
                 status: HealthStatus::Degraded,
                 metrics: Some(serde_json::json!({
-                    "synapse_state": if reason == "synapse_unsupported" {
+                    "synapse_state": if is_unsupported_reason(&reason) {
                         "unsupported"
                     } else {
                         "degraded"
@@ -1141,8 +1279,9 @@ impl CompositeComponent for SynapseComponent {
         }
     }
 
-    /// Shutdown closes admission and cancels queued wrappers before joining every started native call through its incarnation.
+    /// Shutdown closes admission and cancels queued wrappers before joining every started native inference call through its incarnation.
     /// Shutdown never aborts a started native call.
+    /// Token counting is not joined: each in-flight count retains its lane through an `Arc`, and its settlement cannot replace completed shutdown.
     /// The lane ends `Disabled` so a late `bind`, `health`, or `embed_blocking` observes the shutdown instead of a ready lane whose admission is closed.
     /// `embed_blocking` calls are not tracked, so shutdown joins them through the CPU permit: an in-flight blocking call holds that permit until it returns, and the terminal state is written while shutdown holds it, so a call that read `Ready` earlier observes `Disabled` when it rechecks after acquiring the permit, and a joined call that failed cannot overwrite the shutdown state.
     async fn shutdown(&self) -> Result<(), crate::composite::ShutdownError> {
@@ -1155,9 +1294,7 @@ impl CompositeComponent for SynapseComponent {
         self.inner.jobs.clear();
         // Taking the permit joins an in-flight `embed_blocking` call; its own failure transition settles before the shutdown state is written.
         let permit = self.inner.cpu.acquire().await;
-        *self.inner.lock_state() = LaneState::Disabled {
-            reason: SHUT_DOWN_REASON.to_owned(),
-        };
+        *self.inner.lock_state() = LaneState::ShutDown;
         drop(permit);
         Ok(())
     }
@@ -1249,6 +1386,10 @@ mod tests {
     impl EmbeddingEngine for NoopEngine {
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
             Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
         }
     }
 
@@ -1392,5 +1533,186 @@ mod tests {
             lane_state_after_load(Ok(ReadyLane::new(Arc::new(NoopEngine), lane()))),
             LaneState::Ready(_)
         ));
+    }
+
+    struct GatedCountEngine {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<InferenceError>>,
+    }
+
+    impl EmbeddingEngine for GatedCountEngine {
+        fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+            Err(InferenceError::Artifact("artifact fault".to_owned()))
+        }
+
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            if text == "artifact" {
+                return Err(InferenceError::Artifact("count artifact fault".to_owned()));
+            }
+            self.entered.send(()).expect("test observes entry");
+            let error = self
+                .release
+                .lock()
+                .expect("release receiver")
+                .recv()
+                .expect("injected counter panic: release channel closed");
+            Err(error)
+        }
+    }
+
+    fn gated_count_component() -> (
+        Arc<SynapseComponent>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<InferenceError>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let component = Arc::new(
+            SynapseComponent::ready_with_engine(
+                lane(),
+                Arc::new(GatedCountEngine {
+                    entered: entered_tx,
+                    release: std::sync::Mutex::new(release_rx),
+                }),
+                SynapseLimits {
+                    max_queued_request_bytes: 8 * 1024 * 1024,
+                    ..SynapseLimits::default()
+                },
+            )
+            .expect("limits validate"),
+        );
+        (component, entered_rx, release_tx)
+    }
+
+    #[tokio::test]
+    async fn a_count_failure_that_settles_after_shutdown_preserves_the_terminal_state() {
+        let (component, entered_rx, release_tx) = gated_count_component();
+        let budget = std::time::Duration::from_secs(5);
+        let limits = EmbeddingInputLimits::of_lane(&lane());
+        let counting = {
+            let component = Arc::clone(&component);
+            tokio::task::spawn_blocking(move || component.preflight_embedding(limits, "alpha beta"))
+        };
+        entered_rx
+            .recv_timeout(budget)
+            .expect("the count is entered");
+
+        let shutdown = tokio::time::timeout(budget, component.shutdown()).await;
+        let stopped = component.status();
+
+        release_tx
+            .send(InferenceError::Invariant("count overflowed".to_owned()))
+            .expect("the count is released");
+        let refusal = tokio::time::timeout(budget, counting)
+            .await
+            .expect("the released count completes within the budget")
+            .expect("the counting thread joins")
+            .expect_err("an invariant count fails the preflight");
+        shutdown
+            .expect("shutdown must not wait for the blocked count")
+            .expect("shutdown drains cleanly");
+        match stopped {
+            SynapseStatus::Disabled { reason } => assert_eq!(reason, SHUT_DOWN_REASON),
+            other => panic!("a drained lane must be disabled, got {other:?}"),
+        }
+        assert_eq!(
+            refusal,
+            DenseUnavailable::CountUnavailable(InferenceFailureKind::Invariant)
+        );
+        match component.status() {
+            SynapseStatus::Disabled { reason } => assert_eq!(
+                reason, SHUT_DOWN_REASON,
+                "a late count failure must not overwrite completed shutdown"
+            ),
+            other => panic!("the terminal shutdown state must survive, got {other:?}"),
+        }
+        assert_eq!(component.health().await.status, HealthStatus::Degraded);
+    }
+
+    #[tokio::test]
+    async fn a_count_invariant_escalates_runtime_disablement() {
+        for artifact_source in ["inference", "count"] {
+            let (component, entered_rx, release_tx) = gated_count_component();
+            let budget = std::time::Duration::from_secs(5);
+            let limits = EmbeddingInputLimits::of_lane(&lane());
+            let counting = {
+                let component = Arc::clone(&component);
+                tokio::task::spawn_blocking(move || {
+                    component.preflight_embedding(limits, "alpha beta")
+                })
+            };
+            entered_rx
+                .recv_timeout(budget)
+                .expect("the count is entered");
+            if artifact_source == "inference" {
+                assert!(matches!(
+                    component.embed_blocking(&["alpha"]),
+                    Err(InferenceError::Artifact(_))
+                ));
+            } else {
+                assert_eq!(
+                    component.preflight_embedding(limits, "artifact"),
+                    Err(DenseUnavailable::CountUnavailable(
+                        InferenceFailureKind::Artifact
+                    ))
+                );
+            }
+            assert!(matches!(component.status(), SynapseStatus::Disabled { .. }));
+            release_tx
+                .send(InferenceError::Invariant("count overflowed".to_owned()))
+                .expect("the count is released");
+            let result = tokio::time::timeout(budget, counting)
+                .await
+                .expect("the count completes")
+                .expect("the count does not panic");
+            assert_eq!(
+                result,
+                Err(DenseUnavailable::CountUnavailable(
+                    InferenceFailureKind::Invariant
+                ))
+            );
+            assert!(
+                matches!(component.status(), SynapseStatus::Failing { .. }),
+                "an invariant must escalate {artifact_source} disablement: {:?}",
+                component.status()
+            );
+            assert_eq!(component.health().await.status, HealthStatus::Failing);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_counter_panic_is_quarantined_as_a_content_free_invariant() {
+        let (component, entered_rx, release_tx) = gated_count_component();
+        let budget = std::time::Duration::from_secs(5);
+        let limits = EmbeddingInputLimits::of_lane(&lane());
+        let counting = {
+            let component = Arc::clone(&component);
+            tokio::task::spawn_blocking(move || component.preflight_embedding(limits, "alpha beta"))
+        };
+        entered_rx
+            .recv_timeout(budget)
+            .expect("the count is entered");
+        drop(release_tx);
+        let result = tokio::time::timeout(budget, counting)
+            .await
+            .expect("the count completes")
+            .expect("preflight must contain a backend panic");
+        assert_eq!(
+            result,
+            Err(DenseUnavailable::CountUnavailable(
+                InferenceFailureKind::Invariant
+            ))
+        );
+        let SynapseStatus::Failing { reason } = component.status() else {
+            panic!("a counter panic quarantines the lane");
+        };
+        assert_eq!(reason, "token counting panicked");
+        assert_eq!(component.health().await.status, HealthStatus::Failing);
+        assert_eq!(
+            component.preflight_embedding(limits, "alpha beta"),
+            Err(DenseUnavailable::LaneUnavailable {
+                state: LaneUnavailableState::Failing
+            })
+        );
     }
 }

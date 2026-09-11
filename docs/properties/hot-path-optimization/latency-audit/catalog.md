@@ -2454,8 +2454,8 @@ evaluation of this area and its disposition are recorded in
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L114-L127
 [reattach]: ../../../../crates/daemon/src/wire.rs#L145-L186
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../crates/daemon/src/wire.rs#L673-L736
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L826-L837
+[flatten]: ../../../../crates/daemon/src/wire.rs#L680-L743
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L833-L844
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264
