@@ -23,6 +23,7 @@ mod unix {
         BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
         EventSink, FinishReason, LlmExecutionBackend,
     };
+    use host_runtime::synapse::embed_tokens::EmbedTokens;
     use host_runtime::synapse::inference::InferenceError;
     use host_runtime::synapse::{EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits};
     use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
@@ -281,6 +282,10 @@ mod unix {
     struct DeterministicEngine;
 
     impl EmbeddingEngine for DeterministicEngine {
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
+        }
+
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
             Ok(texts
                 .iter()

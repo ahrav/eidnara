@@ -13,6 +13,7 @@ use fastembed::{
 use super::bundle::{Corpus, CorpusItem, SelectedOutput, VerifiedBundle};
 #[cfg(target_os = "linux")]
 use super::bundle::{OpenRegularFileError, open_regular_file, validate_sha256_hex};
+use super::embed_tokens::{EmbedTokens, UntruncatedTokenizer};
 
 /// CPU ONNX Runtime contains executable code and static runtime tables, not model weights.
 /// The 512 MiB limit bounds the verification source buffer and sealed memfd copy to 1 GiB.
@@ -241,6 +242,8 @@ pub(crate) fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), St
 
 pub struct Backend {
     model: Mutex<TextEmbedding>,
+    /// A clone of `model`'s tokenizer with truncation and padding disabled, so a count names the whole text.
+    counter: UntruncatedTokenizer,
     dims: usize,
     /// The tokenizer truncates every text to this many tokens.
     max_tokens: usize,
@@ -325,9 +328,11 @@ impl Backend {
             })?
             .get_ids()
             .is_empty();
+        let counter = UntruncatedTokenizer::from_tokenizer(embedder.tokenizer.clone());
 
         let backend = Self {
             model: Mutex::new(embedder),
+            counter,
             dims: manifest.dims as usize,
             max_tokens: manifest.max_tokens as usize,
             zero_token_inputs_possible,
@@ -336,6 +341,12 @@ impl Backend {
         backend.certify(&corpus, certification_rows, max_batch_text_bytes)?;
         backend.long_input_probe(&corpus, max_text_bytes, certification_rows)?;
         Ok(backend)
+    }
+
+    /// The full untruncated token count of `text` under the bundle's own tokenizer, including the special tokens the post-processor adds.
+    /// Inference truncates at `max_tokens`; this count does not, so a caller can refuse a text the model would otherwise cut.
+    pub fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+        self.counter.count(text)
     }
 
     /// embed blocks while running native inference over one ordered page of texts.

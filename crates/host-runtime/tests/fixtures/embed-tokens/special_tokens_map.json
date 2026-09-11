@@ -1,0 +1,15 @@
+{
+ "cls_token": "[CLS]",
+ "pad_token": "[PAD]",
+ "sep_token": "[SEP]",
+ "unk_token": {
+  "content": "[UNK]",
+  "single_word": false,
+  "lstrip": false,
+  "rstrip": false,
+  "normalized": false
+ },
+ "additional_special_tokens": [
+  "[SEP TOK]"
+ ]
+}

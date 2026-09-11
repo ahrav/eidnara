@@ -634,6 +634,23 @@ async fn certified_bundle_loads_and_serves_expected_vectors() {
         assert!((a - b).abs() <= tolerance);
     }
 
+    // The in-process count from the same verified bytes sees the whole text, so the preflight refuses what the wire path silently truncates.
+    let limits = host_runtime::synapse::EmbeddingInputLimits::of_lane(&lane);
+    let admitted = component
+        .preflight_embedding(limits, "alpha beta gamma delta epsilon zeta eta theta")
+        .expect("eight words fit the eight-token window");
+    assert_eq!(admitted.tokens().get(), 8);
+    assert_eq!(
+        component.preflight_embedding(
+            limits,
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+        ),
+        Err(host_runtime::synapse::DenseUnavailable::TokenOverflow {
+            tokens: host_runtime::synapse::embed_tokens::EmbedTokens::new(10),
+            max_tokens: host_runtime::synapse::embed_tokens::EmbedTokens::new(8),
+        })
+    );
+
     // Zero-token inputs are refused before native inference.
     for text in ["", "   "] {
         match component.embed_blocking(&[text]) {

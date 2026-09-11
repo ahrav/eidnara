@@ -1,0 +1,312 @@
+{
+ "_derivation": "Hand-derived from tokenizer.json: WordLevel vocab [PAD]=0 [UNK]=1 [CLS]=2 [SEP]=3 alpha=4 beta=5 gamma=6 delta=7; WhitespaceSplit pre-tokenizer; TemplateProcessing wraps every single sequence as [CLS] A [SEP]. attention_mask is 1 for every real token. special_tokens_mask is 1 only for the tokens the template supplies; a special token written in the text is matched by the added vocabulary and encodes to its id like any other word, so its mask stays 0. Pinned against tokenizers 0.22.2 (the crate's exact dependency). special_tokens_map.json adds [SEP TOK] at load time exactly as inference does; it is absent from tokenizer.json, so it receives the next id after the vocabulary, 8, and only a counter cloned from the configured inference tokenizer can see it.",
+ "sequences": [
+  {
+   "label": "two words",
+   "text": "alpha beta",
+   "ids": [
+    2,
+    4,
+    5,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "empty",
+   "text": "",
+   "ids": [
+    2,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    1
+   ]
+  },
+  {
+   "label": "whitespace only",
+   "text": "   ",
+   "ids": [
+    2,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    1
+   ]
+  },
+  {
+   "label": "mixed whitespace",
+   "text": "alpha \t\n beta",
+   "ids": [
+    2,
+    4,
+    5,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "unknown word",
+   "text": "alpha unknownword",
+   "ids": [
+    2,
+    4,
+    1,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "special token in text",
+   "text": "alpha [SEP] beta",
+   "ids": [
+    2,
+    4,
+    3,
+    5,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "unicode word",
+   "text": "\u03b1\u03b2\u03b3 beta",
+   "ids": [
+    2,
+    1,
+    5,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "eight words",
+   "text": "alpha beta gamma delta alpha beta gamma delta",
+   "ids": [
+    2,
+    4,
+    5,
+    6,
+    7,
+    4,
+    5,
+    6,
+    7,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "nine words",
+   "text": "alpha beta gamma delta alpha beta gamma delta alpha",
+   "ids": [
+    2,
+    4,
+    5,
+    6,
+    7,
+    4,
+    5,
+    6,
+    7,
+    4,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1
+   ]
+  },
+  {
+   "label": "map-only special token",
+   "text": "alpha [SEP TOK] beta",
+   "ids": [
+    2,
+    4,
+    8,
+    5,
+    3
+   ],
+   "attention_mask": [
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "special_tokens_mask": [
+    1,
+    0,
+    0,
+    0,
+    1
+   ]
+  }
+ ],
+ "padded_batch": {
+  "_derivation": "Batch-longest padding pads every sequence to the longest one with [PAD]=0 and attention 0; the untruncated count of each text is its own real-token length, which is the sum of its attention mask, never the padded length.",
+  "texts": [
+   "alpha",
+   "alpha beta gamma delta",
+   "gamma"
+  ],
+  "padded_length": 6,
+  "counts": [
+   3,
+   6,
+   3
+  ],
+  "padded_ids": [
+   [
+    2,
+    4,
+    3,
+    0,
+    0,
+    0
+   ],
+   [
+    2,
+    4,
+    5,
+    6,
+    7,
+    3
+   ],
+   [
+    2,
+    6,
+    3,
+    0,
+    0,
+    0
+   ]
+  ]
+ },
+ "truncation_control": {
+  "_derivation": "A tokenizer truncating at 4 keeps [CLS] plus two words plus [SEP] for the eight-word text and reports 4, which fits a window of 4; the true sequence is 10 and does not.",
+  "text": "alpha beta gamma delta alpha beta gamma delta",
+  "window": 4,
+  "truncated_count": 4,
+  "full_count": 10
+ },
+ "fixed_padding_control": {
+  "_derivation": "A tokenizer padding every sequence to a fixed 16 reports 16 ids for two words; the count is the four real tokens.",
+  "text": "alpha beta",
+  "pad_to": 16,
+  "padded_length": 16,
+  "count": 4
+ }
+}

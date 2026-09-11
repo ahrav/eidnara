@@ -9,8 +9,10 @@
 //! Shutdown drains the incarnation tracker before release.
 
 pub mod bundle;
+pub mod embed_tokens;
 pub mod inference;
 pub mod jobs;
+pub mod preflight;
 pub mod protocol;
 
 use std::path::PathBuf;
@@ -25,8 +27,13 @@ use crate::handler::{
     BindOutcome, HealthReport, HealthStatus, InitError, ManifestSnapshot, RequestCtx,
     RequestOutcome, RouteHandle, RouteIdentity,
 };
+pub use embed_tokens::EmbedTokens;
 use inference::{Backend, InferenceError, OrtIdentity};
 use jobs::{AdmitOutcome, JobTable, PollOutcome};
+pub use preflight::{
+    AdmittedInput, DenseUnavailable, EmbeddingIdentity, EmbeddingInputLimits, InferenceFailureKind,
+    LaneUnavailableState,
+};
 use protocol::{Request, RequestError};
 
 pub const SYNAPSE_MODULE_ID: &str = "synapse";
@@ -162,11 +169,18 @@ impl LaneInfo {
 /// Tests can substitute an `EmbeddingEngine` implementation.
 pub trait EmbeddingEngine: Send + Sync + 'static {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError>;
+
+    /// The full token count of `text` under the engine's own tokenizer, with nothing truncated and no padding.
+    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError>;
 }
 
 impl EmbeddingEngine for Backend {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
         Backend::embed(self, texts)
+    }
+
+    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+        Backend::untruncated_token_len(self, text)
     }
 }
 
@@ -337,6 +351,57 @@ impl SynapseComponent {
         }
     }
 
+    /// Judges one text for embedding under the ready lane: bytes first, then the exact untruncated count from the lane's own tokenizer, then the window.
+    /// The count runs outside the `cpu` permit, so a refused text never contends with inference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable`] naming the first check that failed; the text is never part of the reason.
+    pub fn preflight_embedding<'t>(
+        &self,
+        limits: EmbeddingInputLimits,
+        text: &'t str,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        preflight::admit(&lane.lane, &*lane.backend, limits, text)
+    }
+
+    /// Embeds one admitted text, byte for byte as admitted, under the lane it was admitted for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable::IdentityChanged`] when the serving lane is no longer the admitting one, [`DenseUnavailable::LaneUnavailable`] when no lane serves, [`DenseUnavailable::LaneBusy`] when another call holds the lane's permit, and [`DenseUnavailable::Inference`] when inference refuses or fails.
+    pub fn embed_admitted(
+        &self,
+        admitted: &AdmittedInput<'_>,
+    ) -> Result<Vec<f32>, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        if !admitted.identity().matches(&lane.lane) {
+            return Err(DenseUnavailable::IdentityChanged);
+        }
+        let mut vectors = self
+            .run_inference(&lane, &[admitted.text()])
+            .map_err(|refusal| match refusal {
+                EmbedRefusal::Busy => DenseUnavailable::LaneBusy {
+                    retry_after_ms: self.inner.limits.query_retry_after_ms,
+                },
+                EmbedRefusal::Inference(error) => DenseUnavailable::Inference((&error).into()),
+            })?;
+        // `check_engine_vectors` accepted exactly one vector for the one text.
+        Ok(vectors.pop().expect("one vector for one admitted text"))
+    }
+
+    /// One lock acquisition answers both whether a lane serves and, if not, which state refuses.
+    fn ready_or_unavailable(&self) -> Result<Arc<ReadyLane>, DenseUnavailable> {
+        let state = match &*self.inner.lock_state() {
+            LaneState::Ready(lane) => return Ok(Arc::clone(lane)),
+            LaneState::Starting => LaneUnavailableState::Starting,
+            LaneState::Disabled { .. } => LaneUnavailableState::Disabled,
+            LaneState::Failing { .. } => LaneUnavailableState::Failing,
+        };
+        Err(DenseUnavailable::LaneUnavailable { state })
+    }
+
     /// `embed_blocking` shares the lane's single `cpu` permit with routed queries and batch workers, so at most one native call runs at a time.
     /// A lane whose permit is held or closed reports `Artifact` without waiting, because a synchronous caller cannot park on the async semaphore.
     /// `Invariant` errors mark the lane failing before returning, so later callers cannot obtain vectors from a suspect backend.
@@ -380,14 +445,27 @@ impl SynapseComponent {
                 }
             }
         };
+        self.run_inference(&lane, texts)
+            .map_err(|refusal| match refusal {
+                EmbedRefusal::Busy => InferenceError::Artifact(BUSY_REASON.to_owned()),
+                EmbedRefusal::Inference(error) => error,
+            })
+    }
+
+    /// Runs one native call for `lane` under the single `cpu` permit, settling failures and panics into the lane state.
+    fn run_inference(
+        &self,
+        lane: &ReadyLane,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, EmbedRefusal> {
         let _permit = self
             .inner
             .cpu
             .try_acquire()
-            .map_err(|_| InferenceError::Artifact(BUSY_REASON.to_owned()))?;
+            .map_err(|_| EmbedRefusal::Busy)?;
         // A concurrent holder can mark the lane failing between the state read and this acquisition; the captured backend must not run after that transition.
         if let Some(reason) = lane_failure_reason(&self.inner) {
-            return Err(InferenceError::Artifact(reason));
+            return Err(InferenceError::Artifact(reason).into());
         }
         // A panicking backend is quarantined the same way the routed workers quarantine a panicked blocking task; the caller sees the same `Invariant` instead of an unwind that leaves the lane `Ready`.
         let joined =
@@ -397,6 +475,18 @@ impl SynapseComponent {
         check_engine_vectors(&self.inner, lane.lane.dims, texts.len(), &vectors)
             .map_err(InferenceError::Invariant)?;
         Ok(vectors)
+    }
+}
+
+/// Why one native call did not run to a vector: the permit was held, or inference itself refused or failed.
+enum EmbedRefusal {
+    Busy,
+    Inference(InferenceError),
+}
+
+impl From<InferenceError> for EmbedRefusal {
+    fn from(error: InferenceError) -> Self {
+        Self::Inference(error)
     }
 }
 
@@ -1249,6 +1339,10 @@ mod tests {
     impl EmbeddingEngine for NoopEngine {
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
             Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
         }
     }
 

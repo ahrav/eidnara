@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use super::raw_client::{self, Discovered, RawFrame};
+use host_runtime::synapse::embed_tokens::EmbedTokens;
 use host_runtime::synapse::inference::InferenceError;
 use host_runtime::synapse::{
     EmbeddingEngine, LaneInfo, SYNAPSE_MODULE_ID, SynapseComponent, SynapseLimits,
@@ -44,6 +45,9 @@ pub struct DeterministicEngine {
     pub texts_embedded: AtomicUsize,
     pub call_texts: Mutex<Vec<String>>,
     pub fail_next: Mutex<Option<InferenceError>>,
+    /// Token counts requested, separate from inference calls.
+    pub count_calls: AtomicUsize,
+    pub fail_next_count: Mutex<Option<InferenceError>>,
     gate: Mutex<Option<EngineGate>>,
 }
 
@@ -56,6 +60,8 @@ impl DeterministicEngine {
             texts_embedded: AtomicUsize::new(0),
             call_texts: Mutex::new(Vec::new()),
             fail_next: Mutex::new(None),
+            count_calls: AtomicUsize::new(0),
+            fail_next_count: Mutex::new(None),
             gate: Mutex::new(None),
         })
     }
@@ -97,6 +103,15 @@ impl DeterministicEngine {
 }
 
 impl EmbeddingEngine for DeterministicEngine {
+    /// One whitespace-separated word is one model token; the count is exact, never truncated, and counted separately from inference calls.
+    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+        self.count_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.fail_next_count.lock().expect("count fail lock").take() {
+            return Err(error);
+        }
+        Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
+    }
+
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.call_texts
