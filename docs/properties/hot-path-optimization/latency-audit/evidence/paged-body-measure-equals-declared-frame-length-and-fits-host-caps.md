@@ -172,9 +172,10 @@ candidate was not committed and has no immutable source revision.
   bytes and existing host refusal. The failed preflight above remains
   historical evidence; neither text replacement nor a parser, wire, or cap
   change is authorized.
-- Implementation: [the carrier factory][carrier] serializes, parses an
-  inspection snapshot, installs a private non-enumerable symbol containing
-  the text, and freezes the root. The pager measures that text. The existing
+- Implementation: [the carrier factory][carrier] serializes, copies the root
+  fields into a shallow view, installs a private non-enumerable symbol
+  containing the text, and freezes the root. It does not parse the text. The
+  pager measures that text. The existing
   module-call and transport body parameters carry the branded object without
   another argument or wrapper. [The encoder][carrier-encoder] uses its stored
   text; ordinary objects retain the `JSON.stringify` path. Nested inspection
@@ -198,10 +199,14 @@ candidate was not committed and has no immutable source revision.
   `String.isWellFormed`; the local structural type supplies its missing
   declaration under the package's ES2022 library selection.
 - Serialization: the full source body and each emitted envelope stringify
-  once. Envelopes materialize only after the page count stabilizes. Digest,
-  scalar-skeleton, item, and continuation packing still serialize their own
-  inputs. This is not a claim that the pager invokes `JSON.stringify` once
-  in total. Source getters and `toJSON` are evaluated before packing.
+  once. The unpaged path parses nothing. A body that needs paging parses the
+  full text once so every item is plain JSON, and each item's byte bound is
+  computed once before the page-count loop rather than once per attempt.
+  Envelopes materialize only after the page count stabilizes and are not
+  parsed. Digest, scalar-skeleton, item, and continuation packing still
+  serialize their own inputs. This is not a claim that the pager invokes
+  `JSON.stringify` once in total. Source getters and `toJSON` are evaluated
+  before packing.
 - Red/green evidence: the [module transport snapshot test][snapshot-test]
   failed before implementation with two stringify calls where one was
   expected. It passes with the carrier, including source mutation, nested
@@ -254,17 +259,22 @@ candidate was not committed and has no immutable source revision.
   warnings` pass. Rust formatting passes. Full `check:repo`, bundle smoke,
   and independent landing reviews remain outer gates, not claimed here.
   Pi's typecheck and all 379 tests pass (1365 assertions, no skips).
-- Memory: no process-local cache is added. During preparation, the original
-  input can coexist with the parsed full-body snapshot, parsed page objects,
-  and stored text. For full-text length S and total page-text length P,
-  `2 * (S + P)` accounts for their logical UTF-16 payload bytes, excluding
-  engine/object overhead. Token matches, decoded string probes, continuation
-  UTF-8 item buffers, and transport frame reservations are additional
-  transient storage. Page objects and
+- Memory: no process-local cache is added. On the unpaged path the original
+  input coexists with one shallow root copy and the stored text. During paged
+  preparation it also coexists with one parsed full-body snapshot and the
+  per-page stored texts; page views are shallow copies that share item
+  references with the snapshot. For full-text length S and total page-text
+  length P, `2 * (S + P)` accounts for the logical UTF-16 payload bytes of
+  the texts, excluding engine/object overhead. Token matches, decoded string
+  probes, continuation UTF-8 item buffers, and transport frame reservations
+  are additional transient storage. Page objects and
   strings survive across the series' awaits; they are not zero-cost memory
   and are not covered by the transport's publication-only byte charge. The
-  full-body snapshot is preparation-local; no throughput, RSS, or latency
-  improvement is asserted.
+  full-body snapshot is preparation-local. On Bun 1.3.14 the unpaged path
+  measures about half the pre-carrier cost of two stringifies across dense,
+  long-string, and mixed 500-770 KiB bodies (0.85, 0.54, and 0.21 ms versus
+  1.60, 1.03, and 0.43 ms); no RSS or end-to-end latency improvement is
+  asserted.
 - Conclusion: the approved acceptance/refusal corpus passes at the specified
   seams. P3 stays active and partial for actual TypeScript native attachment.
 
@@ -312,9 +322,10 @@ candidate was not committed and has no immutable source revision.
   no checker or skip list is changed.
 - The carrier has a shallow-readonly inspection view and authoritative text.
   Root fields are frozen for control-flow reads; nested inspection edits do
-  not change the wire. Per-page parsed graphs remain transient allocations.
-  No unsafe public text/object pairing factory, cache, or extra mode is added
-  to avoid those parses. Only transport stringify elimination is claimed.
+  not change the wire. Emitted pages are not parsed; only a body that needs
+  paging is parsed, once. No unsafe public text/object pairing factory,
+  cache, or extra mode is added. Only transport stringify elimination is
+  claimed.
 - Final gates pass: `check:repo` (5133 passes, five existing skips), bundle
   smoke, 215 focused TypeScript tests (1111 Bun assertions plus fixture Node
   assertions), six direct-host tests, focused all-feature Cargo Clippy, and
@@ -330,13 +341,13 @@ candidate was not committed and has no immutable source revision.
   sender/host evidence retain the limits stated above. P3 remains active.
 
 [ryu-bound]: https://docs.rs/ryu/1.0.23/ryu/raw/fn.format64.html
-[unpaged-regression]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1456
+[unpaged-regression]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1509
 [carrier]: ../../../../../packages/opencode-plugin/src/shared/host-client/serialized-json-body.ts#L1-L26
 [carrier-encoder]: ../../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
-[growth-bound]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L637-L669
+[growth-bound]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L637-L676
 [snapshot-test]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
-[pager-spy]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1425
-[carrier-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1412
+[pager-spy]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1426
+[carrier-hook]: ../../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1425
 [carrier-corpus]: ../../../../../packages/opencode-plugin/src/hooks/context/__tests__/serialized-transform-corpus.ts
 [writer-test]: ../../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L55
 [host-runner]: ../../../../../packages/e2e-tests/scripts/verify-serialized-transform-pages.ts

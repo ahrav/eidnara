@@ -198,9 +198,9 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [serialized-writer]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L55
 [serialized-transport]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
 [serialized-client]: ../../../../packages/opencode-plugin/src/shared/host-client/client.test.ts#L108-L175
-[serialized-unpaged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1456
-[serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1425
-[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1412
+[serialized-unpaged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1509
+[serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1426
+[serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1425
 [serialized-host]: ../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
 [serialized-campaign]: evidence/paged-body-measure-equals-declared-frame-length-and-fits-host-caps.md#q-what-do-the-unpaged-correction-and-registered-cargo-test-prove
 
@@ -437,9 +437,9 @@ not a claim that no related check exists anywhere in the repository.
 [tordinal]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.test.ts#L173
 [tsqlite]: ../../../../packages/opencode-plugin/src/shared/sqlite.test.ts#L279
 [tbind]: ../../../../packages/opencode-plugin/src/shared/sqlite-bind-style.test.ts#L32
-[t1308]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1308
-[t1371]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1371
-[t1391]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1391
+[t1308]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1309
+[t1371]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1372
+[t1391]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1392
 [t181]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.test.ts#L181
 [t358]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L358
 [t381]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/logger.test.ts#L381

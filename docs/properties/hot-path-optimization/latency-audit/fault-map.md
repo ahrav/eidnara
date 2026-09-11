@@ -182,7 +182,7 @@ in the records' open questions.
 [handle]: ../../../../crates/daemon/src/lib.rs#L11805-L11827
 [capacity]: ../../../../crates/host-runtime/src/handler.rs#L486-L491
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
-[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
+[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12484-L12499
 [pageapply]: ../../../../crates/daemon/src/lib.rs#L9425-L9433
 [expand]: ../../../../crates/daemon/src/lib.rs#L4151-L4245

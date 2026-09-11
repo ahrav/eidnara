@@ -8,11 +8,11 @@ export type SerializedJsonBody = Readonly<Record<string, unknown>> & {
     readonly [SERIALIZED_JSON]: string;
 };
 
+/** Nested values are shared with `value`; only root fields are copied, so nothing is parsed. */
 export function serializeJsonBody(value: Record<string, unknown>): SerializedJsonBody {
     const text = JSON.stringify(value);
     if (text === undefined) throw new TypeError("request body is not JSON serializable");
-    const body: unknown = JSON.parse(text);
-    if (!isRecord(body)) throw new TypeError("request body must serialize to a JSON object");
+    const body: Record<string, unknown> = { ...value };
     Object.defineProperty(body, SERIALIZED_JSON, { value: text });
     return Object.freeze(body) as SerializedJsonBody;
 }

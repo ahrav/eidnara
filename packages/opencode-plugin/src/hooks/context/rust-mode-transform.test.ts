@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import { serializedJsonText } from "../../shared/host-client/serialized-json-body";
 import * as logger from "../../shared/logger";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
 import { Database } from "../../shared/sqlite";
@@ -314,7 +315,9 @@ describe("Rust mode transform request", () => {
             prompt_surface_config_identity: promptSurfaceConfigIdentity(undefined),
             prompt_surface_tool_descriptions: {},
         });
-        expect(first.native_messages).toEqual(makeMessages(sessionId));
+        // The carried text is the wire contract; `output.messages` is rewritten in place after the send.
+        const firstWire = JSON.parse(serializedJsonText(first)!) as Record<string, unknown>;
+        expect(firstWire.native_messages).toEqual(makeMessages(sessionId));
         expect(Array.isArray(first.messages)).toBe(true);
         expect("pass_inputs" in first).toBe(false);
         expect(output.messages).toEqual(native);

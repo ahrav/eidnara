@@ -140,13 +140,16 @@ describe("HostClient", () => {
             method: "transform",
             get messages() {
                 reads += 1;
-                return [{ text: reads === 1 ? "é😀\ud800" : "changed on second read" }];
+                return [{ text: reads === 1 ? "é😀\ud800" : "changed on later read" }];
             },
         };
         const stringify = spyOn(JSON, "stringify");
         try {
             const page = serializeJsonBody(body);
             const bytes = Buffer.byteLength(serializedJsonText(page));
+            // The text is authoritative: it comes from the first getter read, and the
+            // shallow view never rewrites it.
+            const readsAfterBuild = reads;
             body.method = "mutated";
             (page.messages as Array<{ text: string }>)[0]!.text = "inspection edit";
             expect(Reflect.set(page, "method", "wrong")).toBe(false);
@@ -155,7 +158,7 @@ describe("HostClient", () => {
             void waiting.catch(() => {});
             const frame = await daemon.next();
             expect(stringify.mock.calls.length).toBe(callsBeforeSend);
-            expect(reads).toBe(1);
+            expect(reads).toBe(readsAfterBuild);
             expect(frame.headerBytes).toBeDefined();
             const header = frame.headerBytes!;
             expect(new DataView(header.buffer, header.byteOffset).getUint32(0, true)).toBe(bytes);

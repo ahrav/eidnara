@@ -2398,7 +2398,7 @@ evaluation of this area and its disposition are recorded in
 [outcome]: ../../../../crates/host-runtime/src/handler.rs#L230-L235
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
 [scratchconst]: ../../../../crates/host-runtime/src/config.rs#L21-L31
-[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
+[paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
@@ -2535,7 +2535,7 @@ evaluation of this area and its disposition are recorded in
 [midturndb]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L228-L282
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L295-L333
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
-[paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L660-L669
+[paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
 [pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
 [numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
