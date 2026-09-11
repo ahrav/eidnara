@@ -207,6 +207,47 @@ fn edit_certified_manifest(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)
     });
 }
 
+#[test]
+fn bundles_require_bpe_dropout_to_be_disabled() {
+    for dropout in [None, Some(0.0), Some(0.001), Some(0.5), Some(1.0)] {
+        let dir = tempfile::tempdir().expect("temp bundle dir");
+        copy_fixture_to(dir.path());
+        let path = dir.path().join("tokenizer.json");
+        let mut tokenizer: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        tokenizer["model"] = serde_json::json!({
+            "type": "BPE",
+            "dropout": dropout,
+            "unk_token": "[UNK]",
+            "vocab": {"[PAD]": 0, "[UNK]": 1, "a": 2, "b": 3, "ab": 4},
+            "merges": [["a", "b"]]
+        });
+        let bytes = serde_json::to_vec(&tokenizer).unwrap();
+        tokenizers::Tokenizer::from_bytes(&bytes)
+            .expect("the dropout fixture is a valid tokenizer");
+        std::fs::write(path, &bytes).unwrap();
+        edit_certified_manifest(dir.path(), |m| {
+            m["tokenizer"]["tokenizer"]["sha256"] = sha256_hex(&bytes).into()
+        });
+        let result =
+            host_runtime::synapse::bundle::load_bundle(dir.path(), &SynapseLimits::default(), None);
+        if dropout.is_some_and(|p| p > 0.0) {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => {
+                    panic!("an exact-count bundle must reject enabled BPE dropout: {dropout:?}")
+                }
+            };
+            assert!(
+                error.to_string().contains("BPE dropout must be disabled"),
+                "{error}"
+            );
+        } else {
+            result.expect("a tokenizer with disabled dropout remains valid");
+        }
+    }
+}
+
 fn corpus() -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(fixture_dir().join("corpus.json")).expect("corpus"))
         .expect("corpus json")

@@ -44,7 +44,8 @@ pub enum ExportWindow {
     /// descriptors live at S that were invalidated in the window, without text.
     CatchUp { through: i64 },
     /// One step of catch-up: descriptors created in `(after, through]`, each with its text, and descriptors live at `after` that were invalidated in the window, without text.
-    /// `after` is a complete commit at or after S that an earlier window already delivered, so the hold must cover `(S, through]`.
+    /// `after` is a complete commit at or after S that an earlier window already delivered.
+    /// The first page proves coverage of `(after, through]` only; acknowledgement proves `(S, through]`.
     Delta { after: i64, through: i64 },
 }
 
@@ -225,7 +226,8 @@ impl KernelStore {
     /// One admitted page of `window` after `cursor`, read at the hold's S in
     /// one short transaction and materialized from the object store after
     /// that transaction closes. The hold must be valid at `now`. A catch-up
-    /// window's first page also proves the hold is extended through its end;
+    /// window's first page also proves the hold is extended through its end,
+    /// and a delta step's first page proves the hold covers the step;
     /// coverage remains valid while `through` is fixed and the hold remains
     /// valid, so a page continued from a cursor does not repeat that proof.
     /// A cursor from another hold or window is rejected before reading the store.
@@ -264,8 +266,9 @@ impl KernelStore {
                     if after < pin.snapshot || after > through {
                         return Err(SourceHoldError::InvalidRequest.into());
                     }
+                    // The coverage check starts at `after` because only descriptors created in `(after, through]` read bytes; starting at `pin.snapshot` would rescan every earlier step.
                     if cursor.is_none() {
-                        check_coverage(&tx, pin.snapshot, hold_id, through)?;
+                        check_coverage(&tx, after, hold_id, through)?;
                     }
                     (catch_up_body(), through, after)
                 }
@@ -381,6 +384,8 @@ const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence
 /// `start` that were invalidated inside the window, which carry the
 /// invalidation fact and export no text. `?1` is `through` and `?2` is the
 /// window's start, S for a whole catch-up and `after` for one delta.
+/// `idx_objects_source_descriptor_page` has no commit column, so catch-up scans
+/// every descriptor row; its cost follows the corpus, not the window.
 fn catch_up_body() -> String {
     format!(
         "{rows} AND (({created}) OR ({live_at_s}

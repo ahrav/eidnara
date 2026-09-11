@@ -6,197 +6,28 @@ import {
     describe,
     expect,
     setSystemTime,
+    spyOn,
     test,
 } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { type NativeChannel, type NativeReceiveLease, ProducerCursor } from "@eidnara/shm-native";
+import {
+    DAEMON_ID,
+    FakeDaemon,
+    IDENTITY,
+    KEY,
+    ROUTE_CHANNEL,
+    ROUTE_EPOCH,
+    writeConnectionFile,
+} from "./__tests__/fake-daemon";
 import { HostClient, type HostClientOptions, type HostDiagnosticsEvent } from "./client";
-import type { ConnectionGenerationOptions } from "./connection";
 import { credentialFingerprints } from "./credential-fingerprint";
 import { HostCallError, HostClientError } from "./errors";
-import {
-    decodeHeader,
-    type EnvelopeHeader,
-    encodeHeader,
-    FrameType,
-    PROTOCOL_VERSION,
-} from "./protocol";
-import { ShmFrameChannel } from "./shm-frame-channel";
+import { FrameType } from "./protocol";
+import { serializedJsonText, serializeJsonBody } from "./serialized-json-body";
 import { AdmissionClass, type BindIdentity } from "./types";
-
-const IDENTITY: BindIdentity = {
-    project_root: "/workspace/project",
-    harness: "opencode",
-    session: "session-1",
-};
-const KEY = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
-const DAEMON_ID = Uint8Array.from({ length: 16 }, (_, i) => 0x60 + i);
-const ROUTE_CHANNEL = 7;
-const ROUTE_EPOCH = 1;
-
-interface PeerFrame {
-    header: EnvelopeHeader;
-    body: Uint8Array;
-}
-
-/**
- * `FakeLink` stands in for one shared-memory ring pair so these scenarios run without the native addon.
- */
-class FakeLink {
-    readonly fromClient: PeerFrame[] = [];
-    private readonly toClient: PeerFrame[] = [];
-    private ready: (() => void) | null = null;
-
-    readonly native = {
-        produce: (
-            header: Uint8Array,
-            capacity: number,
-            fill: (cursor: ProducerCursor) => void,
-            beforePublish?: () => void,
-        ): void => {
-            const body = new Uint8Array(capacity);
-            const cursor = new ProducerCursor([body], capacity);
-            fill(cursor);
-            if (cursor.written !== capacity) throw new RangeError("producer underfill");
-            beforePublish?.();
-            this.fromClient.push({ header: decodeHeader(header), body });
-        },
-        reserve: (): never => {
-            throw new Error("the client facade never reserves ring capacity");
-        },
-        drainOne: (deliver: (lease: NativeReceiveLease) => void): boolean => {
-            const frame = this.toClient.shift();
-            if (!frame) return false;
-            deliver({
-                header: encodeHeader(frame.header),
-                byteLength: frame.body.byteLength,
-                segmentCount: 1,
-                segment: () => frame.body,
-                release: () => {},
-            } as unknown as NativeReceiveLease);
-            return true;
-        },
-        startReadiness: (handler: () => void): void => {
-            this.ready = handler;
-            if (this.toClient.length > 0) queueMicrotask(handler);
-        },
-        peerClosed: (): boolean => false,
-        close: (): void => {},
-    } as unknown as NativeChannel;
-
-    deliver(frame: PeerFrame): void {
-        this.toClient.push(frame);
-        const ready = this.ready;
-        if (ready) queueMicrotask(ready);
-    }
-}
-
-class FakeDaemon {
-    readonly links: FakeLink[] = [];
-
-    readonly channelFactory: NonNullable<ConnectionGenerationOptions["channelFactory"]> = ({
-        budget,
-        maxBodyLen,
-        handlers,
-    }) => {
-        const link = new FakeLink();
-        this.links.push(link);
-        return new ShmFrameChannel({ nativeChannel: link.native, budget, maxBodyLen, handlers });
-    };
-
-    get link(): FakeLink {
-        const link = this.links.at(-1);
-        if (!link) throw new Error("no connection has been established");
-        return link;
-    }
-
-    drain(): PeerFrame | null {
-        return this.link.fromClient.shift() ?? null;
-    }
-
-    async next(timeoutMs = 3_000): Promise<PeerFrame> {
-        const startedAt = Date.now();
-        for (;;) {
-            const frame = this.drain();
-            if (frame) return frame;
-            if (Date.now() - startedAt > timeoutMs) throw new Error("no frame arrived");
-            await delay(1);
-        }
-    }
-
-    async nextRequest(): Promise<{ header: EnvelopeHeader; json: Record<string, unknown> }> {
-        const frame = await this.next();
-        expect(frame.header.ty).toBe(FrameType.Request);
-        return {
-            header: frame.header,
-            json: JSON.parse(Buffer.from(frame.body).toString("utf8")) as Record<string, unknown>,
-        };
-    }
-
-    send(
-        fields: Partial<EnvelopeHeader> & { ty: number },
-        body: Uint8Array = new Uint8Array(),
-    ): void {
-        this.link.deliver({
-            header: {
-                len: body.byteLength,
-                ver: PROTOCOL_VERSION,
-                flags: 0,
-                channel: 0,
-                epoch: 0,
-                corr: 0n,
-                ...fields,
-            },
-            body,
-        });
-    }
-
-    respond(request: EnvelopeHeader, value: unknown): void {
-        this.send(
-            {
-                ty: FrameType.Response,
-                channel: request.channel,
-                epoch: request.epoch,
-                corr: request.corr,
-            },
-            new Uint8Array(Buffer.from(JSON.stringify(value))),
-        );
-    }
-
-    fail(request: EnvelopeHeader, body: unknown): void {
-        this.send(
-            {
-                ty: FrameType.Error,
-                channel: request.channel,
-                epoch: request.epoch,
-                corr: request.corr,
-            },
-            new Uint8Array(Buffer.from(JSON.stringify(body))),
-        );
-    }
-
-    async acceptRouteOpen(): Promise<Record<string, unknown>> {
-        const open = await this.nextRequest();
-        expect(open.header.channel).toBe(0);
-        expect(open.json.op).toBe("route.open");
-        this.respond(open.header, {
-            op: "route.open",
-            route_channel: ROUTE_CHANNEL,
-            route_epoch: ROUTE_EPOCH,
-        });
-        return open.json;
-    }
-
-    async answerRouted(result: unknown): Promise<Record<string, unknown>> {
-        const routed = await this.nextRequest();
-        expect(routed.header.channel).toBe(ROUTE_CHANNEL);
-        this.respond(routed.header, result);
-        return routed.json;
-    }
-}
 
 async function waitUntil(check: () => boolean, timeoutMs = 3_000): Promise<void> {
     const startedAt = Date.now();
@@ -257,28 +88,12 @@ afterEach(async () => {
     for (const client of clients) await client.closeAsync().catch(() => {});
 });
 
-async function writeConnectionFile(): Promise<string> {
-    fileCounter += 1;
-    const filePath = path.join(tmpDir, `conn-${fileCounter}.json`);
-    const content = JSON.stringify({
-        schema: 2,
-        wire_version: 2,
-        setup_socket: "/tmp/eidnara-host-client-test.sock",
-        key: Array.from(KEY),
-        daemon_id: Array.from(DAEMON_ID),
-        pid: 4_242,
-        daemon_ver: "eidnara-host/0.1.0",
-    });
-    await writeFile(filePath, content, { mode: 0o600 });
-    return filePath;
-}
-
 async function connected(
     overrides: Partial<HostClientOptions> = {},
 ): Promise<{ client: HostClient; daemon: FakeDaemon }> {
     const daemon = new FakeDaemon();
     const client = await HostClient.connect({
-        connectionFile: await writeConnectionFile(),
+        connectionFile: await writeConnectionFile(path.join(tmpDir, `conn-${++fileCounter}.json`)),
         identity: IDENTITY,
         shutdownDeadlineMs: 500,
         requestTimeoutMs: 3_000,
@@ -290,6 +105,76 @@ async function connected(
 }
 
 describe("HostClient", () => {
+    test("plain Pi-style objects cannot collide with the serialized body identity", async () => {
+        const { client, daemon } = await connected();
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const route = await opening;
+        const body = {
+            method: "transform",
+            text: "not wire authority",
+            serialized: "{}",
+            body: {},
+            value: {},
+            page: {},
+            bytes: 0,
+            [Symbol("serialized JSON body")]: '{"method":"wrong"}',
+        };
+        expect(serializedJsonText(body)).toBeUndefined();
+        const expected = new TextEncoder().encode(JSON.stringify(body));
+        const waiting = client.request(route, body);
+        void waiting.catch(() => {});
+        const frame = await daemon.next();
+        expect(frame.body).toEqual(expected);
+        daemon.respond(frame.header, { ok: true });
+        await waiting;
+    });
+
+    test("encodes a serialized snapshot without another body stringify", async () => {
+        const { client, daemon } = await connected();
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const route = await opening;
+        let reads = 0;
+        const body = {
+            method: "transform",
+            get messages() {
+                reads += 1;
+                return [{ text: reads === 1 ? "é😀\ud800" : "changed on later read" }];
+            },
+        };
+        const stringify = spyOn(JSON, "stringify");
+        try {
+            const page = serializeJsonBody(body);
+            const bytes = Buffer.byteLength(serializedJsonText(page));
+            // The text is authoritative: it comes from the first getter read, and the
+            // shallow view never rewrites it.
+            const readsAfterBuild = reads;
+            body.method = "mutated";
+            (page.messages as Array<{ text: string }>)[0]!.text = "inspection edit";
+            expect(Reflect.set(page, "method", "wrong")).toBe(false);
+            const callsBeforeSend = stringify.mock.calls.length;
+            const waiting = client.request(route, page);
+            void waiting.catch(() => {});
+            const frame = await daemon.next();
+            expect(stringify.mock.calls.length).toBe(callsBeforeSend);
+            expect(reads).toBe(readsAfterBuild);
+            expect(frame.headerBytes).toBeDefined();
+            const header = frame.headerBytes!;
+            expect(new DataView(header.buffer, header.byteOffset).getUint32(0, true)).toBe(bytes);
+            expect(frame.body).toEqual(
+                new TextEncoder().encode(
+                    '{"method":"transform","messages":[{"text":"é😀\\ud800"}]}',
+                ),
+            );
+            expect(frame.body.byteLength).toBe(bytes);
+            daemon.respond(frame.header, { ok: true });
+            await waiting;
+        } finally {
+            stringify.mockRestore();
+        }
+    });
+
     test("managed call opens a cached route once and reuses it", async () => {
         const { client, daemon } = await connected();
 

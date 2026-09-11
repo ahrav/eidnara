@@ -20,11 +20,12 @@ use daemon::search_catchup::{
 use daemon::search_projection::SearchProjection;
 use kernel::source_identity::Occurrence;
 use kernel::{
-    ArtifactDestination, ArtifactIngestRequest, CommitIntent, CommitPageBounds, CommitReadError,
-    CommitReadRequest, CurrentInputExpectation, DomainSpec, EligibilityBinding, ExportWindow,
-    KernelStore, ProjectScope, ProviderEgress, RepositoryProvenance, Sensitivity,
-    SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourceHoldError, SourcePageBounds, SourceRow,
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
+    ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
+    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputExpectation, DomainSpec,
+    EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress,
+    RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission,
+    SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::{
@@ -392,6 +393,29 @@ impl Corpus {
             .commit(intent(&format!("empty-{key}")), |_| Ok(String::new()))
             .unwrap()
             .commit_seq
+    }
+
+    /// Logical (non-purge) deletion for `evidence_id`.
+    /// The ledger records nothing: the projection must not change until it can tombstone the deletion.
+    fn delete(&self, key: &str, evidence_id: &str) -> ArtifactDeletionResult {
+        let digest: String = inspect(&self.kernel_db())
+            .query_row(
+                "SELECT artifact_digest FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        self.kernel
+            .delete_artifact(ArtifactDeletionRequest {
+                intent: intent(&format!("delete-{key}")),
+                identity: ArtifactDeletionIdentity::Digest(digest),
+                kind: ArtifactDeletionKind::Delete,
+                operator_id: None,
+                target_locator: None,
+                reason: None,
+                deleted_at: 42,
+            })
+            .unwrap()
     }
 
     /// A control commit: another consumer registers, which projects nothing.
@@ -901,6 +925,90 @@ fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
         .unwrap();
     assert_eq!(*blocked(&report), Blocked::NoLocalBaseline);
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+/// Acknowledging past a deletion would satisfy the search consumer's deletion barrier while the projection still serves the deleted text, so the window is refused and none of its commits move.
+#[test]
+fn a_window_holding_a_deletion_is_refused_and_leaves_its_barrier_unsatisfied() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, _) = corpus.bootstrap(dir.path());
+
+    // One ingest and one publish fill the first two-commit window; the deletion opens the next.
+    let doomed = corpus.publish("doomed", &[("msg-b", "1", "doomed message")]);
+    let deletion = corpus.delete("doomed", "evidence-doomed-0");
+    assert_eq!(deletion.commit_seq, doomed + 1);
+    assert_eq!(corpus.tip(), deletion.commit_seq);
+    let ledger = corpus.ledger();
+    assert!(
+        ledger.tombstones.is_empty(),
+        "the ledger predicts the row stays live until a tombstone can be projected"
+    );
+
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let mut trace = Vec::new();
+    let report = driver
+        .run_episode(&consumer, &two_commit_windows(), 3, &mut |event| {
+            trace.push(event);
+            assert_each_window(dir.path(), dir.path(), &ledger, event);
+        })
+        .unwrap();
+    assert_eq!(
+        *blocked(&report),
+        Blocked::DeletionUnpropagated {
+            commit_seq: deletion.commit_seq,
+        }
+    );
+    assert_eq!(report.target, deletion.commit_seq);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert_eq!(report.acknowledged_through, doomed);
+    assert_eq!(windows(&trace), vec![doomed]);
+    assert_eq!(corpus.kernel_checkpoint(), doomed);
+    assert_matches_ledger(dir.path(), &ledger, doomed);
+    assert!(
+        durable(dir.path())
+            .rows
+            .values()
+            .any(|text| text == "doomed message"),
+        "the deleted text is still served, so the deletion must not count as propagated"
+    );
+
+    let barrier = corpus
+        .kernel
+        .deletion_barrier(&deletion.barrier_id)
+        .unwrap();
+    let search = barrier
+        .consumers
+        .iter()
+        .find(|status| status.consumer_id == CONSUMER)
+        .unwrap();
+    assert_eq!(search.required_checkpoint_commit_seq, deletion.commit_seq);
+    assert_eq!(search.checkpoint_commit_seq, Some(doomed));
+    assert!(!search.satisfied, "{barrier:?}");
+    assert!(!barrier.cleared, "{barrier:?}");
+
+    let before = durable(dir.path());
+    let again = driver
+        .run_episode(&consumer, &two_commit_windows(), 4, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        *blocked(&again),
+        Blocked::DeletionUnpropagated {
+            commit_seq: deletion.commit_seq,
+        }
+    );
+    assert_eq!((again.batches_applied, again.commits_consumed), (0, 0));
+    assert_eq!(corpus.kernel_checkpoint(), doomed);
+    assert_eq!(durable(dir.path()), before);
+    assert!(
+        !corpus
+            .kernel
+            .deletion_barrier(&deletion.barrier_id)
+            .unwrap()
+            .cleared
+    );
 }
 
 /// Probes the projection's write lock from an independent connection whenever the driver is about to take the kernel writer; an open local transaction makes the probe fail.
@@ -1428,6 +1536,115 @@ fn corruption_and_storage_failures_quarantine_the_driver_without_acknowledgement
 }
 
 #[test]
+fn a_negative_episode_clock_is_refused_before_anything_durable_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let before = durable(dir.path());
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let report = driver
+        .run_episode(&consumer, &bounds(), -1, &mut |_| panic!("no window runs"))
+        .unwrap();
+    assert_eq!(*blocked(&report), Blocked::NegativeTime { now: -1 });
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert_eq!(durable(dir.path()), before);
+    assert!(driver.quarantine().is_none());
+}
+
+#[test]
+fn a_missing_occurrence_behind_the_checkpoint_quarantines_the_driver() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    // Deleting `msg-a`'s occurrence leaves the supersession below without an
+    // invalidation target.
+    let corruptor = mutate(&search_path(dir.path()));
+    corruptor
+        .pragma_update(None, "foreign_keys", "OFF")
+        .unwrap();
+    let deleted = corruptor.execute("DELETE FROM occurrences", []).unwrap();
+    assert!(deleted >= 1);
+    corpus.publish("revise", &[("msg-a", "2", "first message, revised")]);
+    let before = durable(dir.path());
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        corpus.kernel_checkpoint(),
+        hold.snapshot,
+        "no acknowledgement"
+    );
+    assert_eq!(durable(dir.path()), before);
+    let again = driver
+        .run_episode(&consumer, &bounds(), 4, &mut |_| panic!("no work runs"))
+        .unwrap_err();
+    assert!(matches!(again, CatchUpError::Quarantined(q) if q == quarantine));
+    assert_eq!(durable(dir.path()), before);
+}
+
+#[test]
+fn a_checkpoint_that_contradicts_the_hold_snapshot_quarantines_instead_of_acknowledging() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let target = corpus.tip();
+    // The extension makes the hold cover `(S, target]`. A crash between the
+    // local commit and the acknowledgement leaves this same coverage.
+    corpus
+        .kernel
+        .extend_source_hold(
+            &consumer.binding,
+            &consumer.hold_id,
+            target,
+            hold_admission(),
+        )
+        .unwrap();
+    // The corrupted checkpoint keeps the hold id, names a baseline other than
+    // the hold's snapshot, and names a prefix above the kernel's checkpoint.
+    let changed = mutate(&search_path(dir.path()))
+        .execute(
+            "UPDATE projection_checkpoint SET snapshot_commit_seq=?1, checkpoint_commit_seq=?2
+             WHERE singleton=1",
+            rusqlite::params![hold.snapshot + 1, target],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let before = durable(dir.path());
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    let CatchUpError::Quarantined(quarantine) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        corpus.kernel_checkpoint(),
+        hold.snapshot,
+        "no acknowledgement"
+    );
+    assert_eq!(durable(dir.path()), before);
+    let again = driver
+        .run_episode(&consumer, &bounds(), 4, &mut |_| panic!("no work runs"))
+        .unwrap_err();
+    assert!(matches!(again, CatchUpError::Quarantined(q) if q == quarantine));
+    assert_eq!(durable(dir.path()), before);
+}
+
+#[test]
 fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
@@ -1548,8 +1765,15 @@ impl Cut {
 #[test]
 #[ignore = "re-executed by the crash-cut test with its environment set"]
 fn crash_child_entrypoint_reexecuted_by_the_parent() {
-    let root = PathBuf::from(std::env::var(CHILD_ROOT).unwrap());
-    let cut = Cut::parse(&std::env::var(CHILD_CUT).unwrap());
+    // An ignored-test sweep (`--ignored`/`--include-ignored`) invokes this
+    // entrypoint without the parent's environment; only the parent sets it.
+    let (root, cut) = match (std::env::var(CHILD_ROOT), std::env::var(CHILD_CUT)) {
+        (Err(std::env::VarError::NotPresent), Err(std::env::VarError::NotPresent)) => return,
+        (Ok(root), Ok(cut)) => (root, cut),
+        (root, cut) => panic!("incomplete child environment: {root:?}, {cut:?}"),
+    };
+    let root = PathBuf::from(root);
+    let cut = Cut::parse(&cut);
     let corpus = Corpus::open(&root);
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);
@@ -1694,7 +1918,7 @@ fn crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_earl
                 ),
                 Cut::Released => assert_eq!(
                     *blocked(&report),
-                    Blocked::Acknowledgement(SourceHoldError::BindingMismatch),
+                    Blocked::HoldExtension(SourceHoldError::BindingMismatch),
                     "{report:?}"
                 ),
                 Cut::Acknowledged => {

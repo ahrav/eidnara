@@ -8,5 +8,5 @@ export function logTransformTiming(
 ): void {
     const elapsed = (performance.now() - startMs).toFixed(1);
     const suffix = extra ? ` ${extra}` : "";
-    sessionLog(sessionId, `transform stage: stage=${stage} elapsed=${elapsed}ms${suffix}`);
+    sessionLog.debug(sessionId, `transform stage: stage=${stage} elapsed=${elapsed}ms${suffix}`);
 }

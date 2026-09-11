@@ -291,7 +291,12 @@ impl<'a> EmbeddingPublisher<'a> {
                     error => PublicationError::Refused(error),
                 },
                 Refusal::Admission | Refusal::Identity => PublicationError::Refused(error),
-                Refusal::Integrity => self.enter_quarantine(QuarantineKind::Integrity, &error),
+                // A completion may reference an occurrence that was never queued;
+                // classify it as refusal, not projection corruption.
+                Refusal::Integrity => match error {
+                    ProjectionError::UnknownOccurrence { .. } => PublicationError::Refused(error),
+                    error => self.enter_quarantine(QuarantineKind::Integrity, &error),
+                },
                 Refusal::Storage => self.enter_quarantine(QuarantineKind::Storage, &error),
             }),
             // BEGIN never ran, so nothing of the completion is durable.

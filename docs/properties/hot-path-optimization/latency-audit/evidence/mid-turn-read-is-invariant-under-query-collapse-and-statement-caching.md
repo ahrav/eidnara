@@ -334,7 +334,7 @@ the file at the same path.
 [availability-reader]: ../../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.ts#L149-L174
 [marker-reader]: ../../../../../packages/opencode-plugin/src/plugin/conflict-warning-hook.ts#L207-L218
 [hook-test]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1612-L1666
-[hook-call]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1072
+[hook-call]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1073
 [ismidturn]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
 [dbexists]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/read-session-db.ts#L33-L35
 [dbpath]: ../../../../../packages/opencode-plugin/src/shared/opencode-database-path.ts#L65-L66

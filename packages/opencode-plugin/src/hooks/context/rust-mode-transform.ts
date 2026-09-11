@@ -852,7 +852,7 @@ export function createRustModeTransform(
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
-        sessionLog(sessionId, "rust transform failed; serving the input unchanged:", error);
+        sessionLog.warn(sessionId, "rust transform failed; serving the input unchanged:", error);
     };
 
     const resetOrdinalMemo = (state: RustSessionState): void => {
@@ -899,7 +899,7 @@ export function createRustModeTransform(
         const syntheticTurn = observeSyntheticTurn(state, messages);
         if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
             state.syntheticCascadeLogged = true;
-            sessionLog(
+            sessionLog.warn(
                 sessionId,
                 `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
             );
@@ -945,7 +945,7 @@ export function createRustModeTransform(
         const finishPass = (applied: boolean): void => {
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
-            sessionLog(
+            sessionLog.debug(
                 sessionId,
                 formatRustPassLog({
                     decision,
@@ -1003,7 +1003,7 @@ export function createRustModeTransform(
                         ? value.toFixed(1)
                         : "n/a";
                 };
-                sessionLog(
+                sessionLog.debug(
                     sessionId,
                     `rust module stages: handler=${stage("handler_total")} apply_once=${stage("total")} ` +
                         `request_to_handler=${stage("request_observed_to_handler")} delta_expand=${stage("delta_expand")} ` +
@@ -1028,7 +1028,8 @@ export function createRustModeTransform(
                     )
                     .map(([key, value]) => `${key}:${(value as number).toFixed(1)}`)
                     .join(" ");
-                if (detail) sessionLog(sessionId, `rust module stages (slow pass): ${detail}`);
+                if (detail)
+                    sessionLog.debug(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
         // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
@@ -1421,7 +1422,7 @@ export function createRustModeTransform(
                     );
                 }
                 transformSeriesRestarted = true;
-                sessionLog(
+                sessionLog.warn(
                     sessionId,
                     `transform_series_restart reason=${result.restart.reason} pages=${result.restart.pages} at_page=${result.restart.atPage}`,
                 );
@@ -1469,7 +1470,7 @@ export function createRustModeTransform(
                 try {
                     await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
                 } catch (nackError) {
-                    sessionLog(
+                    sessionLog.warn(
                         sessionId,
                         "rust retry note delivery nack failed (ignored):",
                         nackError,
@@ -1488,7 +1489,7 @@ export function createRustModeTransform(
             const nativeContentOmitted = !hasNativeResponseContent(response);
             if (needFullSync || nativeContentOmitted) {
                 if (!needFullSync) {
-                    sessionLog(
+                    sessionLog.warn(
                         sessionId,
                         "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
                     );
@@ -1622,7 +1623,11 @@ export function createRustModeTransform(
                 try {
                     await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
                 } catch (nackError) {
-                    sessionLog(sessionId, "rust note delivery nack failed (ignored):", nackError);
+                    sessionLog.warn(
+                        sessionId,
+                        "rust note delivery nack failed (ignored):",
+                        nackError,
+                    );
                 }
                 throw error;
             }
@@ -1630,7 +1635,7 @@ export function createRustModeTransform(
                 try {
                     await sendNoteDeliveryDisposition("transform.nack", discardedDeliveryPassIds);
                 } catch (nackError) {
-                    sessionLog(
+                    sessionLog.warn(
                         sessionId,
                         "rust discarded note delivery nack failed (will retry):",
                         nackError,
@@ -1641,7 +1646,11 @@ export function createRustModeTransform(
                 try {
                     await sendNoteDeliveryDisposition("transform.ack", appliedDeliveryPassIds);
                 } catch (ackError) {
-                    sessionLog(sessionId, "rust note delivery ack failed (will retry):", ackError);
+                    sessionLog.warn(
+                        sessionId,
+                        "rust note delivery ack failed (will retry):",
+                        ackError,
+                    );
                 }
             }
             const ownsSharedState =
@@ -1668,14 +1677,14 @@ export function createRustModeTransform(
                     wireCaches.set(sessionId, pendingWireCache);
                 } else {
                     // The wire state was invalidated while this pass awaited the daemon. The applied output stands, but the cache built from the pre-invalidation array does not.
-                    sessionLog(
+                    sessionLog.debug(
                         sessionId,
                         "rust wire state changed during the pass; discarding this pass's wire cache",
                     );
                 }
             } else {
                 // A newer pass or session deletion owns shared state. The applied output and note dispositions stand, but this pass publishes no cache or memo state.
-                sessionLog(
+                sessionLog.debug(
                     sessionId,
                     "rust pass lost shared-state ownership after apply; discarding its cache update",
                 );
@@ -1690,7 +1699,7 @@ export function createRustModeTransform(
                 error instanceof PassSupersededDuringPass
             ) {
                 decision = error instanceof SessionClearedDuringPass ? "cleared" : "superseded";
-                sessionLog(sessionId, error.message);
+                sessionLog.debug(sessionId, error.message);
             } else {
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
                 markFailure(sessionId, state, error);
@@ -1717,7 +1726,7 @@ export function createRustModeTransform(
                 void options.moduleClient
                     .deleteSession(sessionId, projectRoot)
                     .catch((error) => {
-                        sessionLog(sessionId, "rust module session deletion failed:", error);
+                        sessionLog.warn(sessionId, "rust module session deletion failed:", error);
                     })
                     .finally(() => options.moduleClient.closeSession?.(sessionId));
             }
