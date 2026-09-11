@@ -200,10 +200,10 @@ observer semantics nor fingerprint identifiers change.
 
 [ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2084-L2133
 [message-view]: ../../../../../crates/daemon/src/wire.rs#L383
-[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27319
+[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27323
 [delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23122
 [delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L22855
-[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28572
+[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28645
 
 ## Retention and observer-scope verification
 

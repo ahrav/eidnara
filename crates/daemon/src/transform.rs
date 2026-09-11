@@ -6673,6 +6673,7 @@ fn pending_passthrough_messages(
                 apply_tag_overlay_to_message(
                     &mut rendered,
                     message,
+                    req.is_synthetic(message),
                     blocks,
                     tag_overlay,
                     |_| false,
@@ -7477,6 +7478,7 @@ pub fn temporal_gap_prefix(gap_ms: i64) -> Option<String> {
 fn apply_tag_overlay_to_message(
     message: &mut WireMessage,
     ingress: &IngressMessage,
+    synthetic: bool,
     blocks: &[&FlatBlock],
     overlay: Option<&TagOverlayState>,
     is_reduced: impl Fn(&FlatBlock) -> bool,
@@ -7488,7 +7490,7 @@ fn apply_tag_overlay_to_message(
     let Some(overlay) = overlay else {
         return;
     };
-    if ingress.ck.role == "system" || message.meta.synthetic {
+    if ingress.ck.role == "system" || synthetic {
         return;
     }
     let mut modified = false;
@@ -11089,6 +11091,7 @@ fn build_output_with_tags(
                 apply_tag_overlay_to_message(
                     &mut rebuilt,
                     msg,
+                    req.is_synthetic(msg),
                     blocks,
                     tag_overlay,
                     |_| false,
@@ -11200,6 +11203,7 @@ fn build_output_with_tags(
                     apply_tag_overlay_to_message(
                         &mut rebuilt,
                         msg,
+                        req.is_synthetic(msg),
                         blocks,
                         tag_overlay,
                         |block| reduced.contains_key(&block.block_index),
@@ -27492,6 +27496,75 @@ pub(crate) mod tests {
                 "normalization must not mutate handler input"
             );
         }
+    }
+
+    #[test]
+    fn tag_overlay_guard_uses_the_pass_local_synthetic_view() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"guard replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let mut carrier = pair.assistant_msg.clone();
+        carrier.meta.synthetic = false;
+        carrier.meta.harness_id = Some("replayed-call".into());
+        carrier
+            .content_mut()
+            .push(WireBlock::bare(wire::BlockKind::Text {
+                text: "synthetic carrier text".into(),
+            }));
+        let request = active_cc_req(
+            "ses",
+            "cfg0",
+            vec![
+                item("live", 90, "live prompt"),
+                IngressMessage {
+                    mid: "replayed-call".into(),
+                    ordinal: 91,
+                    ck: carrier,
+                },
+            ],
+        );
+        let ingress = normalize_synthetic_todo_ingress(&request);
+        let projection = ingress.projection.project().unwrap();
+        let blocks_by_mid = projection_blocks_by_mid(&projection);
+        let overlay = TagOverlayState {
+            tag_by_block_id: BTreeMap::from([
+                ("live#0".into(), 41),
+                ("replayed-call#1".into(), 42),
+            ]),
+            temporal_by_block_id: BTreeMap::from([(
+                "replayed-call#1".into(),
+                "<!-- synthetic overlay must not render -->\n".into(),
+            )]),
+            ..Default::default()
+        };
+
+        let mut rendered = Vec::new();
+        for message in &request.messages {
+            assert!(!message.ck.meta.synthetic);
+            let mut rebuilt = message.ck.clone();
+            apply_tag_overlay_to_message(
+                &mut rebuilt,
+                message,
+                ingress.is_synthetic(message),
+                &blocks_by_mid[message.mid.as_str()],
+                Some(&overlay),
+                |_| false,
+                false,
+            );
+            rendered.push(serde_json::to_vec(&rebuilt).unwrap());
+        }
+        assert_ne!(
+            rendered[0],
+            serde_json::to_vec(&request.messages[0].ck).unwrap(),
+            "live control must take its overlay"
+        );
+        assert!(ingress.is_synthetic(&request.messages[1]));
+        assert_eq!(
+            rendered[1],
+            serde_json::to_vec(&request.messages[1].ck).unwrap(),
+            "normalized synthetic message must not take an overlay"
+        );
     }
 
     #[test]
