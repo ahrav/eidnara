@@ -24294,6 +24294,7 @@ pub(crate) mod tests {
         core: &CoreState,
         m1: &crate::m1_compose::M1Composition,
         history_budget_tokens: f64,
+        memory_update_count: usize,
     ) -> bool {
         let m0_tokens = core
             .frozen_units
@@ -24307,7 +24308,7 @@ pub(crate) mod tests {
         } else {
             0
         };
-        m1.memory_update_count > 40
+        memory_update_count > 40
             || (m1_has_content
                 && m1_tokens as f64 > (history_budget_tokens * 0.20)
                 && history_budget_tokens > 0.0)
@@ -24387,8 +24388,7 @@ pub(crate) mod tests {
                     )
                     .unwrap();
                     assert_eq!(tokenizer::estimate_tokens(&m1.body), target_m1_tokens);
-                    assert_eq!(m1.memory_update_count, 0);
-                    let expected = frozen_soft_pressure_refold(&loaded.core, &m1, budget);
+                    let expected = frozen_soft_pressure_refold(&loaded.core, &m1, budget, 0);
                     let budget_pressure = budget > 0.0 && target_m1_tokens as f64 > budget * 0.20;
                     let ratio_pressure =
                         m0_tokens >= 500 && target_m1_tokens as f64 > m0_tokens as f64 * 0.15;
@@ -24464,7 +24464,6 @@ pub(crate) mod tests {
                 }
                 let m1 = crate::m1_compose::M1Composition {
                     body: body.to_string(),
-                    memory_update_count: 0,
                     new_coverage: None,
                     note_deliveries: Vec::new(),
                     profile_rendered: false,
@@ -24480,7 +24479,7 @@ pub(crate) mod tests {
                     let before = crate::token_cache::local_stats();
                     let actual = soft_pressure_refold(&core.frozen_units, body, budget, estimate);
                     let after = crate::token_cache::local_stats();
-                    assert_eq!(actual, frozen_soft_pressure_refold(&core, &m1, budget));
+                    assert_eq!(actual, frozen_soft_pressure_refold(&core, &m1, budget, 0));
                     let expected_calls = usize::from(has_m0) + usize::from(body != M1_PLACEHOLDER);
                     assert_eq!(observed.borrow().len(), expected_calls);
                     assert_eq!(after.calls - before.calls, expected_calls as u64);
@@ -24539,7 +24538,12 @@ pub(crate) mod tests {
                 panic!("tool call")
             };
             assert_eq!(original, &call["input"]);
-            assert_eq!(flat.tool_input.as_deref(), Some(original));
+            // The projection retains one copy of the input, inside `wire`.
+            let flat_fields = serde_json::to_value(flat).unwrap();
+            assert!(
+                flat_fields.get("tool_input").is_none(),
+                "projection must not retain a second tool input copy: {flat_fields}"
+            );
             let item = sel_item_from_flat(flat, &HashMap::new());
             let cloned = item.clone();
             let boundary = crate::sel_kind_for_flat(flat);

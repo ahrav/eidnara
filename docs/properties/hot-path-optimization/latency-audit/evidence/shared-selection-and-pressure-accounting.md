@@ -29,10 +29,10 @@ candidate input representation.
 
 The borrow lifetime propagates through selection items and boundary messages,
 but not through persisted wire types. No new process-local cache or retained
-input allocation is added. Existing projection-owned wire and `tool_input`
-copies remain; this work removes their downstream selection copies, not the
-projection's own copies. Token-cache generations, capacity, key domains, and
-`RETAINED_BYTES_BOUND` are unchanged.
+input allocation is added. The projection retains the tool input once, inside
+the wire block; `FlatBlock` carries no separate input copy, so the borrowed
+selection value is the only projected input. Token-cache generations, capacity,
+key domains, and `RETAINED_BYTES_BOUND` are unchanged.
 
 [`soft_pressure_refold`][pressure] owns the frozen-unit lookup, placeholder
 gate, and both comparisons. Its estimator argument is the pass's injected
@@ -79,8 +79,10 @@ at 74, 75, and 76 tokens, and budgets 0, -1, 365, 370, 375, 380, 385, and
 values. The three constant witness assertions record budget-only pressure,
 ratio-only pressure, and neither, independently of the candidate result.
 An injected spy checks the exact m0 and m1 texts and cached/direct parity.
-The original direct-tokenizer reference retains its dead arm with count zero;
-no test pretends that an update-count crossing is production-reachable.
+The original direct-tokenizer reference keeps its update-count term and takes
+the count as a parameter; callers pass `0`, the only value composition ever
+produced for it. No test pretends that an update-count crossing is
+production-reachable.
 
 Focused commands `cargo test -p daemon --locked --lib <filter>` passed:
 
@@ -153,12 +155,36 @@ passes. No global-estimator substitution or estimator-order change is made.
 The architecture remains separate where behavior differs: boundary tool-result
 names remain empty while transform selection retains real names. `Cow` borrows
 the exact existing wire value; wrapping an owned-value clone in an `Arc` would
-keep the copy unless the wire owner also changed. `FlatBlock.tool_input`
-remains part of the serialized projection artifact. The constant
-`M1Composition.memory_update_count` field remains for the frozen baseline oracle
-and its zero-count assertions; no production decision reads it. Sparse-sidecar
+keep the copy unless the wire owner also changed. Sparse-sidecar
 fallback uses a transient boolean and the existing order vector, with no extra
 set or retained cache.
+
+## Review follow-up: dead projection and composition fields
+
+A pull-request review found two fields that the borrowed selection left with
+no production reader, and both are removed.
+
+`FlatBlock.tool_input` held `Arc::new(input.clone())`, a deep copy of every
+tool-call input made on every projection. After both selection constructors
+borrow `wire.kind()`, nothing read that copy; the retained-bytes declaration
+only counted it. The field, its clone in `flatten_block`, and its accounting
+term are removed. The projection golden fixture is regenerated through the
+test's own `EIDNARA_REGEN_PROJECTION_GOLDEN` hook; the only change is the
+removed `tool_input` key on the five tool-call blocks. `FlatBlock` is the
+cache-stability core's internal item and is not part of the host wire
+contract. The sharing check now asserts that the serialized projection block
+carries no `tool_input`, and the renamed
+`projection_retained_bytes_counts_wire_and_frontier_allocations_once` check
+charges the input exactly once, through the wire. Both assertions fail on the
+prior code and pass after the removal.
+
+`M1Composition.memory_update_count` had one writer, the constant `0` in
+`compose_m1`, and no production reader once the SOFT disjunct was removed. The
+field is removed. The frozen reference keeps the original expression's shape
+and takes the update count as an explicit parameter; both callers pass `0`,
+the only value composition ever produced. The two constructed-composition
+tests no longer name the field. The test module fails to compile against the
+prior struct and passes after the removal.
 
 After integration, `cargo test -p daemon --locked --lib <filter>` passes for
 `transform::` (288 passed, three manual timing tests ignored), `selection::`

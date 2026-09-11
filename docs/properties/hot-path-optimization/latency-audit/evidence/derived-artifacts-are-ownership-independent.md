@@ -130,7 +130,10 @@ accounting](shared-selection-and-pressure-accounting.md).
 Both production selection constructors borrow the projected wire input.
 The pointer-identity test fails on the clone-based baseline and passes on
 the borrowed representation, including a selection clone and historian input.
-The unchanged selection reference passes all 18 differential tests.
+The unchanged selection reference passes all 18 differential tests. The
+`tool_input` versus `wire.kind()` question from the discovery snapshot is
+resolved by removal: `FlatBlock` no longer carries a separate input copy, so
+there is one projected input and no pair of fields to drift apart.
 
 The sidecar test compares full and incremental order, metadata, and pins over
 three generations with repeated IDs. It also checks sparse prefixes: map
@@ -140,13 +143,13 @@ the two-form pin question for the tested cases. Sorted-key protocol intent
 and the production differential-panic policy remain outside this change.
 
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
-[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
-[flatproj]: ../../../../../crates/daemon/src/wire.rs#L114-L127
-[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L141-L144
-[reattach]: ../../../../../crates/daemon/src/wire.rs#L145-L186
-[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L680-L743
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L833-L842
+[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L62
+[flatproj]: ../../../../../crates/daemon/src/wire.rs#L112-L125
+[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L139-L142
+[reattach]: ../../../../../crates/daemon/src/wire.rs#L143-L184
+[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L322-L330
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L732
+[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L822-L831
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011

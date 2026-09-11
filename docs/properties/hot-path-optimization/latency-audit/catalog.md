@@ -313,8 +313,8 @@ Check: `always` - For every pass, three artifact families agree with their
 value-only construction. Projection: `project_messages(&msgs)` is equal under
 [`FlatProjection`][flatproj]'s derived `PartialEq` whether the slice is the
 fresh request, the normalized clone, a reattached prefix plus suffix, or a
-shared view; per block `content_hash == sha256(bytes)`, `bytes ==
-to_string(wire)`, and `tool_input` equals the `input` inside `wire.kind()`;
+shared view; per block `content_hash == sha256(bytes)` and `bytes ==
+to_string(wire)`, and the block retains the tool input once, inside `wire`;
 and `project_messages_incremental(msgs, cached, k) == project_messages(msgs)`
 with equal [`differential_bytes`][diff-bytes]. Native attachment: under
 `serve_native`, `to_vec(incremental native_messages) ==
@@ -339,9 +339,10 @@ every pass projects and serves, every plugin turn attaches, and every
 downstream digest keys on these fields.
 Fault/timing angle: None in time. A projector that reuses an ingress
 `Arc<WireBlock>` and computes `bytes` from another serialization; a consumer
-reading `tool_input` and `wire.kind()` from blocks no longer built together
+reading a projected input copy that is not the `wire.kind()` value
 ([`sel_item_from_flat`][sel-item] and
-[`sel_kind_for_flat`][sel-kind] both borrow the wire input); chunk reuse decided by
+[`sel_kind_for_flat`][sel-kind] both borrow the wire input, and `FlatBlock`
+holds no other copy); chunk reuse decided by
 pointer identity; an incremental sidecar merge that changes first-seen order
 on a repeated mid ([`:277-291`][sidecar-merge]); a direct `to_vec(&message)`
 on a typed shell (rebuilt prefix, reduced, overlaid, or synthetic) that emits
@@ -1975,10 +1976,11 @@ has content and `m0_tokens >= 500` and `m1_tokens > m0_tokens * 0.15`;
 `m1_tokens` is `0` when `m1.body == M1_PLACEHOLDER`, and `m0_tokens` is `0`
 when no frozen unit has key `m0`. A cache-backed count may replace the direct
 call only if it equals the direct count for the exact text at each observed
-comparison (H1's cache clause). Composition sets `memory_update_count` to zero;
-the dead update-count disjunct is removed by the explicit owner decision
-recorded in the evidence. The frozen reference retains the original expression
-and is evaluated with zero, so its reachable classifications stay fixed.
+comparison (H1's cache clause). `M1Composition` carries no memory update count;
+composition has no writer for one, and the dead update-count disjunct is
+removed by the explicit owner decision recorded in the evidence. The frozen
+reference retains the original expression and takes that count as a parameter
+the callers set to `0`, so its reachable classifications stay fixed.
 `always` because the classification selects
 between an ordinary SOFT and a rematerialized m0, which H2 states as distinct
 boundaries.
@@ -2451,11 +2453,11 @@ evaluation of this area and its disposition are recorded in
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
-[flatproj]: ../../../../crates/daemon/src/wire.rs#L114-L127
-[reattach]: ../../../../crates/daemon/src/wire.rs#L145-L186
-[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L329-L337
-[flatten]: ../../../../crates/daemon/src/wire.rs#L680-L743
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L833-L844
+[flatproj]: ../../../../crates/daemon/src/wire.rs#L112-L125
+[reattach]: ../../../../crates/daemon/src/wire.rs#L143-L184
+[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L322-L330
+[flatten]: ../../../../crates/daemon/src/wire.rs#L673-L732
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L822-L831
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264

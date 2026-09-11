@@ -381,10 +381,10 @@ not a claim that no related check exists anywhere in the repository.
 
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2036
-[t-inc]: ../../../../crates/daemon/src/wire.rs#L1418
-[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1617
+[t-inc]: ../../../../crates/daemon/src/wire.rs#L1404
+[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1603
 [t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36402
-[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1603
+[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1589
 [t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22228
 [t-astro]: ../../../../crates/daemon/src/lib.rs#L20956
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19168
