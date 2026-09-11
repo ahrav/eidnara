@@ -98,7 +98,7 @@ pub struct HarnessMessageMeta {
     pub mid: String,
     pub ordinal: u64,
     pub role: String,
-    pub raw: Value,
+    pub raw: Arc<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable_key: Option<String>,
     #[serde(default)]
