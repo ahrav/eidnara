@@ -21,7 +21,8 @@ use kernel::source_identity::{
     EncodedOccurrence, Occurrence, OccurrenceRefusal, Span, derived_lineage_id, encode,
     encode_preserving_span, identity_digest, select,
 };
-use rusqlite::{CachedStatement, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
+use storage::CachedStatement;
 use storage::GuardedConn;
 
 /// The complete schema, applied once to a pristine file by

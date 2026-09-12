@@ -336,11 +336,11 @@ Existing check: [Guarded-store checks](existing-checks.md#guarded-store) are
 unaudited and cover cached statements, shadows, and restoration.
 Impact: Setup elision can authorize stale privileges or target shadow objects.
 Open questions:
-- The read path's `query_only` toggle expires every cached statement on the
-  connection, and it is the read callback's only write barrier for main and
-  temp alike; `deny_scope_escapes` allows DML on every non-infrastructure
-  table. What replaces it as the read path's write barrier if the toggle is
-  dropped? Owner: the connection-open unit (#430). (needs human input)
+- Resolved by the connection-open unit (#430): the read path's `query_only`
+  toggle stays. It expires every cached statement on the connection, and it is
+  the read callback's only write barrier for main and temp alike because
+  `deny_scope_escapes` allows DML on every non-infrastructure table; the two
+  pragma statements are the price of that barrier.
 
 ### callback-batching-preserves-observation-boundaries
 

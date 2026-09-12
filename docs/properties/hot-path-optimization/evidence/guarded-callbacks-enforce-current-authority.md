@@ -66,7 +66,9 @@ Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969`; bundled SQLite
 Preservation authority: implementation tickets
 [#428](https://github.com/ahrav/eidnara/issues/428) (mode gate) and
 [#429](https://github.com/ahrav/eidnara/issues/429) (schema-version keyed
-snapshot and once-per-connection durability pin), and the
+snapshot and once-per-connection durability pin), and
+[#430](https://github.com/ahrav/eidnara/issues/430) (connection-open pragmas
+and statement-cache capacity), and the
 [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
 The store installs [one authorizer per connection][gate-install] at open. The
@@ -157,10 +159,33 @@ pins the remaining expiry: `query_only` is a flag pragma and SQLite expires
 every statement on the connection for each one, so the counts over read,
 read, fenced, fenced calls are `0, >=1, higher, unchanged`. The
 [temp-write test][temp-write] shows `query_only` is the read path's write
-barrier for the temp database as well as main. Removing the toggle is the
-open question of the connection-open unit
-([#430](https://github.com/ahrav/eidnara/issues/430)); both tests name the
-behavior that unit would change.
+barrier for the temp database as well as main. The connection-open unit
+([#430](https://github.com/ahrav/eidnara/issues/430)) resolved the open
+question with those two tests: `query_only` blocks temp-database writes, it is
+the read callback's only write barrier because `deny_scope_escapes` allows
+DML on every non-infrastructure table, and the read path therefore keeps its
+two pragma statements.
+
+The connection-open path owns the resource pragmas. The memory store's
+[connection profile][profile] reads `PRAGMA page_size` and the
+`MAX_MMAP_SIZE` compile option, derives `cache_size` in pages from a byte
+budget and the measured page size, caps `mmap_size` at the compile-time
+maximum, keeps `temp_store` in memory, and reads back what took effect; the
+[profile test][profile-test] checks each derivation. The
+[resource-pragma test][resource-pragmas] shows read and fenced callbacks denied
+`cache_size`, `temp_store`, and `mmap_size` writes while the maintenance-set
+values stand. The memory store sets an explicit
+[statement-cache capacity][capacity] covering its distinct cached texts, with
+the kernel store's capacity as precedent. The [eviction probe][eviction-probe]
+extends the statement-reuse probe: a handle handed out with no runs after a
+returned handle of the same text had run means the cache re-created it, and an
+undersized cache shows exactly that. The [steady-pass test][pass-probe] shows a
+warm pass and four steady passes on one growing session preparing more distinct
+texts than the default capacity would hold, fewer than the configured capacity
+with a quarter of it as headroom, and re-creating no statement; the distinct
+count is the load-bearing claim, since the cache evicts only on insertion past
+capacity. The budgets are declared, not measured; the W1 measurement contract
+owns their effect.
 
 The [restoration test][restore-test] shows maintenance regaining its pragma
 writes after a panicking read and a panicking fenced callback, `query_only`
@@ -184,43 +209,53 @@ denial-matrix tests that existed at the baseline pass unchanged. After the
 schema-version keyed snapshot and the once-per-connection pin the same command
 passed 76 tests: seven internal tests (key reuse and replacement, defensive
 mode, forged version, retained bound, release comparison, pin, maintenance
-unwind) and the rename test were added.
+unwind) and the rename test were added. After the connection-open pragmas and
+the statement-cache capacity it passed 78 tests: the resource-pragma denial
+rows and the eviction probe were added; `cargo test -p memory-store --locked`
+gained the connection-profile test and `cargo test -p daemon --locked` the
+steady-pass eviction test.
 
 [lock]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L195-L209
-[read]: ../../../../crates/storage/src/lib.rs#L248-L264
-[write]: ../../../../crates/storage/src/lib.rs#L313-L339
+[read]: ../../../../crates/storage/src/lib.rs#L269-L286
+[write]: ../../../../crates/storage/src/lib.rs#L335-L361
 [scope]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L624-L705
 [cache]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L487-L498
 [facade]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5563-L5586
 [notes]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5999-L6025
 [scope-owners]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4772-L4823
-[mode]: ../../../../crates/storage/src/lib.rs#L557-L569
-[gate-install]: ../../../../crates/storage/src/lib.rs#L1303
-[flush]: ../../../../crates/storage/src/lib.rs#L277-L287
-[scope-install]: ../../../../crates/storage/src/lib.rs#L853-L955
-[mode-hold]: ../../../../crates/storage/src/lib.rs#L756-L758
-[apply]: ../../../../crates/storage/src/lib.rs#L1803-L1841
-[gate-tests]: ../../../../crates/storage/src/lib.rs#L1956-L2295
-[probe]: ../../../../crates/storage/src/lib.rs#L4429-L4513
-[read-witness]: ../../../../crates/storage/src/lib.rs#L4567-L4596
-[temp-write]: ../../../../crates/storage/src/lib.rs#L4603-L4626
-[restore-test]: ../../../../crates/storage/src/lib.rs#L4632-L4684
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L4690-L4720
-[surface-test]: ../../../../crates/storage/src/lib.rs#L4727-L4747
-[cached-test]: ../../../../crates/storage/src/lib.rs#L4382
-[snapshot]: ../../../../crates/storage/src/lib.rs#L577-L587
-[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L720-L731
-[infra-check]: ../../../../crates/storage/src/lib.rs#L928-L943
-[forget]: ../../../../crates/storage/src/lib.rs#L748-L752
-[bound]: ../../../../crates/storage/src/lib.rs#L611
-[rename-test]: ../../../../crates/storage/src/lib.rs#L4520-L4560
-[pin-test]: ../../../../crates/storage/src/lib.rs#L2194-L2232
-[bound-test]: ../../../../crates/storage/src/lib.rs#L2143-L2164
-[durability-test]: ../../../../crates/storage/src/lib.rs#L3923-L3988
-[forge-test]: ../../../../crates/storage/src/lib.rs#L2107-L2137
-[defensive]: ../../../../crates/storage/src/lib.rs#L671
-[defensive-test]: ../../../../crates/storage/src/lib.rs#L2081-L2101
-[release-test]: ../../../../crates/storage/src/lib.rs#L2170-L2186
-[pin]: ../../../../crates/storage/src/lib.rs#L737-L744
-[maintenance-exit]: ../../../../crates/storage/src/lib.rs#L366-L369
-[unwind-test]: ../../../../crates/storage/src/lib.rs#L2237-L2286
+[mode]: ../../../../crates/storage/src/lib.rs#L625-L637
+[gate-install]: ../../../../crates/storage/src/lib.rs#L1422
+[flush]: ../../../../crates/storage/src/lib.rs#L299-L309
+[scope-install]: ../../../../crates/storage/src/lib.rs#L972-L1074
+[mode-hold]: ../../../../crates/storage/src/lib.rs#L875-L877
+[apply]: ../../../../crates/storage/src/lib.rs#L1922-L1960
+[gate-tests]: ../../../../crates/storage/src/lib.rs#L2075-L2414
+[probe]: ../../../../crates/storage/src/lib.rs#L4548-L4632
+[read-witness]: ../../../../crates/storage/src/lib.rs#L4795-L4824
+[temp-write]: ../../../../crates/storage/src/lib.rs#L4831-L4854
+[restore-test]: ../../../../crates/storage/src/lib.rs#L4860-L4912
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L4918-L4948
+[surface-test]: ../../../../crates/storage/src/lib.rs#L4955-L4975
+[cached-test]: ../../../../crates/storage/src/lib.rs#L4501
+[snapshot]: ../../../../crates/storage/src/lib.rs#L645-L655
+[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L805-L816
+[infra-check]: ../../../../crates/storage/src/lib.rs#L1047-L1062
+[forget]: ../../../../crates/storage/src/lib.rs#L867-L871
+[bound]: ../../../../crates/storage/src/lib.rs#L679
+[rename-test]: ../../../../crates/storage/src/lib.rs#L4639-L4679
+[pin-test]: ../../../../crates/storage/src/lib.rs#L2313-L2351
+[bound-test]: ../../../../crates/storage/src/lib.rs#L2262-L2283
+[durability-test]: ../../../../crates/storage/src/lib.rs#L4042-L4107
+[forge-test]: ../../../../crates/storage/src/lib.rs#L2226-L2256
+[defensive]: ../../../../crates/storage/src/lib.rs#L754
+[defensive-test]: ../../../../crates/storage/src/lib.rs#L2200-L2220
+[release-test]: ../../../../crates/storage/src/lib.rs#L2289-L2305
+[pin]: ../../../../crates/storage/src/lib.rs#L822-L829
+[maintenance-exit]: ../../../../crates/storage/src/lib.rs#L388-L391
+[unwind-test]: ../../../../crates/storage/src/lib.rs#L2356-L2405
+[profile]: ../../../../crates/memory-store/src/lib.rs#L502-L544
+[profile-test]: ../../../../crates/memory-store/src/lib.rs#L15120-L15149
+[capacity]: ../../../../crates/memory-store/src/lib.rs#L478
+[resource-pragmas]: ../../../../crates/storage/src/lib.rs#L4685-L4723
+[eviction-probe]: ../../../../crates/storage/src/lib.rs#L4729-L4788
+[pass-probe]: ../../../../crates/daemon/src/lib.rs#L24573-L24603
