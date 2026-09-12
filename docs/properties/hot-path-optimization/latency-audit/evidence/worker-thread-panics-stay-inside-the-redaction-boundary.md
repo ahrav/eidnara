@@ -25,7 +25,7 @@ widens to every pass.
   calls `previous(info)` with the full panic info (`:46`). `previous` is
   whatever `take_hook` returned at the single install
   ([`runtime.rs:602`][install]); the only other `std::panic::set_hook` in the
-  tree is the test at [`tests/dispatch.rs:635`][t-panic-child], so in the
+  tree is the test at [`tests/dispatch.rs:631-660`][t-panic-child], so in the
   daemon it is the Rust default, which prints the thread name, location, and
   payload text.
 - The host wraps the request handler at [`dispatch.rs:928-934`][wrap]:
@@ -51,16 +51,16 @@ widens to every pass.
   the upload payload at `:577`), [`read.rs:291`][blk-read-gate], and
   [`:311`][blk-read-rows].
 - Three direct `spawn_blocking` calls: [`health.rs:224`][spawn-health];
-  [`mod.rs:358`][spawn-kernel-open], where a `JoinError` is printed with
+  [`mod.rs:358-362`][spawn-kernel-open], where a `JoinError` is printed with
   `eprintln!` and mapped to `KernelError::Fault` (`:360-362`); and
-  [`lib.rs:3808`][spawn-store-open], where a `JoinError` re-panics on the
+  [`lib.rs:3858-3866`][spawn-store-open], where a `JoinError` re-panics on the
   caller (`:3810`).
 - The evaluation names `routing.rs:591` as a production tenant of the pool.
   That call sits inside `#[cfg(test)] mod tests`
   ([`routing.rs:458-459`][routing-tests]) and is not production code; the
   record does not list it.
 - The other production `thread_local!` the boundary crosses is the
-  token-cache counter block at [`token_cache.rs:57`][tc-local] (W2). The
+  token-cache counter block at [`token_cache.rs:57-76`][tc-local] (W2). The
   third in the inspected crates is `#[cfg(test)]`
   ([`transform.rs:495-498`][tl-test]).
 - The host-runtime catalog's
@@ -113,8 +113,8 @@ The host settles an in-handler panic as `internal_error`; the kernel routes
 settle a worker panic as an `unavailable` response by documented intent.
 
 - Sources examined: [`dispatch.rs:985-989`][terminal],
-  [`mod.rs:460-468`][blocking], [`read.rs:296-322`][read-arms],
-  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3815-3817`][spawn-store-open].
+  [`mod.rs:462-468`][blocking], [`read.rs:296-322`][read-arms],
+  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3858-3866`][spawn-store-open].
 - Findings: Three distinct mappings exist for a `JoinError` from a worker
   panic: an `internal_error` terminal (host), a `store_unavailable` response
   (kernel routes), and a re-panic (store open). The kernel-route mapping is a
@@ -163,7 +163,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 [blk-read-rows]: ../../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3821-L3823
+[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3858-L3866
 [routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L458-L459
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
 [tl-test]: ../../../../../crates/daemon/src/transform.rs#L495-L498

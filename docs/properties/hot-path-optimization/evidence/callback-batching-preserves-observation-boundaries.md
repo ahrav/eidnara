@@ -92,7 +92,7 @@ the live anchors below are to that merged tree.
 [test]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L3946-L3981
 [rollback]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L4116
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
-[live-read]: ../../../../crates/storage/src/lib.rs#L326-L343
-[live-write]: ../../../../crates/storage/src/lib.rs#L392-L456
-[live-test]: ../../../../crates/storage/src/lib.rs#L5697-L5734
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L5867-L5893
+[live-read]: ../../../../crates/storage/src/lib.rs#L343-L360
+[live-write]: ../../../../crates/storage/src/lib.rs#L409-L473
+[live-test]: ../../../../crates/storage/src/lib.rs#L5749-L5786
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L5919-L5945

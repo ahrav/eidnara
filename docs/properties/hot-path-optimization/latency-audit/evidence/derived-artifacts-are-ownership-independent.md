@@ -40,7 +40,7 @@ never of the allocation or the lane that produced them.
   `i` exactly when [`chunk.value.as_ref() == message`][chunk-eq], a value test.
   [`remember_message`][remember] appends to `order` only on first sight;
   [`decode_opencode_sidecar_incremental`][sidecar-inc] copies the prior order,
-  then appends suffix mids not already present ([`:277-291`][sidecar-merge]),
+  then appends suffix mids not already present ([`:288-310`][sidecar-merge]),
   and takes `mid_pins` from the suffix only.
 - [`ServedMessage::from_message_reusing`][served-reusing] computes
   `canonical_bytes = to_vec(to_value(&message))`, `canonical_hash` as its
@@ -555,10 +555,10 @@ latency.
 [canonical-keys]: ../../../../../crates/daemon/src/served_json.rs#L218
 [canonical-test-entry]: ../../../../../crates/daemon/src/served_json.rs#L116-L119
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
-[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13794
+[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13797
 [canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L252-L279
-[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11829-L11851
-[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13939
+[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11874-L11896
+[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13942
 [canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L171
 
 [bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
@@ -590,8 +590,8 @@ latency.
 [fp-reuse]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L164-L216
 [ser-served]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2016
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2031
+[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2019
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2034
 [prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
 [sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
 [sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16632

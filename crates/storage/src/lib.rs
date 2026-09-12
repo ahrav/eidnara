@@ -234,6 +234,23 @@ mod sqlite_backend {
         }
 
         /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
+        /// how many times the current handle ran after the probe first saw it. SQLite counts
+        /// a run per step sequence ended by a reset and keeps the count across in-place
+        /// re-preparation, so a never-evicted text's count is the number of times the
+        /// connection ran it since arming; a re-created handle counts from zero. Empty when
+        /// the probe was never started.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn statement_runs(&self) -> std::collections::BTreeMap<String, i32> {
+            self.gate
+                .lock()
+                .statement_probe
+                .iter()
+                .flat_map(|probe| probe.iter())
+                .map(|(sql, reuse)| (sql.clone(), (reuse.last_runs - reuse.baseline_runs).max(0)))
+                .collect()
+        }
+
+        /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
         /// how many times the statement cache handed out a re-created handle after a
         /// returned handle of that key had run. Every key prepared appears; a cache sized
         /// for the hot set shows zero for each. Empty when the probe was never started.
@@ -900,10 +917,13 @@ mod sqlite_backend {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy)]
     struct StatementReuse {
         /// `last_runs` records the run count a handle reported when it last returned to the cache.
         last_runs: i32,
+        /// `baseline_runs` records the run count the handle carried when the probe first saw
+        /// it, so runs before arming are not reported; a re-created handle starts at zero.
+        baseline_runs: i32,
         evictions: u32,
     }
 
@@ -1035,9 +1055,14 @@ mod sqlite_backend {
             let mut state = self.lock();
             let probe = state.statement_probe.as_mut()?;
             let key = sql.trim().to_string();
-            let reuse = probe.entry(key.clone()).or_default();
+            let reuse = probe.entry(key.clone()).or_insert(StatementReuse {
+                last_runs: runs,
+                baseline_runs: runs,
+                evictions: 0,
+            });
             if runs == 0 && reuse.last_runs > 0 {
                 reuse.evictions += 1;
+                reuse.baseline_runs = 0;
             }
             Some((self, key))
         }
@@ -5283,6 +5308,33 @@ mod tests {
             store.statement_evictions().get("SELECT 1"),
             Some(&1),
             "the unstepped reuse of the re-created handle is not an eviction"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// SQLite keeps a handle's run count from before the probe was armed; the probe reports
+    /// only the runs after arming.
+    #[test]
+    fn statement_runs_count_from_the_probe_start_not_the_handle_creation() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let run = |store: &SqliteStore| {
+            store
+                .with_conn_fenced(|tx| {
+                    tx.prepare_cached("SELECT 1")?
+                        .query_row([], |r| r.get::<_, i64>(0))?;
+                    Ok(())
+                })
+                .expect("run SELECT 1");
+        };
+        run(&store);
+        store.start_statement_reuse_probe();
+        run(&store);
+        assert_eq!(
+            store.statement_runs().get("SELECT 1"),
+            Some(&1),
+            "the run before the probe started is not counted"
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);

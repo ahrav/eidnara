@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The single-load evidence below describes the live pass.
 
 ## Discovery trigger
 
@@ -119,34 +121,160 @@ covers narrow-read equivalence or `historian_active` on durable state.
 - Missing evidence: SQLite behavior was not run; relevant only under a bypass.
 - Conclusion: unresolved, needs a SQLite run only if a bypassing writer exists.
 
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6302-L6329
-[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4666-L4667
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4664-L4665
-[meta-epoch]: ../../../../../crates/memory-store/src/lib.rs#L1472-L1473
-[meta-historian]: ../../../../../crates/memory-store/src/lib.rs#L1588-L1589
-[phase]: ../../../../../crates/memory-store/src/lib.rs#L622-L631
-[hds-state]: ../../../../../crates/memory-store/src/lib.rs#L664-L667
-[unique]: ../../../../../crates/memory-store/src/lib.rs#L3376-L3457
-[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10163-L10256
-[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4284-L4302
-[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4164-L4193
-[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4180
-[epoch-load]: ../../../../../crates/daemon/src/lib.rs#L4181-L4186
-[active]: ../../../../../crates/daemon/src/lib.rs#L4580-L4593
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5007-L5080
-[prepare-load]: ../../../../../crates/daemon/src/lib.rs#L5026
-[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5462
-[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5463-L5476
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8228-L8236
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8237-L8245
-[rerun]: ../../../../../crates/daemon/src/lib.rs#L8281-L8284
-[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8371-L8390
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L22957
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L35324
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36092
-[cas-retry]: ../../../../../crates/daemon/src/transform.rs#L1948-L1987
-[descent-load]: ../../../../../crates/daemon/src/transform.rs#L2918
-[descend]: ../../../../../crates/daemon/src/transform.rs#L2929-L2940
-[snapshot]: ../../../../../crates/daemon/src/transform.rs#L3006
-[truncate]: ../../../../../crates/daemon/src/transform.rs#L4097-L4103
-[truncate-reload]: ../../../../../crates/daemon/src/transform.rs#L4115
+[load]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6196-L6223
+[full-select]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4581-L4582
+[meta-select]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4579-L4580
+[meta-epoch]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1387-L1388
+[meta-historian]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1503-L1504
+[phase]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L537-L546
+[hds-state]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L579-L582
+[unique]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3291-L3372
+[recomp]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10057-L10150
+[epoch-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4271-L4289
+[epoch-read-delta]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4151-L4180
+[epoch-comment]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4167
+[epoch-load]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4168-L4173
+[active]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4567-L4580
+[prepare]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994-L5067
+[prepare-load]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5013
+[no-fire-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5449
+[no-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5450-L5463
+[floor-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8215-L8223
+[hook]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8224-L8232
+[rerun]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8268-L8271
+[floor-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8358-L8377
+[t-cas]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L22606
+[t-emergency]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L34923
+[t-no-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L35691
+[cas-retry]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1940-L1979
+[descent-load]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2910
+[descend]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2921-L2932
+[snapshot]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2998
+[truncate]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L4089-L4095
+[truncate-reload]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L4107
+
+## Single-load evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the
+storage units that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/432)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+The handler [loads `meta` once][pass-load] through [`load_meta`][meta-load]
+before the tail-delta expansion and hands the result to the pre-transform
+consumers as a [`PassState`][pass-state]: `Loaded` carries the metadata,
+`Unavailable` means the load failed, and `Reload` means the consumer runs after
+a commit. The load reads the [`meta` projection][meta-select-live] alone: no
+pre-transform consumer reads the core, and the full row's `core_state`
+deserialization is the largest cost of a full load. The
+[tail-delta expansion][delta] and the [projection-cache lookup][lookup] take
+`Loaded`'s epoch and return `None` otherwise, so a failed load still answers
+full-sync and misses the cache as it did on its own failed load. The
+[last-response anchor][last-response] takes `Loaded`'s timestamp, `0` on
+`Unavailable`, and a `load_meta` read on `Reload`; the
+[historian-active check][active-live] takes `Loaded`'s phase when it is idle, idle on
+`Unavailable`, and the phase alone from the store on `Reload` and on a `Loaded`
+non-idle phase with no live run, since a run that completes after the pass load
+leaves the live map and commits idle. The
+[transform closure][run-transform] receives the pass state on its first run
+and `Reload` on every rerun after an inline firing or a live completion, and
+the load is dropped after the first run so a rerun can name nothing else.
+The transform's own [snapshot][snapshot-live] stays its linearization point and
+a CAS conflict still reloads; `prepare_historian_fire` keeps its post-commit
+full load because its no-fire write needs the committed `row_version`. The
+compartment state-sync gate keeps its full load as well: it writes on the
+strength of that read and had no hot-path motive to narrow.
+
+The pass load is timed on its own as the [`pass_state_load`][pass-timing]
+pass-trace bucket. At the baseline the read sat inside the `delta_expand` and
+`projection_cache_lookup` windows; moving it ahead of both would otherwise
+shrink those buckets by the read's cost while `handler_total` kept it.
+
+The read point of the historian-active check and the last-response anchor
+moved earlier, from inside the transform closure to before the side-channel
+drain and the pass-trace write. Neither of those writes `cache_state`, so no
+in-process write is hidden; a concurrent publish landing inside that section is
+read as the earlier phase only while a run is live. A live run is reported
+active through the in-process live map before the durable phase is consulted;
+a loaded active phase with no live run is re-read, so a run that completed
+between the pass load and the check does not veto the pass.
+
+Post-commit scalar consumers read one `meta` field by
+[SQL JSON extraction][scalar-select]: `json_valid(meta, 1)` refuses text that
+is not strict JSON, since SQLite's parser accepts JSON5 that serde refuses;
+`json_type(meta)` refuses strict JSON that is not an object (`null`, a number,
+an array), which deserializes to no `ModuleMeta` and would otherwise read every
+path as absent; `json_type(meta, path)` tells an absent path, which takes the
+serde default, from a JSON
+`null`; and `->>` yields the unquoted value, whose type is checked against the
+type text because `->>` renders a boolean as the integer `1` or `0`. The three
+functions share one parse of `meta`: the bundled SQLite keys its JSON parse
+cache on a negative auxdata slot, which every function in a statement sees. The
+Emergency95 [floor reads][floor-live] share one
+[`load_publication_floor_ordinal`][floor-accessor] closure; the wrapup epoch
+check uses [`load_revert_epoch`][epoch-accessor]; `historian_active` uses
+[`load_historian_phase`][phase-accessor] on `Reload` and on a loaded active
+phase with no live run.
+
+The [differential test][scalar-test] builds rows from a serialized default
+`meta` and shows each accessor equal to the full deserialization where that
+succeeds, and failing on its own field where the full load fails: a `null`,
+negative, textual, or boolean `revert_epoch`; a boolean floor; an unknown
+`historian.state`; JSON5; malformed text; and strict JSON that is not an
+object. It also shows `load_meta` equal
+to the full load's `meta` on every row both accept, and failing on every row
+both refuse. The recorded divergences are per-column and per-field versus
+per-row reading: a corrupt `core_state` fails only the full load, so
+`load_meta` and every scalar accessor answer on such a row; a sibling field's
+corruption fails only the full load and `load_meta`; a `historian` that is not
+an object reads as an absent path, so the phase is idle where the full load
+refuses the row; and an integer above `i64::MAX`, which SQLite returns as a
+float, fails only the scalar read. A pre-transform consumer therefore proceeds
+on a row whose `core_state` is corrupt where its own full load once refused
+it; the transform's snapshot then fails that row and the pass is rejected
+before any commit, so the consumers' work on that pass is discarded. Every
+post-commit scalar consumer runs after a full load of the same row succeeded in
+the same request or holds a value the transform already committed.
+
+The [load-count test][load-count] arms the statement probe, runs a warm pass,
+then a steady pass with the interleave hook sampling both projections' counts
+between the transform commit and the post-commit load: one `meta` load and no
+full load before the hook, one full load and no `meta` load after, and no
+eviction of either counted handle. The counters key on the prepared statement
+text through [`CacheStateSelect`][select-probe]; the
+[counter test][counters-test] forces an eviction with a cache of one and shows
+the counter records it. At the baseline the same pass ran the full select three
+or four times. The [durable-phase test][phase-test] exercises `historian_active`
+on each `PassState`; the [timing test][timing-test] shows the bucket present and
+non-zero on a steady pass.
+
+### Focused execution, 2026-09-12
+
+`cargo test -p memory-store --locked` passed with the differential test and the
+counter test; `cargo test -p daemon --locked` passed with the load-count test,
+the timing test, the durable-phase test, and the extended interleave test, the
+two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+branch as well and passing in isolation.
+
+[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8121
+[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6380-L6392
+[meta-select-live]: ../../../../../crates/memory-store/src/lib.rs#L4664-L4665
+[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3507-L3511
+[delta]: ../../../../../crates/daemon/src/lib.rs#L4206
+[lookup]: ../../../../../crates/daemon/src/lib.rs#L4317
+[last-response]: ../../../../../crates/daemon/src/lib.rs#L4641-L4673
+[active-live]: ../../../../../crates/daemon/src/lib.rs#L4609-L4632
+[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8222
+[pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
+[snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
+[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4691-L4692
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8217-L8221
+[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6479-L6498
+[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6441-L6457
+[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6459-L6477
+[select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4669-L4685
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15279-L15507
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15509-L15542
+[load-count]: ../../../../../crates/daemon/src/lib.rs#L24695-L24747
+[timing-test]: ../../../../../crates/daemon/src/lib.rs#L24753-L24765
+[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24771-L24784

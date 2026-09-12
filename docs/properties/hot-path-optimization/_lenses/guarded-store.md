@@ -23,10 +23,10 @@ S2 preserves [within-call snapshot and next-call freshness][snapshot]. Neither
 record permits batching unrelated operations into one snapshot, weaker
 durability, or a schema/version ledger.
 
-[mutex]: ../../../../crates/storage/src/lib.rs#L261-L298
-[read]: ../../../../crates/storage/src/lib.rs#L326-L343
-[write]: ../../../../crates/storage/src/lib.rs#L392-L456
-[scope]: ../../../../crates/storage/src/lib.rs#L1185-L1267
-[cache]: ../../../../crates/storage/src/lib.rs#L910-L917
-[facade]: ../../../../crates/memory-store/src/lib.rs#L5669-L5692
-[snapshot]: ../../../../crates/storage/src/lib.rs#L5697-L5734
+[mutex]: ../../../../crates/storage/src/lib.rs#L278-L315
+[read]: ../../../../crates/storage/src/lib.rs#L343-L360
+[write]: ../../../../crates/storage/src/lib.rs#L409-L473
+[scope]: ../../../../crates/storage/src/lib.rs#L1210-L1292
+[cache]: ../../../../crates/storage/src/lib.rs#L930-L937
+[facade]: ../../../../crates/memory-store/src/lib.rs#L5718-L5741
+[snapshot]: ../../../../crates/storage/src/lib.rs#L5749-L5786

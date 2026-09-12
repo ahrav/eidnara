@@ -27,25 +27,25 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   contends with or extends the pass commit. A secret-bearing `session_id` is
   [tolerated only when the row already exists][flagged].
 - [`trace_pass_rejected`][rejected] updates `reject_count + 1`
-  ([`:6738`][reject-bump]); its [doc][rejected-doc] calls it a single plain
+  ([`:7013`][reject-bump]); its [doc][rejected-doc] calls it a single plain
   UPSERT outside the fenced transaction. [`trace_pass_completed`][completed]'s
   [doc][completed-doc] says it cannot alter CAS semantics or hold the commit
   transaction open longer.
 - [`trace_pass_stable`][stable] appends one `scheduler_history` observation
-  with the 256-entry ring ([`:6594-6601`][stable-ring]); the
+  with the 256-entry ring ([`:6869-6876`][stable-ring]); the
   [in-commit upsert][commit-trace] does the same, initializes `receive_count`
-  to `0` on a fresh insert ([`:8441`][commit-init]), and leaves it alone on
+  to `0` on a fresh insert ([`:8716`][commit-init]), and leaves it alone on
   conflict.
 - The [`PassTrace` doc][passtrace-doc] says the counters are stored apart from
   `cache_state` so a rejected pass leaves a trail without advancing
   `row_version`.
 - Readers: [session status][status-read] and [health][health-read] JSON, the
-  `newest_pass_at` age at [`:6238`][age], and the plugin's
+  `newest_pass_at` age at [`:6300-6311`][age], and the plugin's
   [`Passes: N received, M rejected`][plugin] line.
   [`load_pass_scheduler_history`][sched-history] has one non-store caller,
   a [test][sched-test].
-- An Emergency95 pass can rerun `run_transform` at [`:8264-8267`][rerun-a] and
-  [`:8372-8375`][rerun-b] after one receive breadcrumb.
+- An Emergency95 pass can rerun `run_transform` at [`:8349-8352`][rerun-a] and
+  [`:8448-8451`][rerun-b] after one receive breadcrumb.
 
 ## Failure scenario
 
@@ -75,7 +75,7 @@ unchanged; `first_divergence` is NULL after a reject; `scheduler_history`
 gains one observation per accepted pass; and the cache-state row commits when
 the trace write fails. The
 [state checks](../existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list seven pass-trace tests ([`t-reject`][t-reject], [`t-success`][t-success],
+list six pass-trace tests ([`t-success`][t-success],
 [`t-repeat`][t-repeat], [`t-frozen`][t-frozen], [`t-status`][t-status],
 [`t-upserts`][t-upserts], [`t-sched`][t-sched]) and the identity gate
 ([`t-secret`][t-secret]); none covers `first_divergence` after a reject,
@@ -93,8 +93,7 @@ channel, the authority route read, and dreamer tasks only.
 ### Q: Is under-counting rejected passes an acceptable semantic change?
 
 - Sources examined: [`trace_pass_received`][received], the
-  [`PassTrace` doc][passtrace-doc], [`t-reject`][t-reject],
-  [`t-frozen`][t-frozen].
+  [`PassTrace` doc][passtrace-doc], [`t-frozen`][t-frozen].
 - Findings: The doc states the reject-trail purpose; the tests encode
   `receive_count == reject_count` after rejects. A fold cannot preserve that
   without a second write on the reject path.
@@ -121,36 +120,35 @@ channel, the authority route read, and dreamer tasks only.
 - Conclusion: unresolved, needs R3's owner-relationship normalization.
 
 [r3]: ../../catalog.md#redaction-audit-does-not-depend-on-retained-payload
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8144
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8207-L8214
-[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8277-L8280
-[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8385-L8388
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8449
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6210-L6260
-[age]: ../../../../../crates/daemon/src/lib.rs#L6251
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7839-L7887
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23804
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23834
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23850
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23882
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23914
-[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1827-L1851
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13532
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13575
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8206
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8280-L8287
+[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8349-L8352
+[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8448-L8451
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8512
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6246-L6300
+[age]: ../../../../../crates/daemon/src/lib.rs#L6300-L6311
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7903-L7942
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24606
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L24809
+[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1823-L1847
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
+[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13592
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L852-L869
-[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6588-L6590
-[received]: ../../../../../crates/memory-store/src/lib.rs#L6591-L6641
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6602-L6620
-[stable]: ../../../../../crates/memory-store/src/lib.rs#L6646-L6738
-[stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6700-L6707
-[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6740-L6742
-[completed]: ../../../../../crates/memory-store/src/lib.rs#L6743-L6791
-[rejected-doc]: ../../../../../crates/memory-store/src/lib.rs#L6793-L6796
-[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6797-L6850
-[reject-bump]: ../../../../../crates/memory-store/src/lib.rs#L6844
-[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L6898-L6931
-[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8533-L8600
-[commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8547
-[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15544
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L17713
+[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6757-L6759
+[received]: ../../../../../crates/memory-store/src/lib.rs#L6760-L6810
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6771-L6789
+[stable]: ../../../../../crates/memory-store/src/lib.rs#L6815-L6907
+[stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6869-L6876
+[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6909-L6911
+[completed]: ../../../../../crates/memory-store/src/lib.rs#L6912-L6960
+[rejected-doc]: ../../../../../crates/memory-store/src/lib.rs#L6962-L6965
+[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6966-L7019
+[reject-bump]: ../../../../../crates/memory-store/src/lib.rs#L7013
+[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L7067-L7100
+[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8702-L8769
+[commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8716
+[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15977
+[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18068
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268

@@ -260,6 +260,6 @@ anchors above identify each branch.
 [t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L2290
 [count-digest]: ../../../../../crates/daemon/src/token_cache.rs#L103-L143
 [memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L417
-[caller]: ../../../../../crates/daemon/src/transform.rs#L4707-L4721
+[caller]: ../../../../../crates/daemon/src/transform.rs#L4710-L4724
 [declaration]: ../../../../../crates/daemon/src/lib.rs#L2256-L2286
 [bench]: ../../../../../crates/daemon/benches/hot_path.rs#L161-L199

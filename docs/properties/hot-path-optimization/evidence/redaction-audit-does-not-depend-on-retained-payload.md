@@ -11,13 +11,13 @@ This is a performance hypothesis, not a claim that retained text is unredacted.
 
 ## Evidence trail
 
-- [memory-store/lib.rs:2221-2242][retain] clones Content output and retains the
+- [memory-store/lib.rs:2306-2327][retain] clones Content output and retains the
   Redaction in the scan. Identity branches return the input value instead.
-- [2133-2143][json] already records JSON-observed scans with empty retained text
+- [2218-2228][json] already records JSON-observed scans with empty retained text
   and preserved detections, field identity, action, and owners.
-- [2356-2424][audit] persists detector revision/digest, finding count, owner
+- [2441-2509][audit] persists detector revision/digest, finding count, owner
   copies, labels, and actions. It does not consume field.redaction.text.
-- [2245-2271][execute] co-commits applied effects and audit under a fenced write.
+- [2330-2356][execute] co-commits applied effects and audit under a fenced write.
   Replay skips a new audit append at this boundary.
 
 ## Failure scenario

@@ -63,7 +63,7 @@ tokenizer obligations remain in their canonical catalogs, named under
 | G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the historian, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The dreamer schedule [defaults to `None`][sched-default]; smart notes need a cron on the note. |
-| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14027`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
+| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14098`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the only abort seam after commit is the `#[cfg(test)]` [hook][hook]. |
 | W12 | default-production | Every `kernel.*` route that reaches the store runs its work through [`kernel_routes::blocking`][blocking] on a `spawn_blocking` worker with the redaction guard at depth `0`; the panic itself is the injected fault. |
 
@@ -688,29 +688,47 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - The no-fire CAS test and the emergency interleave test
-exercise the post-commit load; no test compares a narrow `meta` read with
-`MemoryStore::load`, and none covers `historian_active` reading durable
-state.
+exercise the post-commit load. The
+[memory-store differential test](evidence/consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence)
+compares the `revert_epoch`, `historian.state`, and
+`publication_floor_ordinal` scalar reads and the `meta`-only load with
+`MemoryStore::load` over absent keys, JSON `null`, booleans, unknown variants,
+negative and textual epochs, a non-object `historian`, JSON5, malformed `meta`,
+and malformed `core_state`; the daemon load-count test shows one pre-transform
+`meta` load, no pre-transform full load, and one post-commit full load per
+steady pass, split by the interleave hook, on handles the probe shows were
+never re-created; the durable-phase test exercises `historian_active` on every
+`PassState`.
 Guarantee: Consolidating or narrowing `cache_state` loads never changes what
 any consumer observes: a post-commit consumer sees its own commit, and a
-scalar projection decodes and fails exactly as the full load does.
+scalar or `meta`-only projection decodes its field as the full load does and
+fails where the full load fails on that field; the per-column and per-field
+divergences (a corrupt `core_state`, a corrupt sibling field, a non-object
+ancestor, an integer above `i64::MAX`) are recorded in the evidence, and a
+pre-transform consumer that proceeds on a row whose `core_state` the full load
+refuses does so only in a pass the transform's own snapshot then rejects before
+any commit.
 Check: `always` - Freshness: within one pass, every `cache_state` read that
 executes after `commit_transform`, [`descend_lineage`][descend],
 [`truncate_compartments_for_revert`][truncate], or an awaited historian
 firing observes a `row_version` at least as new as the one that work
 returned, any CAS write derived from that read ([`record_no_fire`][no-fire]
 under `loaded.row_version`) uses that value, and the two Emergency95
-`publication_floor_ordinal` reads ([`:8213-8221`][floor-a],
-[`:8356-8375`][floor-b]) stay distinct because their comparison is the rerun
+`publication_floor_ordinal` reads ([`:8303-8308`][floor-a],
+[`:8425-8444`][floor-b]) stay distinct because their comparison is the rerun
 trigger. Decode: for every stored `meta` text, a scalar projection of
 `revert_epoch` and `historian.state` returns the same value as
-`serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when it
-fails, or when `core_state` fails to deserialize, the consumer takes the
-branch it takes today (`None` for the projection cache at
+`serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when that
+field fails to deserialize the consumer takes the branch it took on a failed
+full load (`None` for the projection cache at
 [`lookup_full_projection_cache`][epoch-read] and
 [`expand_transform_tail_delta`][epoch-read-delta], `false` for
-[`historian_active`][active]). `always` because the daemon consumes these
-reads on every pass, not only under a fault.
+[`historian_active`][active]), except for the recorded divergences: a
+corrupt `core_state` or a corrupt sibling field no longer takes that branch
+(the pass proceeds and the transform's own snapshot load refuses the row
+before any commit), a non-object `historian` reads as `Idle`, and an epoch
+above `i64::MAX` fails the scalar read alone. `always` because the daemon
+consumes these reads on every pass, not only under a fault.
 Fault/timing angle: A consolidation reuses a snapshot taken before
 `commit_transform` for a consumer placed after it, or reuses the first
 `run_transform` snapshot for an Emergency95 rerun after an inline firing; a
@@ -772,8 +790,8 @@ never both; a `pass_trace` write never changes `cache_state`; and a
 `pass_trace` failure never aborts an otherwise valid cache commit unless the
 specification states the new coupling. `always` because status, health, and
 the plugin display read these counters on every request, and every call site
-discards the trace result with `let _ =` ([`:8129`][received-call],
-[`:8192-8199`][rejected-call], [`:8434`][completed-call],
+discards the trace result with `let _ =` ([`:8206`][received-call],
+[`:8280-8287`][rejected-call], [`:8512`][completed-call],
 [`record_stable_pass_trace`][stable-call]).
 Fault/timing angle: A fold moves the bump after `run_transform`, so a rejected
 or stable pass under-counts, or attaches it to every commit so a rerun
@@ -847,7 +865,7 @@ returned after the loop completes. `always` because
 which rows a pass touches.
 Fault/timing angle: Process crash between the mark commit and the
 [per-row delete][delete-one]; the publish task's own drain
-([`:10762-10771`][publish-drain]) overlapping the pass drain on one session;
+([`:11037-11046`][publish-drain]) overlapping the pass drain on one session;
 a target insert failing after the outbox state change in a reordered
 transaction; an empty-drain shortcut that skips the [leftover delete][delete-all];
 a delete-in-place that changes which rows [count as pending][status-sc].
@@ -925,18 +943,24 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial - The emergency interleave test constructs the situation
-through the test hook; no campaign marker records it.
+Exercised: yes - The
+[emergency interleave test](evidence/foreign-write-lands-between-pass-loads.md#marker-evidence)
+records the transform's committed `row_version` and the publish's committed
+`row_version` from the store inside the hook and asserts the publish landed
+after the transform and after the Emergency95 pre-hook floor read, before
+`prepare_historian_fire`'s load and the final floor check.
 Guarantee: A state-load campaign reaches the interleaving that distinguishes
 one-load-per-pass from per-consumer loads.
 Check: `sometimes` - For some pass, a foreign commit by another actor
 (historian publish, wrapup recut, or state sync) through a second store
 handle returns a `row_version` greater than the one the pass's transform
-committed, and that commit returns before the pass's first post-commit
-`cache_state` read begins; both versions and the ordering are recorded from
+committed, and that commit returns between two of the pass's post-commit
+`cache_state` reads (the hook sits after the Emergency95 pre-floor read at
+[`:8303-8308`][floor-a] and before `prepare_historian_fire`'s load and the
+final floor check); both versions and the ordering are recorded from
 the store and the actor, never from the pass's own read, which is what C1
 tests. `sometimes` rather than `reachable` because the rerun
-lines at [`:8356-8375`][floor-b] execute on every Emergency95 pass while the
+lines at [`:8425-8444`][floor-b] execute on every Emergency95 pass while the
 interleaving that makes C1 meaningful may never occur.
 Fault/timing angle: The window between `commit_transform` and
 [`prepare_historian_fire`][prepare] or the floor check.
@@ -968,10 +992,10 @@ on an empty drain.
 Check: `sometimes` - Under three constant markers
 `side-channel-row-is-due-during-a-drain-event`, `-primer`, and
 `-user-observation`, for some call to [`drain_historian_side_channels`][drain]
-from the handler's pass drain ([`:8122-8126`][pass-drain]), the outbox holds
+from the handler's pass drain ([`:8199-8203`][pass-drain]), the outbox holds
 at entry, for that kind, at least one row with `delivered_at_ms IS NULL` and
 `next_attempt_at_ms <= now_ms` for the `now_ms` the call passes (the due
-predicate at [`:10893-10894`][due-predicate]). Each marker records the
+predicate at [`:11168-11169`][due-predicate]). Each marker records the
 pending rows read from the outbox and the drain's `now_ms` before delivery
 runs, never the delivery result. `sometimes` because the drain lines execute
 on every pass while a due row may never exist, so `reachable` would be
@@ -980,9 +1004,9 @@ Fault/timing angle: Under default configuration no [`model_chain`][cfg-models]
 is set, so nothing publishes, the outbox is empty on every pass, and C3's
 per-row clauses are never evaluated. With publishing,
 [`publish_historian_chunk`][publish] drains inline right after its commit
-([`:10762-10771`][publish-drain]), so the pass drain finds a due row only when
+([`:11037-11046`][publish-drain]), so the pass drain finds a due row only when
 that inline delivery failed (the next attempt is
-`now + 1000 * 2^min(attempt, 6)` ms, [`:10981-10985`][backoff]) or when the
+`now + 1000 * 2^min(attempt, 6)` ms, [`:11256-11260`][backoff]) or when the
 process ended between the enqueue commit and the inline drain.
 Required faults and enabling state: A published firing with events, primers,
 and user observations (a direct `publish_historian_chunk` call in a unit
@@ -1686,9 +1710,9 @@ test mode and compares nothing; [`.config/nextest.toml`][nextest] excludes
 bench targets. The daemon bench's [header][hp-header] disclaims its own
 numbers as a baseline; its end-to-end arms call [`transform_cached`][hp-e2e]
 on an already-typed request against a fresh store, skipping the handler work
-at [`:8113-8130`][h-pre] and the response encoding in
+at [`:8181-8198`][h-pre] and the response encoding in
 [`respond_transform`][respond]. The two production-sized fixtures
-([1_400][fx-1400], [2_500][fx-2500]) are `#[ignore]` and print to stderr. The
+([1_12436-12441][fx-1400], [2_28085-28090][fx-2500]) are `#[ignore]` and print to stderr. The
 transport bench measures a fixed [256- or 4096-byte payload][he-payload],
 [rejects `--designated-host`][he-designated], and labels its own record
 [`BLOCKED`][he-blocked] while its [manifest][he-manifest] declares 24 probes.
@@ -1712,9 +1736,11 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: invalidated - with no recorded stage delta there is nothing for a
-moved timer boundary to misreport; the record is kept as authored for
-traceability.
+Status: invalidated - the one recorded stage delta, the single pass-state
+load ([C1][c1]), gave the moved read its own `pass_state_load` field and key
+instead of leaving it inside `delta_expand` and `projection_cache_lookup`,
+so no existing field changed what it brackets; the record is kept as
+authored for traceability.
 Exercised: partial - The line's key set and the default deserialization are
 pinned; nothing ties the TypeScript key list to the Rust struct or asserts
 what a field brackets.
@@ -1724,7 +1750,7 @@ Check: `always` - Every key printed by [`format_pass_timing_line`][fmt] and
 every key the plugin's [`rust module stages:` line][ts-stages] reads resolves
 to a field of [`TransformTimings`][tt] under a pinned key-to-field map, which
 at HEAD is the identity except `post_attach_ms` for `post_attach`
-(`transform.rs:1254`, `:1331`, field at `:1162`); each field's start and stop
+(`transform.rs:1264`, `:1342`, field at `:1172`); each field's start and stop
 instants are stated in a per-field table beside the struct and a relocation
 changes the table in the same change (a review gate, not a runtime
 assertion); a field for a removed or merged stage
@@ -1734,7 +1760,7 @@ the token-cache delta ([`record_token_cache_delta`][rtcd]) run on one thread.
 `always` because the handler populates `timings` on every ordinary pass and
 [`respond_transform`][respond] emits the line for every response.
 Fault/timing angle: The transform moves to a blocking thread while the
-handler-level `Instant` pairs at [`:8461-8486`][h-timings] stay on the
+handler-level `Instant` pairs at [`:8540-8564`][h-timings] stay on the
 handler task; a stage split across an `.await` splits its
 [thread-local counter][tc-local] delta. Both reads sit inside the synchronous
 [`apply_additive_only`][snap-add] and [`apply_once`][snap-once] bodies today.
@@ -1755,6 +1781,9 @@ improvement.
 Open questions:
 - Are the stage fields a contract with the plugin, or free to change with the
   plugin's log line? (needs human input)
+- Does a recorded delta that adds its own bucket reactivate this record, or
+  does it stay invalidated until a delta moves work under an existing timer?
+  (needs human input)
 
 ### token-cache-is-a-pure-declared-memo-behind-one-estimator-interface
 
@@ -1999,8 +2028,8 @@ edited; two project roots bound at once.
 Confidence: high - [Evidence](evidence/effective-config-reads-observe-a-tier-change-by-the-next-pass.md).
 [`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn]
 with its deep clone at [`:288`][eff-clone], the per-pass callers
-([`:4788`][call-reattach], [`:5049`][call-fire], [`:5366`][call-wrapup]), and
-the bind freeze ([`:11786`][call-bind], [binding doc][binding-doc]) are
+([`:4842`][call-reattach], [`:5100`][call-fire], [`:5419`][call-wrapup]), and
+the bind freeze ([`:11856`][call-bind], [binding doc][binding-doc]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the mtime test and the three privilege tests; all unaudited. Unit tests
@@ -2032,15 +2061,15 @@ next pass's `ProducerContext` construction for the same session:
 table; the projection cache holds the entry [`store_projection_cache`][store-pc]
 would have stored, or the next pass takes the full projection path;
 `guidance_dates` holds no entry for the session, or the next pass's
-`ProducerContext.guidance_date` ([`:8173`][guidance-use]) equals a fresh
+`ProducerContext.guidance_date` ([`:8261`][guidance-use]) equals a fresh
 computation; and the serialized-output cache holds no entry from a pass the
 store rejected, which the transform catalog's
 [output-cache record][tc-output] already constrains. `always` because the
 four updates run on every committing pass whatever the execution topology.
 Fault/timing angle: On the ordinary path there is no `.await` between the
-commit at [`:8200`][commit-call] and the bookkeeping at
-[`:8207-8212`][roots-insert], [`:8385-8392`][pc-store], and
-[`:8396-8401`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
+commit at [`:8288-8291`][commit-call] and the bookkeeping at
+[`:8297-8302`][roots-insert], [`:8444-8451`][pc-store], and
+[`:8474-8479`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
 sit inside the Emergency95 branch. Moving `run_transform` to
 `spawn_blocking` introduces an await after the commit, and a blocking task
 cannot be cancelled once started, so an abort landing there leaves the
@@ -2165,7 +2194,7 @@ Guarantee: A relocation campaign reaches the window in which a transform is
 committed and its in-memory bookkeeping has not run.
 Check: `sometimes` - For some pass, `commit_transform` has returned success
 and the handler's abort (cancellation, route close, or generation
-retirement) is observed before [`:8207`][roots-insert] executes. The marker
+retirement) is observed before [`:8297-8302`][roots-insert] executes. The marker
 asserts the commit and the abort ordering, not the next pass's state.
 Fault/timing angle: At HEAD the window exists only in the Emergency95 branch
 at the awaits `:8263`, `:8289`, and `:8315`; it exists on every pass once a
@@ -2203,7 +2232,7 @@ code as an in-handler panic on the runtime worker, which at HEAD is
 `internal_error` with `handler request task failed`
 ([`dispatch.rs:985-989`][panic-terminal]). `always` because the hook decides
 per panic from the panicking thread's [`CALLBACK_POLL_DEPTH`][pb-tls]
-([`callback_is_polling`][pb-polling], the branch at [`:40-47`][pb-hook]), so
+([`callback_is_polling`][pb-polling], the branch at [`:36-50`][pb-hook]), so
 every worker-thread panic is either redacted or forwarded; the check is on
 the thread the panic runs on, not on a defect.
 Fault/timing angle: The guard is a thread-local depth counter
@@ -2212,21 +2241,21 @@ Fault/timing angle: The guard is a thread-local depth counter
 handler future ([`dispatch.rs:928-934`][wrap-callback]). A
 `tokio::task::spawn_blocking` worker never runs either, so its depth is the
 initial `0` and the hook forwards the full panic info to the previously
-installed hook ([`:46`][pb-hook]), the Rust default because the only other
+installed hook ([`:36-50`][pb-hook]), the Rust default because the only other
 `std::panic::set_hook` in the tree is in a test
-([`tests/dispatch.rs:635`][t-panic-child]). Tokio catches the unwinding panic
+([`tests/dispatch.rs:631-660`][t-panic-child]). Tokio catches the unwinding panic
 as a `JoinError` after the hook has printed. At HEAD the daemon runs kernel
 work this way through [`kernel_routes::blocking`][blocking] at eight sites
 ([`commit.rs:1013`][blk-commit-preview], [`:1038`][blk-commit-run],
 [`egress.rs:201`][blk-egress], [`eligibility.rs:346`][blk-eligibility],
-[`ingest.rs:796`][blk-ingest-decode], [`:797`][blk-ingest-finish],
+[`ingest.rs:722`][blk-ingest-decode], [`:797`][blk-ingest-finish],
 [`read.rs:291`][blk-read-gate], [`:311`][blk-read-rows]) and directly at
-[`health.rs:224`][spawn-health], [`mod.rs:358`][spawn-kernel-open], and
-[`lib.rs:3808`][spawn-store-open]. The ingest finish closure calls
+[`health.rs:224`][spawn-health], [`mod.rs:358-362`][spawn-kernel-open], and
+[`lib.rs:3858-3866`][spawn-store-open]. The ingest finish closure calls
 [`store.ingest_artifact`][route-ingest] with the upload payload and the page
 decode closure holds the base64 page; a relocated transform carries the whole
 request. The same boundary crosses the token-cache counters
-([`token_cache.rs:57`][tc-local], W2); the third `thread_local!` in the
+([`token_cache.rs:57-76`][tc-local], W2); the third `thread_local!` in the
 inspected crates is test-only ([`transform.rs:495-498`][tl-test]).
 Required faults and enabling state: A panic injected inside the relocated
 work (a `kernel_routes::blocking` closure at HEAD, or the relocated
@@ -2241,13 +2270,13 @@ The thread-local, the hook branch, the two guard entry points, the handler
 wrap, the eight `blocking` sites, the three direct `spawn_blocking` sites,
 and the `JoinError` mappings are source-verified. The terminal clause
 disagrees with HEAD for kernel routes: `blocking` maps a worker panic to
-`KernelOutcome::unavailable(StoreUnavailable)` ([`mod.rs:467`][blocking]),
+`KernelOutcome::unavailable(StoreUnavailable)` ([`mod.rs:462-468`][blocking]),
 which the route returns as a `Response` body
 `{"kind":"unavailable","reason":"store_unavailable"}` by the documented
 intent at [`:460-461`][blocking-doc], not as an `internal_error` terminal;
 `open_once` maps it to `KernelError::Fault` after an `eprintln!`
-([`mod.rs:360-362`][spawn-kernel-open]); the store opener re-panics
-([`lib.rs:3810`][spawn-store-open]). Both sides are cited; the record does not
+([`mod.rs:358-362`][spawn-kernel-open]); the store opener re-panics
+([`lib.rs:3858-3866`][spawn-store-open]). Both sides are cited; the record does not
 resolve which terminal is the contract.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the three host-runtime redaction tests
@@ -2299,8 +2328,8 @@ lines execute every [`IDLE_POLL`][sched-idle] on a default campaign while the
 list is empty, so `reachable` would be trivially satisfied.
 Fault/timing angle: The schedule [defaults to `None`][sched-default], and
 [`scheduled_projects`][sched-projects] drops any project whose schedule is
-`None` (`schedule: schedule?` at [`:14027`][sched-filter]) or whose memories
-authority is not `MODULE` ([`:14002-14007`][sched-authority]), so a default
+`None` (`schedule: schedule?` at [`:14098`][sched-filter]) or whose memories
+authority is not `MODULE` ([`:14073-14078`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
@@ -2503,24 +2532,24 @@ evaluation of this area and its disposition are recorded in
 [wire751]: ../../../host-wire-protocol.md#L440
 [wire77]: ../../../host-wire-protocol.md#L666
 
-[handle]: ../../../../crates/daemon/src/lib.rs#L11828-L11850
-[bytecap]: ../../../../crates/daemon/src/lib.rs#L15496-L15512
-[footprint]: ../../../../crates/daemon/src/lib.rs#L15451-L15479
-[copies]: ../../../../crates/daemon/src/lib.rs#L15432-L15441
-[toolarge]: ../../../../crates/daemon/src/lib.rs#L15482-L15487
-[queuefull]: ../../../../crates/daemon/src/lib.rs#L15489-L15494
-[probe]: ../../../../crates/daemon/src/lib.rs#L15345-L15353
-[class]: ../../../../crates/daemon/src/lib.rs#L15425-L15436
-[dispatch]: ../../../../crates/daemon/src/lib.rs#L12582-L12676
-[pagefields]: ../../../../crates/daemon/src/lib.rs#L12678-L12682
-[unrecognized]: ../../../../crates/daemon/src/lib.rs#L12698-L12722
+[handle]: ../../../../crates/daemon/src/lib.rs#L11882-L11904
+[bytecap]: ../../../../crates/daemon/src/lib.rs#L15574-L15590
+[footprint]: ../../../../crates/daemon/src/lib.rs#L15516-L15552
+[copies]: ../../../../crates/daemon/src/lib.rs#L15511-L15514
+[toolarge]: ../../../../crates/daemon/src/lib.rs#L15559-L15565
+[queuefull]: ../../../../crates/daemon/src/lib.rs#L15567-L15572
+[probe]: ../../../../crates/daemon/src/lib.rs#L15390-L15398
+[class]: ../../../../crates/daemon/src/lib.rs#L15470-L15481
+[dispatch]: ../../../../crates/daemon/src/lib.rs#L12627-L12721
+[pagefields]: ../../../../crates/daemon/src/lib.rs#L12723-L12727
+[unrecognized]: ../../../../crates/daemon/src/lib.rs#L12743-L12767
 [pageconst]: ../../../../crates/daemon/src/lib.rs#L758-L765
-[freeze]: ../../../../crates/daemon/src/lib.rs#L8059-L8060
-[routechan]: ../../../../crates/daemon/src/lib.rs#L8068-L8071
-[accept]: ../../../../crates/daemon/src/lib.rs#L8089
+[freeze]: ../../../../crates/daemon/src/lib.rs#L8095-L8096
+[routechan]: ../../../../crates/daemon/src/lib.rs#L8113-L8116
+[accept]: ../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../crates/daemon/src/lib.rs#L587-L644
-[pageapply]: ../../../../crates/daemon/src/lib.rs#L9448-L9456
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12508-L12523
+[pageapply]: ../../../../crates/daemon/src/lib.rs#L9487-L9510
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12568-L12577
 [wirestruct]: ../../../../crates/daemon/src/transform.rs#L809-L980
 [wiremsg]: ../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../crates/memory-store/src/lib.rs#L250-L264
@@ -2533,43 +2562,43 @@ evaluation of this area and its disposition are recorded in
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
-[expand]: ../../../../crates/daemon/src/lib.rs#L4167-L4261
-[store-pc]: ../../../../crates/daemon/src/lib.rs#L4319-L4361
-[historian-fire]: ../../../../crates/daemon/src/lib.rs#L5011
-[assemble]: ../../../../crates/daemon/src/lib.rs#L5251-L5255
-[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13054
-[gate-native]: ../../../../crates/daemon/src/lib.rs#L13110-L13115
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13118-L13138
-[native-diff]: ../../../../crates/daemon/src/lib.rs#L13351-L13368
-[segments-take]: ../../../../crates/daemon/src/lib.rs#L14457-L14472
-[segments]: ../../../../crates/daemon/src/lib.rs#L14477-L14484
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16618
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16680
+[expand]: ../../../../crates/daemon/src/lib.rs#L4204-L4291
+[store-pc]: ../../../../crates/daemon/src/lib.rs#L4336-L4378
+[historian-fire]: ../../../../crates/daemon/src/lib.rs#L5047
+[assemble]: ../../../../crates/daemon/src/lib.rs#L5287-L5291
+[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13099
+[gate-native]: ../../../../crates/daemon/src/lib.rs#L13155-L13160
+[native-attach]: ../../../../crates/daemon/src/lib.rs#L8481-L8510
+[native-diff]: ../../../../crates/daemon/src/lib.rs#L13396-L13413
+[segments-take]: ../../../../crates/daemon/src/lib.rs#L14502-L14517
+[segments]: ../../../../crates/daemon/src/lib.rs#L14522-L14529
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16663
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16725
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2036-L2058
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L224
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L301-L308
 [served-byte-witnesses]: evidence/derived-artifacts-are-ownership-independent.md#canonical-served-bytes-and-fingerprint-identity
 [block-identity]: ../../../../crates/daemon/src/wire.rs#L885
-[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2016
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2126
-[sel-item]: ../../../../crates/daemon/src/transform.rs#L6377
-[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6843-L6868
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6888-L6893
-[load-tags]: ../../../../crates/daemon/src/transform.rs#L6966-L7028
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7228-L7233
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7335-L7358
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7362-L7389
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7426
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27955
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27706
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23611
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23892
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28973
-[tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3042-L3043
-[tag-protection]: ../../../../crates/daemon/src/transform.rs#L3704-L3717
-[combined-tags]: ../../../../crates/daemon/src/transform.rs#L3438-L3446
-[mint-tail]: ../../../../crates/daemon/src/transform.rs#L7961-L7971
-[commit-mints]: ../../../../crates/daemon/src/transform.rs#L4969-L4978
+[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2019
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2129
+[sel-item]: ../../../../crates/daemon/src/transform.rs#L6380
+[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6846-L6871
+[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6891-L6896
+[load-tags]: ../../../../crates/daemon/src/transform.rs#L6969-L7031
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7231-L7236
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7338-L7361
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7365-L7392
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7429
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23669-L23950
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23945
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
+[tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3045-L3046
+[tag-protection]: ../../../../crates/daemon/src/transform.rs#L3707-L3720
+[combined-tags]: ../../../../crates/daemon/src/transform.rs#L3441-L3449
+[mint-tail]: ../../../../crates/daemon/src/transform.rs#L7964-L7974
+[commit-mints]: ../../../../crates/daemon/src/transform.rs#L4972-L4981
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L187-L198
 [reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L367-L375
@@ -2595,48 +2624,48 @@ evaluation of this area and its disposition are recorded in
 [tail-reclaim]: ../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../crates/memory-store/src/lib.rs#L210-L216
-[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8340-L8355
+[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8509-L8524
 [tag-content-policy]: ../../../../crates/memory-store/src/lib.rs#L2289-L2318
-[load-order]: ../../../../crates/memory-store/src/lib.rs#L7351-L7379
+[load-order]: ../../../../crates/memory-store/src/lib.rs#L7520-L7548
 [serde-features]: ../../../../Cargo.toml#L45
 
-[load]: ../../../../crates/memory-store/src/lib.rs#L6302-L6329
+[load]: ../../../../crates/memory-store/src/lib.rs#L6351-L6498
 [full-select]: ../../../../crates/memory-store/src/lib.rs#L4666-L4667
-[epoch-read]: ../../../../crates/daemon/src/lib.rs#L4287-L4305
-[epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4167-L4196
-[active]: ../../../../crates/daemon/src/lib.rs#L4583-L4596
-[prepare]: ../../../../crates/daemon/src/lib.rs#L5010-L5083
-[no-fire]: ../../../../crates/daemon/src/lib.rs#L5466-L5479
-[handler]: ../../../../crates/daemon/src/lib.rs#L8138-L8400
-[received-call]: ../../../../crates/daemon/src/lib.rs#L8154
-[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8217-L8224
-[commit-call]: ../../../../crates/daemon/src/lib.rs#L8217
-[roots-insert]: ../../../../crates/daemon/src/lib.rs#L8232-L8237
-[floor-a]: ../../../../crates/daemon/src/lib.rs#L8238-L8246
-[hook]: ../../../../crates/daemon/src/lib.rs#L8247-L8255
-[floor-b]: ../../../../crates/daemon/src/lib.rs#L8381-L8400
-[pc-store]: ../../../../crates/daemon/src/lib.rs#L8410-L8417
-[guidance-remove]: ../../../../crates/daemon/src/lib.rs#L8421-L8426
-[completed-call]: ../../../../crates/daemon/src/lib.rs#L8459
+[epoch-read]: ../../../../crates/daemon/src/lib.rs#L4308-L4323
+[epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4190-L4220
+[active]: ../../../../crates/daemon/src/lib.rs#L4600-L4618
+[prepare]: ../../../../crates/daemon/src/lib.rs#L5046-L5119
+[no-fire]: ../../../../crates/daemon/src/lib.rs#L5502-L5515
+[handler]: ../../../../crates/daemon/src/lib.rs#L8181-L8444
+[received-call]: ../../../../crates/daemon/src/lib.rs#L8206
+[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8280-L8287
+[commit-call]: ../../../../crates/daemon/src/lib.rs#L8288-L8291
+[roots-insert]: ../../../../crates/daemon/src/lib.rs#L8297-L8302
+[floor-a]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
+[hook]: ../../../../crates/daemon/src/lib.rs#L8308-L8316
+[floor-b]: ../../../../crates/daemon/src/lib.rs#L8425-L8444
+[pc-store]: ../../../../crates/daemon/src/lib.rs#L8444-L8451
+[guidance-remove]: ../../../../crates/daemon/src/lib.rs#L8474-L8479
+[completed-call]: ../../../../crates/daemon/src/lib.rs#L8512
 [cfg-models]: ../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
-[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1939-L1978
-[stable-call]: ../../../../crates/daemon/src/transform.rs#L1821-L1845
-[descend]: ../../../../crates/daemon/src/transform.rs#L2960-L2971
-[value-compare]: ../../../../crates/daemon/src/transform.rs#L3224
-[truncate]: ../../../../crates/daemon/src/transform.rs#L4136-L4142
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13686
-[received]: ../../../../crates/memory-store/src/lib.rs#L6591-L6641
-[received-doc]: ../../../../crates/memory-store/src/lib.rs#L6588-L6590
-[flagged]: ../../../../crates/memory-store/src/lib.rs#L6602-L6620
-[stable]: ../../../../crates/memory-store/src/lib.rs#L6646-L6738
-[completed]: ../../../../crates/memory-store/src/lib.rs#L6743-L6791
-[completed-doc]: ../../../../crates/memory-store/src/lib.rs#L6740-L6742
-[rejected]: ../../../../crates/memory-store/src/lib.rs#L6797-L6850
-[sched-history]: ../../../../crates/memory-store/src/lib.rs#L6898-L6931
+[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1942-L1981
+[stable-call]: ../../../../crates/daemon/src/transform.rs#L1823-L1847
+[descend]: ../../../../crates/daemon/src/transform.rs#L2963-L2974
+[value-compare]: ../../../../crates/daemon/src/transform.rs#L3227
+[truncate]: ../../../../crates/daemon/src/transform.rs#L4139-L4145
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13689
+[received]: ../../../../crates/memory-store/src/lib.rs#L6760-L6810
+[received-doc]: ../../../../crates/memory-store/src/lib.rs#L6757-L6759
+[flagged]: ../../../../crates/memory-store/src/lib.rs#L6771-L6789
+[stable]: ../../../../crates/memory-store/src/lib.rs#L6815-L6907
+[completed]: ../../../../crates/memory-store/src/lib.rs#L6912-L6960
+[completed-doc]: ../../../../crates/memory-store/src/lib.rs#L6909-L6911
+[rejected]: ../../../../crates/memory-store/src/lib.rs#L6966-L7019
+[sched-history]: ../../../../crates/memory-store/src/lib.rs#L7067-L7100
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L852-L869
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8412-L8421
-[commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8533-L8600
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8581-L8590
+[commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8702-L8769
 [json-content]: ../../../../crates/memory-store/src/lib.rs#L2201-L2211
 [record-scan]: ../../../../crates/memory-store/src/lib.rs#L2218-L2228
 [policy]: ../../../../crates/memory-store/src/lib.rs#L3162-L3183
@@ -2646,25 +2675,25 @@ evaluation of this area and its disposition are recorded in
 [clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3367-L3371
 [unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3374-L3375
 [unique]: ../../../../crates/memory-store/src/lib.rs#L3376-L3457
-[recomp]: ../../../../crates/memory-store/src/lib.rs#L10163-L10256
+[recomp]: ../../../../crates/memory-store/src/lib.rs#L10332-L10425
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1472-L1473
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1588-L1589
 [phase]: ../../../../crates/memory-store/src/lib.rs#L622-L631
-[drain]: ../../../../crates/memory-store/src/lib.rs#L10912-L10957
-[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L10909-L10911
-[status-sc]: ../../../../crates/memory-store/src/lib.rs#L10959-L10985
-[load-due]: ../../../../crates/memory-store/src/lib.rs#L10987-L11021
-[deliver]: ../../../../crates/memory-store/src/lib.rs#L11023-L11079
-[failure]: ../../../../crates/memory-store/src/lib.rs#L11081-L11120
-[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11122-L11135
-[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11137-L11159
-[publish]: ../../../../crates/memory-store/src/lib.rs#L10665
-[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L10868-L10877
+[drain]: ../../../../crates/memory-store/src/lib.rs#L11081-L11126
+[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11078-L11080
+[status-sc]: ../../../../crates/memory-store/src/lib.rs#L11128-L11154
+[load-due]: ../../../../crates/memory-store/src/lib.rs#L11156-L11190
+[deliver]: ../../../../crates/memory-store/src/lib.rs#L11192-L11248
+[failure]: ../../../../crates/memory-store/src/lib.rs#L11250-L11289
+[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11291-L11304
+[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11306-L11328
+[publish]: ../../../../crates/memory-store/src/lib.rs#L10834
+[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L11037-L11046
 [kinds]: ../../../../crates/memory-store/src/lib.rs#L4598-L4601
-[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13686-L13707
-[mark]: ../../../../crates/memory-store/src/lib.rs#L13845-L13870
-[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L13872-L13914
-[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L13916-L13937
+[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13855-L13876
+[mark]: ../../../../crates/memory-store/src/lib.rs#L14014-L14039
+[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L14041-L14083
+[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L14085-L14106
 [idx-order]: ../../../../crates/memory-store/baseline.sql#L531-L535
 
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
@@ -2692,7 +2721,7 @@ evaluation of this area and its disposition are recorded in
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [hostpage]: ../../../../crates/daemon/src/lib.rs#L748-L749
-[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9340-L9346
+[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9385-L9391
 
 [agents]: ../../../../crates/shm-transport/AGENTS.md
 [arena-const]: ../../../../crates/shm-transport/src/arena.rs#L4-L7
@@ -2732,7 +2761,7 @@ evaluation of this area and its disposition are recorded in
 [reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L517-L554
 [direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
 [native-reserve]: ../../../../packages/shm-native/src/lib.rs#L1024
-[settle-with]: ../../../../crates/daemon/src/lib.rs#L12038-L12094
+[settle-with]: ../../../../crates/daemon/src/lib.rs#L12093-L12148
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
@@ -2781,16 +2810,16 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12433-L12438
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28082-L28087
-[h-pre]: ../../../../crates/daemon/src/lib.rs#L8138-L8155
-[h-timings]: ../../../../crates/daemon/src/lib.rs#L8486-L8511
-[respond]: ../../../../crates/daemon/src/lib.rs#L14434
-[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1205
-[rtcd]: ../../../../crates/daemon/src/transform.rs#L1207-L1218
-[fmt]: ../../../../crates/daemon/src/transform.rs#L1224-L1357
-[snap-add]: ../../../../crates/daemon/src/transform.rs#L2409
-[snap-once]: ../../../../crates/daemon/src/transform.rs#L2889
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12436-L12441
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28085-L28090
+[h-pre]: ../../../../crates/daemon/src/lib.rs#L8181-L8198
+[h-timings]: ../../../../crates/daemon/src/lib.rs#L8540-L8564
+[respond]: ../../../../crates/daemon/src/lib.rs#L14479
+[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
+[rtcd]: ../../../../crates/daemon/src/transform.rs#L1209-L1220
+[fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360
+[snap-add]: ../../../../crates/daemon/src/transform.rs#L2412
+[snap-once]: ../../../../crates/daemon/src/transform.rs#L2892
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
@@ -2801,22 +2830,22 @@ evaluation of this area and its disposition are recorded in
 [tc-shard]: ../../../../crates/daemon/src/token_cache.rs#L112-L113
 [tc-u32]: ../../../../crates/daemon/src/token_cache.rs#L135-L137
 [tc-cet]: ../../../../crates/daemon/src/token_cache.rs#L165-L181
-[tc-inject]: ../../../../crates/daemon/src/transform.rs#L1801-L1817
+[tc-inject]: ../../../../crates/daemon/src/transform.rs#L1804-L1820
 [declared-doc]: ../../../../crates/daemon/src/lib.rs#L2250-L2256
 [declared]: ../../../../crates/daemon/src/lib.rs#L2256-L2286
-[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2873
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6337
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24329
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24351
+[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2876
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6340
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24332
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24354
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L21023
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L21339
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21459
-[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24358
-[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24384
-[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24518
-[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21483
-[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28292
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L21068
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L21386
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21508
+[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24361
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24387
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24521
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21486
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28295
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
@@ -2838,9 +2867,9 @@ evaluation of this area and its disposition are recorded in
 [as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L40-L46
 [trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L693
 [trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L744-L777
-[boundary-view]: ../../../../crates/daemon/src/lib.rs#L16618-L16678
-[construction-corpus]: ../../../../crates/daemon/src/lib.rs#L17556
-[firing-capture]: ../../../../crates/daemon/src/lib.rs#L23611
+[boundary-view]: ../../../../crates/daemon/src/lib.rs#L16663-L16723
+[construction-corpus]: ../../../../crates/daemon/src/lib.rs#L17601
+[firing-capture]: ../../../../crates/daemon/src/lib.rs#L23662
 [fp]: ../../../../crates/daemon/src/historian.rs#L140-L158
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L673
 [fp-verify]: ../../../../crates/daemon/src/historian.rs#L326-L334
@@ -2857,12 +2886,12 @@ evaluation of this area and its disposition are recorded in
 [sched-due]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L412-L416
 [sched-default]: ../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
-[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4572-L4581
+[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4589-L4598
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L229-L230
-[call-reattach]: ../../../../crates/daemon/src/lib.rs#L4806
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5064
-[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5383
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L11811
+[call-reattach]: ../../../../crates/daemon/src/lib.rs#L4842
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5100
+[call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5419
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L11856
 [eff-proj]: ../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../crates/daemon/src/config.rs#L268-L288
@@ -2871,10 +2900,10 @@ evaluation of this area and its disposition are recorded in
 [guidance]: ../../../../crates/daemon/src/config.rs#L414-L496
 [merge]: ../../../../crates/daemon/src/config.rs#L716
 [raise-only]: ../../../../crates/daemon/src/config.rs#L740
-[knows]: ../../../../crates/daemon/src/lib.rs#L4505-L4552
+[knows]: ../../../../crates/daemon/src/lib.rs#L4522-L4569
 [roots-doc]: ../../../../crates/daemon/src/lib.rs#L2959-L2962
-[guidance-fn]: ../../../../crates/daemon/src/lib.rs#L4664-L4671
-[guidance-use]: ../../../../crates/daemon/src/lib.rs#L8198
+[guidance-fn]: ../../../../crates/daemon/src/lib.rs#L4700-L4707
+[guidance-use]: ../../../../crates/daemon/src/lib.rs#L8261
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
@@ -2896,20 +2925,20 @@ evaluation of this area and its disposition are recorded in
 [blk-read-rows]: ../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3831-L3833
+[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3858-L3866
 [tl-test]: ../../../../crates/daemon/src/transform.rs#L495-L498
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 
-[pass-drain]: ../../../../crates/daemon/src/lib.rs#L8147-L8151
-[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L10999-L11000
-[backoff]: ../../../../crates/memory-store/src/lib.rs#L11087-L11091
-[fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6006-L6015
+[pass-drain]: ../../../../crates/daemon/src/lib.rs#L8199-L8203
+[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11168-L11169
+[backoff]: ../../../../crates/memory-store/src/lib.rs#L11256-L11260
+[fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6055-L6064
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36511
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18749
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L18954
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36750
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19183
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19388
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261
 [sched-due-projects]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L265-L296
 [sched-idle]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L36
@@ -2917,6 +2946,6 @@ evaluation of this area and its disposition are recorded in
 [sched-fixture]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L586-L593
 [sched-clock]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L418-L427
 [t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L680
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14006-L14058
-[sched-authority]: ../../../../crates/daemon/src/lib.rs#L14028-L14033
-[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14053
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14051-L14103
+[sched-authority]: ../../../../crates/daemon/src/lib.rs#L14073-L14078
+[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14098

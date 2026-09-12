@@ -15,7 +15,7 @@ sender exercises today.
 ## Evidence trail
 
 - [`reserve_direct`][reserve-direct] charges exactly
-  `exact_len + HEADER_LEN` on the egress budget at [`:528-538`][reserve-direct]
+  `exact_len + HEADER_LEN` on the egress budget at [`:517-554`][reserve-direct]
   and returns an [`OutputBuffer`][outbuf] with `direct: Some(DirectOutput)`
   and `body: Vec::new()`. [`output_from_writer`][from-writer] is its only
   entry.
@@ -27,7 +27,7 @@ sender exercises today.
   `send_before`.
 - On the endpoint thread, [`publish_one`][publish-one] wraps the publish in
   `catch_unwind`, returns `Err(())` unless the result is `Ok(Ok(()))`, and
-  drops `charge` at [`:784`][publish-one] only after success.
+  drops `charge` at [`:749-786`][publish-one] only after success.
 - [`publish_direct`][publish-direct] calls
   `reserve_until(body_len, header, deadline)`, runs the serializer into a
   [`ReservationWriter`][res-writer]
@@ -38,16 +38,16 @@ sender exercises today.
   marks it finished on any [`write_reservation`][write-res] error; an end past
   `allocation_len` is `Overflow`.
 - [`commit`][commit-underfill] aborts with `Underfill` when
-  `cursor != body_len` ([`:2551-2555`][commit-underfill]), aborts on
+  `cursor != body_len` ([`:2533-2570`][commit-underfill]), aborts on
   quarantine or a
   length past capacity, and runs [`prepare_commit`][prepare-commit], which
   checks the wire header's declared length against `body_len` at
-  [`:2316-2317`][prepare-commit] before any shared-state write.
+  [`:2306-2343`][prepare-commit] before any shared-state write.
 - A serializer `Err` returns from `publish_direct` before `commit_before`; a
   panic unwinds through it to `catch_unwind`. In both cases the
   `ProducerReservation` drops, and [`Drop`][res-drop] runs
   [`abort_reservation`][abort], which punches the dirtied range.
-- The endpoint loop at [`:622-630`][publish-fail] turns any `publish_one`
+- The endpoint loop at [`:622-646`][publish-fail] turns any `publish_one`
   error into `ReadClose::Corrupt("shared-memory publish failed")` and returns,
   which closes the connection. The owned path classifies a `measure` or
   `write_to` failure as a request-scoped `encode_failed` terminal in
@@ -86,7 +86,7 @@ inbound receives blocked, between `reserve_until` returning and
 closure and its captures live in the queue; a retired or cancelled generation
 drops the `OutboundFrame` there, which must release both the egress charge
 and the captured source bytes. The egress charge's release is at
-[`:784`][publish-one] on success and at the `OutboundFrame` drop otherwise.
+[`:749-786`][publish-one] on success and at the `OutboundFrame` drop otherwise.
 
 ## What a test must construct
 
@@ -105,7 +105,7 @@ deadline arm and the owned `into_parts` cases only.
 ### Q: Is a connection close the intended outcome for a settled response?
 
 - Sources examined: [`publish_one`][publish-one], the loop at
-  [`:622-630`][publish-fail], [`settle_prepared_with`][settle-with], the host
+  [`:622-646`][publish-fail], [`settle_prepared_with`][settle-with], the host
   catalog's [terminal record][hr-terminal], and [§6.3][wire63].
 - Findings: The owned path fails one request; the direct path fails the
   connection. §6.3 fixes abort-without-publication and says nothing about
@@ -152,7 +152,7 @@ deadline arm and the owned `into_parts` cases only.
 [publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
 [commit-before]: ../../../../../crates/host-runtime/src/ring_transport.rs#L814-L825
 [res-writer]: ../../../../../crates/host-runtime/src/ring_transport.rs#L827-L843
-[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1857-L1887
+[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
 [fixture-arm]: ../../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2268-L2304
 [prepare-commit]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2306-L2343
@@ -160,7 +160,7 @@ deadline arm and the owned `into_parts` cases only.
 [res-write]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2519-L2531
 [commit-underfill]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
 [res-drop]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2587-L2594
-[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12027-L12083
+[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12093-L12148
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
 [wire63]: ../../../../host-wire-protocol.md#L314
 [hr-terminal]: ../../../host-runtime/catalog.md#req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame

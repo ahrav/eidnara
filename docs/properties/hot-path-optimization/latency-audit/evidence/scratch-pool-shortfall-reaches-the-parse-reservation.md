@@ -84,10 +84,10 @@ are the only existing coverage and none is a handler-level witness.
 - Conclusion: unresolved, needs a production observation; the record stays
   `test-only` as the catalog states.
 
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11818-L11840
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15440-L15468
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15471-L15476
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15478-L15483
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11882-L11904
+[footprint]: ../../../../../crates/daemon/src/lib.rs#L15516-L15552
+[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15559-L15565
+[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15567-L15572
 [reserve]: ../../../../../crates/host-runtime/src/handler.rs#L474-L484
 [capacity]: ../../../../../crates/host-runtime/src/handler.rs#L486-L491
 [pools]: ../../../../../crates/host-runtime/src/runtime.rs#L814-L822

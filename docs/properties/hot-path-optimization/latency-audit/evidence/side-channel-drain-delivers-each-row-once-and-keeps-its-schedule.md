@@ -34,7 +34,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
   [`mark_historian_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
   call per kind; the mark updates under `delivered_at_ms IS NULL` and returns
   `QueryReturnedNoRows` when `changed != 1`, which rolls the transaction back.
-  A test-only `fail_once` seam at [`:10922-10933`][fail-once] injects a
+  A test-only `fail_once` seam at [`:11197-11208`][fail-once] injects a
   failure per kind.
 - [`record_historian_side_channel_failure`][failure] computes
   `delay = 1000 * 2^min(attempt_count, 6)` capped at
@@ -52,7 +52,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
 - Rows are enqueued by [`publish_historian_chunk`][publish]; the outbox
   [primary key][outbox-sql] is `(session_id, firing_seq, kind, source_start,
   source_end, item_index)`. The publish task also drains after a committed
-  publish ([`:10762-10771`][publish-drain]), so two drainers can overlap on one
+  publish ([`:11037-11046`][publish-drain]), so two drainers can overlap on one
   session.
 - Firing needs a configured [`model_chain`][cfg-models] (the
   [`no_models` gate][no-models]); `user_observation` rows also need
@@ -111,29 +111,29 @@ window, two drainers, ordering across firings, the limit, or the backoff.
 - Conclusion: resolved with answer - the code and doc agree at HEAD; a fold
   must rewrite the doc and prove the one-row delete-or-rollback guard.
 
-[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8137-L8141
-[no-models]: ../../../../../crates/daemon/src/lib.rs#L5202-L5209
+[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8199-L8203
+[no-models]: ../../../../../crates/daemon/src/lib.rs#L5238-L5245
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
 [kinds]: ../../../../../crates/memory-store/src/lib.rs#L4598-L4601
-[publish]: ../../../../../crates/memory-store/src/lib.rs#L10665
-[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10868-L10877
-[drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L10909-L10911
-[drain]: ../../../../../crates/memory-store/src/lib.rs#L10912-L10957
-[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L10959-L10985
-[load-due]: ../../../../../crates/memory-store/src/lib.rs#L10987-L11021
-[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11023-L11079
-[fail-once]: ../../../../../crates/memory-store/src/lib.rs#L11028-L11039
-[failure]: ../../../../../crates/memory-store/src/lib.rs#L11081-L11120
-[delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11122-L11135
-[delete-one]: ../../../../../crates/memory-store/src/lib.rs#L11137-L11159
-[events-insert]: ../../../../../crates/memory-store/src/lib.rs#L13686-L13707
-[mark]: ../../../../../crates/memory-store/src/lib.rs#L13845-L13870
-[primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L13872-L13914
-[obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L13916-L13937
-[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L18872
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19088
-[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19235
-[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L20697
+[publish]: ../../../../../crates/memory-store/src/lib.rs#L10834
+[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L11037-L11046
+[drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L11078-L11080
+[drain]: ../../../../../crates/memory-store/src/lib.rs#L11081-L11126
+[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L11128-L11154
+[load-due]: ../../../../../crates/memory-store/src/lib.rs#L11156-L11190
+[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11192-L11248
+[fail-once]: ../../../../../crates/memory-store/src/lib.rs#L11197-L11208
+[failure]: ../../../../../crates/memory-store/src/lib.rs#L11250-L11289
+[delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11291-L11304
+[delete-one]: ../../../../../crates/memory-store/src/lib.rs#L11306-L11328
+[events-insert]: ../../../../../crates/memory-store/src/lib.rs#L13855-L13876
+[mark]: ../../../../../crates/memory-store/src/lib.rs#L14014-L14039
+[primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L14041-L14083
+[obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L14085-L14106
+[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L19306
+[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19522
+[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19669
+[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L21131
 [outbox-sql]: ../../../../../crates/memory-store/baseline.sql#L489-L505
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535

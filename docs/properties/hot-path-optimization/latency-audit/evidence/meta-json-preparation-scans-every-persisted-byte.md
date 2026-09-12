@@ -36,12 +36,12 @@ column specifically.
   secret-bearing value bypass `prepare_value` and persist when the unchanged
   input is returned.
 - [`prepare_value`][prepare-value]: a detected value under an identity or
-  integrity key refuses ([`:3213-3217`][refuse-identity]); a protected key
-  holding a container with text refuses ([`:3226-3233`][refuse-container]); a
+  integrity key refuses ([`:3298-3302`][refuse-identity]); a protected key
+  holding a container with text refuses ([`:3311-3318`][refuse-container]); a
   protected scalar substitutes `<REDACTED:label>` and records a synthetic
-  detection when the scanner found none ([`:3243-3259`][substitute]); object
+  detection when the scanner found none ([`:3328-3344`][substitute]); object
   keys are bound-checked and scanned again during the walk
-  ([`:3266-3272`][walk-keys]).
+  ([`:3351-3357`][walk-keys]).
 - The [policy enum][policy] distinguishes durable from transaction and
   reject-protected from preserve-identities; the `meta` column uses durable
   preserve-identities.
@@ -118,13 +118,13 @@ covers byte identity of a clean stored `meta` or a `BTreeMap`-key secret.
 [clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3367-L3371
 [unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3374-L3375
 [unique]: ../../../../../crates/memory-store/src/lib.rs#L3376-L3457
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6302-L6329
-[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8412-L8421
-[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10163-L10256
-[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15197
-[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15280
-[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15297
-[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15334
+[load]: ../../../../../crates/memory-store/src/lib.rs#L6351-L6498
+[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8581-L8590
+[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10332-L10425
+[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15631
+[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15714
+[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15731
+[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15768
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3192
+[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3195
 [serde-features]: ../../../../../Cargo.toml#L45
