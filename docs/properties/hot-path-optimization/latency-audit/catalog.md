@@ -321,8 +321,7 @@ The [canonical-shell check][shell-sharing] proves repeated reattachment and
 incremental projection retain shell pointers without mutating raw ingress.
 The [decode check][shell-decode] asserts `Send + 'static` and unchanged malformed
 input errors. The complex replay also compares fresh, reattached, and shared
-projections, served messages and their retained `canonical_bytes`, shell
-pointers, and cold and warm shell charges.
+projections, served bytes, shell pointers, and cold and warm shell charges.
 The [shell metadata check][shell-metadata] reparses nonempty origin and provider
 extras with non-default, non-synthetic harness metadata. It checks that replay
 drops only the unknown message field while retaining every block and known
@@ -478,47 +477,59 @@ questions and their evidence remain in the evidence file.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Cold-versus-cached parity across five passes exists; no
-test asserts the entry is unchanged after a mint pass whose commit fails, and
-none checks `source_bytes` against the projected text outside the mint tests.
+Exercised: partial - Cold, drop, reset, remint, poisoned-refill, and interleaved
+session tests pass. A failed second mint insert leaves the baseline pointer,
+contents, and durable state unchanged. Row-sharing checks fail on the
+deep-copy predecessor. Source equality is exercised on clean text; the
+prepared-field policy for detected secrets remains an open question.
 Guarantee: Pass-local mint rows never become visible through the tag
 baseline cache, and every visible row's `source_bytes` is byte-equal to the
 projected text it tags.
 Check: `always` - After every pass, the [`TagBaselineCacheEntry.tags`][tag-entry]
 for the session equals `store.load_tags_for_session(session)` for the
 `(store_namespace, generation, count, max_tag_number)` the entry records, in
-[`ORDER BY tag_number ASC`][load-order]; the pass-local `tag_rows` after
-[`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
-rows with `tag_number = max + offset + 1` in projection block order; and
+[`ORDER BY tag_number ASC`][load-order]. [`tag_mint_rows`][append-mint]
+creates a pass-owned tail with `tag_number = max + offset + 1` in projection
+block order. The [combined slice][combined-tags] contains baseline row handles
+followed by mint row handles without copying their source allocations; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7197-7202`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([mint capture][mint-input]).
 `always` because the entry is read on the next pass of the same session and
-a stale or speculative row changes the active-tag match at
-[`:7393`][active-match].
-Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
-[`snapshot`][tag-snapshot] holds a second reference. A design that appends
-in place, or stores the pass's `Arc` back before commit, exposes rows the
-store has not numbered; the store numbers from `MAX(tag_number) + 1` and
-skips existing ids, which is the transform catalog's
-[two-authorities record][tc-tagnum]. [`load_cached_tags`][load-tags] appends
-`load_tags_after` only when the summary is unchanged between two reads.
+a stale or speculative row changes the [active-tag match][active-match].
+Fault/timing angle: The cache owns `Arc<[Arc<TagRow>]>`; the pass never
+mutates its entry. The pass retains an [immutable named baseline][tag-baseline]
+for [bootstrap protection][tag-protection], separate from the combined view.
+[Overlay computation][mint-tail] reads the baseline and
+mint tail together before the caller combines their handles. The commit
+reads only the [pass-owned mint tail][commit-mints]. A successful commit
+does not publish those speculative rows to the cache. Only
+[`load_cached_tags`][load-tags] publishes store-read rows, validating the
+summary across an append refill. Store numbering remains independent, as
+the [historical two-authorities record][tc-tagnum] describes.
 Required faults and enabling state: Tagging active (a profile with
 `tool_present`), a warm baseline entry, a pass that mints, then a second pass
-on the same session; for the aliasing arm, a mint batch whose commit CAS
-fails so the speculative rows are never committed.
+on the same session; for the rollback arm, the existing attempt hook installs
+a temporary SQLite trigger that aborts the second mint insert.
 Confidence: high - [Evidence](evidence/tag-baseline-cache-entry-is-never-mutated-by-a-pass.md).
-The cache entry, the snapshot clone, the make_mut copy, the mint append, and
-the store's ordered load are source-verified.
+The shared baseline, mint tail, combined view, hygiene consumers, commit
+inputs, and store-read-only refill are source-verified. Cache accounting
+charges row capacities, row pointers, and row/slice Arc headers in full,
+including shared rows, under the unchanged 64 MiB baseline budget. The
+64-byte allocator allowance remains separate from the Arc counters.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
-cover cold-versus-cached parity, refill after a direct SQL update, and
-session isolation; all unaudited.
+cover cold-versus-cached parity, direct-SQL refill, session isolation,
+failed-commit rollback, source bytes, row sharing, capacity-driven admission
+refusal, protected-orphan iterator parity, and bootstrap protection with mints;
+all unaudited.
 Impact: A speculative or stale row changes which tags are treated as active
 on the next pass.
 Open questions:
-- `source_bytes` pass through the store's prepared-field path
-  ([`write.bytes("source_bytes", ..)`][mint-prepared]); a detection refuses
-  the insert. [R1][r1] owns that policy; this record assumes the bytes that
-  land are unchanged. Is that assumption stated anywhere? (needs human input)
+- The transform commit uses [`write.bytes("tag_source_bytes", ..)`][mint-prepared],
+  whose [content policy][tag-content-policy] substitutes detected secrets.
+  The older evidence cites the separate tag-mint API. How should unconditional
+  source equality apply to redacted inputs? [R1][r1] owns the unchanged
+  prepared-field policy; the clean-text corpus does not settle this conflict.
+  (needs human input)
 
 ### hygiene-digest-is-kind-prefixed-part-content
 
@@ -1816,7 +1827,7 @@ state.
 Fault/timing angle: A fingerprint format change lands while a firing is in
 flight across a restart, so the stored string no longer equals the recomputed
 one and publication fails with `FingerprintMismatch`. The snapshot is built at
-[`:418-430`][snap-build] with `bytes: block.bytes.to_string()`; its only
+[`:417-429`][snap-build] with `bytes: block.bytes.to_string()`; its only
 reader is [`as_item`][as-item] feeding the fingerprint, which reads
 `item.bytes.len()` into the literal `id:kind:len|...`, stored in
 [`HistorianDurableState.chunk_fingerprint`][fp-field] and compared by
@@ -1830,7 +1841,7 @@ firing; a chunk whose text exceeds `token_budget`, which needs a large
 session.
 Confidence: high - [Evidence](evidence/historian-firing-input-is-preserved-by-cheaper-construction.md).
 The snapshot, the fingerprint, its two comparisons, and the truncation call
-at [`:693`][trunc-call] are source-verified.
+at [`:692`][trunc-call] are source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the fingerprint test, the production-window, exact-budget, and
 small-window differentials, the golden, and the marker test; all unaudited.
@@ -2312,7 +2323,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [A3][a3] | Construct concurrent parses with a barrier so the shortfall is observable. |
 | [B1][b1] | Selection inputs, native prefix chunks, snapshot fallback, and sidecar order/pins are checked. Extend integration coverage for sorted-key served output. |
 | [B2][b2] | Typed-flag reference and delta comparisons run. Extend the finite observer corpus when new replay shapes appear. |
-| [B3][b3] | Fail a mint commit and inspect the cache entry; compare `source_bytes` with projected text. |
+| [B3][b3] | Failed-commit rollback and clean-source equality are exercised. Resolve equality semantics for detected secrets. |
 | [B4][b4] | State the digest input explicitly against `FlatBlock.content_hash`. |
 | [B5][b5] | The constructed delta-turn witness fires. A production plugin body remains unobserved. |
 | [C1][c1] | Pair a narrow read with `MemoryStore::load` over malformed and defaulted rows; observe the post-commit `row_version`. |
@@ -2471,19 +2482,23 @@ evaluation of this area and its disposition are recorded in
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2116-L2132
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6353
-[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6822-L6847
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6867-L6872
-[load-tags]: ../../../../crates/daemon/src/transform.rs#L6939-L6997
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7197-L7202
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7304-L7325
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7329-L7353
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7393
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7928-L7929
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27385
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27136
+[tag-entry]: ../../../../crates/daemon/src/transform.rs#L6828-L6853
+[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6873-L6878
+[load-tags]: ../../../../crates/daemon/src/transform.rs#L6951-L7013
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7213-L7218
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7320-L7343
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7347-L7374
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7411
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27615
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27366
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23248
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23521
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28407
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28633
+[tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3034-L3035
+[tag-protection]: ../../../../crates/daemon/src/transform.rs#L3696-L3709
+[combined-tags]: ../../../../crates/daemon/src/transform.rs#L3430-L3438
+[mint-tail]: ../../../../crates/daemon/src/transform.rs#L7943-L7953
+[commit-mints]: ../../../../crates/daemon/src/transform.rs#L4951-L4960
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L186-L198
 [reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L367-L375
@@ -2507,7 +2522,8 @@ evaluation of this area and its disposition are recorded in
 [tail-reclaim]: ../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../crates/memory-store/src/lib.rs#L210-L216
-[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L7156-L7164
+[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8234-L8249
+[tag-content-policy]: ../../../../crates/memory-store/src/lib.rs#L2204-L2233
 [load-order]: ../../../../crates/memory-store/src/lib.rs#L7245-L7273
 [serde-features]: ../../../../Cargo.toml#L45
 
@@ -2533,10 +2549,10 @@ evaluation of this area and its disposition are recorded in
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1931-L1970
 [stable-call]: ../../../../crates/daemon/src/transform.rs#L1813-L1837
-[descend]: ../../../../crates/daemon/src/transform.rs#L2953-L2964
-[value-compare]: ../../../../crates/daemon/src/transform.rs#L3217
-[truncate]: ../../../../crates/daemon/src/transform.rs#L4122-L4128
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13607
+[descend]: ../../../../crates/daemon/src/transform.rs#L2952-L2963
+[value-compare]: ../../../../crates/daemon/src/transform.rs#L3216
+[truncate]: ../../../../crates/daemon/src/transform.rs#L4128-L4134
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13671
 [received]: ../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6496-L6514
@@ -2692,16 +2708,16 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12421-L12426
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28092-L28097
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12418-L12423
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L27742-L27747
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8113-L8130
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8461-L8486
 [respond]: ../../../../crates/daemon/src/lib.rs#L14408
 [tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1199-L1210
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
-[snap-add]: ../../../../crates/daemon/src/transform.rs#L2402
-[snap-once]: ../../../../crates/daemon/src/transform.rs#L2882
+[snap-add]: ../../../../crates/daemon/src/transform.rs#L2401
+[snap-once]: ../../../../crates/daemon/src/transform.rs#L2881
 [tc-doc]: ../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../crates/daemon/src/token_cache.rs#L16
 [tc-bound]: ../../../../crates/daemon/src/token_cache.rs#L24-L28
@@ -2715,19 +2731,19 @@ evaluation of this area and its disposition are recorded in
 [tc-inject]: ../../../../crates/daemon/src/transform.rs#L1793-L1809
 [declared-doc]: ../../../../crates/daemon/src/lib.rs#L2241-L2247
 [declared]: ../../../../crates/daemon/src/lib.rs#L2248-L2262
-[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2866
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6316
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L23759
+[ao-sig]: ../../../../crates/daemon/src/transform.rs#L2865
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6322
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L23989
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24011
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [native-sharing]: ../../../../crates/daemon/src/lib.rs#L20660
 [native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20976
 [native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21096
-[soft-reference]: ../../../../crates/daemon/src/transform.rs#L23788
-[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L23814
-[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L23948
-[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21146
-[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L27726
+[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24018
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24044
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24178
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21210
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L27952
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
@@ -2745,10 +2761,10 @@ evaluation of this area and its disposition are recorded in
 [edge-margin]: ../../../../crates/context-core/src/redaction.rs#L380-L385
 [ms-content]: ../../../../crates/memory-store/src/lib.rs#L2070-L2078
 [ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2357-L2392
-[snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L418-L430
-[as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L38-L47
-[trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L693
-[trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L743-L778
+[snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L417-L429
+[as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L37-L46
+[trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L692
+[trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L742-L777
 [fp]: ../../../../crates/daemon/src/historian.rs#L140-L158
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L588
 [fp-verify]: ../../../../crates/daemon/src/historian.rs#L326-L334

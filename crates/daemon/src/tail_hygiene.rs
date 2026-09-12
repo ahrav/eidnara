@@ -315,9 +315,9 @@ fn neighborhood_consistent(
 /// Part attribution uses exact block identities.
 /// A legacy row with only a raw call ID uses the fallback only when one owner arc and its tag-number neighborhood are unambiguous.
 /// Rows with recurring raw call IDs remain T-only when the fallback owner arc or tag-number neighborhood is ambiguous.
-fn tag_numbers_by_block_and_arc(
+fn tag_numbers_by_block_and_arc<'a>(
     projection: &FlatProjection,
-    tag_rows: &[TagRow],
+    tag_rows: impl IntoIterator<Item = &'a TagRow> + Clone,
 ) -> (HashMap<String, i64>, HashMap<String, i64>) {
     let block_ids = projection
         .blocks
@@ -330,7 +330,8 @@ fn tag_numbers_by_block_and_arc(
     let mut bounds_by_message = HashMap::<usize, (i64, i64)>::new();
 
     for row in tag_rows
-        .iter()
+        .clone()
+        .into_iter()
         .filter(|row| block_ids.contains(row.block_id.as_str()))
     {
         by_block.insert(row.block_id.clone(), row.tag_number);
@@ -361,7 +362,7 @@ fn tag_numbers_by_block_and_arc(
         .filter_map(|block| block.tool_call_id.as_deref())
         .collect::<HashSet<_>>();
     let mut orphan_rows = HashMap::<&str, Vec<&TagRow>>::new();
-    for row in tag_rows.iter().filter(|row| {
+    for row in tag_rows.into_iter().filter(|row| {
         !block_ids.contains(row.block_id.as_str()) && call_ids.contains(row.block_id.as_str())
     }) {
         orphan_rows
@@ -407,12 +408,15 @@ fn tag_numbers_by_block_and_arc(
     (by_block, by_arc)
 }
 
-fn protected_tag_numbers(tag_rows: &[TagRow], protected_tags: usize) -> HashSet<i64> {
+fn protected_tag_numbers<'a>(
+    tag_rows: impl IntoIterator<Item = &'a TagRow>,
+    protected_tags: usize,
+) -> HashSet<i64> {
     if protected_tags == 0 {
         return HashSet::new();
     }
     tag_rows
-        .iter()
+        .into_iter()
         .map(|row| row.tag_number)
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -469,15 +473,16 @@ fn block_is_protected(
 /// Synthetic, system, covered, reduced, sentinel, reasoning, and opaque parts
 /// contribute zero. Protected parts contribute to `T` but not `U`. Arithmetic
 /// saturates, and the returned counts preserve `0 <= U <= T`.
-pub(crate) fn measure_tail_hygiene(
+/// Each clone of `tag_rows` must independently yield the same row sequence.
+pub(crate) fn measure_tail_hygiene<'a>(
     projection: &FlatProjection,
     core: &CoreState,
     coverage_ordinal: Option<u64>,
-    tag_rows: &[TagRow],
+    tag_rows: impl IntoIterator<Item = &'a TagRow> + Clone,
     protected_tags: usize,
     protected_block_ids: &HashSet<String>,
 ) -> TailHygieneMeasurement {
-    let (tags_by_block, tags_by_arc) = tag_numbers_by_block_and_arc(projection, tag_rows);
+    let (tags_by_block, tags_by_arc) = tag_numbers_by_block_and_arc(projection, tag_rows.clone());
     let protected_numbers = protected_tag_numbers(tag_rows, protected_tags);
     let protected_arc_ids = projection
         .blocks
@@ -1169,6 +1174,44 @@ mod tests {
             );
             assert!(measured.u <= measured.t, "{} violated U subset T", case.id);
         }
+    }
+
+    #[test]
+    fn shared_row_iterator_matches_slice_for_protected_legacy_orphan() {
+        let golden: HygieneGolden =
+            serde_json::from_str(include_str!("../testdata/nudge-hygiene-golden.json"))
+                .expect("parse nudge hygiene golden");
+        let case = golden
+            .cases
+            .iter()
+            .find(|case| case.id == "unambiguous-legacy-orphan")
+            .expect("legacy orphan fixture");
+        let messages = case
+            .messages
+            .iter()
+            .map(fixture_message)
+            .collect::<Vec<_>>();
+        let tags = case.tags.iter().map(fixture_tag).collect::<Vec<_>>();
+        let projection = project_messages(&messages).unwrap();
+        let core = CoreState::empty();
+        let protected_blocks = HashSet::new();
+        let slice = measure_tail_hygiene(&projection, &core, None, &tags, 2, &protected_blocks);
+        let shared = tags.into_iter().map(Arc::new).collect::<Vec<_>>();
+        let measured = measure_tail_hygiene(
+            &projection,
+            &core,
+            None,
+            shared.iter().map(Arc::as_ref),
+            2,
+            &protected_blocks,
+        );
+        assert_eq!(measured, slice);
+        let orphan = &measured.parts[2];
+        assert_eq!(orphan.tag_number, Some(2));
+        assert!(orphan.protected);
+        assert_eq!(orphan.u_tokens, 0);
+        assert!(orphan.tokens > 0);
+        assert!(measured.u > 0 && measured.u < measured.t);
     }
 
     #[test]
