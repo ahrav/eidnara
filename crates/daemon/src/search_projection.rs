@@ -315,6 +315,20 @@ impl SearchProjection {
         self.run(f, Access::Read)
     }
 
+    /// [`Self::read`] whose connection acquisition ends at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when the
+    /// connection is still held at `deadline`; nothing was read.
+    pub fn read_within<T>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
+        self.run(f, Access::ReadWithin(deadline))
+    }
+
     /// Runs `f` under the store's transaction of the given access. A refusal
     /// from `f` rolls the transaction back and is returned as itself; a store
     /// failure is returned as the store's.
@@ -326,7 +340,7 @@ impl SearchProjection {
         let mut outcome: Option<Result<T, ProjectionError>> = None;
         let mut quarantine = None;
         let inner = |conn: &GuardedConn<'_>| -> rusqlite::Result<()> {
-            if !matches!(access, Access::Read)
+            if !access.is_read()
                 && let Some(found) = self.quarantine()
             {
                 quarantine = Some(found);
@@ -338,7 +352,7 @@ impl SearchProjection {
             if failed {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
-            if !matches!(access, Access::Read)
+            if !access.is_read()
                 && let Some(found) = self.quarantine()
             {
                 quarantine = Some(found);
@@ -350,6 +364,7 @@ impl SearchProjection {
             Access::Write => self.store.with_conn_fenced(inner),
             Access::WriteWithin(deadline) => self.store.with_conn_fenced_within(deadline, inner),
             Access::Read => self.store.with_conn(inner),
+            Access::ReadWithin(deadline) => self.store.with_conn_within(deadline, inner),
         };
         if let Some(quarantine) = quarantine {
             return Err(SearchProjectionError::Quarantined(quarantine));
@@ -375,4 +390,11 @@ enum Access {
     Write,
     WriteWithin(Instant),
     Read,
+    ReadWithin(Instant),
+}
+
+impl Access {
+    fn is_read(self) -> bool {
+        matches!(self, Self::Read | Self::ReadWithin(_))
+    }
 }

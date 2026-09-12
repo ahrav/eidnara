@@ -287,7 +287,33 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let mut guard = self.lock_conn()?;
+            let guard = self.lock_conn()?;
+            self.read_on(guard, f)
+        }
+
+        /// [`Self::with_conn`] whose connection acquisition ends at `deadline`.
+        ///
+        /// The connection is polled rather than awaited. Once the transaction is open the read is
+        /// unbounded, as in [`Self::with_conn`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline`;
+        /// otherwise as [`Self::with_conn`].
+        pub fn with_conn_within<T>(
+            &self,
+            deadline: Instant,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            self.read_on(guard, f)
+        }
+
+        fn read_on<T>(
+            &self,
+            mut guard: ConnGuard<'_>,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;

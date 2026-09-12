@@ -649,6 +649,46 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     );
 }
 
+/// The budget's deadline bounds the wait for the projection connection before selection as it bounds the wait before the write: a slice that starts while another operation holds the connection returns `Cancelled` at its deadline, before the holder releases, and removes nothing.
+#[test]
+fn a_slice_stops_at_its_deadline_while_another_operation_holds_the_connection() {
+    let fixture = Fixture::build();
+    let (took, taken) = std::sync::mpsc::channel::<()>();
+    let hold = std::time::Duration::from_secs(3);
+    let report = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            fixture
+                .projection()
+                .read(|_| {
+                    took.send(()).unwrap();
+                    std::thread::sleep(hold);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        taken.recv().unwrap();
+        let started = Instant::now();
+        let budget = EvalBudget::new(
+            Some(started + std::time::Duration::from_millis(200)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let report = fixture
+            .cleanup(fixture.acknowledged)
+            .run_slice(bounds(), &budget)
+            .unwrap();
+        assert!(
+            started.elapsed() < hold / 2,
+            "the slice waited {:?} for the held connection, past its deadline",
+            started.elapsed()
+        );
+        report
+    });
+    assert_eq!(report.stop, Some(CleanupStop::Cancelled));
+    assert_eq!((report.inspected, report.reclaimed.occurrences), (0, 0));
+    assert_eq!(report.cursor, None);
+    assert_eq!(fixture.present().len(), 10);
+}
+
 /// AC4, AC5: a row bound stops the slice after exactly that many rows with a cursor the next slice resumes from; the original budget's cancellation and deadline stop admission before any page and cannot be renewed by the same identity, while a fresh budget proceeds.
 #[test]
 fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {

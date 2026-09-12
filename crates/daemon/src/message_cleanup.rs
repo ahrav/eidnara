@@ -1,4 +1,4 @@
-//! Runs one bounded slice of message-index cleanup against the projection: candidate pages are read under the acknowledged kernel prefix, each page is reclaimed in one fenced write transaction that re-checks eligibility, and the cursor is carried across slices so an interrupted slice resumes where it stopped. One `EvalBudget` gates every admission, and its deadline bounds the wait for the projection's write lock; cancellation leaves whatever committed, since each committed page is complete on its own.
+//! Runs one bounded slice of message-index cleanup against the projection: candidate pages are read under the acknowledged kernel prefix, each page is reclaimed in one fenced write transaction that re-checks eligibility, and the cursor is carried across slices so an interrupted slice resumes where it stopped. One `EvalBudget` gates every admission, and its deadline bounds the wait for the projection connection before selection and for the write lock; cancellation leaves whatever committed, since each committed page is complete on its own.
 
 use std::num::NonZeroUsize;
 
@@ -19,7 +19,7 @@ pub struct CleanupBounds {
 /// Why a slice stopped before the scan was exhausted. Every committed page stands; the cursor names where the next slice resumes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupStop {
-    /// The budget was cancelled or its deadline passed before the next page was admitted, or the deadline passed while waiting for the write lock.
+    /// The budget was cancelled or its deadline passed before the next page was admitted, or the deadline passed while waiting for the projection connection or the write lock.
     Cancelled,
     /// The slice reached its page or row bound with rows left to inspect.
     BoundReached,
@@ -100,7 +100,7 @@ impl<'a> MessageCleanup<'a> {
             let acknowledged = self.acknowledged_through;
             let kernel = self.kernel_incarnation_id.as_str();
             let after = self.cursor.clone();
-            let page = self.projection.read(|conn| {
+            let select = |conn: &GuardedConn<'_>| {
                 candidates(
                     conn,
                     kernel,
@@ -108,7 +108,19 @@ impl<'a> MessageCleanup<'a> {
                     after.as_deref(),
                     bounds.page_rows,
                 )
-            })?;
+            };
+            let page = match budget.deadline() {
+                Some(deadline) => self.projection.read_within(deadline, select),
+                None => self.projection.read(select),
+            };
+            let page = match page {
+                Ok(page) => page,
+                Err(SearchProjectionError::Store(StoreError::Deadline)) => {
+                    report.stop = Some(CleanupStop::Cancelled);
+                    return Ok(report);
+                }
+                Err(error) => return Err(error),
+            };
             report.inspected += page.inspected;
             let Some(last) = page.last_occurrence_id else {
                 report.cursor = None;
