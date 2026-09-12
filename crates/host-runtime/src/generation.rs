@@ -626,6 +626,8 @@ impl GenerationStore {
             let _ = remove_tree(&self.generations_fd, &temp_name);
             return Err(err);
         }
+        // A tree renamed away during the copy holds the published object detached from the named store; the digest must not be reported for it.
+        self.verify_named_identity()?;
         Ok(digest)
     }
 
@@ -1400,6 +1402,12 @@ mod tests {
         }];
         assert!(matches!(
             store.stage_and_promote(&successor, &meta(), &BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "lifecycle store was replaced under the mutator"
+            })
+        ));
+        assert!(matches!(
+            store.stage(&successor, &meta(), &BTreeSet::new()),
             Err(GenerationError::NativePayloadInvalid {
                 detail: "lifecycle store was replaced under the mutator"
             })

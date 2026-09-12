@@ -23,7 +23,8 @@ use daemon::projection_lifecycle::{
 use daemon::search_projection::SearchProjection;
 use daemon::search_seed::{
     ClosedSeed, SEED_FILE, SEED_REPORT_FILE, SEED_TARGET, SeedBarrier, SeedBounds, SeedRefusal,
-    quiesce, quiesce_with_barrier_for_test, stage, verify_closed,
+    SeedVerification, quiesce, quiesce_with_barrier_for_test, seed_stage_meta, stage,
+    verify_closed,
 };
 use host_runtime::generation::{CurrentProfile, GenerationStore, SourceSpec, StageMeta};
 use host_runtime::synapse::SynapseLimits;
@@ -265,20 +266,20 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
         (ledger_rows.clone(), 0, ledger_jobs.clone(), 1)
     );
     let digest = sha256_of(&path);
-    assert_eq!(seed.verification.sha256, digest);
+    assert_eq!(seed.verification().sha256, digest);
     assert_eq!(
         (
-            seed.verification.occurrences,
-            seed.verification.tombstones,
-            seed.verification.pending_jobs,
-            seed.verification.vectors,
-            seed.verification.generation_id.as_str(),
+            seed.verification().occurrences,
+            seed.verification().tombstones,
+            seed.verification().pending_jobs,
+            seed.verification().vectors,
+            seed.verification().generation_id.as_str(),
         ),
         (2, 0, 1, 1, support::embedding_fixtures::GENERATION)
     );
-    assert_eq!(seed.verification.identity(), fixture.expected);
+    assert_eq!(seed.verification().identity(), fixture.expected);
     assert_eq!(
-        seed.verification.checkpoint_commit_seq,
+        seed.verification().checkpoint_commit_seq,
         fixture.corpus.tip()
     );
 
@@ -359,24 +360,26 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
         .flatten()
         .count();
     assert_eq!(generations, 1);
-    // Each call writes its own temp report; staging neither reuses nor removes another writer's file under the deterministic prefix.
-    let planted = dir.path().join(format!(
-        "{SEED_REPORT_FILE}.{}.{}",
-        std::process::id(),
-        Sha256::digest(seed.verification.canonical_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ));
-    fs::write(&planted, b"not this call's report").unwrap();
+    // A report left by a process cut mid-staging is reclaimed by the next staging: every stager holds the store's exclusive transaction lock, so a report present at entry has no live writer.
+    let planted = dir.path().join(format!("{SEED_REPORT_FILE}.cut-process"));
+    fs::write(&planted, b"a cut process's report").unwrap();
     let staged_beside = stage(&seed, &store, &tx, dir.path(), &BTreeSet::new()).unwrap();
     assert_eq!(staged_beside.digest, staged.digest);
+    assert!(!planted.exists(), "the stale report is reclaimed");
     assert_eq!(
-        fs::read(&planted).unwrap(),
-        b"not this call's report",
-        "staging leaves a file it did not create alone"
+        fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(SEED_REPORT_FILE)
+            })
+            .count(),
+        0,
+        "staging leaves no report of its own behind"
     );
-    fs::remove_file(&planted).unwrap();
     assert_eq!(
         fs::read_dir(dir.path())
             .unwrap()
@@ -532,7 +535,7 @@ async fn a_checkpoint_blocking_reader_bounds_progress_and_a_retry_succeeds() {
     )
     .unwrap();
     assert_eq!(wal_len(&path), 0);
-    assert_eq!(seed.verification.occurrences, 2);
+    assert_eq!(seed.verification().occurrences, 2);
 }
 
 /// An active read transaction blocks SQLite checkpointing; the budget deadline must cancel `quiesce` before `attempt_wait` expires, with the projection handed back.
@@ -673,7 +676,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         SearchProjection::open(dir.path()).is_err(),
         "the held seed keeps the projection's lease"
     );
-    let verification = seed.verification.clone();
+    let verification = seed.verification().clone();
     let path = seed.release();
     let reopen_seed = || ClosedSeed::for_test(path.clone(), verification.clone());
 
@@ -685,7 +688,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 8] = [
+    let cases: [(&str, &str, SeedRefusal); 9] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -694,6 +697,12 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         (
             "missing checkpoint",
             "DELETE FROM projection_checkpoint",
+            SeedRefusal::Checkpoint,
+        ),
+        // The schema admits a NULL hold; `apply_batch` refuses an empty one, so no batch could extend this checkpoint.
+        (
+            "checkpoint without a hold",
+            "UPDATE projection_checkpoint SET hold_id=NULL",
             SeedRefusal::Checkpoint,
         ),
         (
@@ -734,7 +743,11 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let staged = stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new());
         assert_eq!(staged.unwrap_err(), SeedRefusal::BytesChanged, "{name}");
         if refusal == SeedRefusal::BytesChanged {
-            assert_ne!(verification.unwrap(), reopen_seed().verification, "{name}");
+            assert_ne!(
+                verification.unwrap(),
+                reopen_seed().verification().clone(),
+                "{name}"
+            );
         } else {
             assert_eq!(verification.unwrap_err(), refusal, "{name}");
         }
@@ -1022,8 +1035,43 @@ fn process_cuts_at_every_quiesce_barrier_reopen_to_the_ledger() {
             &unbounded(),
         )
         .unwrap();
-        assert_eq!(seed.verification.occurrences, 2, "{cut:?}");
-        assert_eq!(seed.verification.vectors, 1, "{cut:?}");
+        assert_eq!(seed.verification().occurrences, 2, "{cut:?}");
+        assert_eq!(seed.verification().vectors, 1, "{cut:?}");
         assert_eq!(wal_len(&path), 0, "{cut:?}");
     }
+}
+
+/// Two compatibility identities that differ only in where a newline falls between adjacent fields are different identities; their manifest contract digests must differ.
+#[test]
+fn compatibility_digest_separates_fields_that_contain_newlines() {
+    let verification = |policy: &str, contract: &str| SeedVerification {
+        schema: 1,
+        schema_version: 1,
+        kernel_incarnation_id: "kernel".to_owned(),
+        projection_policy_version: policy.to_owned(),
+        identity_contract_version: contract.to_owned(),
+        limit_manifest_protocol_version: "limits".to_owned(),
+        embedding_model: "model".to_owned(),
+        tokenizer_fingerprint: "tokenizer".to_owned(),
+        vector_dimension: 8,
+        generation_epoch: 1,
+        generation_id: "gen-1".to_owned(),
+        generation_state: "building".to_owned(),
+        snapshot_commit_seq: 0,
+        checkpoint_commit_seq: 0,
+        hold_id: "hold".to_owned(),
+        occurrences: 0,
+        tombstones: 0,
+        pending_jobs: 0,
+        admitted_jobs: 0,
+        vectors: 0,
+        bytes: 0,
+        sha256: "0".repeat(64),
+    };
+    let shifted_left = seed_stage_meta(&verification("a\nb", "c"));
+    let shifted_right = seed_stage_meta(&verification("a", "b\nc"));
+    assert_ne!(
+        shifted_left.release_contract_sha256,
+        shifted_right.release_contract_sha256
+    );
 }

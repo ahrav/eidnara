@@ -154,14 +154,22 @@ impl SeedVerification {
     }
 }
 
-/// A closed database that passed verification. The seed holds the database lease, so no store opens the file while it lives; dropping the seed releases the file for [`SearchProjection::open`].
+/// A closed database that passed verification. The seed holds the database lease, so no store opens the file while it lives; dropping the seed releases the file for [`SearchProjection::open`]. The fields are read-only: the report is the certificate of the bytes at `path`, and [`stage`] publishes it as such.
 pub struct ClosedSeed {
-    pub path: PathBuf,
-    pub verification: SeedVerification,
+    path: PathBuf,
+    verification: SeedVerification,
     lease: Option<lease::HeldFileLease>,
 }
 
 impl ClosedSeed {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn verification(&self) -> &SeedVerification {
+        &self.verification
+    }
+
     /// A seed over `path` certified by `verification`, holding no lease; tests use it to stage a file whose bytes they have changed since.
     #[cfg(feature = "test-support")]
     pub fn for_test(path: PathBuf, verification: SeedVerification) -> Self {
@@ -458,6 +466,10 @@ pub fn verify_closed(
     let checkpoint = retrieval::batch::read_checkpoint(&conn, &identity.kernel_incarnation_id)
         .map_err(|_| SeedRefusal::Checkpoint)?
         .ok_or(SeedRefusal::Checkpoint)?;
+    // The schema admits a NULL hold, read back as empty; `apply_batch` refuses an empty hold, so no batch could extend that checkpoint.
+    if checkpoint.hold_id.is_empty() {
+        return Err(SeedRefusal::Checkpoint);
+    }
     let count = |sql: &str| -> Result<u64, SeedRefusal> {
         conn.query_row(sql, [], |row| row.get::<_, i64>(0))
             .map_err(store)
@@ -520,26 +532,27 @@ pub struct StagedSeed {
 /// The manifest identity a seed stages under: the target names the seed kind, the contract slot carries the compatibility identity's digest, the inputs slot the verification report's digest, and the payload slot the seed bytes' digest. No release contract or inputs lock exists for a seed; the slots bind what a seed has.
 pub fn seed_stage_meta(verification: &SeedVerification) -> StageMeta {
     let identity = verification.identity();
-    let compatibility = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+    // A JSON array delimits each field, so identities whose strings contain the delimiter still hash apart.
+    let compatibility = serde_json::to_vec(&(
         identity.schema_version,
-        identity.projection_policy_version,
-        identity.identity_contract_version,
-        identity.limit_manifest_protocol_version,
-        identity.embedding_model,
-        identity.tokenizer_fingerprint,
+        &identity.projection_policy_version,
+        &identity.identity_contract_version,
+        &identity.limit_manifest_protocol_version,
+        &identity.embedding_model,
+        &identity.tokenizer_fingerprint,
         identity.vector_dimension,
-        identity.generation_epoch
-    );
+        identity.generation_epoch,
+    ))
+    .expect("identity serialization cannot fail");
     StageMeta {
         target: SEED_TARGET.to_owned(),
-        release_contract_sha256: hex(&Sha256::digest(compatibility.as_bytes())),
+        release_contract_sha256: hex(&Sha256::digest(&compatibility)),
         inputs_lock_sha256: verification.report_sha256(),
         source_payload_manifest_sha256: verification.sha256.clone(),
     }
 }
 
-/// Checks that the closed seed still holds the certified bytes, writes its report beside the control record, and stages both into `store` under [`seed_stage_meta`]. A seed whose bytes changed since it was closed is refused: its certificate named other bytes. `_transaction` is the caller's exclusive hold on the store's `transaction.lock`, which the store requires of every mutator and which keeps a concurrent host launcher's `prune` from reclaiming the staging temp or the published seed; hold it until the digest is pinned.
+/// Checks that the closed seed still holds the certified bytes, writes its report into `report_dir`, and stages both into `store` under [`seed_stage_meta`]. A seed whose bytes changed since it was closed is refused: its certificate named other bytes. `_transaction` is the caller's exclusive hold on the store's `transaction.lock`, which the store requires of every mutator and which keeps a concurrent host launcher's `prune` from reclaiming the staging temp or the published seed; hold it until the digest is pinned. That lock also serializes every stager, so a `seed-report.json.*` file found in `report_dir` on entry was left by a process cut mid-staging and is removed; `report_dir` is for this store's stagers only.
 ///
 /// # Errors
 ///
@@ -559,15 +572,17 @@ pub fn stage(
         Ok(_) => return Err(SeedRefusal::BytesChanged),
         Err(refusal) => return Err(refusal),
     }
-    // The temp name is unique to this call, so two stagings of one seed in one process take different names, and a name that already exists is another writer's file: `create_new` refuses it and nothing removes it.
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let report_path = report_dir.join(format!(
-        "{SEED_REPORT_FILE}.{}-{unique}.{}",
-        std::process::id(),
-        seed.verification.report_sha256()
-    ));
+    // Under the exclusive transaction lock no other stager is live, so every report already here is stale.
+    for entry in fs::read_dir(report_dir).map_err(io)?.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SEED_REPORT_FILE)
+        {
+            fs::remove_file(entry.path()).map_err(io)?;
+        }
+    }
+    let report_path = report_dir.join(format!("{SEED_REPORT_FILE}.tmp"));
     let report = seed.verification.canonical_bytes();
     let mut file = fs::OpenOptions::new()
         .write(true)
