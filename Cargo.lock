@@ -475,6 +475,7 @@ dependencies = [
  "criterion",
  "daemon",
  "filetime",
+ "gix",
  "hmac",
  "host-runtime",
  "kernel",
