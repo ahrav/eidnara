@@ -173,7 +173,6 @@ not performance measurements or a full-workspace gate.
 | [`transform_snapshot_keeps_row_version_and_overlays_from_one_commit`][t-snap-keeps] | The snapshot `row_version` matches overlays from the same commit. | unaudited |
 | [`transform_cas_conflict_leaves_every_overlay_table_empty`][t-cas-empty] | The CAS loser commits no overlay rows. | unaudited |
 | [`competing_pass_counter_survives_direct_primary_lifecycle_and_reopen`][t-counter] | The CAS loser is rejected; state survives reopen. | unaudited |
-| [`transform_reject_records_trace_without_advancing_row_version`][t-reject] | Reject: `receive_count == 1`, `reject_count == 1`, `row_version` unchanged. | unaudited |
 | [`transform_success_records_received_and_completed_trace`][t-success] | Success: received then completed timestamps. | unaudited |
 | [`repeated_rejects_increment_trace_and_overwrite_last_error`][t-repeat] | Counters increment per pass; the last error is overwritten. | unaudited |
 | [`sequential_failing_passes_trace_every_reject_while_cache_state_stays_frozen`][t-frozen] | Four rejects: `receive_count == 4`, `row_version` frozen. | unaudited |
@@ -532,7 +531,6 @@ not a claim that no related check exists anywhere in the repository.
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L17109
 [t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L17178
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-reject]: ../../../../crates/daemon/src/lib.rs#L24253
 [t-success]: ../../../../crates/daemon/src/lib.rs#L24562
 [t-repeat]: ../../../../crates/daemon/src/lib.rs#L24578
 [t-frozen]: ../../../../crates/daemon/src/lib.rs#L24606
