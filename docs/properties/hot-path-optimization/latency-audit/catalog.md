@@ -417,7 +417,9 @@ charges can exceed the canonical shell's smaller footprint; only suffix sizes
 are recomputed. Cache budgets are unchanged. Canonical serialization uses
 serde formatter spans rather than a materialized `Value` round trip; keys
 without escapes order by their raw bytes, and an object already in order is
-not sorted, so a retained-original shell decodes no keys. The
+not sorted, so a retained-original shell whose keys carry no escapes decodes
+no keys. An object with an escaped key decodes every key before ordering,
+even when the object is already in order. The
 positional map, lazy digest index, and serialization spans are per-message
 scratch, not retained cache entries. All checks remain unaudited for adequacy.
 Impact: Output identity, served fingerprints, token caches, tag mint, and the

@@ -378,9 +378,11 @@ field byte spans. The copy step orders fields by Rust string key and
 copies scalar bytes unchanged. A key without a backslash compares as the raw
 bytes between its quotes, which equals its decoded `str` order because serde
 writes non-ASCII unescaped; the quotes are excluded because `"` sorts after a
-space. Only an object with an escaped key decodes its keys. An object already
-in order is not sorted, so a retained-original shell allocates per object,
-not per key ([allocation witness][canonical-allocations]). It does not build
+space. Only an object with an escaped key decodes its keys, and it decodes
+every key even when it is already in order. An unescaped-key object already
+in order is not sorted, so a retained-original shell whose keys carry no
+escapes allocates per object, not per key
+([allocation witness][canonical-allocations]). It does not build
 a `Value` tree, reserialize
 values, change numeric forms, or duplicate the wire schema. Existing wire
 serializers still decide field omissions and whether to replay retained JSON.
