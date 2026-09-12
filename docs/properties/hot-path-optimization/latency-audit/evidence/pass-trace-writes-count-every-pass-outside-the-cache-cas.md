@@ -196,7 +196,11 @@ the pass never retires: the tag, temporal-mark, user-hint, and channel-1
 overlay rows, the root added to `transform_session_roots`, the
 `scheduler_observation` and `scheduler_interesting` entries appended to the
 `pass_trace` history rings, and a `first_divergence` that stays readable as
-`last_divergence` after a pass with none. Reassignment leaves the write's
+`last_divergence` after a pass with none. The ring, fingerprint, and
+divergence receipts sit under a separate [history owner][history-owner] so the
+eviction below scans only those receipts, bounded by the two rings, and not
+the session's accumulated overlay receipts; the owner index covers the owner
+id alone. Reassignment leaves the write's
 default owner list alone, so a scan prepared after it keeps the pass owner;
 the [reassignment test][reassign-test] holds that. The retained owner is
 registered only when the pass carries such a scan, and its key differs from
@@ -261,24 +265,25 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2438
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16794-L16836
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7040
-[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7070-L7082
-[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16772-L16789
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16738-L16767
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16839-L16881
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7046
+[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7076-L7088
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16817-L16834
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16783-L16812
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2857
 [retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2860
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L9015-L9021
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L9041-L9047
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2638-L2680
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8966-L8968
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16595-L16733
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16875-L16974
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9104-L9128
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17187-L17250
-[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9130-L9143
-[root-test]: ../../../../../crates/memory-store/src/lib.rs#L16979-L17024
-[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8948-L8955
-[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17029-L17076
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24475-L24498
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8975-L8980
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16621-L16778
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16948-L17047
+[history-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9130-L9154
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17260-L17323
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9156-L9169
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17052-L17097
+[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8957-L8964
+[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17102-L17149
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24569-L24592
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7049
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7055

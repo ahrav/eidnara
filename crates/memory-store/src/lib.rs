@@ -2766,10 +2766,10 @@ fn retire_active_scan_scope(
     retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
 }
 
-/// Keeps the newest `keep` retained receipts for `field_id` in the session's scope and
+/// Keeps the newest `keep` history-owner receipts for `field_id` in the session's scope and
 /// prunes the scans that lost their last owner. Rowid order is insertion order among the
 /// surviving rows because SQLite assigns each new rowid above every existing one.
-fn evict_retained_receipts_beyond(
+fn evict_history_receipts_beyond(
     tx: &GuardedConn<'_>,
     session_id: &str,
     field_id: &str,
@@ -2788,7 +2788,7 @@ fn evict_retained_receipts_beyond(
             params![
                 active_scan_private_key("session", session_id),
                 owner_kind,
-                active_scan_private_key(owner_kind, CACHE_STATE_RETAINED_OWNER_KEY)
+                active_scan_private_key(owner_kind, CACHE_STATE_HISTORY_OWNER_KEY)
             ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -2858,6 +2858,12 @@ const CACHE_STATE_PASS_OWNER_KEY: &str = "cache_state_pass";
 
 /// Distinct from the `cache_state` key so legacy rows stay separable from live ones.
 const CACHE_STATE_RETAINED_OWNER_KEY: &str = "cache_state_retained";
+
+/// Owner of the receipts the eviction below scans on every commit: the two history rings,
+/// the fingerprint, and the divergence. Cumulative overlay and root receipts stay under
+/// [`CACHE_STATE_RETAINED_OWNER_KEY`], so the scan is bounded by the rings, not by the
+/// session's accumulated overlays; the owner index covers `domain_owner_id` only.
+const CACHE_STATE_HISTORY_OWNER_KEY: &str = "cache_state_history";
 
 /// Mirrors the `256` and `255` literals in the `commit_transform` UPSERT.
 const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
@@ -8813,6 +8819,9 @@ impl MemoryStore {
             })
             .transpose()?;
         let retained_scans_start = write.scans.len();
+        // The divergence is the first scan past `retained_scans_start`; it moves to the
+        // history owner below because a later divergence replaces it.
+        let divergence_scan = first_divergence.map(|_| retained_scans_start);
         let first_divergence = first_divergence
             .map(|value| {
                 write.json_content(
@@ -8950,7 +8959,7 @@ impl MemoryStore {
                 fingerprint_scan..fingerprint_scan + 1,
                 "session",
                 session_id,
-                CACHE_STATE_RETAINED_OWNER_KEY,
+                CACHE_STATE_HISTORY_OWNER_KEY,
             );
         }
         // The accepted cache row version is a stable identity for the pass that produced the
@@ -8963,8 +8972,25 @@ impl MemoryStore {
             current_time_ms()
         };
         // These bytes stay stored after the next pass, so their scans outlive the pass owner.
-        for range in [retained_scans, history_scans] {
-            write.reassign_scans_in(range, "session", session_id, CACHE_STATE_RETAINED_OWNER_KEY);
+        write.reassign_scans_in(
+            retained_scans,
+            "session",
+            session_id,
+            CACHE_STATE_RETAINED_OWNER_KEY,
+        );
+        write.reassign_scans_in(
+            history_scans,
+            "session",
+            session_id,
+            CACHE_STATE_HISTORY_OWNER_KEY,
+        );
+        if let Some(divergence_scan) = divergence_scan {
+            write.reassign_scans_in(
+                divergence_scan..divergence_scan + 1,
+                "session",
+                session_id,
+                CACHE_STATE_HISTORY_OWNER_KEY,
+            );
         }
 
         let outcome = write.execute(&self.inner, |coordinated| {
@@ -9123,7 +9149,7 @@ impl MemoryStore {
                 ("first_divergence", first_divergence.is_some(), 0),
             ] {
                 if appended {
-                    evict_retained_receipts_beyond(tx, session_id, field_id, keep)?;
+                    evict_history_receipts_beyond(tx, session_id, field_id, keep)?;
                 }
             }
             if let Some(project_root) = canonical_project_root.as_deref() {
@@ -16696,6 +16722,16 @@ mod tests {
             with_overlay.0 > steady.0,
             "the tag mint's scans are added, got {with_overlay:?} after {steady:?}"
         );
+        let tag_receipts = field_scan_ids(
+            &store,
+            "ses",
+            &["tag_block_id", "tag_kind", "tag_source_bytes"],
+        );
+        assert_eq!(
+            tag_receipts.len(),
+            3,
+            "one receipt per tag field, got {tag_receipts:?}"
+        );
         store
             .commit_transform("ses", base_commit(Some(version), &core, &meta))
             .unwrap();
@@ -16703,6 +16739,15 @@ mod tests {
             scan_audit_rows(&store),
             with_overlay,
             "the overlay scans remain while the later pass settles"
+        );
+        assert_eq!(
+            field_scan_ids(
+                &store,
+                "ses",
+                &["tag_block_id", "tag_kind", "tag_source_bytes"]
+            ),
+            tag_receipts,
+            "the same tag receipts survive the pass that retired the previous pass owner"
         );
         let tags: i64 = store
             .inner
@@ -16833,6 +16878,34 @@ mod tests {
             scan_audit_rows(&store).0 > before.0,
             "a detected identity keeps its audit row"
         );
+    }
+
+    /// The `(field_id, scan_id)` pairs the session scope holds for `field_ids`.
+    fn field_scan_ids(
+        store: &MemoryStore,
+        session_id: &str,
+        field_ids: &[&str],
+    ) -> std::collections::BTreeSet<(String, String)> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT c.field_id, c.scan_id FROM scan_owner_copies c \
+                     JOIN scan_domain_owners o ON o.domain_owner_id = c.domain_owner_id \
+                     JOIN scan_owner_scopes s ON s.owner_scope_id = o.owner_scope_id \
+                     WHERE s.scope_kind = 'session' AND s.scope_key = ?1",
+                )?;
+                let rows = statement
+                    .query_map([active_scan_private_key("session", session_id)], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows
+                    .into_iter()
+                    .filter(|(field, _)| field_ids.contains(&field.as_str()))
+                    .collect())
+            })
+            .unwrap()
     }
 
     fn field_copy_counts(
@@ -20689,12 +20762,33 @@ mod tests {
             })
             .collect();
         assert_eq!(stale.len(), 3);
+        // One delivery called directly retires its row inside its own transaction: the row
+        // is absent as soon as the call returns, before any drain-side cleanup could run,
+        // which the baseline's mark-then-delete would not have shown at this point.
+        let first = &stale[0];
+        assert!(store.deliver_historian_side_channel(first).unwrap());
+        let first_kind_rows: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM historian_side_channel_outbox \
+                     WHERE session_id = 'ses' AND kind = ?1",
+                    params![first.id.kind],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            first_kind_rows, 0,
+            "the delivered {} row is gone before any drain runs",
+            first.id.kind
+        );
         let drained = store
             .drain_historian_side_channels("ses", i64::MAX, 32)
             .unwrap();
         assert_eq!(
             (drained.attempted, drained.succeeded, drained.failed),
-            (3, 3, 0)
+            (2, 2, 0)
         );
         for row in &stale {
             assert!(

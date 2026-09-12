@@ -173,19 +173,21 @@ hold nothing, and all three rows stay pending. That half shows the insert and
 the retirement share one transaction; the baseline already held the insert and
 the mark in one transaction, so it is not a behavior change. The gap the
 baseline left, a crash between the mark commit and the delete commit, is
-closed by construction because no second commit exists; the discriminating
-assertion is that the outbox ends empty rather than marked. The test then
-reads the due rows a second time before one drain delivers them, and each
-stale delivery reports the row as already retired: each target holds one row
-and the outbox holds none.
+closed by construction because no second commit exists. The discriminating
+assertion is a direct `deliver_historian_side_channel` call after which the
+row is already absent, before any drain runs; the baseline would have left it
+marked until the drain's second commit. The test then reads the due rows a
+second time before one drain delivers the rest, and each stale delivery
+reports the row as already retired: each target holds one row and the outbox
+holds none.
 
 ### Focused execution, 2026-09-12
 
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11582-L11660
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14425-L14450
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11706-L11730
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20599-L20738
-[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17081-L17148
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11608-L11686
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14451-L14476
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11732-L11756
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20672-L20832
+[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17154-L17221

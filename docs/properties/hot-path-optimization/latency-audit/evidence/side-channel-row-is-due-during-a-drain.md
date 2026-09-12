@@ -132,5 +132,5 @@ call to the drain function, not a handler pass, so the witness is `reachable`
 for the drain function rather than the `sometimes` witness the record's
 guarantee names. A handler-pass run with all three kinds due is still open.
 
-[drain-live]: ../../../../../crates/memory-store/src/lib.rs#L11456-L11514
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20599-L20738
+[drain-live]: ../../../../../crates/memory-store/src/lib.rs#L11482-L11540
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20672-L20832

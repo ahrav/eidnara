@@ -218,7 +218,7 @@ not performance measurements or a full-workspace gate.
 
 None found: `first_divergence`
 NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
-commits twice; a `pass_trace` write failure beside a successful cache commit;
+commits twice;
 outbox ordering across firings, the per-kind limit, or the backoff values.
 
 Suspiciously quiet: the drain result and every trace result are discarded
@@ -540,29 +540,29 @@ not a claim that no related check exists anywhere in the repository.
 [t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36937
 [t-emergency]: ../../../../crates/daemon/src/lib.rs#L36144
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L23426
-[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18258
-[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18312
-[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18381
+[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18331
+[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18385
+[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18454
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-success]: ../../../../crates/daemon/src/lib.rs#L24563
 [t-repeat]: ../../../../crates/daemon/src/lib.rs#L24578
 [t-frozen]: ../../../../crates/daemon/src/lib.rs#L24607
 [t-status]: ../../../../crates/daemon/src/lib.rs#L24860
 [t-divergence]: ../../../../crates/daemon/src/lib.rs#L32912
-[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19272
+[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19345
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13549
-[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16483
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L20741
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20386
+[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16509
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L20835
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20459
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36801
-[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L20859
-[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22321
-[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16219
-[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L16136
-[t-container]: ../../../../crates/memory-store/src/lib.rs#L16236
-[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L16273
+[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L20953
+[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22415
+[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16245
+[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L16162
+[t-container]: ../../../../crates/memory-store/src/lib.rs#L16262
+[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L16299
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L728
-[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16416
+[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16442
 [t-sync]: ../../../../crates/storage/src/lib.rs#L4286-L4351
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
@@ -667,8 +667,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
-[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15699-L15918
-[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15925-L15953
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15725-L15944
+[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15951-L15979
 [t-load-count]: ../../../../crates/daemon/src/lib.rs#L24695-L24747
 [t-timing]: ../../../../crates/daemon/src/lib.rs#L24753-L24765
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24771-L24784
@@ -681,19 +681,19 @@ units); their links are to the live tree.
 The three preparation checks were added with the single-pass `meta`
 preparation; their links are to the live tree.
 
-[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L16044-L16092
-[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16097-L16131
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L16070-L16118
+[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16123-L16157
 [t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
-[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16595-L16733
-[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16738-L16767
-[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16794-L16836
-[t-first-receive]: ../../../../crates/memory-store/src/lib.rs#L16772-L16789
-[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16875-L16974
-[t-ring]: ../../../../crates/memory-store/src/lib.rs#L17187-L17250
-[t-root]: ../../../../crates/memory-store/src/lib.rs#L16979-L17024
-[t-parse-first]: ../../../../crates/memory-store/src/lib.rs#L17152-L17181
-[t-fingerprint]: ../../../../crates/memory-store/src/lib.rs#L17029-L17076
-[t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17081-L17148
-[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24475-L24498
-[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20599-L20738
+[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16621-L16778
+[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16783-L16812
+[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16839-L16881
+[t-first-receive]: ../../../../crates/memory-store/src/lib.rs#L16817-L16834
+[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16948-L17047
+[t-ring]: ../../../../crates/memory-store/src/lib.rs#L17260-L17323
+[t-root]: ../../../../crates/memory-store/src/lib.rs#L17052-L17097
+[t-parse-first]: ../../../../crates/memory-store/src/lib.rs#L17225-L17254
+[t-fingerprint]: ../../../../crates/memory-store/src/lib.rs#L17102-L17149
+[t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17154-L17221
+[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24569-L24592
+[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20672-L20832
 [t-outcome]: ../../../../crates/daemon/src/lib.rs#L24791-L24835
