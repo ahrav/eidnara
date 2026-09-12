@@ -228,19 +228,19 @@ mod sqlite_backend {
             Ok(self.guard(conn))
         }
 
-        /// Acquires the connection by polling until `deadline` rather than blocking past the caller's budget.
+        /// Acquires the connection by polling until `deadline` rather than blocking past the caller's budget; a deadline that has already passed is refused before the first attempt.
         fn lock_conn_within(&self, deadline: Instant) -> Result<ConnGuard<'_>, StoreError> {
             self.refuse_reentry()?;
             loop {
+                if Instant::now() >= deadline {
+                    return Err(StoreError::Deadline);
+                }
                 match self.conn.try_lock() {
                     Ok(conn) => return Ok(self.guard(conn)),
                     Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                         return Ok(self.guard(poisoned.into_inner()));
                     }
                     Err(std::sync::TryLockError::WouldBlock) => {}
-                }
-                if Instant::now() >= deadline {
-                    return Err(StoreError::Deadline);
                 }
                 thread::sleep(CONN_ACQUIRE_POLL);
             }
@@ -293,13 +293,14 @@ mod sqlite_backend {
 
         /// [`Self::with_conn`] whose connection acquisition ends at `deadline`.
         ///
-        /// The connection is polled rather than awaited. Once the transaction is open the read is
-        /// unbounded, as in [`Self::with_conn`].
+        /// The connection is polled rather than awaited, and a deadline that has already passed
+        /// is refused without acquiring it. Once the transaction is open the read is unbounded,
+        /// as in [`Self::with_conn`].
         ///
         /// # Errors
         ///
-        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline`;
-        /// otherwise as [`Self::with_conn`].
+        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline` or
+        /// the deadline has passed; otherwise as [`Self::with_conn`].
         pub fn with_conn_within<T>(
             &self,
             deadline: Instant,
@@ -4033,6 +4034,27 @@ mod tests {
         release_tx.send(()).expect("release");
         thread.join().expect("holder thread");
         drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bounded_read_refuses_an_expired_deadline_even_when_the_connection_is_free() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let expired = Instant::now() - Duration::from_millis(1);
+        let ran = std::cell::Cell::new(false);
+        let r = store.with_conn_within(expired, |_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
+        assert!(!ran.get(), "the callback ran past its deadline");
+        store
+            .with_conn_within(Instant::now() + Duration::from_secs(5), |c| {
+                c.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            })
+            .expect("a live deadline reads");
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 
