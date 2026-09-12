@@ -57,7 +57,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [Handler completion fence][handler-fence] | Both the outer task and callback are tracked. | unaudited |
 | [Close gate][close-gate] | Unstopped dispatch after the post-abort wait trips fatal state and refuses cleanup. | unaudited |
 | [Retained reservations][reservations] | Staging and decode ownership release their respective charges. | unaudited |
-| [Parse admission][parse-admission] | Parse residency is reserved before Value decoding; oversized and temporarily exhausted reservations have different refusals. | unaudited |
+| [Parse admission][parse-admission] | Parse residency is charged inside the decode as values are built; a footprint above the capacity and a pool held by other requests have different refusals. | unaudited |
 | [ByteCharge ownership][byte-charge] | Owned permits hold bytes through transfer and release them on drop. | unaudited |
 | [Decode admission][decode-admission] | Both decoding bytes and job count must fit before admission. | unaudited |
 | [Saturated requests][saturation-test] | `server_busy` occurs without handler dispatch. | unaudited |
@@ -71,7 +71,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [Reserved-class isolation][reserved-isolation] | Saturated reserved work cannot consume a general slot. | unaudited |
 | [General-class isolation][general-isolation] | Saturated general work cannot consume the reserve. | unaudited |
 | [Request byte cap][request-cap] | Only transform-class requests receive the widened frame cap. | unaudited |
-| [Parse node counting][parse-nodes] | String punctuation and escaped quotes do not become structural nodes. | unaudited |
+| [Parse node counting][parse-nodes] | Separators inside strings do not become values; the footprint counts the values the decode builds. | unaudited |
 | [Retained string copies][parse-copies] | The footprint covers every retained string copy. | unaudited |
 | [Dense parse footprint][parse-dense] | Scalar-dense input is charged above its wire size; string content is counted separately. | unaudited |
 | [Upload caps][upload-cap-test] | Reservation admission and release use the declared caps. | unaudited |
@@ -345,7 +345,7 @@ that no related check exists anywhere in the repository.
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L11867-L11888
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L11921-L11936
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
 [route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L832-L887
@@ -356,9 +356,9 @@ that no related check exists anywhere in the repository.
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L970
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1067
 [request-cap]: ../../../crates/daemon/src/lib.rs#L18583
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L18676
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L18693
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L18696
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20012-L20047
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20012-L20047
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20012-L20047
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -429,7 +429,7 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5228-L5287
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L15582-L15609
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L15616-L15641
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L24960-L25111
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L25871-L25901
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5616-L5655
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5579-L5609
 [unretained-policy-test]: ../../../crates/storage/src/lib.rs#L5700-L5746

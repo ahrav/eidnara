@@ -528,10 +528,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19406
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25102
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25168-L25277
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27889
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24821
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24885-L25165
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13993
 [served-shells]: ../../../../crates/daemon/src/transform.rs#L13714
 [served-corpus]: ../../../../crates/daemon/src/transform.rs#L13760
