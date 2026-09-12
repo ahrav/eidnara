@@ -1143,6 +1143,26 @@ fn incomplete_scans_retire_nothing() {
     );
     assert_eq!(revoked.retired, 0);
     assert_eq!(corpus.live_oids(), before);
+    // A grant revoked inside the inventory ends that phase at its next page, before the repository is walked.
+    let gate = support::projection_gate::open_gate();
+    let revoked_early = GitReconciler::new(&corpus.kernel)
+        .with_probe_for_test(Probe::AfterInventoryPage, || gate.close())
+        .run_episode(
+            &gate,
+            &repo.scope(&[MAIN]),
+            InventoryBounds {
+                page_rows: NonZeroUsize::new(1).unwrap(),
+                ..bounds()
+            },
+            &unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        revoked_early.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Inventory))
+    );
+    assert_eq!((revoked_early.reachable, revoked_early.retired), (None, 0));
+    assert_eq!(corpus.live_oids(), before);
 
     // An unreadable commit inside the walk is a store failure, never an absent source.
     repo.garble(&c1);
