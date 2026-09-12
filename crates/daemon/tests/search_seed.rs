@@ -27,6 +27,7 @@ use daemon::search_seed::{
 };
 use host_runtime::generation::{CurrentProfile, GenerationStore, SourceSpec, StageMeta};
 use host_runtime::synapse::SynapseLimits;
+use host_runtime::{InstanceError, LifecycleTransactionLock};
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, ProjectScope};
 use retrieval::ProjectionIdentity;
@@ -54,8 +55,12 @@ fn seed_bounds() -> SeedBounds {
 }
 
 fn unbounded() -> EvalBudget {
+    budget_for(Duration::from_secs(60))
+}
+
+fn budget_for(remaining: Duration) -> EvalBudget {
     EvalBudget::new(
-        Some(std::time::Instant::now() + Duration::from_secs(60)),
+        Some(std::time::Instant::now() + remaining),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
 }
@@ -279,7 +284,16 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
 
     let root = store_root();
     let store = GenerationStore::open(Some(root.path())).unwrap();
-    let staged = stage(&seed, &store, dir.path(), &BTreeSet::new()).unwrap();
+    // Staging mutates the host lifecycle store, so it runs under the store's transaction lock; a host mutator arriving meanwhile is refused rather than reclaiming the seed's staging temp under it.
+    let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+    let staged = stage(&seed, &store, &tx, dir.path(), &BTreeSet::new()).unwrap();
+    assert!(
+        matches!(
+            LifecycleTransactionLock::acquire_exclusive(Some(root.path())),
+            Err(InstanceError::AlreadyRunning)
+        ),
+        "the host's mutation lock stays held across the staged seed"
+    );
     assert_eq!(
         store.read_current().unwrap(),
         CurrentProfile::Absent,
@@ -326,6 +340,7 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
             "generation_state": "building",
             "snapshot_commit_seq": fixture.snapshot,
             "checkpoint_commit_seq": fixture.corpus.tip(),
+            "hold_id": "0123456789abcdef0123456789abcdef",
             "occurrences": 2,
             "tombstones": 0,
             "pending_jobs": 1,
@@ -337,13 +352,45 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
     );
 
     // A lost response: staging the same seed again finds the same object and publishes nothing twice.
-    let again = stage(&seed, &store, dir.path(), &BTreeSet::new()).unwrap();
+    let again = stage(&seed, &store, &tx, dir.path(), &BTreeSet::new()).unwrap();
     assert_eq!(again.digest, staged.digest);
     let generations = fs::read_dir(store.root().join("generations"))
         .unwrap()
         .flatten()
         .count();
     assert_eq!(generations, 1);
+    // Each call writes its own temp report; staging neither reuses nor removes another writer's file under the deterministic prefix.
+    let planted = dir.path().join(format!(
+        "{SEED_REPORT_FILE}.{}.{}",
+        std::process::id(),
+        Sha256::digest(seed.verification.canonical_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ));
+    fs::write(&planted, b"not this call's report").unwrap();
+    let staged_beside = stage(&seed, &store, &tx, dir.path(), &BTreeSet::new()).unwrap();
+    assert_eq!(staged_beside.digest, staged.digest);
+    assert_eq!(
+        fs::read(&planted).unwrap(),
+        b"not this call's report",
+        "staging leaves a file it did not create alone"
+    );
+    fs::remove_file(&planted).unwrap();
+    assert_eq!(
+        fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(SEED_REPORT_FILE)
+            })
+            .count(),
+        0,
+        "every report temp of a finished staging is removed"
+    );
 
     // A host generation promoted beside the seed: host validation is what it was, the seed stays unselected, and protected reclamation keeps both.
     let host_src = tempfile::tempdir().unwrap();
@@ -433,6 +480,7 @@ async fn a_checkpoint_blocking_reader_bounds_progress_and_a_retry_succeeds() {
         .unwrap();
 
     let gate = open_gate();
+    let started = std::time::Instant::now();
     let refused = quiesce(
         fixture.projection,
         &gate,
@@ -442,6 +490,12 @@ async fn a_checkpoint_blocking_reader_bounds_progress_and_a_retry_succeeds() {
         &unbounded(),
     )
     .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "three attempts of {:?} each finished in {elapsed:?}, not after the connection's standing busy timeout",
+        seed_bounds().attempt_wait
+    );
     match refused.refusal {
         SeedRefusal::CheckpointBlocked {
             attempts,
@@ -479,6 +533,51 @@ async fn a_checkpoint_blocking_reader_bounds_progress_and_a_retry_succeeds() {
     .unwrap();
     assert_eq!(wal_len(&path), 0);
     assert_eq!(seed.verification.occurrences, 2);
+}
+
+/// An active read transaction blocks SQLite checkpointing; the budget deadline must cancel `quiesce` before `attempt_wait` expires, with the projection handed back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_blocked_checkpoint_attempt_ends_at_the_budget_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = embedded_fixture(dir.path()).await;
+    let path = search_path(dir.path());
+    let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM occurrences;")
+        .unwrap();
+
+    let remaining = Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let refused = quiesce(
+        fixture.projection,
+        &open_gate(),
+        0,
+        &fixture.expected,
+        SeedBounds {
+            checkpoint_attempts: NonZeroU32::new(1_000).unwrap(),
+            attempt_wait: Duration::from_secs(30),
+            ..seed_bounds()
+        },
+        &budget_for(remaining),
+    )
+    .unwrap_err();
+    let elapsed = started.elapsed();
+    assert_eq!(refused.refusal, SeedRefusal::Cancelled);
+    assert!(
+        elapsed >= remaining,
+        "the attempt waited for the budget it was given: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the attempt ended at the deadline, not after the connection's standing busy wait: {elapsed:?}"
+    );
+    let projection = refused.projection.expect("nothing was closed");
+    assert!(wal_len(&path) > 0, "a cancelled quiesce removes no journal");
+    let count: i64 = projection
+        .read(|conn| Ok(conn.query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))?))
+        .unwrap();
+    assert_eq!(count, 2);
+    reader.execute_batch("COMMIT;").unwrap();
 }
 
 /// AC5: another handle, a running worker, or a closed gate refuses the seed before the checkpoint, and the projection is returned untouched.
@@ -568,6 +667,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
     .unwrap();
     let root = store_root();
     let store = GenerationStore::open(Some(root.path())).unwrap();
+    let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
     let pristine = fs::read(&path).unwrap();
     assert!(
         SearchProjection::open(dir.path()).is_err(),
@@ -585,7 +685,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 6] = [
+    let cases: [(&str, &str, SeedRefusal); 8] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -607,6 +707,16 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
             SeedRefusal::Generation,
         ),
         (
+            "retired generation",
+            "UPDATE vector_generations SET state='retired'",
+            SeedRefusal::Generation,
+        ),
+        (
+            "ambiguous generation",
+            "INSERT INTO vector_generations SELECT 'gen-0',embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch,'verified',created_at,updated_at FROM vector_generations WHERE generation_id='gen-1'",
+            SeedRefusal::Generation,
+        ),
+        (
             "admitted work",
             "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
             SeedRefusal::AdmittedWork(1),
@@ -619,9 +729,10 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
     ];
     for (name, sql, refusal) in cases {
         tamper(sql);
+        // Verification names the fault; staging sees only that the certificate names other bytes.
         let verification = verify_closed(&path, &fixture.expected, u64::MAX);
-        let staged = stage(&reopen_seed(), &store, dir.path(), &BTreeSet::new());
-        assert_eq!(staged.unwrap_err(), refusal, "{name}");
+        let staged = stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new());
+        assert_eq!(staged.unwrap_err(), SeedRefusal::BytesChanged, "{name}");
         if refusal == SeedRefusal::BytesChanged {
             assert_ne!(verification.unwrap(), reopen_seed().verification, "{name}");
         } else {
@@ -642,15 +753,25 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         fs::write(&path, &pristine).unwrap();
     }
     fs::write(&path, &pristine[..pristine.len() / 2]).unwrap();
-    assert!(matches!(
-        stage(&reopen_seed(), &store, dir.path(), &BTreeSet::new()),
-        Err(SeedRefusal::Store(_) | SeedRefusal::Integrity(_) | SeedRefusal::BytesChanged)
-    ));
+    assert_eq!(
+        stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new()).unwrap_err(),
+        SeedRefusal::BytesChanged,
+        "truncated bytes are other bytes"
+    );
     assert_eq!(
         fs::read_dir(store.root().join("generations"))
             .unwrap()
             .count(),
         0
+    );
+    // A file that grew after certification is other bytes too, not a capacity refusal.
+    let mut grown = pristine.clone();
+    grown.extend_from_slice(&[0u8; 4096]);
+    fs::write(&path, &grown).unwrap();
+    assert_eq!(
+        stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new()).unwrap_err(),
+        SeedRefusal::BytesChanged,
+        "grown bytes are other bytes"
     );
     fs::write(&path, &pristine).unwrap();
     assert_eq!(
@@ -667,7 +788,20 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         .unwrap();
     assert_eq!(
         verify_closed(&path, &fixture.expected, u64::MAX).unwrap_err(),
-        SeedRefusal::SidecarPresent("sqlite-wal".to_owned())
+        SeedRefusal::SidecarPresent("-wal".to_owned())
+    );
+    live.execute_batch("COMMIT;").unwrap();
+    drop(live);
+    // SQLite appends the sidecar suffix to the whole file name, whatever the name's extension; the check follows the same rule.
+    let other = dir.path().join("other.db");
+    fs::write(&other, &pristine).unwrap();
+    let live = Connection::open(&other).unwrap();
+    live.execute_batch("BEGIN; SELECT count(*) FROM occurrences;")
+        .unwrap();
+    assert!(dir.path().join("other.db-wal").exists());
+    assert_eq!(
+        verify_closed(&other, &fixture.expected, u64::MAX).unwrap_err(),
+        SeedRefusal::SidecarPresent("-wal".to_owned())
     );
     live.execute_batch("COMMIT;").unwrap();
     drop(live);
@@ -685,7 +819,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         .unwrap();
     drop(projection);
     assert_eq!(
-        stage(&reopen_seed(), &store, dir.path(), &BTreeSet::new()).unwrap_err(),
+        stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new()).unwrap_err(),
         SeedRefusal::BytesChanged
     );
     assert_eq!(
@@ -697,6 +831,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
     stage(
         &reopen_seed_after(&path, &fixture.expected),
         &store,
+        &tx,
         dir.path(),
         &BTreeSet::new(),
     )

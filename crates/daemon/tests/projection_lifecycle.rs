@@ -55,7 +55,7 @@ fn recovery_request() -> LifecycleRequest {
 /// The record the test expects, built from the request alone.
 fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
     LifecycleIntent {
-        schema: 1,
+        schema: 2,
         transition: request.transition,
         selected_generation: request.selected_generation.clone(),
         kernel_incarnation_id: request.kernel_incarnation_id.clone(),
@@ -86,7 +86,7 @@ fn raw_record(data_home: &Path) -> Value {
 /// The recovery record as the ledger spells it, every persisted field written out by hand.
 fn recovery_ledger(consumed: u32) -> Value {
     json!({
-        "schema": 1,
+        "schema": 2,
         "transition": "AuthorizedRecovery",
         "selected_generation": "gen-2",
         "kernel_incarnation_id": "incarnation-a",
@@ -185,7 +185,9 @@ fn intent_survives_deleting_the_disposable_family_and_matches_the_ledger_after_r
     }
     // The projection reopens as a fresh database; the intent, not the database, carries the episode.
     let projection = SearchProjection::open(dir.path()).unwrap();
-    let identity = projection.read(retrieval::read_identity).unwrap();
+    let identity = projection
+        .read(|conn| retrieval::read_identity(conn))
+        .unwrap();
     assert_eq!(identity, None);
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     // A restart renews no allowance: one episode remains, then none, and none past the deadline.
@@ -436,7 +438,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         }),
         ("other schema", |path: &Path| {
             let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-            value["schema"] = Value::from(2);
+            value["schema"] = Value::from(3);
             fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
         ("world readable", |path: &Path| {
@@ -493,6 +495,21 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         lifecycle.consume_episode(&open, NOW),
         Err(IntentRefusal::Unavailable(_))
     ));
+
+    // A schema 1 record has no `staged_seed_digest`; it is another schema, not a corrupt record.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    lifecycle.record(&open, &rebuild_request(), NOW).unwrap();
+    let path = record_path(dir.path());
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["schema"] = Value::from(1);
+    value.as_object_mut().unwrap().remove("staged_seed_digest");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(
+        lifecycle.read(),
+        ControlState::Unavailable("schema 1".to_owned()),
+        "a schema 1 record is refused through the schema arm"
+    );
 
     // Authorization withdrawn after the fact: a gate that no longer enables the backfill hook stops the recorded recovery from spending episodes or deleting the database.
     let dir = tempfile::tempdir().unwrap();

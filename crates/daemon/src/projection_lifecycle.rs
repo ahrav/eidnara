@@ -10,19 +10,16 @@ use rustix::fs::{FlockOperation, OFlags};
 use serde::{Deserialize, Serialize};
 
 use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
+use crate::search_projection::{JOURNAL_SUFFIXES, sidecar_path};
 
 pub const CONTROL_DIR: &str = "search-lifecycle";
 pub const CONTROL_RECORD: &str = "intent.json";
 const TEMP_PREFIX: &str = "intent.";
 const TEMP_SUFFIX: &str = ".tmp";
-const SCHEMA: u32 = 1;
-/// The database and its journals, the family the intent outlives.
-const DISPOSABLE_FAMILY: [&str; 4] = [
-    "search.sqlite",
-    "search.sqlite-wal",
-    "search.sqlite-shm",
-    "search.sqlite-journal",
-];
+/// Schema 2 adds `staged_seed_digest`; a record of another schema is unavailable rather than read with defaults.
+const SCHEMA: u32 = 2;
+/// The database whose journals and shared-memory index, named by [`JOURNAL_SUFFIXES`], complete the family the intent outlives.
+const DISPOSABLE_DATABASE: &str = "search.sqlite";
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
@@ -449,8 +446,12 @@ impl ProjectionLifecycle {
         let _lock = self.lock().map_err(io_refusal)?;
         let intent = self.admitted_intent(gate)?;
         let family = data_home.join("search");
-        for name in DISPOSABLE_FAMILY {
-            match fs::remove_file(family.join(name)) {
+        let database = family.join(DISPOSABLE_DATABASE);
+        let sidecars = JOURNAL_SUFFIXES
+            .iter()
+            .map(|suffix| sidecar_path(&database, suffix));
+        for member in std::iter::once(database.clone()).chain(sidecars) {
+            match fs::remove_file(member) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(io_refusal(error)),

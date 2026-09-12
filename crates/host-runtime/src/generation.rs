@@ -577,7 +577,7 @@ impl GenerationStore {
         Ok(digest)
     }
 
-    /// Stages and publishes the generation directory under its digest without touching the current profile. Nothing selects the staged generation, and `prune` reclaims it unless the caller names its digest in `protected`; a repeated staging of the same bytes finds the valid occupant and publishes nothing twice.
+    /// Stages and publishes the generation directory under its digest without touching the current profile. Nothing selects the staged generation, and `prune` reclaims it unless the caller names its digest in `protected`; a repeated staging of the same bytes finds the valid occupant and publishes nothing twice. The caller holds `transaction.lock`, as for every mutation of the store.
     ///
     /// The method returns `InsufficientStorage`, `UnsupportedStateSchema`, and `NativePayloadInvalid` as [`Self::stage_and_promote`] does.
     pub fn stage(

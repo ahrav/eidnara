@@ -327,6 +327,26 @@ mod sqlite_backend {
             f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
         }
 
+        /// Limits the connection-lock wait and SQLite's busy wait of one unfenced callback to
+        /// `deadline`. The connection lock is polled until `deadline`; the busy timeout is set to
+        /// the remaining time for `f` and restored to the standing busy timeout afterward.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline`, when
+        /// no time remains before `f` runs, or when the statement ends with `SQLITE_BUSY` or
+        /// `SQLITE_LOCKED`; [`StoreError::Backend`] for any other failure of `f`.
+        pub fn with_conn_unfenced_within<T>(
+            &self,
+            deadline: Instant,
+            f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            with_busy_timeout_until(&guard, deadline, |conn| {
+                f(&MaintenanceConn::new(conn)).map_err(deadline_on_lock_wait)
+            })
+        }
+
         /// Run a closure inside an epoch-fenced write transaction. The write is
         /// rejected ([`StoreError::Fenced`]) if a newer writer has taken over the
         /// database; otherwise it commits atomically.

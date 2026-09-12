@@ -7,8 +7,9 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use host_runtime::LifecycleTransactionLock;
 use host_runtime::generation::{GenerationError, GenerationStore, SourceSpec, StageMeta};
 use kernel::applicability::EvalBudget;
 use retrieval::ProjectionIdentity;
@@ -16,10 +17,12 @@ use rusqlite::{Connection, OpenFlags};
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use storage::immutable_uri;
+use storage::{StoreError, immutable_uri};
 
 use crate::projection_gates::{EntryPoint, HookGate, ProjectionHook};
-use crate::search_projection::SearchProjection;
+use crate::search_projection::{
+    JOURNAL_SUFFIXES, SearchProjection, SearchProjectionError, sidecar_path,
+};
 use crate::search_writer::Quarantine;
 
 /// The manifest target every staged search seed carries; host generations carry their own.
@@ -32,7 +35,7 @@ const REPORT_SCHEMA: u32 = 1;
 pub struct SeedBounds {
     /// Checkpoints attempted before a held-back log is reported blocked.
     pub checkpoint_attempts: NonZeroU32,
-    /// The wait between attempts.
+    /// How long one attempt waits in SQLite's busy handler for the readers or writers holding the checkpoint back; the budget's deadline cuts the wait short.
     pub attempt_wait: Duration,
     /// Bytes the closed database may occupy.
     pub max_bytes: u64,
@@ -76,7 +79,8 @@ pub enum SeedRefusal {
     /// The closed file no longer verifies to the report that certified it; the certificate named other bytes.
     #[error("the seed's bytes changed after they were verified")]
     BytesChanged,
-    #[error("no vector generation matches the identity")]
+    /// Zero or several live (non-retired) vector generations carry the identity; the certificate names exactly one.
+    #[error("no single live vector generation matches the identity")]
     Generation,
     #[error("the projection checkpoint row is missing or corrupt")]
     Checkpoint,
@@ -113,6 +117,8 @@ pub struct SeedVerification {
     pub generation_state: String,
     pub snapshot_commit_seq: i64,
     pub checkpoint_commit_seq: i64,
+    /// The hold whose prefix the checkpoint extends; `apply_batch` requires the next batch to name it.
+    pub hold_id: String,
     pub occurrences: u64,
     pub tombstones: u64,
     pub pending_jobs: u64,
@@ -304,12 +310,20 @@ fn quiesce_at(
     barrier(SeedBarrier::BeforeCheckpoint);
     let mut last = (0, 0, 0);
     let mut completed = false;
-    for attempt in 0..bounds.checkpoint_attempts.get() {
+    for _ in 0..bounds.checkpoint_attempts.get() {
         if budget.check().is_err() {
             return Err(refused(Some(Arc::new(projection)), SeedRefusal::Cancelled));
         }
-        last = match projection.checkpoint_truncate() {
+        // The checkpoint deadline caps SQLite's busy-handler wait; the budget caps the deadline.
+        let attempt_deadline = Instant::now() + bounds.attempt_wait;
+        let deadline = budget
+            .deadline()
+            .map_or(attempt_deadline, |budget| budget.min(attempt_deadline));
+        last = match projection.checkpoint_truncate(deadline) {
             Ok(result) => result,
+            Err(SearchProjectionError::Store(StoreError::Deadline)) => {
+                return Err(refused(Some(Arc::new(projection)), SeedRefusal::Cancelled));
+            }
             Err(error) => {
                 return Err(refused(
                     Some(Arc::new(projection)),
@@ -321,9 +335,6 @@ fn quiesce_at(
         if last.0 == 0 {
             completed = true;
             break;
-        }
-        if attempt + 1 < bounds.checkpoint_attempts.get() {
-            std::thread::sleep(bounds.attempt_wait);
         }
     }
     if !completed {
@@ -348,20 +359,14 @@ fn quiesce_at(
     })
 }
 
-/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, a generation of that identity, a checkpoint row, no work admitted to a worker, and every vector of the identity's dimension. Returns the report with the file's digest.
-///
 /// # Errors
 ///
-/// Returns the first failing check as its [`SeedRefusal`].
-pub fn verify_closed(
-    path: &Path,
-    expected: &ProjectionIdentity,
-    max_bytes: u64,
-) -> Result<SeedVerification, SeedRefusal> {
+/// Returns [`SeedRefusal::SidecarPresent`], [`SeedRefusal::TooLarge`], or [`SeedRefusal::Io`].
+fn closed_bytes(path: &Path, max_bytes: u64) -> Result<(u64, String), SeedRefusal> {
     let io = |error: io::Error| SeedRefusal::Io(error.kind().to_string());
     // SQLite unlinks the log and the shared-memory index when the last connection closes; a rollback journal belongs to no closed database.
-    for suffix in ["sqlite-wal", "sqlite-shm", "sqlite-journal"] {
-        match fs::symlink_metadata(path.with_extension(suffix)) {
+    for suffix in JOURNAL_SUFFIXES {
+        match fs::symlink_metadata(sidecar_path(path, suffix)) {
             Ok(_) => return Err(SeedRefusal::SidecarPresent(suffix.to_owned())),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(error)),
@@ -374,6 +379,20 @@ pub fn verify_closed(
             max: max_bytes,
         });
     }
+    Ok((bytes, file_sha256(path).map_err(io)?))
+}
+
+/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, and every vector of the identity's dimension. Returns the report with the file's digest.
+///
+/// # Errors
+///
+/// Returns the first failing check as its [`SeedRefusal`].
+pub fn verify_closed(
+    path: &Path,
+    expected: &ProjectionIdentity,
+    max_bytes: u64,
+) -> Result<SeedVerification, SeedRefusal> {
+    let (bytes, sha256) = closed_bytes(path, max_bytes)?;
     // `immutable` reads the file as it is: no log is created, replayed, or expected.
     let conn = Connection::open_with_flags(
         immutable_uri(path),
@@ -402,52 +421,43 @@ pub fn verify_closed(
     if violations > 0 {
         return Err(SeedRefusal::ForeignKeys(violations));
     }
-    let identity: ProjectionIdentity = conn
-        .query_row(
-            "SELECT schema_version,kernel_incarnation_id,projection_policy_version,identity_contract_version,
-                    limit_manifest_protocol_version,embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
-             FROM projection_identity WHERE singleton=1",
-            [],
-            |row| {
-                Ok(ProjectionIdentity {
-                    schema_version: row.get(0)?,
-                    kernel_incarnation_id: row.get(1)?,
-                    projection_policy_version: row.get(2)?,
-                    identity_contract_version: row.get(3)?,
-                    limit_manifest_protocol_version: row.get(4)?,
-                    embedding_model: row.get(5)?,
-                    tokenizer_fingerprint: row.get(6)?,
-                    vector_dimension: row.get(7)?,
-                    generation_epoch: u64::try_from(row.get::<_, i64>(8)?)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                })
-            },
-        )
-        .map_err(|_| SeedRefusal::Identity)?;
+    // The projection's own readers define the identity and checkpoint rows, so the certifier and the writer read them by one rule.
+    let identity = retrieval::read_identity(&conn)
+        .map_err(|_| SeedRefusal::Identity)?
+        .ok_or(SeedRefusal::Identity)?;
     if identity != *expected {
         return Err(SeedRefusal::IdentityMismatch);
     }
-    let (generation_id, generation_state): (String, String) = conn
-        .query_row(
+    // A retired generation is one the projection refuses to queue work for, and several live generations of one identity would leave the certificate naming an arbitrary one; the seed's generation is the single live row.
+    let mut live: Vec<(String, String)> = conn
+        .prepare(
             "SELECT generation_id,state FROM vector_generations
              WHERE embedding_model=?1 AND tokenizer_fingerprint=?2 AND vector_dimension=?3 AND generation_epoch=?4
-             ORDER BY generation_id LIMIT 1",
-            rusqlite::params![
-                identity.embedding_model,
-                identity.tokenizer_fingerprint,
-                identity.vector_dimension,
-                i64::try_from(identity.generation_epoch).map_err(|_| SeedRefusal::Identity)?
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+               AND state<>'retired'
+             ORDER BY generation_id LIMIT 2",
         )
-        .map_err(|_| SeedRefusal::Generation)?;
-    let (snapshot_commit_seq, checkpoint_commit_seq): (i64, i64) = conn
-        .query_row(
-            "SELECT snapshot_commit_seq,checkpoint_commit_seq FROM projection_checkpoint WHERE singleton=1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| SeedRefusal::Checkpoint)?;
+        .and_then(|mut statement| {
+            statement
+                .query_map(
+                    rusqlite::params![
+                        identity.embedding_model,
+                        identity.tokenizer_fingerprint,
+                        identity.vector_dimension,
+                        i64::try_from(identity.generation_epoch)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?
+                .collect()
+        })
+        .map_err(store)?;
+    if live.len() != 1 {
+        return Err(SeedRefusal::Generation);
+    }
+    let (generation_id, generation_state) = live.remove(0);
+    let checkpoint = retrieval::batch::read_checkpoint(&conn, &identity.kernel_incarnation_id)
+        .map_err(|_| SeedRefusal::Checkpoint)?
+        .ok_or(SeedRefusal::Checkpoint)?;
     let count = |sql: &str| -> Result<u64, SeedRefusal> {
         conn.query_row(sql, [], |row| row.get::<_, i64>(0))
             .map_err(store)
@@ -474,7 +484,6 @@ pub fn verify_closed(
     }
     let vectors = count("SELECT count(*) FROM occurrence_vectors")?;
     drop(conn);
-    let sha256 = file_sha256(path).map_err(io)?;
     Ok(SeedVerification {
         schema: REPORT_SCHEMA,
         schema_version: identity.schema_version,
@@ -488,8 +497,9 @@ pub fn verify_closed(
         generation_epoch: identity.generation_epoch,
         generation_id,
         generation_state,
-        snapshot_commit_seq,
-        checkpoint_commit_seq,
+        snapshot_commit_seq: checkpoint.snapshot_commit_seq,
+        checkpoint_commit_seq: checkpoint.checkpoint_commit_seq,
+        hold_id: checkpoint.hold_id,
         occurrences,
         tombstones,
         pending_jobs,
@@ -529,43 +539,49 @@ pub fn seed_stage_meta(verification: &SeedVerification) -> StageMeta {
     }
 }
 
-/// Verifies the closed seed's bytes again, writes its report beside the control record, and stages both into `store` under [`seed_stage_meta`]. A seed whose bytes changed since it was closed is refused: its certificate named other bytes.
+/// Checks that the closed seed still holds the certified bytes, writes its report beside the control record, and stages both into `store` under [`seed_stage_meta`]. A seed whose bytes changed since it was closed is refused: its certificate named other bytes. `_transaction` is the caller's exclusive hold on the store's `transaction.lock`, which the store requires of every mutator and which keeps a concurrent host launcher's `prune` from reclaiming the staging temp or the published seed; hold it until the digest is pinned.
 ///
 /// # Errors
 ///
-/// Returns [`SeedRefusal::BytesChanged`] when the bytes no longer verify to the same report, and [`SeedRefusal::Staging`] for the store's refusal; nothing is selected in either case.
+/// Returns [`SeedRefusal::BytesChanged`] when the file's size or digest differs from the certificate, [`SeedRefusal::SidecarPresent`] when a connection has the file open, and [`SeedRefusal::Staging`] for the store's refusal; nothing is selected in any case.
 pub fn stage(
     seed: &ClosedSeed,
     store: &GenerationStore,
+    _transaction: &LifecycleTransactionLock,
     report_dir: &Path,
     protected: &BTreeSet<String>,
 ) -> Result<StagedSeed, SeedRefusal> {
     let io = |error: io::Error| SeedRefusal::Io(error.kind().to_string());
-    let expected = seed.verification.identity();
-    let again = verify_closed(&seed.path, &expected, seed.verification.bytes)?;
-    if again != seed.verification {
-        return Err(SeedRefusal::BytesChanged);
+    // Every field of the report is a function of the file's bytes, so a matching digest is a matching report; the copy hashes the bytes again and refuses a mismatch of its own.
+    match closed_bytes(&seed.path, u64::MAX) {
+        Ok((bytes, sha256))
+            if bytes == seed.verification.bytes && sha256 == seed.verification.sha256 => {}
+        Ok(_) => return Err(SeedRefusal::BytesChanged),
+        Err(refusal) => return Err(refusal),
     }
+    // The temp name is unique to this call, so two stagings of one seed in one process take different names, and a name that already exists is another writer's file: `create_new` refuses it and nothing removes it.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
     let report_path = report_dir.join(format!(
-        "{SEED_REPORT_FILE}.{}.{}",
+        "{SEED_REPORT_FILE}.{}-{unique}.{}",
         std::process::id(),
         seed.verification.report_sha256()
     ));
     let report = seed.verification.canonical_bytes();
-    let written = fs::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
         .open(&report_path)
-        .and_then(|mut file| {
-            file.write_all(&report)?;
-            file.sync_all()
-        });
-    if let Err(error) = written {
+        .map_err(io)?;
+    if let Err(error) = file.write_all(&report).and_then(|()| file.sync_all()) {
+        drop(file);
         let _ = fs::remove_file(&report_path);
         return Err(io(error));
     }
+    drop(file);
     let sources = [
         SourceSpec {
             rel_path: SEED_FILE.to_owned(),
