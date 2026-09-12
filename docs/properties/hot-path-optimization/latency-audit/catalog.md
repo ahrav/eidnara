@@ -2462,8 +2462,8 @@ evaluation of this area and its disposition are recorded in
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13319-L13336
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14425-L14440
 [segments]: ../../../../crates/daemon/src/lib.rs#L14445-L14452
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16629
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16586
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16648
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2028-L2050
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
