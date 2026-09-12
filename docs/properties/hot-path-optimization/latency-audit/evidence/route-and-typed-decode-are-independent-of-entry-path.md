@@ -133,8 +133,14 @@ Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
 [`Handler::handle`][handle-live] reads one [entry probe][probe-live] from the
-body before anything else: the `method` and `kind` discriminators and whether
-any [`TRANSFORM_PAGE_FIELDS`][pageconst] key is present. The probe's
+body: the `method` and `kind` discriminators and whether any
+[`TRANSFORM_PAGE_FIELDS`][pageconst] key is present. A body over 1 MiB is
+probed by the byte cap before the resident reservation, as it always was; a
+body at or under 1 MiB is admitted by its length and probed after the
+reservation, so no parse runs before it, as before this change. The probe's
+one body-proportional cost is serde_json's unescape buffer for a long escaped
+key or discriminator, so this ordering keeps that buffer inside admission
+control for every body the cap does not need to classify. The probe's
 [map visitor][probe-visitor] mirrors the tree dispatch rather than a derived
 struct: a repeated key keeps its last value, a page key counts when present
 whatever its value, `null` included, each key is [classified in place][probe-key]
@@ -144,9 +150,9 @@ selects the lane and the byte-cap class; it does not decide whether the tree
 parses the body, so a body it routes to the direct lane is not admitted there on
 the probe alone.
 
-The same probe serves the byte cap: [`enforce_request_byte_cap`][cap-live] takes
-it instead of running its own read, so a body over 1 MiB is probed once, and it
-keeps the [class read][class-live] (an overlong `method` reads as absent for the
+The same probe serves the byte cap: [`enforce_request_byte_cap`][cap-live]
+returns the probe it read for the class, so a body over 1 MiB is probed once,
+and it keeps the [class read][class-live] (an overlong `method` reads as absent for the
 widening while [dispatch's read][route-resolve] takes any string `method` as
 the route, so that body is admitted and then refused by shape). A body over
 1 MiB whose discriminator the probe scans past a value the tree cannot parse is
@@ -182,9 +188,17 @@ direct lane that decode reads the body bytes, so the direct lane's
 `handler_total` includes the byte parse that the tree lane's `Value` parse
 precedes. The walk's only body-proportional cost is serde_json's scratch buffer
 for one escaped string at a time, released with the walk, and it runs after the
-resident reservation. The [byte-scan bound][copies-live] is retained; the direct
-decode retains at most what the tree lane retains, and the [peak test][t-peak]
-measures it below the tree decode's peak on the dense native corpus.
+resident reservation. The [byte-scan bound][copies-live] is retained and gains one
+term: the direct decode retains what the tree lane retains, but serde_json
+unescapes a string holding an escape into a scratch buffer that the direct
+lane's deserializer keeps beside those copies until `from_slice` returns, where
+the tree lane's `Value` parse releases it before `from_value` builds the typed
+copies. The bound charges the longest escaped string at
+[`UNESCAPE_SCRATCH_SLACK`][scratch-live] for that buffer's doubling growth.
+The [peak test][t-peak] measures the direct decode below the tree decode's peak
+on the dense native corpus, and the [escaped peak test][t-peak-escaped]
+measures it within the charge on a 4 MiB text block holding one escape, where
+before the term it peaked four copies against a three-copy charge.
 [`handle_transform_for_test`][test-entry] serializes its request and enters at
 the body branch, so the crate's transform tests run the direct lane.
 
@@ -222,7 +236,10 @@ accepts and the walk declines (the token holding a document string, which then
 takes the tree lane). The [token test][t-token] holds the pinned literal to
 serde_json's behavior. The [cap test][t-cap-live] adds a body of exactly
 `MAX_TRANSFORM_FRAME_BYTES` admitted, one byte more refused, and a 2 MiB
-transform-class body nested past the depth limit still admitted.
+transform-class body nested past the depth limit still admitted. The
+[allocation test][t-cap-alloc] passes a 900 KiB body whose one key holds an
+escape through the byte cap and measures less than half the body's size
+allocated; before the ordering above it measured the key's length.
 
 The numeric open question is answered by the run: the tree and the direct
 decode share one parser and one set of visitors, so a float or exponent on an
@@ -245,6 +262,26 @@ generated the 19-case serialized corpus and passed
 the direct-host fixture, which compares the paged final `messages` bytes to the
 one-slice control.
 
+### Review follow-up, 2026-09-12
+
+Two automated review findings on the merged head were reproduced with the
+counting allocator before any production edit, then closed by the edits above.
+`parse_charge_covers_escaped_text_direct_decode_peak` failed at
+`4194304 text bytes (escaped: true) peaked at 16782827 bytes during the direct
+decode but the parse charge reserved only 12589901`, and passes with the
+scratch term. `byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`
+failed at `the byte cap allocated 921610 bytes before the resident reservation
+for a 921627 byte body` against a signature-only refactor of the merged head,
+and passes with the cap probing only bodies over 1 MiB. Before the scratch term the
+tree lane's peak on that message shape measured 54 to 57 bytes above the
+charge at 64 KiB, 1 MiB, and 4 MiB of text, with and without the escape; the
+overage is in the fixed headroom, predates this change, still stands for the
+unescaped shape, and is recorded here, not fixed.
+`cargo test -p daemon --locked --no-fail-fast` then passed every test but the
+two `dreamer_run_task_bounds_*` tests, which fail under full-suite load on the
+base as well, and `publication_search_deadline_preserves_admission_without_recharging`,
+which fails the same way on the base commit `d42838e3` alone.
+
 Before the raw-value rule and the split into probe and walk, the six raw-value
 corpus bodies failed both differentials: the body with the token under an
 ignored field was served through `dispatch_body` on the direct lane while the
@@ -252,31 +289,34 @@ tree dispatch refused it with `unrecognized_request_shape`, and the probe
 accepted it where the tree did not parse it. The rule and the split were added
 against those failures.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11903-L11922
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12659-L12681
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15452-L15460
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15462-L15465
-[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15445-L15449
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15476-L15509
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15521-L15545
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15548-L15634
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15639-L15644
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15654-L15661
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15831-L15850
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11903-L11923
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12660-L12682
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15453-L15461
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15463-L15466
+[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15446-L15450
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15477-L15510
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15522-L15546
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15549-L15635
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15640-L15645
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15655-L15662
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15857-L15880
 [direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7975-L7987
 [tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7991-L8011
 [typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8016
 [page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9524
-[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15752
+[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15753
 [test-entry]: ../../../../../crates/daemon/src/lib.rs#L8599-L8609
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19338-L19386
-[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19391-L19417
-[t-token]: ../../../../../crates/daemon/src/lib.rs#L19422-L19434
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19437-L19598
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19619-L19742
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19765-L19804
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19256-L19335
-[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19366-L19414
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19419-L19445
+[t-token]: ../../../../../crates/daemon/src/lib.rs#L19450-L19462
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19465-L19626
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19647-L19770
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19793-L19832
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19286-L19363
+[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L89-L127
+[t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L143-L164
+[t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L166-L187
+[scratch-live]: ../../../../../crates/daemon/src/lib.rs#L15755-L15756
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

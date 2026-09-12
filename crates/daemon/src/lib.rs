@@ -11902,10 +11902,10 @@ impl CompositeComponent for Handler {
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
         let body = ctx.body.as_slice();
-        let probe = probe_request(body);
-        if let Err(outcome) = enforce_request_byte_cap(body, probe.as_ref()) {
-            return settle_prepared(&ctx, outcome).await;
-        }
+        let cap_probe = match enforce_request_byte_cap(body) {
+            Ok(probe) => probe,
+            Err(outcome) => return settle_prepared(&ctx, outcome).await,
+        };
         let Some(footprint) = value_footprint_bound(body) else {
             return settle_prepared(&ctx, request_too_large_error()).await;
         };
@@ -11917,6 +11917,7 @@ impl CompositeComponent for Handler {
             }
             None => return settle_prepared(&ctx, resident_capacity_error()).await,
         };
+        let probe = cap_probe.or_else(|| probe_request(body));
         let (_, outcome) = self.dispatch_body(ctx.route, body, probe.as_ref()).await;
         settle_prepared(&ctx, outcome).await
     }
@@ -15751,6 +15752,9 @@ const VALUE_NODE_SLACK: usize = 2;
 /// much, so one bound covers both lanes.
 const RETAINED_NODE_COPIES: usize = 2;
 
+/// The estimate doubles the longest escaped string for the unescape buffer's growth.
+const UNESCAPE_SCRATCH_SLACK: usize = 2;
+
 const VALUE_NODE_CHARGE_BYTES: usize = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
 
 /// `native_messages` stores `Arc<Value>` handles; their slack charge plus the `Arc` allocation
@@ -15781,36 +15785,58 @@ const RETAINED_STRING_COPIES: usize = 3;
 fn value_footprint_bound(body: &[u8]) -> Option<usize> {
     let mut nodes: usize = 1;
     let mut string_bytes: usize = 0;
+    let mut longest_escaped_string: usize = 0;
+    let mut current_string: usize = 0;
+    let mut current_has_escape = false;
     let mut in_string = false;
     let mut escaped = false;
     for &byte in body {
         if in_string {
             string_bytes += 1;
+            current_string += 1;
             if escaped {
                 escaped = false;
             } else if byte == b'\\' {
                 escaped = true;
+                current_has_escape = true;
             } else if byte == b'"' {
                 in_string = false;
+                if current_has_escape {
+                    longest_escaped_string = longest_escaped_string.max(current_string);
+                }
             }
             continue;
         }
         match byte {
-            b'"' => in_string = true,
+            b'"' => {
+                in_string = true;
+                current_string = 0;
+                current_has_escape = false;
+            }
             b',' | b':' => nodes += 1,
             _ => {}
         }
+    }
+    if in_string && current_has_escape {
+        longest_escaped_string = longest_escaped_string.max(current_string);
     }
     nodes
         .checked_mul(VALUE_NODE_CHARGE_BYTES)?
         .checked_mul(RETAINED_NODE_COPIES)?
         .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
+        .checked_add(longest_escaped_string.checked_mul(UNESCAPE_SCRATCH_SLACK)?)?
         .checked_add(VALUE_ENVELOPE_BYTES)
 }
 
 #[cfg(feature = "test-support")]
 pub fn value_footprint_bound_for_test(body: &[u8]) -> Option<usize> {
     value_footprint_bound(body)
+}
+
+/// Whether the byte cap admits `body`; the pre-reservation step of `Handler::handle`.
+#[cfg(feature = "test-support")]
+pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
+    enforce_request_byte_cap(body).is_ok()
 }
 
 /// The failure is permanent when the tree cannot fit the host's resident ceiling at any load.
@@ -15829,18 +15855,22 @@ fn resident_capacity_error() -> PreparedOutcome {
 }
 
 /// A body larger than `MAX_FACADE_FRAME_BYTES` without a transform-class probe is refused.
-fn enforce_request_byte_cap(
-    body: &[u8],
-    probe: Option<&RequestEntryProbe>,
-) -> Result<(), PreparedOutcome> {
+/// The probe read for the class is returned so dispatch does not read it again. A body at
+/// or under that cap is admitted by its length alone: the cap runs before the resident
+/// reservation, and the probe's unescape buffer for a long escaped key would otherwise be
+/// the first body-proportional allocation outside admission control.
+fn enforce_request_byte_cap(body: &[u8]) -> Result<Option<RequestEntryProbe>, PreparedOutcome> {
     let body_len = body.len();
     if body_len <= MAX_FACADE_FRAME_BYTES {
-        return Ok(());
+        return Ok(None);
     }
-    let transform_class = probe.is_some_and(RequestEntryProbe::is_transform_class);
+    let probe = probe_request(body);
+    let transform_class = probe
+        .as_ref()
+        .is_some_and(RequestEntryProbe::is_transform_class);
     if transform_class {
         if body_len <= MAX_TRANSFORM_FRAME_BYTES {
-            return Ok(());
+            return Ok(probe);
         }
         return Err(invalid_params_error(
             "request body exceeds the 32 MiB transform limit",
@@ -19254,8 +19284,6 @@ mod tests {
 
     #[test]
     fn request_byte_cap_widens_for_transform_class_only() {
-        let enforce_request_byte_cap =
-            |body: &[u8]| enforce_request_byte_cap(body, probe_request(body).as_ref());
         let pad = |method: &str, key: &str, bytes: usize| {
             format!(
                 "{{\"{key}\":\"{method}\",\"pad\":\"{}\"}}",
