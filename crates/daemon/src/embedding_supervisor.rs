@@ -252,8 +252,9 @@ impl EmbeddingSupervisor {
                     let mut slice = {
                         let this = Arc::clone(&self);
                         let budget = budget.clone();
+                        let invalidated = invalidated.clone();
                         self.tracker
-                            .spawn_blocking(move || this.slice(kind, &budget))
+                            .spawn_blocking(move || this.slice(kind, &budget, &invalidated))
                     };
                     tokio::select! {
                         biased;
@@ -310,7 +311,12 @@ impl EmbeddingSupervisor {
     }
 
     /// One slice on the blocking thread that owns it: a backfill pass or a sweep, under `budget`.
-    fn slice(&self, kind: SliceKind, budget: &EvalBudget) -> Result<SliceOutcome, Stop> {
+    fn slice(
+        &self,
+        kind: SliceKind,
+        budget: &EvalBudget,
+        invalidated: &CancellationToken,
+    ) -> Result<SliceOutcome, Stop> {
         if self.panic_next_slice.swap(false, Ordering::SeqCst) {
             panic!("maintenance slice panicked for the test");
         }
@@ -347,6 +353,10 @@ impl EmbeddingSupervisor {
                             .as_ref()
                         {
                             tap(&event);
+                        }
+                        // The slice thread cancels its own budget on a revoked grant: the dispatcher reports each job's admission before its native call, so a gate closed between two jobs stops the second here, without waiting for the supervisor task to be scheduled.
+                        if invalidated.is_cancelled() {
+                            budget.cancel();
                         }
                         match event {
                             // The host owns native work from submission, whatever the charge decides.

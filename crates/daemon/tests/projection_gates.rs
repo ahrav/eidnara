@@ -6,9 +6,10 @@ use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use daemon::embedding_dispatch::Blocked;
+use daemon::embedding_dispatch::{Blocked, DispatchEvent, Stage};
 use daemon::embedding_supervisor::{
     EmbeddingSupervisor, Maintained, SliceBounds, SliceKind, SliceOutcome, SupervisorEvent,
 };
@@ -30,7 +31,8 @@ use retrieval::batch::dense_eligible;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use support::embedding_fixtures::{
-    Corpus, GateGuard, NOW, PROJECT, TestEngine, bounds, component, inspect, occurrence_of,
+    Corpus, GateGuard, NOW, PROJECT, TestEngine, bounds as dispatch_bounds, bounds, component,
+    inspect, occurrence_of,
 };
 use support::projection_gate::{identity, open_gate, passing_evaluator};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -590,6 +592,58 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         Err(Denial::EvidenceIdentity),
         "a run under an earlier identity does not carry over"
     );
+
+    // The matrix's cells: every hook at every entry point, through the gate, with a missing, a failed, an unsupported, and an inapplicable packet beside the passing control. A per-hook shortcut in the evaluator fails here.
+    let mut failed_run = passing();
+    failed_run
+        .evidence
+        .harness_runs
+        .insert(HARNESSES[0].to_owned(), HarnessRun::Failed);
+    let mut inapplicable = passing();
+    inapplicable.evidence.identity.generation_epoch += 1;
+    let packets: [(&str, EvidenceEvaluator, Denial); 4] = [
+        (
+            "missing",
+            no_coverage.clone(),
+            Denial::Missing(Gate::ClassCoverage),
+        ),
+        (
+            "failed",
+            failed_run,
+            Denial::Failed(Gate::BothHarness, HARNESSES[0].to_owned()),
+        ),
+        (
+            "unsupported",
+            unsupported.clone(),
+            Denial::Unsupported {
+                harness: HARNESSES[1].to_owned(),
+                capability: required.name.to_owned(),
+            },
+        ),
+        ("inapplicable", inapplicable, Denial::EvidenceIdentity),
+    ];
+    let gate = HookGate::closed();
+    for hook in ProjectionHook::ALL {
+        for entry in EntryPoint::ALL {
+            gate.install(passing());
+            assert!(
+                gate.admit(hook, entry).is_ok(),
+                "{}@{} passing control",
+                hook.id(),
+                entry.id()
+            );
+            for (name, packet, denial) in &packets {
+                gate.install(packet.clone());
+                assert_eq!(
+                    gate.admit(hook, entry).map(|_| ()),
+                    Err(denial.clone()),
+                    "{}@{}@{name}",
+                    hook.id(),
+                    entry.id()
+                );
+            }
+        }
+    }
 }
 
 /// AC1, AC2: with the gate closed, every product entry path — both supervisor slices, message cleanup, git ingest, and git reconciliation — reaches the ledger under its hooks, and the ledger's hook set is exactly the product's. Nothing executes: no durable row changes, no repository is opened, no native call is made.
@@ -800,6 +854,94 @@ async fn invalidation_cancels_the_running_slice_and_keeps_admitted_work_owned() 
     }
     let report = supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
     assert_eq!(report.held_results, 1);
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// A grant revoked between two jobs of one pass is seen on the slice thread itself: the second job is refused before its native call even when the async cancellation branch cannot run, so revocation never depends on the supervisor being scheduled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn revocation_between_jobs_is_seen_on_the_slice_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", "first text");
+    corpus.publish("second", "second text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let projection = Arc::new(projection);
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let gate = open_gate();
+    let (sender, mut events) = unbounded_channel();
+    let mut bounds = slice_bounds(Duration::from_secs(30));
+    bounds.dispatch = daemon::embedding_dispatch::DispatchBounds {
+        result_wait: Duration::from_millis(50),
+        ..dispatch_bounds()
+    };
+    let supervisor = EmbeddingSupervisor::new(
+        Maintained {
+            gate: Arc::clone(&gate),
+            kernel: Arc::clone(&corpus.kernel),
+            projection: Arc::clone(&projection),
+            synapse: Arc::clone(&synapse),
+            project: ProjectScope::new(PROJECT).unwrap(),
+            destination: ArtifactDestination::Remote,
+        },
+        bounds,
+        Arc::new(|| NOW),
+        sender,
+    );
+    // The gate closes on the slice thread as the second job reaches admission; the count of submissions is the oracle.
+    let admits = Arc::new(AtomicUsize::new(0));
+    let submitted = Arc::new(AtomicUsize::new(0));
+    let (closer, seen_admits, seen_submitted) = (
+        Arc::clone(&gate),
+        Arc::clone(&admits),
+        Arc::clone(&submitted),
+    );
+    supervisor.tap_dispatch_events_for_test(move |event| match event {
+        DispatchEvent::Stage {
+            stage: Stage::Admit,
+            ..
+        } => {
+            if seen_admits.fetch_add(1, Ordering::SeqCst) == 1 {
+                closer.close();
+            }
+        }
+        DispatchEvent::Submitted { .. } => {
+            seen_submitted.fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    });
+    // The supervisor's first poll spawns the slice; the task spawned after it then holds the runtime's only worker, so the supervisor's cancellation branch cannot run while the slice works.
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    tokio::spawn(async { std::thread::sleep(Duration::from_secs(1)) })
+        .await
+        .unwrap();
+    assert_eq!(
+        admits.load(Ordering::SeqCst),
+        2,
+        "both jobs reached admission"
+    );
+
+    match ended(&mut events, SliceKind::Backfill).await {
+        SliceOutcome::Backfill { end, admitted, .. } => {
+            assert_eq!((end, admitted), (Some(Blocked::BudgetExhausted), 1));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        submitted.load(Ordering::SeqCst),
+        1,
+        "the second job was not submitted under the revoked grant"
+    );
+    assert_eq!(
+        ended(&mut events, SliceKind::Sweep).await,
+        SliceOutcome::Denied(Denial::NoManifest)
+    );
+
+    supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), running)
         .await
         .unwrap()
