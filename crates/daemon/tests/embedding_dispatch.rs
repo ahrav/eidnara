@@ -1,166 +1,48 @@
 //! Durable embedding dispatch against a real kernel, a real projection, and an in-process Synapse component.
 //! Pending rows are the only queue: they reach the job table once, their results are polled rather than re-admitted, a host restart returns admitted work to pending with its attempts kept, every named disposition survives reopen without resuming on its own, and the attempt ledger moves with the state it accounts for.
 
-use std::cell::RefCell;
+mod support;
+
 use std::io::{BufRead, BufReader, Write};
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use daemon::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
-    lane_binding,
+    Stage, lane_binding,
 };
 use daemon::embedding_publication::{EmbeddingPublisher, Publication};
 use daemon::search_projection::SearchProjection;
 use daemon::search_writer::QuarantineKind;
 use host_runtime::synapse::inference::InferenceError;
 use host_runtime::synapse::{
-    EmbedTokens, EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SubmitOutcome,
-    SynapseComponent, SynapseLimits,
+    EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SubmitOutcome, SynapseComponent,
+    SynapseLimits,
 };
-use kernel::source_identity::Occurrence;
-use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow, KernelStore,
-    MAX_ELIGIBILITY_CANDIDATES, ProjectScope, ProviderEgress, RepositoryProvenance, ScopeSpec,
-    ScopeTermSpec, Sensitivity, SourceClass, SourceDescriptorRequest, SourceHoldAdmission,
-    SourceHoldBinding, SourceHoldBounds, SourcePageBounds, SourceRow, TaintClass,
-};
-use retrieval::batch::{
-    BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
-    row_identities,
-};
+use kernel::{KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope};
+use retrieval::batch::{VectorGeneration, register_generation};
 use retrieval::dispatch::{
-    Admission, BindingOutcome, EpisodeGrant, Recovery, authorize_recovery, charge_admission,
-    job_ledger,
+    Admission, BindingOutcome, Recovery, authorize_recovery, charge_admission, job_ledger,
 };
 use retrieval::vectors::encode;
-use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use sha2::{Digest, Sha256};
-
-const CONSUMER: &str = "search";
-const POLICY: &str = "source-policy.v1";
-const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const PROJECT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const SCOPE: &str = "project:a";
-const SCOPE_B: &str = "project:b";
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-const MODEL: &str = "tiny-test-model";
-const FINGERPRINT: &str = "a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234";
-const DIMS: usize = 8;
-const GENERATION: &str = "gen-1";
-const NOW: i64 = 1_000;
+use rusqlite::{Connection, OptionalExtension};
+use support::embedding_fixtures::{
+    Corpus, DAY_MS, DIMS, FINGERPRINT, GENERATION, GateGuard, MODEL, NOW, PROJECT, PROJECT_B,
+    SCOPE, SCOPE_B, TestEngine, bounds, budget, component, eligibility, generation, grant, inspect,
+    lane, occurrence_of, search_path,
+};
 
 const CHILD_ROOT: &str = "EIDNARA_EMBEDDING_DISPATCH_CHILD_ROOT";
 const CHILD_BARRIER: &str = "EIDNARA_EMBEDDING_DISPATCH_BARRIER";
 
-type Gate = Arc<(Mutex<bool>, Condvar)>;
-
-struct GateGuard(Gate);
-
-impl Drop for GateGuard {
-    fn drop(&mut self) {
-        TestEngine::release(&self.0);
-    }
-}
-
-/// A deterministic engine: one whitespace word is one token, the vector is derived from the text, and the next inference can be made to fail, block, or return a malformed vector.
-struct TestEngine {
-    calls: AtomicUsize,
-    count_calls: AtomicUsize,
-    count_failure: Mutex<Option<InferenceError>>,
-    fail_next: Mutex<Option<InferenceError>>,
-    malformed: Mutex<bool>,
-    gate: Mutex<Option<Gate>>,
-}
-
-impl TestEngine {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            calls: AtomicUsize::new(0),
-            count_calls: AtomicUsize::new(0),
-            count_failure: Mutex::new(None),
-            fail_next: Mutex::new(None),
-            malformed: Mutex::new(false),
-            gate: Mutex::new(None),
-        })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    fn count_calls(&self) -> usize {
-        self.count_calls.load(Ordering::SeqCst)
-    }
-
-    fn fail_next(&self, error: InferenceError) {
-        *self.fail_next.lock().unwrap() = Some(error);
-    }
-
-    fn block_calls(&self) -> GateGuard {
-        let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
-        *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
-        GateGuard(gate)
-    }
-
-    fn release(gate: &Gate) {
-        *gate.0.lock().unwrap_or_else(|error| error.into_inner()) = true;
-        gate.1.notify_all();
-    }
-
-    fn vector_for(text: &str) -> Vec<f32> {
-        let digest = Sha256::digest(text.as_bytes());
-        let mut vector: Vec<f32> = digest
-            .iter()
-            .take(DIMS)
-            .map(|b| f32::from(*b) + 1.0)
-            .collect();
-        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-        for v in &mut vector {
-            *v /= norm;
-        }
-        vector
-    }
-}
-
-impl EmbeddingEngine for TestEngine {
-    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
-        self.count_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(error) = self.count_failure.lock().unwrap().take() {
-            return Err(error);
-        }
-        Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
-    }
-
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(gate) = self.gate.lock().unwrap().clone() {
-            let mut released = gate.0.lock().unwrap();
-            while !*released {
-                released = gate.1.wait(released).unwrap();
-            }
-        }
-        if let Some(error) = self.fail_next.lock().unwrap().take() {
-            return Err(error);
-        }
-        if *self.malformed.lock().unwrap() {
-            return Ok(texts.iter().map(|_| vec![0.5; DIMS]).collect());
-        }
-        Ok(texts.iter().map(|text| Self::vector_for(text)).collect())
-    }
-}
-
 #[test]
 fn a_gate_owner_unwinding_releases_the_inference_worker() {
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
-    let emergency = engine.gate.lock().unwrap().as_ref().unwrap().clone();
+    let gate = GateGuard(engine.block_calls());
+    let emergency = Arc::clone(&gate.0);
     let worker_engine = Arc::clone(&engine);
     let (done, completion) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
@@ -187,30 +69,6 @@ fn a_gate_owner_unwinding_releases_the_inference_worker() {
     assert!(completed.unwrap().is_ok());
 }
 
-fn lane(fingerprint: &str) -> LaneInfo {
-    LaneInfo {
-        model: MODEL.to_owned(),
-        fingerprint: fingerprint.to_owned(),
-        table_epoch: 1,
-        dims: DIMS,
-        execution_provider: "cpu",
-        max_tokens: 512,
-        max_text_bytes: 1024 * 1024,
-        provenance: serde_json::json!({"source": "deterministic test engine"}),
-        recommended_rows: 16,
-        recommended_token_budget: 8192,
-    }
-}
-
-fn component(engine: &Arc<TestEngine>, limits: SynapseLimits) -> SynapseComponent {
-    SynapseComponent::ready_with_engine(
-        lane(FINGERPRINT),
-        Arc::clone(engine) as Arc<dyn EmbeddingEngine>,
-        limits,
-    )
-    .unwrap()
-}
-
 fn wait_for_host_result(
     synapse: &SynapseComponent,
     host_job: &str,
@@ -229,391 +87,6 @@ fn wait_for_host_result(
         );
         std::thread::sleep(Duration::from_millis(5));
     }
-}
-
-fn generation() -> VectorGeneration {
-    VectorGeneration {
-        generation_id: GENERATION.to_string(),
-        embedding_model: MODEL.to_string(),
-        tokenizer_fingerprint: FINGERPRINT.to_string(),
-        vector_dimension: DIMS as u32,
-        generation_epoch: 1,
-    }
-}
-
-fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
-    ProjectionIdentity {
-        schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: kernel_incarnation_id.to_string(),
-        projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v2".to_string(),
-        limit_manifest_protocol_version: "limits.v1".to_string(),
-        embedding_model: MODEL.to_string(),
-        tokenizer_fingerprint: FINGERPRINT.to_string(),
-        vector_dimension: DIMS as u32,
-        generation_epoch: 1,
-    }
-}
-
-fn batch_bounds() -> BatchBounds {
-    BatchBounds {
-        persist: PersistBounds {
-            max_records: NonZeroUsize::new(64).unwrap(),
-            max_payload_bytes: NonZeroUsize::new(1 << 16).unwrap(),
-            max_tuple_bytes: NonZeroUsize::new(2048).unwrap(),
-        },
-        max_source_bytes: NonZeroUsize::new(1 << 16).unwrap(),
-        max_local_mutations: NonZeroUsize::new(64).unwrap(),
-        max_pending: NonZeroUsize::new(64).unwrap(),
-    }
-}
-
-fn grant(allowance: u32, deadline: i64) -> EpisodeGrant {
-    EpisodeGrant {
-        allowance: NonZeroU32::new(allowance).unwrap(),
-        deadline,
-    }
-}
-
-fn bounds(result_wait: Duration) -> DispatchBounds {
-    DispatchBounds {
-        max_jobs: NonZeroUsize::new(16).unwrap(),
-        grant: grant(3, NOW + DAY_MS),
-        retry_after: 10,
-        result_wait,
-        guard_deadline: Duration::from_secs(10),
-    }
-}
-
-fn eligibility(project: &ProjectScope) -> EligibilityBinding<'_> {
-    EligibilityBinding {
-        project,
-        destination: ArtifactDestination::Remote,
-    }
-}
-
-fn intent(key: &str) -> CommitIntent {
-    CommitIntent {
-        producer: "daemon-embedding-dispatch-test".to_string(),
-        operation_key: key.to_string(),
-        request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
-        actor: "test".to_string(),
-        cause: "proof".to_string(),
-    }
-}
-
-/// A kernel with one scoped, admitted project and the descriptors the test publishes into it.
-struct Corpus {
-    kernel: Arc<KernelStore>,
-    published: RefCell<Vec<(String, String)>>,
-}
-
-impl Corpus {
-    fn open(root: &Path) -> Self {
-        Self {
-            kernel: Arc::new(KernelStore::open(root.join("kernel")).unwrap()),
-            published: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn seed(&self) {
-        self.kernel
-            .commit(intent("seed"), |envelope| {
-                envelope.insert_domain(DomainSpec {
-                    domain_id: "domain".to_string(),
-                    object_id: "domain-object".to_string(),
-                    name: "Name".to_string(),
-                    source_kind: "fixture".to_string(),
-                    source_id: "domain".to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                })?;
-                envelope.insert_scope(ScopeSpec {
-                    scope_id: SCOPE.to_string(),
-                    object_id: SCOPE.to_string(),
-                    source_id: SCOPE.to_string(),
-                    domain_id: "domain".to_string(),
-                    source_kind: "kernel_route".to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                    terms: vec![ScopeTermSpec {
-                        dimension: Dimension::Project.as_str().to_string(),
-                        operator: "exact".to_string(),
-                        exact_value: Some(PROJECT.to_string()),
-                        ..ScopeTermSpec::default()
-                    }],
-                })?;
-                envelope.insert_scope(ScopeSpec {
-                    scope_id: SCOPE_B.to_string(),
-                    object_id: SCOPE_B.to_string(),
-                    source_id: SCOPE_B.to_string(),
-                    domain_id: "domain".to_string(),
-                    source_kind: "kernel_route".to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                    terms: vec![ScopeTermSpec {
-                        dimension: Dimension::Project.as_str().to_string(),
-                        operator: "exact".to_string(),
-                        exact_value: Some(PROJECT_B.to_string()),
-                        ..ScopeTermSpec::default()
-                    }],
-                })?;
-                envelope.register_outbox_consumer(CONSUMER, 1)?;
-                Ok(String::new())
-            })
-            .unwrap();
-    }
-
-    fn tip(&self) -> i64 {
-        self.kernel.tip().unwrap()
-    }
-
-    /// Publishes one scoped, admitted message descriptor and returns its object id.
-    fn publish(&self, key: &str, text: &str) -> String {
-        self.publish_scoped(key, text, SCOPE)
-    }
-
-    fn publish_scoped(&self, key: &str, text: &str, scope: &str) -> String {
-        self.publish_class_scoped_with(key, text, "messages", scope, Sensitivity::Normal, true)
-    }
-
-    /// Publishes one scoped, admitted descriptor of `class` and returns its object id.
-    fn publish_class(&self, key: &str, text: &str, class: &str) -> String {
-        self.publish_class_scoped_with(key, text, class, SCOPE, Sensitivity::Normal, true)
-    }
-
-    fn publish_hidden(&self, key: &str, text: &str) -> String {
-        self.publish_class_scoped_with(key, text, "messages", SCOPE, Sensitivity::Normal, false)
-    }
-
-    fn publish_sensitive(&self, key: &str, text: &str) -> String {
-        self.publish_class_scoped_with(key, text, "messages", SCOPE, Sensitivity::Sensitive, true)
-    }
-
-    fn publish_class_scoped_with(
-        &self,
-        key: &str,
-        text: &str,
-        class: &str,
-        scope: &str,
-        sensitivity: Sensitivity,
-        admitted: bool,
-    ) -> String {
-        let handle = self
-            .kernel
-            .ingest_exact_artifact(ArtifactIngestRequest {
-                intent: intent(&format!("artifact-{key}")),
-                payload: text.as_bytes().to_vec(),
-                evidence_id: format!("evidence-{key}"),
-                object_id: format!("evidence-object-{key}"),
-                object_kind: "evidence".to_string(),
-                domain_id: "domain".to_string(),
-                source_kind: "tool_output".to_string(),
-                source_id: format!("native/{key}"),
-                source_revision: 1,
-                media_type: "text/plain".to_string(),
-                retention_class: "canonical".to_string(),
-                retain_until: None,
-                asserted_sensitivity: sensitivity,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: Some(RepositoryProvenance {
-                    repository_id: "repo".to_string(),
-                    revision: "abc123".to_string(),
-                }),
-            })
-            .unwrap();
-        let mut object = String::new();
-        self.kernel
-            .commit(intent(&format!("publish-{key}")), |envelope| {
-                let (identity, representation): (Vec<(&str, &str)>, &str) = match class {
-                    "raw_tool_spans" => (
-                        vec![
-                            ("project_id", "proj-a"),
-                            ("harness", "pi"),
-                            ("session_id", "sess-01"),
-                            ("parent_message_id", "msg-2"),
-                            ("tool_call_id", key),
-                            ("result_revision", "1"),
-                            ("block_index", "0"),
-                        ],
-                        "tool_output",
-                    ),
-                    _ => (
-                        vec![
-                            ("project_id", "proj-a"),
-                            ("harness", "opencode"),
-                            ("session_id", "sess-01"),
-                            ("message_id", key),
-                            ("block_index", "0"),
-                        ],
-                        "text",
-                    ),
-                };
-                let outcome = envelope
-                    .publish_source_descriptor(&SourceDescriptorRequest {
-                        source_policy: kernel::SourceDescriptorPolicy::Native,
-                        occurrence: Occurrence {
-                            class,
-                            identity: &identity,
-                            revision: "1",
-                            representation,
-                            span: None,
-                        },
-                        domain_id: "domain",
-                        scope_id: Some(scope),
-                        evidence_id: &handle.evidence_id,
-                        artifact_digest: &handle.digest,
-                        buffer: text,
-                        sensitivity,
-                        observed_at: 1,
-                    })
-                    .unwrap();
-                if admitted {
-                    envelope.record_admission(AdmissionRequest {
-                        candidate_id: None,
-                        subject_object_id: Some(outcome.object_id.clone()),
-                        source_class: Some(SourceClass::ExplicitUser),
-                        taint_class: Some(TaintClass::UserExplicit),
-                        event: AdmissionEvent {
-                            kind: EventKind::Other,
-                            trigger_object_id: None,
-                            approval_object_id: None,
-                            evidence_id: None,
-                            reason: "test".to_string(),
-                        },
-                    })?;
-                }
-                object = outcome.object_id;
-                Ok(String::new())
-            })
-            .unwrap();
-        self.published
-            .borrow_mut()
-            .push((object.clone(), text.to_string()));
-        object
-    }
-
-    fn retire(&self, object_id: &str) {
-        self.kernel
-            .commit(intent(&format!("retire-{object_id}")), |envelope| {
-                envelope.retire_observation(object_id)?;
-                Ok(String::new())
-            })
-            .unwrap();
-    }
-
-    fn binding(&self) -> SourceHoldBinding {
-        SourceHoldBinding {
-            consumer_id: CONSUMER.to_string(),
-            lease_epoch: self.kernel.lease_epoch(),
-            source_policy_version: POLICY.to_string(),
-        }
-    }
-
-    /// Exports every descriptor live at a fresh S.
-    fn export(&self) -> Vec<SourceRow> {
-        let binding = self.binding();
-        let hold = self
-            .kernel
-            .capture_source_hold(
-                &binding,
-                SourceHoldBounds {
-                    max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
-                    admission: SourceHoldAdmission {
-                        max_references: NonZeroUsize::new(64).unwrap(),
-                        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                    },
-                    expiry_ms: NonZeroU64::new((20 * DAY_MS) as u64).unwrap(),
-                },
-            )
-            .unwrap();
-        let mut rows = Vec::new();
-        let mut cursor = None;
-        loop {
-            let page = self
-                .kernel
-                .export_source_page(
-                    &binding,
-                    &hold.hold_id,
-                    hold.captured_at,
-                    ExportWindow::Snapshot,
-                    cursor.as_ref(),
-                    SourcePageBounds {
-                        max_rows: NonZeroUsize::new(64).unwrap(),
-                        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                        max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                        max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
-                    },
-                )
-                .unwrap();
-            rows.extend(page.rows);
-            match page.next {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        self.kernel
-            .release_source_hold(&binding, &hold.hold_id, hold.captured_at)
-            .unwrap();
-        rows
-    }
-
-    /// Builds the projection from the current export and queues one pending job per message.
-    fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
-        let rows = self.export();
-        let projection = SearchProjection::open(data_home).unwrap();
-        let kernel_incarnation_id: String = Connection::open_with_flags(
-            data_home.join("kernel/kernel.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap()
-        .query_row(
-            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-        projection
-            .write(|conn| {
-                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
-                register_generation(conn, &generation(), 1)?;
-                Ok(())
-            })
-            .unwrap();
-        let identities = row_identities(&rows);
-        let snapshot = self.tip();
-        let batch = batch_from_rows(
-            &rows,
-            &identities,
-            MutationIdentity {
-                kernel_incarnation_id,
-                hold_id: "0123456789abcdef0123456789abcdef".to_string(),
-                snapshot_commit_seq: snapshot,
-                through_commit_seq: snapshot,
-            },
-            Some(GENERATION),
-        )
-        .unwrap();
-        projection.apply_batch(&batch, batch_bounds(), 2).unwrap();
-        (projection, rows)
-    }
-}
-
-fn occurrence_of<'a>(rows: &'a [SourceRow], object_id: &str) -> &'a str {
-    &rows
-        .iter()
-        .find(|row| row.object_id == object_id)
-        .unwrap()
-        .detail
-        .occurrence_id
-}
-
-fn search_path(data_home: &Path) -> PathBuf {
-    data_home.join("search").join("search.sqlite")
-}
-
-fn inspect(data_home: &Path) -> Connection {
-    Connection::open_with_flags(search_path(data_home), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
 }
 
 /// The durable ledger of one occurrence's job, read outside every API under test.
@@ -712,9 +185,13 @@ fn pass(
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, synapse);
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), bounds, now, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                bounds,
+                &budget(Duration::from_secs(10)),
+                now,
+                &mut |event| events.push(event),
+            )
             .unwrap()
     });
     (end, events)
@@ -748,7 +225,9 @@ fn published(events: &[DispatchEvent]) -> Vec<(String, Publication)> {
     events
         .iter()
         .filter_map(|event| match event {
-            DispatchEvent::Published { job_id, outcome } => Some((job_id.clone(), outcome.clone())),
+            DispatchEvent::Published {
+                job_id, outcome, ..
+            } => Some((job_id.clone(), outcome.clone())),
             _ => None,
         })
         .collect()
@@ -813,7 +292,8 @@ async fn payload_corruption_quarantines_before_tokenization_or_inference() {
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let result = dispatcher.run_pass(
         eligibility(&project),
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        &budget(Duration::from_secs(10)),
         NOW,
         &mut |_| {},
     );
@@ -826,7 +306,8 @@ async fn payload_corruption_quarantines_before_tokenization_or_inference() {
     let mut fresh = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let again = fresh.run_pass(
         eligibility(&project),
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        &budget(Duration::from_secs(10)),
         NOW,
         &mut |_| panic!("shared quarantine permits no work"),
     );
@@ -855,7 +336,8 @@ async fn quarantine_entered_after_binding_stops_dispatch_before_submission_or_ch
 
     let result = dispatcher.run_pass(
         eligibility(&project),
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        &budget(Duration::from_secs(10)),
         NOW,
         &mut |event| {
             if matches!(event, DispatchEvent::Bound(_)) {
@@ -885,22 +367,29 @@ async fn publication_search_deadline_preserves_admission_without_recharging() {
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut bounds = bounds(Duration::from_secs(5));
-    bounds.guard_deadline = Duration::from_millis(300);
+    let bounds = bounds();
+    // The budget's deadline is the publication guard's deadline, so a held write lock blocks within it.
+    let short_guard = budget(Duration::from_millis(300));
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let mut events = Vec::new();
     let mut at_admission = None;
     let mut write_lock = None;
     let end = dispatcher
-        .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-            if matches!(event, DispatchEvent::Admitted { .. }) {
-                at_admission = Some(ledger(dir.path(), occurrence));
-                let conn = Connection::open(search_path(dir.path())).unwrap();
-                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-                write_lock = Some(conn);
-            }
-            events.push(event);
-        })
+        .run_pass(
+            eligibility(&project),
+            &bounds,
+            &short_guard,
+            NOW,
+            &mut |event| {
+                if matches!(event, DispatchEvent::Admitted { .. }) {
+                    at_admission = Some(ledger(dir.path(), occurrence));
+                    let conn = Connection::open(search_path(dir.path())).unwrap();
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    write_lock = Some(conn);
+                }
+                events.push(event);
+            },
+        )
         .unwrap();
     assert_eq!(end, Some(Blocked::SearchDeadline));
     let admitted_row = at_admission.expect("publication follows admission");
@@ -917,9 +406,13 @@ async fn publication_search_deadline_preserves_admission_without_recharging() {
     events.clear();
     assert_eq!(
         dispatcher
-            .run_pass(eligibility(&project), &bounds, NOW + 1, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(10)),
+                NOW + 1,
+                &mut |event| { events.push(event) },
+            )
             .unwrap(),
         None
     );
@@ -949,7 +442,7 @@ fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) 
     let occurrence = occurrence_of(&rows, &object);
     let engine_a = TestEngine::new();
     let engine_b = TestEngine::new();
-    let gate = engine_a.block_calls();
+    let gate = GateGuard(engine_a.block_calls());
     let synapse = component(&engine_a, SynapseLimits::default());
     let before = ledger(dir.path(), occurrence);
     let project = ProjectScope::new(PROJECT).unwrap();
@@ -959,7 +452,8 @@ fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) 
     let end = dispatcher
         .run_pass(
             eligibility(&project),
-            &bounds(Duration::from_secs(5)),
+            &bounds(),
+            &budget(Duration::from_secs(10)),
             NOW,
             &mut |event| {
                 if (matches!(event, DispatchEvent::Bound(_)) && !after_admission)
@@ -978,7 +472,13 @@ fn assert_lane_swap_blocked(after_admission: bool, replacement_max_tokens: u32) 
                         .unwrap();
                     TestEngine::release(&gate.0);
                 }
-                events.push(event);
+                // Assertions cover dispositions and admissions, not stage or submission events.
+                if !matches!(
+                    event,
+                    DispatchEvent::Stage { .. } | DispatchEvent::Submitted { .. }
+                ) {
+                    events.push(event);
+                }
             },
         )
         .unwrap();
@@ -1049,13 +549,7 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
     let synapse = component(&engine, SynapseLimits::default());
     let tip = corpus.tip();
 
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(events[0], DispatchEvent::Bound(BindingOutcome::Bound));
     let admitted = admitted(&events);
@@ -1129,13 +623,7 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
     );
 
     // A second pass finds nothing eligible and touches neither the engine nor the ledgers.
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(engine.calls(), 3);
@@ -1151,9 +639,12 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     let synapse = component(&engine, SynapseLimits::default());
-    let short = bounds(Duration::from_millis(50));
+    let short = DispatchBounds {
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
 
     let (end, events) = pass(&corpus, &projection, &synapse, &short, NOW);
     assert_eq!(end, None);
@@ -1174,13 +665,7 @@ async fn outstanding_results_are_polled_by_identity_and_never_readmitted() {
     assert_eq!(engine.calls(), 1);
 
     TestEngine::release(&gate.0);
-    let (_, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(
         published(&events),
         vec![(held.job_id.clone(), Publication::Embedded)]
@@ -1209,9 +694,12 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     let first = component(&engine, SynapseLimits::default());
-    let short = bounds(Duration::from_millis(50));
+    let short = DispatchBounds {
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
     let (_, events) = pass(&corpus, &projection, &first, &short, NOW);
     assert_eq!(admitted(&events).len(), 1);
     let held = ledger(dir.path(), occurrence);
@@ -1263,13 +751,7 @@ async fn host_restart_reconciles_admitted_work_and_wrong_lanes_block() {
     ));
 
     // The next incarnation of the right lane reconciles first: the held job is unreachable, so it is pending again with its attempt kept, then re-admitted under the same job identity.
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &second,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &second, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(
         events[0],
@@ -1332,13 +814,7 @@ async fn over_limit_input_stops_without_inference_and_keeps_lexical_state() {
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
 
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(end, None);
     let over_ledger = ledger(dir.path(), occurrence_of(&rows, &over));
     assert_eq!(
@@ -1375,13 +851,7 @@ async fn over_limit_input_stops_without_inference_and_keeps_lexical_state() {
         projection,
         &[occurrence_of(&rows, &over), occurrence_of(&rows, &fine)],
     );
-    let (_, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(events, vec![DispatchEvent::Bound(BindingOutcome::Bound)]);
     assert_eq!(engine.calls(), 1);
 }
@@ -1423,7 +893,7 @@ fn scenario(
 /// AC5, AC6: a transient failure keeps the row pending under the same episode with its attempt charged, and it is eligible again only when its retry time comes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_failure_retries_under_the_same_episode() {
-    let standard = bounds(Duration::from_secs(5));
+    let standard = bounds();
 
     // Transient execution failure: pending again under the same episode, one attempt charged, eligible only after `retry_after`.
     let (dir, corpus, projection, occurrence, _, synapse, events, end) = scenario(
@@ -1463,7 +933,7 @@ async fn transient_failure_retries_under_the_same_episode() {
 /// AC5: terminal dispositions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_dispositions_stop_dispatch_until_authorized() {
-    let standard = bounds(Duration::from_secs(5));
+    let standard = bounds();
 
     // An artifact fault is the lane's disposition, not the input's: the lane goes down, the pass blocks, and the attempted row keeps its charge as admitted work for the next serving host to reconcile.
     let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
@@ -1506,7 +976,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
         SynapseLimits::default(),
         standard,
         |_, _, engine, _, _| {
-            *engine.malformed.lock().unwrap() = true;
+            engine.return_malformed();
         },
     );
     assert_eq!(
@@ -1660,7 +1130,7 @@ async fn terminal_dispositions_stop_dispatch_until_authorized() {
 async fn exhaustion_holds_until_an_authorization_that_replays_idempotently() {
     let tight = DispatchBounds {
         grant: grant(1, NOW + DAY_MS),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
     let (dir, corpus, projection, occurrence, engine, synapse, events, _) = scenario(
         "exhaust me",
@@ -1791,7 +1261,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
     let second = corpus.publish("m1", "second in line");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     let synapse = component(
         &engine,
         SynapseLimits {
@@ -1799,7 +1269,10 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
             ..SynapseLimits::default()
         },
     );
-    let short = bounds(Duration::from_millis(50));
+    let short = DispatchBounds {
+        result_wait: Duration::from_millis(50),
+        ..bounds()
+    };
 
     let (end, events) = pass(&corpus, &projection, &synapse, &short, NOW);
     assert_eq!(end, None);
@@ -1848,13 +1321,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
     assert_eq!(ledgered.attempts, 1);
 
     TestEngine::release(&gate.0);
-    let (_, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW + 10,
-    );
+    let (_, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW + 10);
     assert_eq!(published(&events).len(), 2, "{events:?}");
     assert_eq!(
         ledger(dir.path(), occurrence_of(&rows, &first)).state,
@@ -1882,12 +1349,16 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     dispatcher.inject_fault_for_test(DispatchFault::LoseChargeReply);
     let mut events = Vec::new();
-    let bounds = bounds(Duration::from_secs(5));
+    let bounds = bounds();
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(10)),
+                NOW,
+                &mut |event| events.push(event),
+            )
             .unwrap()
     });
     assert_eq!(end, None);
@@ -1903,7 +1374,13 @@ async fn a_lost_charge_reply_is_reconciled_from_the_row_not_recharged() {
     // The dispatcher is not quarantined: a later pass runs and finds nothing to do.
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), &bounds, NOW, &mut |_| {})
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(10)),
+                NOW,
+                &mut |_| {},
+            )
             .unwrap()
     });
     assert_eq!(end, None);
@@ -1919,7 +1396,7 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     engine.fail_next(InferenceError::Execution("controlled failure".to_owned()));
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
@@ -1927,13 +1404,20 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
     let mut tight = DispatchBounds {
         grant: grant(1, NOW + DAY_MS),
-        ..bounds(Duration::ZERO)
+        ..DispatchBounds {
+            result_wait: Duration::ZERO,
+            ..bounds()
+        }
     };
     let mut events = Vec::new();
     dispatcher
-        .run_pass(eligibility(&project), &tight, NOW, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project),
+            &tight,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     let charged = ledger(dir.path(), occurrence);
     let item = retrieval::dispatch::first_episode_id(&charged.job_id);
@@ -1952,9 +1436,13 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     ));
     tight.result_wait = Duration::from_secs(5);
     dispatcher
-        .run_pass(eligibility(&project), &tight, NOW + 10, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project),
+            &tight,
+            &budget(Duration::from_secs(10)),
+            NOW + 10,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     let stopped_row = ledger(dir.path(), occurrence);
     assert_eq!(
@@ -1974,7 +1462,13 @@ async fn charge_rollback_cannot_skip_a_failed_host_attempt() {
     assert_eq!(admitted(&events), vec![(charged.job_id, 1)]);
     assert!(published(&events).is_empty());
     dispatcher
-        .run_pass(eligibility(&project), &tight, NOW + 20, &mut |_| {})
+        .run_pass(
+            eligibility(&project),
+            &tight,
+            &budget(Duration::from_secs(10)),
+            NOW + 20,
+            &mut |_| {},
+        )
         .unwrap();
     assert_eq!(ledger(dir.path(), occurrence), stopped_row);
     assert_eq!(engine.calls(), 1);
@@ -1992,21 +1486,28 @@ async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut limits = bounds(Duration::from_secs(5));
-    limits.guard_deadline = Duration::from_millis(300);
+    let limits = bounds();
+    // The budget's deadline bounds the terminal obsoletion write, so a held write lock blocks within it.
+    let short_guard = budget(Duration::from_millis(300));
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let mut write_lock = None;
     let mut events = Vec::new();
 
     let end = dispatcher
-        .run_pass(eligibility(&project), &limits, NOW, &mut |event| {
-            if matches!(event, DispatchEvent::Bound(_)) {
-                let conn = Connection::open(search_path(dir.path())).unwrap();
-                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-                write_lock = Some(conn);
-            }
-            events.push(event);
-        })
+        .run_pass(
+            eligibility(&project),
+            &limits,
+            &short_guard,
+            NOW,
+            &mut |event| {
+                if matches!(event, DispatchEvent::Bound(_)) {
+                    let conn = Connection::open(search_path(dir.path())).unwrap();
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    write_lock = Some(conn);
+                }
+                events.push(event);
+            },
+        )
         .unwrap();
     assert_eq!(end, Some(Blocked::SearchDeadline));
     assert_eq!(ledger(dir.path(), occurrence).state, "pending");
@@ -2017,9 +1518,13 @@ async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     events.clear();
     assert_eq!(
         dispatcher
-            .run_pass(eligibility(&project), &limits, NOW + 1, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &limits,
+                &budget(Duration::from_secs(10)),
+                NOW + 1,
+                &mut |event| { events.push(event) },
+            )
             .unwrap(),
         None
     );
@@ -2050,7 +1555,8 @@ async fn unknown_terminal_commit_emits_no_attributed_stop() {
         dispatcher
             .run_pass(
                 eligibility(&project),
-                &bounds(Duration::from_secs(5)),
+                &bounds(),
+                &budget(Duration::from_secs(10)),
                 NOW,
                 &mut |event| events.push(event),
             )
@@ -2083,18 +1589,25 @@ async fn actionable_rows_are_repolled_before_later_pending_rows() {
             .unwrap()
     };
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
-    let mut limits = bounds(Duration::ZERO);
+    let mut limits = DispatchBounds {
+        result_wait: Duration::ZERO,
+        ..bounds()
+    };
     limits.max_jobs = NonZeroUsize::new(2).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let mut events = Vec::new();
 
     dispatcher
-        .run_pass(eligibility(&project), &limits, NOW, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project),
+            &limits,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     assert_eq!(admitted(&events).len(), 2);
     assert_eq!(
@@ -2111,9 +1624,13 @@ async fn actionable_rows_are_repolled_before_later_pending_rows() {
     events.clear();
     limits.result_wait = Duration::from_secs(5);
     dispatcher
-        .run_pass(eligibility(&project), &limits, NOW + 1, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project),
+            &limits,
+            &budget(Duration::from_secs(10)),
+            NOW + 1,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     assert_eq!(
         ledger(dir.path(), &ordered_occurrences[0]).state,
@@ -2141,13 +1658,19 @@ async fn eligibility_cursor_resets_when_project_changes() {
     let synapse = component(&engine, SynapseLimits::default());
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let project_b = ProjectScope::new(PROJECT_B).unwrap();
-    let mut limits = bounds(Duration::from_secs(5));
+    let mut limits = bounds();
     limits.max_jobs = NonZeroUsize::new(1).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
 
     assert_eq!(
         dispatcher
-            .run_pass(eligibility(&project_a), &limits, NOW, &mut |_| {})
+            .run_pass(
+                eligibility(&project_a),
+                &limits,
+                &budget(Duration::from_secs(10)),
+                NOW,
+                &mut |_| {},
+            )
             .unwrap(),
         None
     );
@@ -2191,9 +1714,13 @@ async fn eligibility_cursor_resets_when_project_changes() {
     drop(conn);
     let mut events = Vec::new();
     dispatcher
-        .run_pass(eligibility(&project_b), &limits, NOW + 1, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project_b),
+            &limits,
+            &budget(Duration::from_secs(10)),
+            NOW + 1,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     assert_eq!(ledger(dir.path(), occurrence_b).state, "embedded");
     assert_eq!(admitted(&events), vec![(target.job_id.clone(), 1)]);
@@ -2228,7 +1755,11 @@ async fn an_unresolved_charge_retry_quarantines_without_resubmission() {
     for _ in 0..2 {
         let result = dispatcher.run_pass(
             eligibility(&project),
-            &bounds(Duration::ZERO),
+            &DispatchBounds {
+                result_wait: Duration::ZERO,
+                ..bounds()
+            },
+            &budget(Duration::from_secs(10)),
             NOW,
             &mut |_| {},
         );
@@ -2258,12 +1789,16 @@ async fn a_refused_charge_statement_is_retried_not_quarantined() {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseChargeStatement);
-    let bounds = bounds(Duration::from_secs(5));
+    let bounds = bounds();
     let mut events = Vec::new();
     let end = tokio::task::block_in_place(|| {
-        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-            events.push(event)
-        })
+        dispatcher.run_pass(
+            eligibility(&project),
+            &bounds,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
     })
     .unwrap();
     assert_eq!(end, None);
@@ -2278,9 +1813,13 @@ async fn a_refused_charge_statement_is_retried_not_quarantined() {
 
     let mut events = Vec::new();
     let end = tokio::task::block_in_place(|| {
-        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-            events.push(event)
-        })
+        dispatcher.run_pass(
+            eligibility(&project),
+            &bounds,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
     })
     .unwrap();
     assert_eq!(end, None);
@@ -2308,12 +1847,16 @@ async fn a_refused_binding_is_retryable_not_quarantined() {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     dispatcher.inject_fault_for_test(DispatchFault::RefuseBinding);
-    let bounds = bounds(Duration::from_secs(5));
+    let bounds = bounds();
     let mut events = Vec::new();
     let refused = tokio::task::block_in_place(|| {
-        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-            events.push(event)
-        })
+        dispatcher.run_pass(
+            eligibility(&project),
+            &bounds,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
     });
     assert!(
         matches!(refused, Err(DispatchError::Retryable(_))),
@@ -2324,9 +1867,13 @@ async fn a_refused_binding_is_retryable_not_quarantined() {
 
     let mut events = Vec::new();
     let end = tokio::task::block_in_place(|| {
-        dispatcher.run_pass(eligibility(&project), &bounds, NOW, &mut |event| {
-            events.push(event)
-        })
+        dispatcher.run_pass(
+            eligibility(&project),
+            &bounds,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
     })
     .unwrap();
     assert_eq!(end, None);
@@ -2359,14 +1906,15 @@ fn crash_child_entrypoint_reexecuted_by_the_parent() {
         let kernel = KernelStore::open(root.join("kernel")).unwrap();
         let projection = SearchProjection::open(&root).unwrap();
         let engine = TestEngine::new();
-        let _gate = engine.block_calls();
+        let _gate = GateGuard(engine.block_calls());
         let synapse = component(&engine, SynapseLimits::default());
         let project = ProjectScope::new(PROJECT).unwrap();
         let mut dispatcher = EmbeddingDispatcher::new(&kernel, &projection, &synapse);
         let result = tokio::task::block_in_place(|| {
             dispatcher.run_pass(
                 eligibility(&project),
-                &bounds(Duration::from_secs(600)),
+                &bounds(),
+                &budget(Duration::from_secs(600)),
                 NOW,
                 &mut |event| {
                     if let DispatchEvent::Admitted { .. } = event {
@@ -2454,13 +2002,7 @@ async fn crash_after_charge_reopens_state_and_accounting_together() {
     let projection = SearchProjection::open(dir.path()).unwrap();
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(
         events[0],
@@ -2497,11 +2039,14 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     let synapse = component(&engine, SynapseLimits::default());
     let tight = DispatchBounds {
         grant: grant(1, NOW + DAY_MS),
-        ..bounds(Duration::from_millis(50))
+        ..DispatchBounds {
+            result_wait: Duration::from_millis(50),
+            ..bounds()
+        }
     };
 
     let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
@@ -2531,7 +2076,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
         ),
         PollOutcome::Page(_)
     ));
-    *engine.count_failure.lock().unwrap() = Some(InferenceError::Execution(
+    engine.fail_next_count(InferenceError::Execution(
         "completion count failed".to_owned(),
     ));
     let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
@@ -2546,7 +2091,7 @@ async fn the_final_attempt_of_an_episode_completes_across_passes() {
         &synapse,
         &DispatchBounds {
             grant: grant(1, NOW + DAY_MS),
-            ..bounds(Duration::from_secs(5))
+            ..bounds()
         },
         NOW,
     );
@@ -2576,11 +2121,14 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
         let (projection, rows) = corpus.bootstrap(dir.path());
         let occurrence = occurrence_of(&rows, &object);
         let engine = TestEngine::new();
-        let gate = engine.block_calls();
+        let gate = GateGuard(engine.block_calls());
         let synapse = component(&engine, SynapseLimits::default());
         let tight = DispatchBounds {
             grant: grant(1, NOW + DAY_MS),
-            ..bounds(Duration::from_millis(50))
+            ..DispatchBounds {
+                result_wait: Duration::from_millis(50),
+                ..bounds()
+            }
         };
         pass(&corpus, &projection, &synapse, &tight, NOW);
         let held = ledger(dir.path(), occurrence);
@@ -2594,7 +2142,7 @@ async fn completion_count_lane_failures_preserve_the_final_attempt() {
             ),
             PollOutcome::Page(_)
         ));
-        *engine.count_failure.lock().unwrap() = Some(failure.clone());
+        engine.fail_next_count(failure.clone());
 
         let (end, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
 
@@ -2625,7 +2173,7 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
             let (projection, rows) = corpus.bootstrap(dir.path());
             let occurrence = occurrence_of(&rows, &object);
             let engine = TestEngine::new();
-            let gate = engine.block_calls();
+            let gate = GateGuard(engine.block_calls());
             let synapse = component(
                 &engine,
                 SynapseLimits {
@@ -2636,7 +2184,10 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
             );
             let tight = DispatchBounds {
                 grant: grant(allowance, NOW + DAY_MS),
-                ..bounds(Duration::from_millis(50))
+                ..DispatchBounds {
+                    result_wait: Duration::from_millis(50),
+                    ..bounds()
+                }
             };
             let (_, events) = pass(&corpus, &projection, &synapse, &tight, NOW);
             let held = ledger(dir.path(), occurrence);
@@ -2672,11 +2223,10 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
             ));
 
             let blocker = if count_failure {
-                *engine.count_failure.lock().unwrap() =
-                    Some(InferenceError::Execution("count failed".to_owned()));
+                engine.fail_next_count(InferenceError::Execution("count failed".to_owned()));
                 None
             } else {
-                let gate = engine.block_calls();
+                let gate = GateGuard(engine.block_calls());
                 let input = synapse
                     .preflight_embedding_for_lane(&lane(FINGERPRINT), "queue holder")
                     .unwrap();
@@ -2726,7 +2276,7 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
                 &synapse,
                 &DispatchBounds {
                     grant: grant(allowance, NOW + DAY_MS),
-                    ..bounds(Duration::from_secs(5))
+                    ..bounds()
                 },
                 NOW,
             );
@@ -2741,6 +2291,18 @@ async fn an_evicted_result_is_readmitted_under_the_charged_attempt() {
             assert_eq!(
                 published(&events),
                 vec![(held.job_id.clone(), Publication::Embedded)]
+            );
+            // The replacement job is polled in its own poll stage: the stale poll, the re-admission, the new poll, then publication.
+            let stages: Vec<Stage> = events
+                .iter()
+                .filter_map(|event| match event {
+                    DispatchEvent::Stage { stage, .. } => Some(*stage),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                stages,
+                vec![Stage::Poll, Stage::Admit, Stage::Poll, Stage::Publish]
             );
             let done = ledger(dir.path(), occurrence);
             assert_eq!(
@@ -2782,16 +2344,20 @@ async fn project_selection_skips_wrong_scope_without_starving_eligible_work() {
     let synapse = component(&engine, SynapseLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
 
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     let mut events = Vec::new();
     let end = dispatcher
-        .run_pass(eligibility(&project_a), &one, NOW, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     assert_eq!(end, None);
     assert_eq!(
@@ -2812,9 +2378,13 @@ async fn project_selection_skips_wrong_scope_without_starving_eligible_work() {
     let project_b = ProjectScope::new(PROJECT_B).unwrap();
     events.clear();
     let end = dispatcher
-        .run_pass(eligibility(&project_b), &one, NOW, &mut |event| {
-            events.push(event)
-        })
+        .run_pass(
+            eligibility(&project_b),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |event| events.push(event),
+        )
         .unwrap();
     assert_eq!(end, None);
     assert_eq!(
@@ -2844,20 +2414,32 @@ async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
     let synapse = component(&engine, SynapseLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
 
     let first = dispatcher
-        .run_pass(eligibility(&project_a), &one, NOW, &mut |_| {})
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |_| {},
+        )
         .unwrap();
     assert_eq!(first, None);
     assert_eq!(ledger(dir.path(), occurrence_a).state, "pending");
     assert_eq!(engine.calls(), 0);
 
     let second = dispatcher
-        .run_pass(eligibility(&project_a), &one, NOW, &mut |_| {})
+        .run_pass(
+            eligibility(&project_a),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |_| {},
+        )
         .unwrap();
     assert_eq!(second, None);
     assert_eq!(ledger(dir.path(), occurrence_a).state, "embedded");
@@ -2888,7 +2470,7 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
         retry_after: 1,
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
     let project_a = ProjectScope::new(PROJECT).unwrap();
     let project_b = ProjectScope::new(PROJECT_B).unwrap();
@@ -2896,17 +2478,28 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
     let mut dispatcher_b = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
     assert_eq!(
         dispatcher_a
-            .run_pass(eligibility(&project_a), &one, NOW, &mut |_| {})
+            .run_pass(
+                eligibility(&project_a),
+                &one,
+                &budget(Duration::from_secs(10)),
+                NOW,
+                &mut |_| {},
+            )
             .unwrap(),
         None
     );
     assert_eq!(ledger(dir.path(), occurrence_a).state, "pending");
     for tick in 1..=3 {
-        *engine.count_failure.lock().unwrap() =
-            Some(InferenceError::Execution("retry count".to_owned()));
+        engine.fail_next_count(InferenceError::Execution("retry count".to_owned()));
         assert_eq!(
             dispatcher_b
-                .run_pass(eligibility(&project_b), &one, NOW + tick, &mut |_| {})
+                .run_pass(
+                    eligibility(&project_b),
+                    &one,
+                    &budget(Duration::from_secs(10)),
+                    NOW + tick,
+                    &mut |_| {},
+                )
                 .unwrap(),
             None
         );
@@ -2916,7 +2509,13 @@ async fn foreign_retries_do_not_restart_another_projects_scan() {
         );
         assert_eq!(
             dispatcher_a
-                .run_pass(eligibility(&project_a), &one, NOW + tick, &mut |_| {})
+                .run_pass(
+                    eligibility(&project_a),
+                    &one,
+                    &budget(Duration::from_secs(10)),
+                    NOW + tick,
+                    &mut |_| {},
+                )
                 .unwrap(),
             None
         );
@@ -2960,23 +2559,38 @@ async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
     drop(conn);
 
     let engine = TestEngine::new();
-    let gate = engine.block_calls();
+    let gate = GateGuard(engine.block_calls());
     let synapse = component(&engine, SynapseLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
-        ..bounds(Duration::ZERO)
+        ..DispatchBounds {
+            result_wait: Duration::ZERO,
+            ..bounds()
+        }
     };
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
 
     dispatcher
-        .run_pass(eligibility(&project), &one, NOW, &mut |_| {})
+        .run_pass(
+            eligibility(&project),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW,
+            &mut |_| {},
+        )
         .unwrap();
     assert_eq!(ledger(dir.path(), deferred_occurrence).attempts, 0);
     assert_eq!(ledger(dir.path(), actionable_occurrence).state, "admitted");
 
     dispatcher
-        .run_pass(eligibility(&project), &one, NOW + 1, &mut |_| {})
+        .run_pass(
+            eligibility(&project),
+            &one,
+            &budget(Duration::from_secs(10)),
+            NOW + 1,
+            &mut |_| {},
+        )
         .unwrap();
     assert_eq!(
         ledger(dir.path(), deferred_occurrence).attempts,
@@ -3002,7 +2616,7 @@ async fn max_jobs_bounds_terminal_dispositions() {
     let synapse = component(&engine, SynapseLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
 
     let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW);
@@ -3052,7 +2666,7 @@ async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
     let synapse = component(&engine, SynapseLimits::default());
     let one = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
 
     let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW);
@@ -3111,8 +2725,9 @@ async fn selected_jobs_are_hydrated_only_when_they_are_driven() {
         eligibility(&project),
         &DispatchBounds {
             max_jobs: NonZeroUsize::new(2).unwrap(),
-            ..bounds(Duration::from_secs(5))
+            ..bounds()
         },
+        &budget(Duration::from_secs(10)),
         NOW,
         &mut |_| {},
     );
@@ -3140,13 +2755,7 @@ async fn hidden_and_sensitive_inputs_are_obsoleted_without_inference() {
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
 
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
 
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), hidden_occurrence).state, "obsolete");
@@ -3176,13 +2785,7 @@ async fn project_selection_still_obsoletes_retracted_input_without_inference() {
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
 
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
 
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), occurrence).state, "obsolete");
@@ -3221,7 +2824,7 @@ async fn eligible_rows_are_taken_oldest_first_not_by_identifier() {
 
     let one_at_a_time = DispatchBounds {
         max_jobs: NonZeroUsize::new(1).unwrap(),
-        ..bounds(Duration::from_secs(5))
+        ..bounds()
     };
     let (end, events) = pass(&corpus, &projection, &synapse, &one_at_a_time, NOW);
     assert_eq!(end, None);
@@ -3238,7 +2841,7 @@ async fn an_authorization_reference_cannot_name_the_first_episode() {
     let (dir, corpus, projection, occurrence, engine, synapse, events, end) = scenario(
         "rejected by the model",
         SynapseLimits::default(),
-        bounds(Duration::from_secs(5)),
+        bounds(),
         |_, _, engine, _, _| {
             engine.fail_next(InferenceError::Input("rejected".to_owned()));
         },
@@ -3264,13 +2867,7 @@ async fn an_authorization_reference_cannot_name_the_first_episode() {
         "an authorized episode lives in its own namespace"
     );
 
-    let (end, events) = pass(
-        &corpus,
-        &projection,
-        &synapse,
-        &bounds(Duration::from_secs(5)),
-        NOW,
-    );
+    let (end, events) = pass(&corpus, &projection, &synapse, &bounds(), NOW);
     assert_eq!(end, None);
     assert_eq!(
         published(&events),
@@ -3309,7 +2906,11 @@ fn a_pass_on_a_runtime_worker_yields_the_worker_to_the_inference_it_awaits() {
             let end = dispatcher
                 .run_pass(
                     eligibility(&project),
-                    &bounds(Duration::from_millis(300)),
+                    &DispatchBounds {
+                        result_wait: Duration::from_millis(300),
+                        ..bounds()
+                    },
+                    &budget(Duration::from_secs(10)),
                     NOW,
                     &mut |event| events.push(event),
                 )

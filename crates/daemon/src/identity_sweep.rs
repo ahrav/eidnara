@@ -5,6 +5,7 @@
 use std::num::NonZeroUsize;
 
 use host_runtime::synapse::SynapseComponent;
+use kernel::applicability::EvalBudget;
 use retrieval::identity_sweep::{Candidate, candidates, presence, reclaim};
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
@@ -20,6 +21,8 @@ pub struct SweepReport {
     pub jobs_reclaimed: usize,
     /// Candidates whose eligibility no longer held when the delete ran.
     pub survivors: usize,
+    /// The budget ended before selection or before the write; the free candidates it left are deferred, not survivors, and the next sweep selects them again.
+    pub budget_exhausted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,12 +44,26 @@ pub struct IdentitySweeper<'a> {
 
 impl<'a> IdentitySweeper<'a> {
     pub fn new(projection: &'a SearchProjection, synapse: &'a SynapseComponent) -> Self {
+        Self::resuming(projection, synapse, None)
+    }
+
+    /// A sweeper whose first selection starts after `cursor`, the job identifier a previous sweeper's [`Self::cursor`] handed back; `None` starts at the first identity.
+    pub fn resuming(
+        projection: &'a SearchProjection,
+        synapse: &'a SynapseComponent,
+        cursor: Option<String>,
+    ) -> Self {
         Self {
             projection,
             synapse,
-            cursor: None,
+            cursor,
             lose_reclaim_reply: false,
         }
+    }
+
+    /// Where the next selection resumes: the job identifier the last full page ended at, or `None` once a pass over the table is complete. A caller that builds a sweeper per sweep threads this through [`Self::resuming`] so held identities at the head cannot starve those behind them.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
     }
 
     /// Makes the next reclamation return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.
@@ -55,14 +72,24 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Inspects at most `max_candidates` finished, unreferenced identities and reclaims those no holder protects. Selection resumes across calls, so held rows consume this call's bound without starving later identities.
+    /// Inspects at most `max_candidates` finished, unreferenced identities and reclaims those no holder protects. Selection resumes across calls, so held rows consume this call's bound without starving later identities. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves the selected page for the next sweep to select again, and the report says the budget ended it.
     ///
     /// # Errors
     ///
     /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
-    pub fn run_sweep(&mut self, max_candidates: NonZeroUsize) -> Result<SweepReport, SweepError> {
+    pub fn run_sweep(
+        &mut self,
+        max_candidates: NonZeroUsize,
+        budget: &EvalBudget,
+    ) -> Result<SweepReport, SweepError> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SweepError::Quarantined(quarantine));
+        }
+        if budget.is_exhausted() {
+            return Ok(SweepReport {
+                budget_exhausted: true,
+                ..SweepReport::default()
+            });
         }
         let mut report = SweepReport::default();
         let page = self
@@ -70,7 +97,8 @@ impl<'a> IdentitySweeper<'a> {
             .read(|conn| candidates(conn, max_candidates, self.cursor.as_deref()))
             .map_err(SweepError::Read)?;
         report.candidates = page.len();
-        self.cursor = if page.len() < max_candidates.get() {
+        // A short page ends one pass over the table; a full page resumes after its last row once this call has judged it.
+        let next_cursor = if page.len() < max_candidates.get() {
             None
         } else {
             page.last().map(|candidate| candidate.job_id.clone())
@@ -84,8 +112,15 @@ impl<'a> IdentitySweeper<'a> {
             }
         }
         if free.is_empty() {
+            self.cursor = next_cursor;
             return Ok(report);
         }
+        if budget.is_exhausted() {
+            // The cursor stays before this page: nothing in it was reclaimed, so the next sweep selects it again. No delete ran, so no candidate is a survivor of one.
+            report.budget_exhausted = true;
+            return Ok(report);
+        }
+        self.cursor = next_cursor;
         let reclaimed = self.projection.write(|conn| reclaim(conn, &free));
         let reclaimed = if std::mem::take(&mut self.lose_reclaim_reply) && reclaimed.is_ok() {
             Err(SearchProjectionError::Store(storage::StoreError::Backend(
