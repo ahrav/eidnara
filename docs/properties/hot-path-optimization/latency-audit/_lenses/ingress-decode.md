@@ -310,7 +310,7 @@ bodies opaque and states only the `invalid_params` cap codes
 ## Anchors
 
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11893-L11915
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11921-L11936
 [composite]: ../../../../../crates/host-runtime/src/composite.rs#L40-L58
 [bytecap]: ../../../../../crates/daemon/src/lib.rs#L15604-L15620
 [footprint]: ../../../../../crates/daemon/src/lib.rs#L15546-L15582
@@ -333,7 +333,7 @@ bodies opaque and states only the `invalid_params` cap codes
 [ticket]: ../../../../../crates/daemon/src/lib.rs#L600-L657
 [pageapply]: ../../../../../crates/daemon/src/lib.rs#L9498-L9521
 [settle]: ../../../../../crates/daemon/src/lib.rs#L12148-L12163
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12574-L12583
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12600-L12609
 [wirestruct]: ../../../../../crates/daemon/src/transform.rs#L809-L980
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264

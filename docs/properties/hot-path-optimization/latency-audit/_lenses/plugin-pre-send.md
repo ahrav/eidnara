@@ -415,7 +415,7 @@ Suspiciously quiet: `transform-stage-logger.ts` has no test file;
    and the guarantee stands; the stated rationale is not reproduced.
 4. Page cap measure. [module-wire.ts:9][pagemax] says the facade accepts
    pages up to 512 KiB; the host enforces 512 KiB on the `serde_json`
-   re-serialization ([lib.rs:9375-9381][hostpagecheck]) while the plugin measures
+   re-serialization ([lib.rs:9386-9392][hostpagecheck]) while the plugin measures
    `JSON.stringify` output. Both say 512 KiB; the measured text differs.
 5. Audit framing (not a source contract). The audit describes "synchronous
    file flushes" per line and a regex scan of the body. The logger batches
@@ -483,7 +483,7 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [evlog]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
 [redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [injection]: ../../../../../crates/daemon/src/injection.rs#L195-L230
-[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15406-L15573
+[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15871-L15894
 [hostpage]: ../../../../../crates/daemon/src/lib.rs#L738-L739
 [hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9386-L9392
 [t377]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L377

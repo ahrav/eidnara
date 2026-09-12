@@ -25,7 +25,7 @@ can shrink a number without making anything faster.
   object; all 22 exist in the struct. Its [`stage`][ts-stage-fn] helper
   prints `n/a` only when the key is absent or non-finite, so a present zero
   prints as `0.0`.
-- The handler assigns 25 fields at [`:8540-8564`][h-timings]. Fourteen are
+- The handler assigns 25 fields at [`:8549-8573`][h-timings]. Fourteen are
   millisecond durations from `Instant` pairs taken on the handler task:
   `handler_total` from `handler_started_at`, the request-to-handler gap,
   the pass-state load, delta expand, side-channel drain, receive trace, cache lookup and store,

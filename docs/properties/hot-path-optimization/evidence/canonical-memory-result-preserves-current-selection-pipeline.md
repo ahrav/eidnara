@@ -10,7 +10,7 @@ The preservation target is the selected result, not a particular SQL shape.
 
 ## Evidence trail
 
-- [daemon/lib.rs:8182-8262][pass] pins one read before the synchronous transform.
+- [daemon/lib.rs:8191-8271][pass] pins one read before the synchronous transform.
   Reruns at [8264, 8291, 8317, and 8372][reruns] reuse that captured result.
 - [canonical_memory.rs:141-174][entry] captures tip before lag sampling and
   passes that tip to the auto-inject read; failures become withheld outcomes.

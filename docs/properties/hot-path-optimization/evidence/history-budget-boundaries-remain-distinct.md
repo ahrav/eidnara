@@ -17,7 +17,7 @@ request validation, and replay. These have different implemented boundaries.
   reach all-tier-5 output for `H` compartments, without requiring monotonic cost.
 - [m0_compose.rs:178-215][outer] counts the wrapped history slice, retries above
   105% at most three times, and can return a still-over-budget render.
-- [daemon/lib.rs:8239-8242][validation] resolves request budgets separately.
+- [daemon/lib.rs:8248-8251][validation] resolves request budgets separately.
 - [transform.rs:4081-4108][hard] composes on HARD; [4348-4381][refold] also
   composes on pressure refold. Frozen replay is not all SOFT work indiscriminately.
 - [cache-stability:221-287][core] separates pure Defer/SoftPlus replay from SOFT

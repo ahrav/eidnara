@@ -110,7 +110,7 @@ because the decoded type exposes no copy count.
 
 - Sources examined: the [page apply][pageapply] call into
   `handle_transform_unpaged_value`, the [512 KiB page cap][hostpagecheck], and
-  the staging constants at [`:742-743`][hostpage] (128 MiB staged maximum).
+  the staging constants at [`:735-736`][hostpage] (128 MiB staged maximum).
 - Findings: The assembled `Value` reaches the typed decode with the per-page
   reservation history only; no `value_footprint_bound` runs on the whole.
 - Missing evidence: A statement of which budget covers the assembled tree.

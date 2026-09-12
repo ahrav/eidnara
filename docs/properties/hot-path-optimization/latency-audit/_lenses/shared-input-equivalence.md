@@ -21,7 +21,7 @@ rebuilt from the projection cache by [`reattach_messages_prefix`][reattach],
 which clones every `Arc<WireBlock>` payload and rebuilds each message shell
 with [`WireMessage::from_parts`][from-parts] (so the shell has no retained
 `original`), and the native prefix is deep-copied from `Vec<Arc<Value>>` into
-`Vec<Value>` at [`:4262-4265`][native-deep]. Inside
+`Vec<Value>` at [`:4271-4274`][native-deep]. Inside
 [`apply_once`][apply-head], [`normalize_synthetic_todo_ingress`][normalize]
 clones the whole request when any non-synthetic message carries a
 [`synthetic_todo_`][todo-prefix] call or result id and sets
@@ -34,7 +34,7 @@ un-normalized `parsed` to [`boundary_messages`][boundary-call] and to
 charges `parsed.messages`, and
 [`attach_native_messages_incremental`][native-attach] filters
 `request.messages` by the un-normalized flag at
-[`:13196-13201`][newest-assistant]. With compaction disabled
+[`:13223-13228`][newest-assistant]. With compaction disabled
 ([default true][compaction-default]) the pass returns through
 [`apply_additive_only`][additive] before normalization runs.
 
@@ -61,7 +61,7 @@ On output, [`ServedMessage::from_message_reusing`][served-reusing] computes
 `canonical_bytes = to_vec(to_value(&message))`, which sorts object keys because
 the workspace enables only [`raw_value`][serde-features] on `serde_json`, and
 the prepared transform output writes exactly those bytes per served segment
-([`PreparedSegment::served`][segment-served], [`:14506-14512`][segments]).
+([`PreparedSegment::served`][segment-served], [`:14543-14549`][segments]).
 `Serialize for` [`WireMessage`][ser-msg] and [`WireBlock`][ser-block] replay
 the retained `original` when present, and a `meta` edit does not clear it
 ([`:210-216`][meta-doc]). The tag baseline is a process cache of
@@ -216,7 +216,7 @@ while the JSON stays equal; a message with `original` is unaffected.
 message through serde instead of [`PreparedSegment::served`][segment-served]
 emits the other form; the handler avoids this only because it takes
 `messages` out of the response before `to_value(response)`
-([`:14485-14500`][segments-take]). The same message therefore already has
+([`:14522-14537`][segments-take]). The same message therefore already has
 two canonical forms depending on whether its shell came from the harness or
 from [`reattach`][reattach], which the
 [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach]
@@ -420,7 +420,7 @@ both sides and neither resolved here:
   [`assemble_historian_firing`][assemble] together with the normalized
   `result.projection`. In the full-array lane a replayed todo message is a
   `BoundaryMsg` whose every block is filtered out by `!block.synthetic`
-  ([`:16646`][boundary-filter]) and its ordinal counts in
+  ([`:16613`][boundary-filter]) and its ordinal counts in
   [`build_historian_chunk`][chunk-build]; in the delta lane the same message
   is rebuilt from `message_meta` with `synthetic: true` and is excluded by
   the message filter. The transform catalog's `synthetic-strip` record

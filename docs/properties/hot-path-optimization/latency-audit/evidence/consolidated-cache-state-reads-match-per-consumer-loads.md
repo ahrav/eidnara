@@ -258,7 +258,7 @@ branch as well and passing in isolation.
 
 [pass-load]: ../../../../../crates/daemon/src/lib.rs#L8130
 [meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6672-L6684
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4903-L4904
+[meta-select-live]: ../../../../../crates/memory-store/src/lib.rs#L4903-L4904
 [pass-state]: ../../../../../crates/daemon/src/lib.rs#L3516-L3520
 [delta]: ../../../../../crates/daemon/src/lib.rs#L4215
 [lookup]: ../../../../../crates/daemon/src/lib.rs#L4326
