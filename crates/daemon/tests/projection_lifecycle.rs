@@ -340,6 +340,20 @@ fn replays_reconcile_to_one_intent_and_conflicts_change_nothing() {
         lifecycle.record(
             &gate,
             &LifecycleRequest {
+                consumer: ConsumerBinding {
+                    consumer_id: " ".to_owned(),
+                    generation_id: "gen-2".to_owned(),
+                },
+                ..rebuild_request()
+            },
+            NOW
+        ),
+        Err(IntentRefusal::InvalidConsumer)
+    );
+    assert_eq!(
+        lifecycle.record(
+            &gate,
+            &LifecycleRequest {
                 authorization_ref: None,
                 ..recovery_request()
             },
@@ -567,7 +581,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
 
     type Corruption = fn(&Path);
-    let corruptions: [(&str, Corruption); 6] = [
+    let corruptions: [(&str, Corruption); 7] = [
         ("truncated", |path: &Path| {
             let mut bytes = fs::read(path).unwrap();
             bytes.truncate(bytes.len() / 2);
@@ -592,6 +606,11 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         ("recovery without authorization", |path: &Path| {
             let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
             value["transition"] = Value::from("AuthorizedRecovery");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }),
+        ("blank consumer", |path: &Path| {
+            let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["consumer"]["consumer_id"] = Value::from(" ");
             fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
     ];
@@ -757,6 +776,45 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         )))
     );
     assert_eq!(raw_record(dir.path()), recovery_ledger(0));
+
+    // Revoking the gate at `BeforeRename` or `BeforeFamilyRemoval` prevents the record update or family removal.
+    let dir = tempfile::tempdir().unwrap();
+    let racing = open_gate();
+    let closer = racing.clone();
+    let lifecycle = ProjectionLifecycle::open(dir.path())
+        .unwrap()
+        .with_write_barrier_for_test(move |barrier| {
+            if barrier == WriteBarrier::BeforeRename {
+                closer.close();
+            }
+        });
+    assert_eq!(
+        lifecycle.record(&racing, &rebuild_request(), NOW),
+        Err(IntentRefusal::Revoked)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    assert_eq!(
+        fs::read_dir(dir.path().join(CONTROL_DIR)).unwrap().count(),
+        0
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    SearchProjection::open(dir.path()).unwrap();
+    let racing = open_gate();
+    let closer = racing.clone();
+    let lifecycle = ProjectionLifecycle::open(dir.path())
+        .unwrap()
+        .with_write_barrier_for_test(move |barrier| {
+            if barrier == WriteBarrier::BeforeFamilyRemoval {
+                closer.close();
+            }
+        });
+    lifecycle.record(&racing, &rebuild_request(), NOW).unwrap();
+    assert_eq!(
+        lifecycle.delete_disposable_family(&racing, NOW),
+        Err(IntentRefusal::Revoked)
+    );
+    assert!(dir.path().join("search").join("search.sqlite").exists());
 }
 
 // ---- Process cuts at the record's write barriers ---------------------------
@@ -766,6 +824,7 @@ fn cut_name(barrier: WriteBarrier) -> &'static str {
         WriteBarrier::BeforeRename => "before-rename",
         WriteBarrier::AfterRename => "after-rename",
         WriteBarrier::AfterDirectorySync => "after-directory-sync",
+        WriteBarrier::BeforeFamilyRemoval => "before-family-removal",
     }
 }
 
@@ -863,7 +922,7 @@ fn process_cuts_at_every_write_barrier_leave_a_complete_prior_or_new_record() {
         let dir = tempfile::tempdir().unwrap();
         run_cut_child(dir.path(), cut);
         let consumed = match cut {
-            WriteBarrier::BeforeRename => 0,
+            WriteBarrier::BeforeRename | WriteBarrier::BeforeFamilyRemoval => 0,
             WriteBarrier::AfterRename | WriteBarrier::AfterDirectorySync => 1,
         };
         let temps_before: Vec<_> = fs::read_dir(dir.path().join(CONTROL_DIR))
