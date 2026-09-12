@@ -15,7 +15,7 @@ constructible from fixtures that already exist in `crates/memory-store` and
 
 ## Evidence trail
 
-- The handler drains on every pass at [`lib.rs:8124-8128`][pass-drain],
+- The handler drains on every pass at [`lib.rs:8131-8135`][pass-drain],
   passing `pass_now` and `HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND`, and
   discards the result.
 - [`drain_historian_side_channels`][drain] deletes delivered rows, then for

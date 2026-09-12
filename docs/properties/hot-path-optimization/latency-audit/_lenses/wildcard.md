@@ -163,7 +163,7 @@ only; no test ran and nothing outside this file changed.
   uncached ([135-137][tc-u32]) and tokenizes outside the lock, so concurrent
   misses may tokenize twice ([107-109][tc-concurrent]).
   [`cached_estimate_tokens`][tc-cet] prefixes a NUL so raw content cannot
-  alias a tail-hygiene key; [`tail_hygiene.rs:264`][th-cwd] and
+  alias a tail-hygiene key; [`tail_hygiene.rs:614`][th-cwd] and
   [`m0_compose` via `bench_internals`][bi-trim] are the other callers.
 - Fault/timing angle: Two sessions miss on the same digest at once; a
   generation rotation at the cap while a promote-on-hit insert runs.
@@ -396,7 +396,7 @@ only; no test ran and nothing outside this file changed.
   [`prepare_historian_fire`][call-fire], and the wrapup path
   [5368][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
-  open ([lib.rs:216-217][binding-doc]). One `ConfigCache` per handler holds
+  open ([lib.rs:223-224][binding-doc]). One `ConfigCache` per handler holds
   one project tier, so two bound project roots alternating re-read the file
   every call ([368-372][tier-cached]). The staleness contract at HEAD
   already ignores a same-mtime edit ([test 2182-2188][t-mtime]).

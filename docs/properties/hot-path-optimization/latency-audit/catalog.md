@@ -2227,7 +2227,7 @@ work this way through [`kernel_routes::blocking`][blocking] at eight sites
 decode closure holds the base64 page; a relocated transform carries the whole
 request. The same boundary crosses the token-cache counters
 ([`token_cache.rs:57`][tc-local], W2); the third `thread_local!` in the
-inspected crates is test-only ([`transform.rs:487-490`][tl-test]).
+inspected crates is test-only ([`transform.rs:495-498`][tl-test]).
 Required faults and enabling state: A panic injected inside the relocated
 work (a `kernel_routes::blocking` closure at HEAD, or the relocated
 transform) whose payload carries a unique long sentinel that appears nowhere

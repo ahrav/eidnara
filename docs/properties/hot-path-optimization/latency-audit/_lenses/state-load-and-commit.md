@@ -138,7 +138,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   [`expand_transform_tail_delta`][epoch-read-delta] map any load error to
   `None`, and [`historian_active`][active] maps it to `false`; a corrupt
   `core_state` column trips both because [`load`][load] decodes both columns.
-  The comment at [lib.rs:4167][epoch-comment] states why the epoch must be the
+  The comment at [lib.rs:4174][epoch-comment] states why the epoch must be the
   persisted one. `ModuleMeta` has no `deny_unknown_fields` and no `flatten`, and
   `revert_epoch` grows by `saturating_add`, so the SQLite integer range is not
   a practical concern but belongs in the equivalence statement.
@@ -189,7 +189,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   transaction at all ([`record_stable_pass_trace`][stable-call] runs only when
   `!committed`). Consumers: [session status][status-read] and
   [health][health-read] JSON, the `newest_pass_at` age computation at
-  [lib.rs:6238-6247][age], and the plugin's `Passes: N received, M rejected`
+  [lib.rs:6245-6254][age], and the plugin's `Passes: N received, M rejected`
   line at [command-handler.ts:267][plugin]. No scheduler decision reads
   `pass_trace`; [`load_pass_scheduler_history`][sched-history] has one
   non-store caller and it is a test at [transform.rs:13564][sched-test].
@@ -396,7 +396,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   the interleaving that makes the first property meaningful may never occur.
 - Guarantee: The campaign exercises the state that distinguishes
   one-load-per-pass from per-consumer loads.
-- Rationale: The rerun logic at [lib.rs:8358-8377][floor-b] exists for this
+- Rationale: The rerun logic at [lib.rs:8365-8384][floor-b] exists for this
   interleaving. Without it, a single-load design and the current design are
   indistinguishable.
 - Fault/timing angle: The window between `commit_transform` and
