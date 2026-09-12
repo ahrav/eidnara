@@ -85,8 +85,8 @@ B is the fixed-slot memo revision. The later session-table revision, which
 refuses over-budget blocks instead of resetting the memo, fingerprints caveman
 units instead of cloning them, and replaces sixteen hashed slots with a
 least-recently-used table behind per-session locks, has not been measured
-under this schedule. Its warm-path work per call is table lookup plus one
-`Arc` clone and per-block validity checks; no new timing is claimed for it.
+under this schedule. This schedule supplies no timing for its table lookup
+and `Arc` path.
 
 | Identity | A | B |
 | --- | --- | --- |
@@ -139,7 +139,7 @@ build/process receipts; do not publish that bundle without secret redaction.
 ## Failure scenario
 
 Removing result construction, substituting a precomputed U/T pair, omitting
-session lookup/locking, or treating batch p95 as individual latency would claim
+slot selection/locking, or treating batch p95 as individual latency would claim
 a benefit outside the measured boundary. Using the failed original baseline
 or naming the repair commit as the memo implementation would misidentify A/B.
 
@@ -152,20 +152,23 @@ not mean each serialized message is exactly 2 KiB. Projection construction,
 tokenizer initialization, pool construction, and memo priming are outside
 timing. A's token cache already warms during Criterion warmup.
 
-The [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
-owns and primes B's pool before the callback. Its
-[wrapper](../../../../../crates/daemon/src/lib.rs#L154-L180) uses the actual
-production memo table with namespace 0 and session ID `benchmark`. Session
-lookup, memo locking, memo validity checks, bookkeeping, and full measurement
-construction/destruction remain inside each timed call, as does loop overhead.
+B's benchmark owns and primes its fixed-slot pool before the callback. Slot
+selection, memo locking, validity checks, bookkeeping, and full measurement
+construction/drop remain inside each timed call, as does loop overhead.
+The linked [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
+and [wrapper](../../../../../crates/daemon/src/lib.rs#L154-L180) show the
+current session-table source, with namespace 0 and session ID `benchmark`,
+not measured B. Its table lookup and `Arc` clone are unmeasured by this run.
 The fixture has empty core state, no populated tags or caveman units, no
 coverage ordinal, empty protected IDs, and `protected_tags = 20`; U is zero.
 
 This result concerns repeated warm in-process hygiene calls at one synthetic
 input point. It establishes neither production representativeness nor
 concurrent-session, cold-call, delta-ingress, total turn, or session latency.
-Correctness tests demonstrate that distinct sessions overlap without blocking
-or evicting each other up to the sixteen-session limit, not contention payoff.
+Correctness tests show distinct-session memo guards overlap and entries stay
+warm up to the sixteen-session limit, not contention payoff. Calls sharing one
+memo allocation serialize; table access and cold-path token-cache access still
+share mutexes. Eviction or removal can give the same identity separate memos.
 The 16 MiB plus fixed-container retention bound
 and its shared accounting-model limits are documented in
 [B4's retention evidence](hygiene-digest-is-kind-prefixed-part-content.md#q-does-the-bounded-memo-preserve-measurements-and-account-for-retention),

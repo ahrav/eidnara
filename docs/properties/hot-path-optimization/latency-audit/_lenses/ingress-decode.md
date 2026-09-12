@@ -1,12 +1,13 @@
 # Ingress decode and admission surface
 
 This lens records the admission and decode obligations that any change to the
-per-turn `transform` ingress path must preserve. Anchors are checked in
-`/local/home/ahrav/scratch/eidnara` at
-`913234433ae36a80a6e22c6aac14c7f9aab74386` on 2026-09-10. It is analysis
-only; no test ran and nothing outside this file changed. Lifetime-of-charge
-obligations stay with [E2][e2]; this lens adds the admission order, the charge
-magnitude, the discriminator read, and the typed-decode equivalence.
+per-turn `transform` ingress path must preserve. Discovery baseline is
+`913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10. Live anchors are
+checked against the worktree based on `bb0a42b213f75091a5598db611a9ee4eb1a7a8b1`
+on 2026-09-12, including the accompanying test edits.
+Lifetime-of-charge obligations stay with [E2][e2]; this lens adds the admission
+order, the charge magnitude, the discriminator read, and the typed-decode
+equivalence.
 
 [`Handler::handle`][handle] (the audit calls it `Module::handle`; the trait is
 [`CompositeComponent`][composite]) runs four steps before any route work: the
@@ -80,7 +81,7 @@ Reachability: test-only - the production plugin caps unpaged bodies at
 verified here.
 Existing check: none found at the handler level. Pure-function tests cover the
 cap and the bound ([byte cap test][t-cap], [footprint tests][t-fp]);
-[prepared_output.rs][t-prep] shows error outcomes settle without an output
+[production settlement test][t-prep] shows error outcomes settle without an output
 reservation.
 Open questions:
 - Is a transient `queue_full` from the shared scratch pool expected in default
@@ -92,8 +93,8 @@ Open questions:
 
 Type: safety
 Check: `always` - for every admitted request, assert
-`charge >= nodes * size_of::<Value>() * VALUE_NODE_SLACK + string_bytes *
-RETAINED_STRING_COPIES + VALUE_ENVELOPE_BYTES` where `nodes` and
+`charge >= nodes * size_of::<Value>() * VALUE_NODE_SLACK * RETAINED_NODE_COPIES
++ string_bytes * RETAINED_STRING_COPIES + VALUE_ENVELOPE_BYTES` where `nodes` and
 `string_bytes` come from the scan, and independently assert that the typed
 decode retains at most `RETAINED_STRING_COPIES` owned copies of each string
 block (the `WireMessage` original, the `WireBlock` original, and the
@@ -269,11 +270,11 @@ Open questions:
 | [`scalar_dense_bodies_bound_far_above_their_wire_size`][t-fp] | node cost dominates for `[1,1,...]`; string bytes are not charged as nodes | unaudited |
 | [`dispatch_routes_each_envelope_class_to_a_distinct_arm`][t-dispatch] | `kind` routing, `facade_envelope_not_supported`, `unrecognized_request_shape` for object and non-object | unaudited |
 | [`management_drop_alias_routes_are_rejected`][t-shape] | retired aliases return `unrecognized_request_shape` | unaudited |
-| [`indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape`][t-shape2] | internal names are not routable by `method`, `kind`, or facade | unaudited |
+| [`indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape`][t-shape2] | internal names are not routable by `method` or facade | unaudited |
 | [`transform_request_parses_full_flat_wire_envelope`][t-envelope] | `from_value::<TransformRequest>` accepts one full envelope | unaudited |
 | [`first_hard_pass_meta_respects_the_store_durable_text_bound`][t-meta] | `from_value::<TransformRequest>` accepts a `kind`-only body (feature `bench-internals`) | unaudited |
 | [`readiness_permissions_catalog_and_real_unary_transform`][directhost] | one small `kind`-only transform admitted through the real host | unaudited |
-| [`typed_errors_and_stream_markers_have_no_prepared_body`][t-prep] | error outcomes settle without an output reservation | unaudited |
+| [`production_settlement_error_and_stream_skip_reservation`][t-prep] | error and streamed outcomes settle without an output reservation | unaudited |
 | [`capacity_separates_permanent_from_transient_exhaustion`][t-budget] | `try_charge` above capacity is permanent and consumes nothing | unaudited |
 | [`try_charge_is_exact_and_all_or_none`][t-budget] | over-capacity acquisition leaves the budget unchanged; `u32` overflow refuses | unaudited |
 | [`the_resident_cap_splits_into_three_non_overlapping_pools`][t-pools] | ingress, egress, and scratch pools sum to the floor | unaudited |
@@ -309,30 +310,30 @@ bodies opaque and states only the `invalid_params` cap codes
 ## Anchors
 
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11811-L11833
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11822-L11844
 [composite]: ../../../../../crates/host-runtime/src/composite.rs#L40-L58
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15478-L15494
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15433-L15461
-[copies]: ../../../../../crates/daemon/src/lib.rs#L15414-L15423
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15464-L15469
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15471-L15476
-[probe]: ../../../../../crates/daemon/src/lib.rs#L15317-L15329
-[probestr]: ../../../../../crates/daemon/src/lib.rs#L15336-L15399
-[class]: ../../../../../crates/daemon/src/lib.rs#L15401-L15412
-[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12564-L12658
-[unrecognized]: ../../../../../crates/daemon/src/lib.rs#L12680-L12704
-[pagefields]: ../../../../../crates/daemon/src/lib.rs#L12660-L12664
-[pageconst]: ../../../../../crates/daemon/src/lib.rs#L751-L758
-[tdispatch]: ../../../../../crates/daemon/src/lib.rs#L7893-L7909
-[observed]: ../../../../../crates/daemon/src/lib.rs#L7932-L7938
-[fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7939-L7947
-[freeze]: ../../../../../crates/daemon/src/lib.rs#L8042-L8043
-[routechan]: ../../../../../crates/daemon/src/lib.rs#L8051-L8054
-[accept]: ../../../../../crates/daemon/src/lib.rs#L8072
-[ticket]: ../../../../../crates/daemon/src/lib.rs#L580-L637
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9431-L9439
-[settle]: ../../../../../crates/daemon/src/lib.rs#L12078-L12093
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12490-L12505
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15514-L15530
+[footprint]: ../../../../../crates/daemon/src/lib.rs#L15464-L15492
+[copies]: ../../../../../crates/daemon/src/lib.rs#L15451-L15454
+[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15500-L15505
+[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15507-L15512
+[probe]: ../../../../../crates/daemon/src/lib.rs#L15338-L15346
+[probestr]: ../../../../../crates/daemon/src/lib.rs#L15364-L15416
+[class]: ../../../../../crates/daemon/src/lib.rs#L15418-L15429
+[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12576-L12669
+[unrecognized]: ../../../../../crates/daemon/src/lib.rs#L12692-L12716
+[pagefields]: ../../../../../crates/daemon/src/lib.rs#L12672-L12676
+[pageconst]: ../../../../../crates/daemon/src/lib.rs#L761-L768
+[tdispatch]: ../../../../../crates/daemon/src/lib.rs#L7904-L7920
+[observed]: ../../../../../crates/daemon/src/lib.rs#L7943-L7949
+[fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7950-L7958
+[freeze]: ../../../../../crates/daemon/src/lib.rs#L8053-L8054
+[routechan]: ../../../../../crates/daemon/src/lib.rs#L8062-L8065
+[accept]: ../../../../../crates/daemon/src/lib.rs#L8083
+[ticket]: ../../../../../crates/daemon/src/lib.rs#L590-L647
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9435-L9450
+[settle]: ../../../../../crates/daemon/src/lib.rs#L12090-L12105
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12500-L12517
 [wirestruct]: ../../../../../crates/daemon/src/transform.rs#L801-L972
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
@@ -345,19 +346,19 @@ bodies opaque and states only the `invalid_params` cap codes
 [wire63]: ../../../../host-wire-protocol.md#L308
 [wire751]: ../../../../host-wire-protocol.md#L440
 [wire83]: ../../../../host-wire-protocol.md#L750
-[plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
+[plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L741-L743
 [paging]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [mapinsert]: https://docs.rs/serde_json/1.0.151/src/serde_json/map.rs.html#127-129
 [derivedup]: https://docs.rs/serde_derive/1.0.229/src/serde_derive/de/struct_.rs.html#269
-[t-cap]: ../../../../../crates/daemon/src/lib.rs#L18573-L18631
-[t-fp]: ../../../../../crates/daemon/src/lib.rs#L18633-L18697
-[t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L26583-L26638
-[t-shape]: ../../../../../crates/daemon/src/lib.rs#L32434-L32451
-[t-shape2]: ../../../../../crates/daemon/src/lib.rs#L32454-L32494
-[t-envelope]: ../../../../../crates/daemon/src/transform.rs#L16162-L16188
+[t-cap]: ../../../../../crates/daemon/src/lib.rs#L18607-L18664
+[t-fp]: ../../../../../crates/daemon/src/lib.rs#L18667-L18730
+[t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L27219-L27274
+[t-shape]: ../../../../../crates/daemon/src/lib.rs#L33041-L33058
+[t-shape2]: ../../../../../crates/daemon/src/lib.rs#L33061-L33101
+[t-envelope]: ../../../../../crates/daemon/src/transform.rs#L16201-L16228
 [t-meta]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../../crates/daemon/tests/direct_host.rs#L48-L128
 [fixture]: ../../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-prep]: ../../../../../crates/daemon/tests/prepared_output.rs#L103-L115
+[t-prep]: ../../../../../crates/daemon/src/lib.rs#L17237-L17259
 [t-budget]: ../../../../../crates/host-runtime/src/wire.rs#L825-L865
 [t-pools]: ../../../../../crates/host-runtime/src/config.rs#L480-L503
