@@ -23,7 +23,7 @@ pre-transform work at [`:8181-8198`][h-pre]. The `run_transform` closure at
 calls [`transform_with_projection_cached`][tc-inject] with
 `&self.serialized_outputs`. The first call is at [`:8288-8291`][commit-call].
 Inside that call, `apply_once` commits the store at
-[`commit_transform:4939-4971`][store-commit] and then replaces the
+[`commit_transform:4950-4982`][store-commit] and then replaces the
 serialized-output cache at [`:4987-4997`][output-replace]; both are inside
 the closure, so the transform catalog's
 [output-cache record][tc-output] governs their order.
@@ -39,7 +39,7 @@ In-memory mutations after `run_transform()` returns, in order:
   the `#[cfg(test)]` [hook][hook] runs.
 - [`prepare_historian_fire`][prepare] replaces the session's boundary-token
   snapshot at [`:5197-5200`][boundary-store] and persists no-fire reasons by
-  CAS at [`record_no_fire:5462`][no-fire]; `spawn_historian_firing` at
+  CAS at [`record_no_fire:5511`][no-fire]; `spawn_historian_firing` at
   [`:8429`][spawn-fire] detaches the firing task.
 - [`:8444-8451`][pc-store] calls [`store_projection_cache`][store-pc], which
   replaces the `projections` entry for `(session, revert_epoch)`.
@@ -48,7 +48,7 @@ In-memory mutations after `run_transform()` returns, in order:
   [`guidance_date_for_session`][guidance-pin] when the loaded `meta` has no
   date, and [`guidance_date_for_transform`][guidance-fn] returns it until it
   is removed. The transform copies `ctx.guidance_date` into `meta` only on a
-  bust pass ([`transform.rs:3998-3999`][guidance-meta]).
+  bust pass ([`transform.rs:4001-4002`][guidance-meta]).
 - [`:8481-8510`][native-attach] updates `native_attachments`;
   [`:8512`][trace-complete] writes the completion trace;
   [`:8514-8517`][observation] records the response observation;

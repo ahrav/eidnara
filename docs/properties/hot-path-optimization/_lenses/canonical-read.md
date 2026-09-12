@@ -8,7 +8,7 @@ task, not a new test run or portfolio evaluation. Anchors are rechecked in
 confirmation; historical citations and exercise are not carried forward.
 
 [The async transform handler][pass] pins one canonical read before its
-synchronous transform closure. Emergency reruns at [8264][retry] reuse it.
+synchronous transform closure. Emergency reruns at [8329-8433][retry] reuse it.
 [The kernel query][sql] has an inner admission join and no memory domain/kind
 predicate. It materializes a full Vec before caller selection. Unadmitted
 objects therefore are not part of its candidate result.

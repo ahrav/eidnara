@@ -43,13 +43,13 @@ only; no test ran and nothing outside this file changed.
   on an already-typed request built by [`serde_json::from_value`][hp-req]
   against a [fresh tempfile store][hp-store]. The production handler wraps
   that call with work the bench never sees: the projection-cache lookup,
-  side-channel drain, and `trace_pass_received` at [8120-8131][h-pre], the
+  side-channel drain, and `trace_pass_received` at [8181-8198][h-pre], the
   `project_memory` read, `historian_active`, and guidance-date lookups inside
   [`run_transform`][h-run], a `Some` projection-cache input at
-  [8186-8192][h-call], `prepare_historian_fire`, and response encoding in
+  [8250-8256][h-call], `prepare_historian_fire`, and response encoding in
   [`respond_transform`][respond]. The bench tops out at 1_000 messages because
   the store's 512 KiB durable-text bound rejects a 1_400-message first HARD
-  pass ([hot_path.rs:30-35][hp-counts], [267-269][hp-cliff]); that cliff is
+  pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]); that cliff is
   pinned by [`transform_meta_bound.rs`][meta-bound]. The two
   production-sized fixtures that do exist are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] at 1_400 messages and
@@ -108,10 +108,10 @@ only; no test ran and nothing outside this file changed.
 - Guarantee: A stage that reports a smaller number after the change got
   faster rather than moving out from under its timer.
 - Rationale: Every `TransformTimings` field carries `#[serde(default)]`
-  ([1018-1197][tt]), so a dropped field deserializes as zero and the plugin
+  ([1026-1207][tt]), so a dropped field deserializes as zero and the plugin
   prints `n/a` only when the key is absent from the JSON object
   ([1019-1024][ts-stage-fn]). The handler assigns its stage fields from
-  `Instant` pairs taken on the handler task at [8463-8488][h-timings]; a
+  `Instant` pairs taken on the handler task at [8540-8564][h-timings]; a
   `spawn_blocking` relocation separates those pairs from the worker's.
   [`record_token_cache_delta`][rtcd] subtracts two reads of the
   [thread-local counters][tc-local]; both reads sit inside the synchronous
@@ -127,8 +127,8 @@ only; no test ran and nothing outside this file changed.
 - Required faults and enabling state: none beyond a code change and a pass
   that populates `timings`.
 - Reachability: default-production - the handler populates `timings` on the
-  ordinary path ([8463][h-timings]) and [`respond_transform`][respond] emits
-  the line for every response ([14463-14481][emit-call]).
+  ordinary path ([8540-8564][h-timings]) and [`respond_transform`][respond] emits
+  the line for every response ([14521-14539][emit-call]).
 - Existing check: [`pass_timing_line_is_parseable_for_an_empty_session`][t-line]
   pins the line's key set; [`timings_are_present_and_old_responses_deserialize_without_them`][t-timings]
   pins the default; the plugin test at [test.ts:244][ts-test] asserts the
@@ -158,7 +158,7 @@ only; no test ran and nothing outside this file changed.
   exactly two generations of that cap and is one term of
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared], whose doc says the runtime
   bound holds only when the declaration is truthful and lists each retention
-  class so a change cannot omit one ([2236-2241][declared-doc]); no test
+  class so a change cannot omit one ([2243-2248][declared-doc]); no test
   checks the sum. [`count_with_digest`][tc-cwd] returns counts above `u32`
   uncached ([135-137][tc-u32]) and tokenizes outside the lock, so concurrent
   misses may tokenize twice ([107-109][tc-concurrent]).
@@ -199,7 +199,7 @@ only; no test ran and nothing outside this file changed.
   invisible to the pass's own accounting, and a test can substitute the
   estimator to reach a threshold.
 - Rationale: `apply_once` takes `estimate_tokens: impl Fn(&str) -> usize +
-  Copy` ([2836-2840][ao-sig]). The existing test is a source-text scan
+  Copy` ([2847-2851][ao-sig]). The existing test is a source-text scan
   limited to the span from [`protected_tail_floor_ordinal`][floor] to
   `post_end_revision_inputs_moved`. Direct `tokenizer::estimate_tokens`
   calls in production transform code at HEAD: the SOFT pressure predicate's
@@ -308,9 +308,9 @@ only; no test ran and nothing outside this file changed.
   The differential test's header says the probe sequence must be preserved
   because token counts are not monotonic in prefix length
   ([1-11][diff-header]); it pins byte equality against the frozen reference
-  at production windows ([100-113][diff-prod], 24 cases, budget 1..32_001),
-  small windows ([131-140][diff-small]), and the exact-budget identity
-  ([115-129][diff-exact]). The golden
+  at production windows ([102-112][diff-prod], 24 cases, budget 1..32_001),
+  small windows ([133-140][diff-small]), and the exact-budget identity
+  ([117-128][diff-exact]). The golden
   [`forced_overflow_preserves_existing_truncation_output`][t-golden] pins
   one case from `testdata/historian-chunk-golden.json`.
 - Fault/timing angle: A fingerprint format change lands while a firing is
@@ -345,7 +345,7 @@ only; no test ran and nothing outside this file changed.
 - Rationale: [`parse_cron`][parse] accepts day-of-month 1..31 independent of
   month, so `0 0 30 2 *` is valid and unsatisfiable; [`matches_day`][vixie]
   implements Vixie OR semantics; the stepper evaluates local civil fields
-  for each epoch minute ([166-192][stepper]), so a spring-forward gap skips
+  for each epoch minute ([163-192][stepper]), so a spring-forward gap skips
   that day and a fall-back overlap matches the earlier instant. The cap is
   [`MAX_SEARCH_MS`][cap], 4 x 366 days, 2_108_160 iterations per call for an
   unsatisfiable expression through [`next_cron_occurrence`][occurrence];
@@ -353,7 +353,7 @@ only; no test ran and nothing outside this file changed.
   ([236-239][note-cap]). The dreamer scheduler calls it as
   [`next_due`][sched-due] on its async task; the schedule defaults to `None`
   ([config.rs:127][sched-default]) and is accepted by
-  [`is_valid_smart_note_cron`][valid] at [config.rs:887][sched-accept].
+  [`is_valid_smart_note_cron`][valid] at [config.rs:881-895][sched-accept].
 - Fault/timing angle: The scheduler's tick runs the stepper synchronously;
   an unsatisfiable schedule pays the full cap on that task.
 - Required faults and enabling state: A `Local` zone with DST; expressions
@@ -396,11 +396,11 @@ only; no test ran and nothing outside this file changed.
   clone of the merged config at [288][eff-clone]. Per-pass callers are
   [`maybe_spawn_reattach`][call-reattach],
   [`prepare_historian_fire`][call-fire], and the wrapup path
-  [5368][call-wrapup]; [`bind`][call-bind] freezes a copy into
+  [5417][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
   open ([lib.rs:223-224][binding-doc]). One `ConfigCache` per handler holds
   one project tier, so two bound project roots alternating re-read the file
-  every call ([368-372][tier-cached]). The staleness contract at HEAD
+  every call ([368-398][tier-cached]). The staleness contract at HEAD
   already ignores a same-mtime edit ([test 2182-2188][t-mtime]).
 - Fault/timing angle: A tier edit between two passes; two routes on
   different project roots alternating; the override edited without touching
@@ -451,7 +451,7 @@ only; no test ran and nothing outside this file changed.
 - Every process-global cache is declared.
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared]
   lists each retention class so a budget change cannot omit one
-  ([2236-2241][declared-doc]); a merged-config cache, a sharded token cache,
+  ([2243-2248][declared-doc]); a merged-config cache, a sharded token cache,
   a cron cache, or a scanner anchor index adds its bound there. No test
   checks the sum.
 - Scanner semantics are versioned. An evaluator change that can alter any
@@ -523,7 +523,7 @@ itself tooling only.
 
 - [`default_rules.yaml:12`][rules-radius-doc] describes `radius` as the
   "Byte radius around an anchor match fed to the regex". The evaluator feeds
-  the whole input to the regex ([112][captures]) and uses `radius` only for
+  the whole input to the regex ([112-128][captures]) and uses `radius` only for
   the context window around the full match ([266-297][radius-window]). The
   doc describes a design the code does not implement; a bounded scan would
   move the code toward the doc and must be judged against the property above,
@@ -543,7 +543,7 @@ itself tooling only.
 - [`config.rs:266-267`][eff-warn-doc] states tier read failures are reported
   on every load. The code matches. A merged-config cache contradicts the
   statement and must rewrite it or preserve the behavior.
-- [`hot_path.rs:30-33`][hp-counts] attributes the 512 KiB cliff to `meta`
+- [`hot_path.rs:29-35`][hp-counts] attributes the 512 KiB cliff to `meta`
   growing about 460 bytes per message. The cliff is pinned by
   [`transform_meta_bound.rs`][meta-bound] at 1_000 ok and 1_400 refused; the
   per-message figure is unverified here.

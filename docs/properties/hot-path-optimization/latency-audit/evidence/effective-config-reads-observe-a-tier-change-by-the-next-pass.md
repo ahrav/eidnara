@@ -81,7 +81,7 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 ### Q: Keep reporting tier read failures on every load?
 
 - Sources examined: [`:266-267`][eff-warn-doc], [`:268-288`][eff-warn],
-  [`read_tier_cached:370-371`][tier-cached].
+  [`read_tier_cached:368-398`][tier-cached].
 - Findings: The cache bypasses its hit path when `warning` is set, so a
   failing file is re-read and re-warned on every call. The doc states this as
   intent. A merged cache that stores the result silences the repeat unless it

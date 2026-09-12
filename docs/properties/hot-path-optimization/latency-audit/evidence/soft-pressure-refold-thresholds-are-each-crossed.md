@@ -25,7 +25,7 @@ is never distinguished from the reference. The parent's
   [`:4418`][m0-unit-refold]. `m1_tokens` is the direct count of
   `m1.body` when it differs from [`M1_PLACEHOLDER`][placeholder]
   ([`:4315-4320`][m1-count]).
-- `m1.body` has content when [`compose_m1`][m1-compose] renders at least one
+- `m1.body` has content when [`compose_m160-237`][m1-compose] renders at least one
   of: new compartments past `folded_compartment_seq`, a changed user profile
   under `memory_enabled`, or newly claimed notes ([`:174-222`][m1-pieces]).
 - `history_budget_tokens` is the request value filtered to finite and

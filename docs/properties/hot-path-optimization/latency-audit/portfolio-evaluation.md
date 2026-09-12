@@ -1081,7 +1081,7 @@ to keep every verified anchor; the C6 and W13 files are within it.
 [call-fire]: ../../../../crates/daemon/src/lib.rs#L5100
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1951-L1990
 [cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[copies]: ../../../../crates/daemon/src/lib.rs#L15466-L15475
+[copies]: ../../../../crates/daemon/src/lib.rs#L15511-L15514
 [diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360

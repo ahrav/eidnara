@@ -16,7 +16,7 @@ a campaign that never opens the window.
 ## Evidence trail
 
 - The first `run_transform()` call is at [`:8288-8291`][commit-call]; the store
-  commit inside it is at [`commit_transform:4939-4971`][store-commit]. The
+  commit inside it is at [`commit_transform:4947-4985`][store-commit]. The
   first in-memory update after it is the lineage-root insert at
   [`:8297-8302`][roots-insert].
 - Between those two points there is no `.await`. The next `.await` on the
