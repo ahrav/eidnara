@@ -252,30 +252,30 @@ tree dispatch refused it with `unrecognized_request_shape`, and the probe
 accepted it where the tree did not parse it. The rule and the split were added
 against those failures.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11891-L11910
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12647-L12669
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15440-L15448
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15450-L15453
-[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15433-L15437
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15464-L15497
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15509-L15533
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15536-L15622
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15627-L15632
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15642-L15649
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15819-L15838
-[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7963-L7975
-[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7979-L7999
-[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8004
-[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9512
-[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15740
-[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8587-L8597
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19326-L19374
-[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19379-L19405
-[t-token]: ../../../../../crates/daemon/src/lib.rs#L19410-L19422
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19425-L19586
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19607-L19730
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19753-L19792
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19244-L19323
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11903-L11922
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12659-L12681
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15452-L15460
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15462-L15465
+[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15445-L15449
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15476-L15509
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15521-L15545
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15548-L15634
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15639-L15644
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15654-L15661
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15831-L15850
+[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7975-L7987
+[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7991-L8011
+[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8016
+[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9524
+[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15752
+[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8599-L8609
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19338-L19386
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19391-L19417
+[t-token]: ../../../../../crates/daemon/src/lib.rs#L19422-L19434
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19437-L19598
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19619-L19742
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19765-L19804
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19256-L19335
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827

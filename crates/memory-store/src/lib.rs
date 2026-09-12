@@ -2147,10 +2147,9 @@ impl PreparedWrite {
         }
     }
 
-    /// Makes `owner` the only owner of the scans in `range`, registering it as a domain
-    /// owner of the write. Called after every field is prepared, so no later scan inherits
-    /// the owner through the default owner list.
-    fn own_scans_in(
+    /// Leaves `domain_owners` unchanged, so scans prepared later keep the default owners;
+    /// `persisted_owners` includes each owner a scan names.
+    fn reassign_scans_in(
         &mut self,
         range: std::ops::Range<usize>,
         scope_kind: &'static str,
@@ -2165,12 +2164,25 @@ impl PreparedWrite {
             scope_key: scope_key.into(),
             owner_key: owner_key.into(),
         };
-        if !self.domain_owners.contains(&owner) {
-            self.domain_owners.push(owner.clone());
-        }
         for scan in &mut self.scans[range] {
             scan.owners = vec![owner.clone()];
         }
+    }
+
+    /// Default owners first, then distinct owners named by scans or existing-scan links.
+    fn persisted_owners(&self) -> Vec<PreparedDomainOwner> {
+        let mut owners = self.domain_owners.clone();
+        let named = self
+            .scans
+            .iter()
+            .flat_map(|scan| scan.owners.iter())
+            .chain(self.existing_scan_links.iter().map(|link| &link.owner));
+        for owner in named {
+            if !owners.contains(owner) {
+                owners.push(owner.clone());
+            }
+        }
+        owners
     }
 
     fn link_existing_scans(
@@ -2440,7 +2452,8 @@ impl ActiveWriteTransaction<'_> {
                 MemoryStoreError::Serde("scan audit write has no domain owner".to_string()),
             )));
         }
-        let mut domain_owner_ids = Vec::with_capacity(prepared.domain_owners.len());
+        let owners = prepared.persisted_owners();
+        let mut domain_owner_ids = Vec::with_capacity(owners.len());
         {
             let mut insert_scope = self.tx.prepare_cached(
                 "INSERT OR IGNORE INTO scan_owner_scopes(
@@ -2460,7 +2473,7 @@ impl ActiveWriteTransaction<'_> {
                 "SELECT domain_owner_id FROM scan_domain_owners
                   WHERE owner_scope_id = ?1 AND owner_kind = ?2 AND owner_key = ?3",
             )?;
-            for owner in &prepared.domain_owners {
+            for owner in &owners {
                 let private_scope_key = active_scan_private_key(owner.scope_kind, &owner.scope_key);
                 let private_owner_key =
                     active_scan_private_key(prepared.owner_kind, &owner.owner_key);
@@ -2633,42 +2646,51 @@ fn prune_retired_active_scan_audit(
     retired_scans: &[(String, String)],
     owner_scope_id: &str,
 ) -> rusqlite::Result<()> {
-    for (scan_id, _) in retired_scans {
-        tx.execute(
+    if !retired_scans.is_empty() {
+        let scan_ids = json_id_array(retired_scans.iter().map(|(scan_id, _)| scan_id.as_str()))?;
+        tx.prepare_cached(
             "DELETE FROM field_scans
-              WHERE scan_id = ?1
+              WHERE scan_id IN (SELECT value FROM json_each(?1))
                 AND NOT EXISTS (
                     SELECT 1 FROM scan_owner_copies
                      WHERE scan_owner_copies.scan_id = field_scans.scan_id
                 )",
-            params![scan_id],
+        )?
+        .execute(params![scan_ids])?;
+        let batch_ids = json_id_array(
+            retired_scans
+                .iter()
+                .map(|(_, batch_id)| batch_id.as_str())
+                .collect::<BTreeSet<_>>(),
         )?;
-    }
-    let mut pruned_batches = BTreeSet::new();
-    for (_, batch_id) in retired_scans {
-        if !pruned_batches.insert(batch_id) {
-            continue;
-        }
-        tx.execute(
+        tx.prepare_cached(
             "DELETE FROM scan_batches
-              WHERE scan_batch_id = ?1
+              WHERE scan_batch_id IN (SELECT value FROM json_each(?1))
                 AND NOT EXISTS (
                     SELECT 1 FROM field_scans
                      WHERE field_scans.scan_batch_id = scan_batches.scan_batch_id
                 )",
-            params![batch_id],
-        )?;
+        )?
+        .execute(params![batch_ids])?;
     }
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM scan_owner_scopes
           WHERE owner_scope_id = ?1
             AND NOT EXISTS (
                 SELECT 1 FROM scan_domain_owners
                  WHERE scan_domain_owners.owner_scope_id = scan_owner_scopes.owner_scope_id
             )",
-        params![owner_scope_id],
-    )?;
+    )?
+    .execute(params![owner_scope_id])?;
     Ok(())
+}
+
+fn json_id_array<'a>(ids: impl IntoIterator<Item = &'a str>) -> rusqlite::Result<String> {
+    serde_json::to_string(&ids.into_iter().collect::<Vec<_>>()).map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(
+            error.to_string(),
+        )))
+    })
 }
 
 /// Retires the domain owners in one scope, optionally narrowed to an owner kind and key,
@@ -2682,12 +2704,11 @@ fn retire_active_scan_domain_owners(
 ) -> rusqlite::Result<()> {
     let private_scope_key = active_scan_private_key(scope_kind, scope_key);
     let owner_scope_id: Option<String> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT owner_scope_id FROM scan_owner_scopes
               WHERE scope_kind = ?1 AND scope_key = ?2",
-            params![scope_kind, private_scope_key],
-            |row| row.get(0),
-        )
+        )?
+        .query_row(params![scope_kind, private_scope_key], |row| row.get(0))
         .optional()?;
     let Some(owner_scope_id) = owner_scope_id else {
         return Ok(());
@@ -2714,13 +2735,13 @@ fn retire_active_scan_domain_owners(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM scan_domain_owners
           WHERE owner_scope_id = ?1
             AND (?2 IS NULL OR owner_kind = ?2)
             AND (?3 IS NULL OR owner_key = ?3)",
-        params![owner_scope_id, owner_kind, private_owner_key],
-    )?;
+    )?
+    .execute(params![owner_scope_id, owner_kind, private_owner_key])?;
     prune_retired_active_scan_audit(tx, &retired_scans, &owner_scope_id)
 }
 
@@ -2770,6 +2791,9 @@ pub struct DueSideChannelMarker {
 /// register could not be retired by the next pass, so the next pass retires this owner
 /// whatever wrote the row it replaces.
 const CACHE_STATE_PASS_OWNER_KEY: &str = "cache_state_pass";
+
+/// Distinct from the `cache_state` key so legacy rows stay separable from live ones.
+const CACHE_STATE_RETAINED_OWNER_KEY: &str = "cache_state_retained";
 
 fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
@@ -8592,9 +8616,6 @@ impl MemoryStore {
             .ok_or_else(|| {
                 MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
             })?;
-        // The fields this pass replaces in `cache_state` and `pass_trace` are owned by the
-        // latest pass and retired when the next pass settles over them; only the cumulative
-        // overlay rows stay under the shared owner below.
         write.domain_owner("session", session_id, CACHE_STATE_PASS_OWNER_KEY);
         // Record the scan without deciding on it. Whether this `session_id` is a new
         // identity is settled by the row this transaction actually finds, because a
@@ -8635,6 +8656,7 @@ impl MemoryStore {
         let canonical_project_root = project_root
             .filter(|root| !root.is_empty())
             .map(|root| canonical_root(root).to_string_lossy().into_owned());
+        let retained_scans_start = write.scans.len();
         if let Some(project_root) = canonical_project_root.as_deref() {
             write.identity("project_root", project_root)?;
         }
@@ -8650,7 +8672,6 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
-        let overlay_scans_start = write.scans.len();
         let tag_mints = tag_mints
             .iter()
             .map(|input| {
@@ -8698,7 +8719,7 @@ impl MemoryStore {
                 })
             })
             .transpose()?;
-        let overlay_scans = overlay_scans_start..write.scans.len();
+        let retained_scans = retained_scans_start..write.scans.len();
         let max_seen_ordinal = max_seen_ordinal
             .map(|ordinal| {
                 i64::try_from(ordinal).map_err(|_| {
@@ -8734,6 +8755,7 @@ impl MemoryStore {
             &meta_json,
             JsonScanPolicy::DurablePreserveIdentities,
         )?;
+        let history_scans_start = write.scans.len();
         let scheduler_observation_json = scheduler_observation
             .map(serialize_scheduler_observation)
             .transpose()?
@@ -8772,6 +8794,7 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
+        let history_scans = history_scans_start..write.scans.len();
         // The accepted cache row version is a stable identity for the pass that produced the
         // divergence. Overlay timestamps are the request clock when available; direct callers
         // that omit one still receive a real commit timestamp.
@@ -8781,9 +8804,10 @@ impl MemoryStore {
         } else {
             current_time_ms()
         };
-        // Tag, temporal-mark, user-hint, and channel-1 rows accumulate across passes and
-        // stay owned by the session's shared owner; every other scan belongs to this pass.
-        write.own_scans_in(overlay_scans, "session", session_id, "cache_state");
+        // These bytes stay stored after the next pass, so their scans outlive the pass owner.
+        for range in [retained_scans, history_scans] {
+            write.reassign_scans_in(range, "session", session_id, CACHE_STATE_RETAINED_OWNER_KEY);
+        }
 
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
@@ -15798,6 +15822,45 @@ mod tests {
         );
     }
 
+    /// Refusal after scanning a substituted value leaves the detection in the caller-provided
+    /// vector.
+    #[test]
+    fn a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector() {
+        // Object members are walked in `serde_json::Map` order, so the value entry's key
+        // sorts before the refusing key.
+        let mut keyed = ModuleMeta::default();
+        keyed.block_identity_by_mid.insert(
+            "a-mid".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "password=earlier-value".to_string(),
+                byte_fingerprint: "fp".to_string(),
+            }],
+        );
+        keyed.block_identity_by_mid.insert(
+            "password=key-secret".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "fp".to_string(),
+            }],
+        );
+        let mut detections = Vec::new();
+        let refused = prepare_json_content_collecting(
+            &serde_json::to_string(&keyed).unwrap(),
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut detections,
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            detections.len(),
+            1,
+            "the earlier value must be scanned before the key refuses, so the caller holds a \
+             detection it must not record"
+        );
+    }
+
     /// The value-only scanner finds nothing in `{"credential":"fixture"}`, so a receipt built
     /// from its detections alone would report no finding for bytes the key gate replaced.
     #[test]
@@ -16479,6 +16542,144 @@ mod tests {
             scan_audit_rows(&store).0 > before.0,
             "a detected identity keeps its audit row"
         );
+    }
+
+    fn field_copy_counts(
+        store: &MemoryStore,
+        session_id: &str,
+        field_ids: &[&str],
+    ) -> std::collections::BTreeMap<String, i64> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT c.field_id, COUNT(*) FROM scan_owner_copies c \
+                     JOIN scan_domain_owners o ON o.domain_owner_id = c.domain_owner_id \
+                     JOIN scan_owner_scopes s ON s.owner_scope_id = o.owner_scope_id \
+                     WHERE s.scope_kind = 'session' AND s.scope_key = ?1 \
+                     GROUP BY c.field_id",
+                )?;
+                let rows = statement
+                    .query_map([active_scan_private_key("session", session_id)], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(field_ids
+                    .iter()
+                    .map(|field| {
+                        let count = rows
+                            .iter()
+                            .find(|(id, _)| id == field)
+                            .map_or(0, |(_, count)| *count);
+                        ((*field).to_string(), count)
+                    })
+                    .collect())
+            })
+            .unwrap()
+    }
+
+    /// `transform_session_roots`, the `scheduler_history` ring, and `last_divergence` hold
+    /// bytes from earlier passes, so their receipts must outlive the pass owner.
+    #[test]
+    fn retained_pass_fields_keep_their_scan_receipts_across_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let retained = [
+            "project_root",
+            "scheduler_observation",
+            "scheduler_interesting",
+            "first_divergence",
+        ];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-a"),
+                    first_divergence: Some("{\"where\":\"m1\"}"),
+                    scheduler_observation: Some(&observation),
+                    scheduler_applied_reductions: true,
+                    ..base_commit(None, &core, &meta)
+                },
+            )
+            .unwrap();
+        let first = field_copy_counts(&store, "ses", &retained);
+        assert!(
+            retained.iter().all(|field| first[*field] == 1),
+            "the first pass records one receipt per retained field, got {first:?}"
+        );
+        let meta_before = field_copy_counts(&store, "ses", &["meta"])["meta"];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-b"),
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap();
+        let (roots, history_len, last_divergence): (i64, i64, Option<String>) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM transform_session_roots WHERE session_id = 'ses'), \
+                            (SELECT json_array_length(scheduler_history) FROM pass_trace \
+                              WHERE session_id = 'ses'), \
+                            (SELECT last_divergence FROM pass_trace WHERE session_id = 'ses')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(roots, 2, "both roots stay stored");
+        assert_eq!(history_len, 2, "both observations stay stored");
+        assert!(
+            last_divergence.is_some_and(|value| value.contains("m1")),
+            "the first pass's divergence stays readable"
+        );
+        let second = field_copy_counts(&store, "ses", &retained);
+        assert_eq!(
+            second["project_root"], 2,
+            "every stored root keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            second["scheduler_observation"], 2,
+            "every stored observation keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            second["scheduler_interesting"], 1,
+            "the stored interesting observation keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            second["first_divergence"], 1,
+            "the divergence still readable as last_divergence keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            field_copy_counts(&store, "ses", &["meta"])["meta"],
+            meta_before,
+            "the replaced meta keeps one live receipt"
+        );
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-b"),
+                    first_divergence: Some("{\"where\":\"m2\"}"),
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap();
+        let third = field_copy_counts(&store, "ses", &retained);
+        assert_eq!(third["project_root"], 3, "got {third:?}");
+        assert_eq!(third["scheduler_observation"], 3, "got {third:?}");
     }
 
     fn base_commit<'a>(
@@ -23699,6 +23900,34 @@ mod shadow_tests {
         let prepared = write.transaction_content("content", &fitting).unwrap();
         assert_eq!(prepared.len(), MAX_DURABLE_TEXT_BYTES);
         assert!(prepared.ends_with("password=<REDACTED:password>"));
+    }
+
+    /// Reassignment changes only the selected scans; a scan prepared afterwards keeps the
+    /// default owners because `domain_owners` is not widened.
+    #[test]
+    fn reassigning_a_scan_range_leaves_later_scans_under_the_default_owner() {
+        let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
+        write.domain_owner("session", "ses", "pass");
+        write.existing_identity("first", "one").unwrap();
+        write.reassign_scans_in(0..1, "session", "ses", "retained");
+        write.existing_identity("second", "two").unwrap();
+        let owner_keys = |scan: &PreparedFieldScan| {
+            scan.owners
+                .iter()
+                .map(|owner| owner.owner_key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(owner_keys(&write.scans[0]), vec!["retained"]);
+        assert_eq!(owner_keys(&write.scans[1]), vec!["pass"]);
+        assert_eq!(
+            write
+                .domain_owners
+                .iter()
+                .map(|owner| owner.owner_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pass"],
+            "the reassigned owner is not a default owner"
+        );
     }
 
     fn apply_state_sync_sections(

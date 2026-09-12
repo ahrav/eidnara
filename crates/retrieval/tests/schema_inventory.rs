@@ -279,8 +279,19 @@ fn compare(documented: &BTreeMap<String, Table>, stored: &BTreeMap<String, Table
 
 #[test]
 fn the_baseline_matches_the_frozen_inventory_field_for_field() {
+    let inventory = std::fs::read_to_string(
+        repo_root().join("docs/properties/search-projection/projection-schema.md"),
+    )
+    .unwrap();
+    let documented_version: u32 = inventory
+        .split_once("The schema version is ")
+        .and_then(|(_, suffix)| suffix.split('.').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(documented_version, retrieval::SCHEMA_VERSION);
     let documented = with_implied_not_null(documented());
-    assert_eq!(documented.len(), 9, "every baseline table is documented");
+    assert_eq!(documented.len(), 10, "every baseline table is documented");
     let stored = with_implied_not_null(stored(retrieval::BASELINE));
     assert_eq!(compare(&documented, &stored), Vec::<String>::new());
     // The inventory gives every persistence field of the contract a home.

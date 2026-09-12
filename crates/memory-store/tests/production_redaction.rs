@@ -681,12 +681,14 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
     );
     drop(connection);
 
-    // A secret in a nested map key is refused rather than stored, and a detection an
-    // earlier value produced in the same document leaves no receipt behind.
-    let mut keyed = ModuleMeta {
-        last_render_config: "password=earlier-value".to_string(),
-        ..ModuleMeta::default()
-    };
+    let mut keyed = ModuleMeta::default();
+    keyed.block_identity_by_mid.insert(
+        "a-mid".to_string(),
+        vec![memory_store::BlockIdentity {
+            kind_tag: "password=earlier-value".to_string(),
+            byte_fingerprint: "fp".to_string(),
+        }],
+    );
     keyed.block_identity_by_mid.insert(
         "password=key-secret".to_string(),
         vec![memory_store::BlockIdentity {

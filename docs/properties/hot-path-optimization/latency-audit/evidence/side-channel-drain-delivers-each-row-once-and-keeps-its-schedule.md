@@ -147,7 +147,7 @@ that precede it on the branch.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/434)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
-[Delivery][deliver] inserts the target row and [retires the outbox row][retire]
+[Delivery][deliver-live] inserts the target row and [retires the outbox row][retire]
 in one fenced transaction. The retirement is a `DELETE` whose
 `delivered_at_ms IS NULL` predicate is the row-still-pending guard: a
 drainer that read the row before another drainer retired it finds nothing to
@@ -180,7 +180,7 @@ and the outbox holds none.
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11361-L11448
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14212-L14236
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11494-L11518
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L19831-L19970
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11385-L11472
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14236-L14260
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11518-L11542
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20032-L20171

@@ -182,26 +182,45 @@ row. The identifiers are generated inside the fenced transaction, so a random
 source failure now aborts the write where `randomblob` could not fail; on
 Linux after boot that failure is not reachable.
 
-The scans a pass records for the fields it replaces are owned by
-[one fixed pass owner][pass-owner] that the next pass
-[retires after every replay check has passed][retire]; the key is not per
-row version because other writers (historian publish, lineage descent,
+The scans a pass records for the identity, `core_state`, and `meta` bytes the
+next pass replaces are owned by [one fixed pass owner][pass-owner] that the
+next pass [retires after every replay check has passed][retire]; the key is
+not per row version because other writers (historian publish, lineage descent,
 recomputation reset) bump `row_version` without registering an owner, and a
-key they never wrote could not be retired. The tag, temporal-mark, user-hint,
-and channel-1 scans are [reassigned][overlay-owner] to the shared owner
-because their rows accumulate; the shared owner is registered only when the
-pass carries an overlay. The retirement adds a bounded number of statements
-to the fenced commit (one owner lookup, one copy delete, one orphan-scan
-prune, one owner delete, and a scope prune) that the receive-side saving does
+key they never wrote could not be retired. Every scan for bytes that outlive
+the pass is [reassigned][overlay-owner] to a [retained owner][retained-owner]
+the pass never retires: the tag, temporal-mark, user-hint, and channel-1
+overlay rows, the root added to `transform_session_roots`, the
+`scheduler_observation` and `scheduler_interesting` entries appended to the
+`pass_trace` history rings, and a `first_divergence` that stays readable as
+`last_divergence` after a pass with none. Reassignment leaves the write's
+default owner list alone, so a scan prepared after it keeps the pass owner;
+the [reassignment test][reassign-test] holds that. The retained owner is
+registered only when the pass carries such a scan, and its key differs from
+the `cache_state` key that stores written before the pass owner existed carry,
+so legacy per-pass rows on those stores stay separable from live ones. Those
+legacy rows are not retired by this change; they stop growing, and a targeted
+cleanup remains open.
+
+The retirement adds a fixed number of cached statements to the fenced commit
+(one scope lookup, one retired-scan select, one owner delete, one
+[set-based orphan-scan prune and one batch prune][prune] over the retired ids
+bound as a JSON array, and a scope prune) that the receive-side saving does
 not offset; the branch's stated cost claim is about the receive write, and the
-retirement is what keeps the audit tables bounded. Lineage descent copies the
-source scope's live scans, which after retirement are the latest pass's scans
-plus overlays rather than every pass the source ever ran. The
-[retirement test][retire-test] shows the `field_scans` and `scan_owner_copies`
-counts flat across six passes, flat again across passes after a historian
-publish bumped the row version, a tag mint's scans added and kept through the
-next pass, and the pass owner, the shared overlay owner, and the publish owner
-each holding exactly their own copies. The
+retirement is what keeps the pass-owned audit rows bounded. The retained
+owner's rows grow with the bytes they describe: one receipt per root, per
+history entry, and per divergence, on the same order as the completed-trace
+receipts. Lineage descent copies the source scope's live scans, which after
+retirement are the latest pass's scans plus the retained scans rather than
+every pass the source ever ran. The [retirement test][retire-test] shows the
+`field_scans` and `scan_owner_copies` counts flat across six passes, flat
+again across passes after a historian publish bumped the row version, a tag
+mint's scans added and kept through the next pass, and the pass owner, the
+retained owner, and the publish owner each holding exactly their own copies.
+The [retained-fields test][retained-test] shows a second pass keeping the
+receipts for the first pass's root, scheduler observation, interesting
+observation, and divergence while both roots, both history entries, and the
+divergence stay stored, and a third pass adding to them. The
 [conflict test][seq-conflict-test] shows a pass that loses the
 compartment-generation check retiring nothing.
 
@@ -212,19 +231,25 @@ its cache state.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p memory-store --locked` passed 180 tests including the four
-above; `cargo test -p daemon --locked` passed 1013, the two
-`dreamer_run_task_bounds_*` tests failing under full-suite load on the base
-branch as well and passing in isolation.
+`cargo test -p memory-store --locked` passed 183 tests including the six
+above; `cargo test -p daemon --locked` passed 1022 unit tests, and the
+`embedding_dispatch` integration test
+`publication_search_deadline_preserves_admission_without_recharging` fails when
+its file runs as a group and passes in isolation, on the unmodified branch head
+as well.
 
-[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2616-L2624
-[audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2432
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16440-L16482
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6888
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16406-L16435
-[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2772
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L8832
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8786
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16263-L16401
-[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24736-L24780
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6897
+[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2629-L2637
+[audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2444
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16503-L16545
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6912
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16469-L16498
+[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2793
+[retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2796
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L8857
+[prune]: ../../../../../crates/memory-store/src/lib.rs#L2644-L2686
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8809
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16326-L16464
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16584-L16683
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L23908-L23931
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24765-L24809
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6921
