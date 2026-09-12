@@ -67,7 +67,12 @@ not the handler.
 | [unflagged_synthetic_delta_prepares_historian_and_native_output][synthetic-delta-witness] | A prior HARD pass freezes the pair; an unflagged suffix reaches the situation marker with a prepared firing and native serving. A third delta reuses the pair in its cached prefix. Captured producer prompts and native bytes match a typed-flag baseline reconstruction; boundary/chunk checks retain the difference from full raw ingress. | unaudited |
 | [lineage_rebase_preserves_unflagged_synthetic_head][synthetic-lineage-rebase] | A non-subagent descent replay rebases a synthetic head from ordinal 1 to 11 without consuming a live ordinal. Projection marks, served bytes and fingerprints equal the typed-flag reference. | unaudited |
 | [tag_overlay_guard_uses_the_pass_local_synthetic_view][synthetic-overlay-guard] | `apply_tag_overlay_to_message` takes its synthetic flag from the pass-local view. A normalized carrier rendered from the raw ingress clone keeps its bytes under a carrier-targeted overlay; a live control takes its tag. | unaudited |
-| [`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline`][t-parked] | Reused `content_hash` fingerprints and `canonical_bytes` equal a full rehash. | unaudited |
+| [`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline`][t-parked] | Reused `content_hash` fingerprints and `canonical_bytes` equal a full rehash for this text fixture, not universally for equal values with different serialized bytes. | unaudited |
+| [Canonical shell and segment witnesses][served-shells] | Literal bytes, SHA-256 identity, measured length, and actual `Served` segment writes agree for original, latent-edited, typed, and block-edited shells. Unknown fields, Unicode keys, a large integer, fractions, and signed zero are preserved. | unaudited |
+| [Canonical frozen-corpus witness][served-corpus] | Original and fully typed shells match the independent `to_vec(to_value(message))` reference and prepared-frame bytes. Pairwise block identity digests agree with structural equality across the corpus. | unaudited |
+| [Fingerprint candidate witness][served-fallback] | Real projection receipts match the frozen structural reference on the same candidates in both signed-zero directions, with original and typed zeros, latent extras, unknown fields, and first-duplicate reuse. Reused and fresh zero fingerprints intentionally differ while served bytes agree. Separately poisoned receipts expose candidate choice and positional precedence, not byte-hash equality. Null block input is rejected. | unaudited |
+| [Single-serialization counter][served-once] | Each nested counted `Serialize` implementation runs once. Nested scalar and decoded-key ordering checks preserve serde bytes and reject unsorted struct output. | unaudited |
+| [Fallback source guard][served-source] | The constructor has no `to_value` round trip. The absent-position fallback has no linear `find` or structural wire-comparison expression and has one lazy digest-index initializer. Positional equality is allowed. | unaudited |
 | [`served_fingerprint_block_ids_pin_flat_mid_index_format`][t-fpids] | Fingerprint block ids are `mid#index` and synthetic ids. | unaudited |
 | [`transform_segments_preserve_existing_golden_bytes`][t-segments] | `Exact` segments concatenate into the golden body. | unaudited |
 | [`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`][t-native-inc] | Real tail expansion shares native values and sidecar metadata. Fresh, reattached, and shared replay produce equal native bytes and projected identity data. At most two served tail messages are encoded; prefix chunks retain pointer identity. The warm request charge equals a fresh walk using the same size estimator, independently of cached charges. The compiled test setting enables the native differential; the negative controls below verify detection. | unaudited |
@@ -100,9 +105,8 @@ not the handler.
 | [`shared_row_iterator_matches_slice_for_protected_legacy_orphan`][t-hyg-iterator] | Arc-row iterator and original slice measurements agree exactly on the frozen orphan fixture with two protected tags; orphan tag 2 has nonzero T and zero U. | unaudited |
 | [selection_differential.rs][t-seldiff] | Optimized selection equals the frozen reference over generated `SelItem`s. | unaudited |
 
-None found: a test that a `Served` prepared segment writes
-`canonical_bytes`, or that names the sorted-key form; a captured production
-delta body replaying a synthetic pair; a test that runs either differential gate from `crates/daemon/tests/`
+None found: a captured production delta body replaying a synthetic pair;
+a test that runs either differential gate from `crates/daemon/tests/`
 or `crates/daemon/benches/` (`cfg!(test)` is false there and no file sets the
 variables).
 
@@ -435,7 +439,12 @@ not a claim that no related check exists anywhere in the repository.
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L29040
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27890
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23230
-[t-parked]: ../../../../crates/daemon/src/transform.rs#L13747
+[t-parked]: ../../../../crates/daemon/src/transform.rs#L14080
+[served-shells]: ../../../../crates/daemon/src/transform.rs#L13808
+[served-corpus]: ../../../../crates/daemon/src/transform.rs#L13854
+[served-fallback]: ../../../../crates/daemon/src/transform.rs#L13891
+[served-once]: ../../../../crates/daemon/src/served_json.rs#L148
+[served-source]: ../../../../crates/daemon/src/transform.rs#L14036
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13617
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
 [t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20651

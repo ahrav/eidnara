@@ -340,6 +340,115 @@ All-target/all-feature daemon Clippy with `-D warnings` and the scoped formatter
 also pass. The extension changes tests and documentation, not served behavior;
 the historical evidence and bound golden remain intact.
 
+### Canonical served bytes and fingerprint identity
+
+Verification date: 2026-09-12. Predecessor: `e1a0d06a785763cb848f42bd65f0e95206cb426c`.
+The [parent preservation contract](https://github.com/ahrav/eidnara/issues/350)
+requires byte-identical served output. This resolves the sorted-key question
+for this optimization without adding a wire field or a protocol version.
+Earlier discovery and execution evidence above remains historical.
+
+The [served constructor][canonical-constructor] serializes through
+[serde's formatter hooks][canonical-encoder]. Those hooks record object and
+field byte spans. The copy step orders fields by decoded Rust string keys and
+copies scalar bytes unchanged. It does not build a `Value` tree, reserialize
+values, change numeric forms, or duplicate the wire schema. Existing wire
+serializers still decide field omissions and whether to replay retained JSON.
+The generic encoder is private; its production entry accepts `WireMessage`,
+whose fields contain no `RawValue` fragments that bypass object hooks.
+The wire structs use named fields rather than flattened maps; retained JSON
+maps have unique keys after parsing. Generic serializers that emit duplicate
+keys or raw fragments are outside this facade's input graph.
+
+The [identity digest][canonical-identity] streams the tuple of typed kind,
+provider extras, and retained original into SHA-256. It normalizes floating
+signed zero only. Integer zero remains distinct from floating zero. These
+ephemeral keys are not projection hashes or persisted fingerprints. Projection
+hashes and fresh fingerprints still use `to_string(WireBlock)` bytes and full
+SHA-256, exposed as 64 lowercase hex characters.
+The [optional original][canonical-original] cannot be `Some(Value::Null)`: its field is private,
+deserialization validates `WireBlockData` before retaining it, and that decode
+rejects null. Constructors and mutation methods set it to `None`. The
+theoretical option/null encoding alias is therefore not a constructible block
+identity and needs no extra sentinel or encoding change.
+
+The positional map keeps the first entry for each index. Its helper uses the
+predecessor's exact structural equality rather than serializing and hashing
+both identities. A mismatching positional candidate forces a fresh hash rather
+than a fallback search. An absent position initializes the identity index once
+per message, preserving
+the first candidate for each digest. Repeated served blocks reuse that same
+candidate. Structural comparison is absent only from the absent-index fallback.
+
+The [receipt witness][canonical-receipts] compares this fallback against an
+inline frozen reference from predecessor `e1a0d06a`: positional-first lookup,
+first structural match when the position is absent, and the structural reuse
+guard. Both algorithms receive the same unpoisoned projection candidates.
+The cases reverse signed-zero order, use original and fully typed zeros,
+distinguish latent provider extras and original retention, and repeat an equal
+block. Reused fingerprints match that reference, including candidate byte
+lengths. Opposite floating-zero spellings intentionally produce a different
+fresh fingerprint, while canonical served bytes remain identical. This is the
+predecessor's behavior, not a new byte-hash equality guarantee. The separate
+poisoned-receipt assertions prove candidate choice only.
+
+Scratch lifetime is the constructor call. The positional map holds at most
+one `usize`/borrowed-block pair per projected block; the lazy identity map holds
+at most one 32-byte digest/borrowed-block pair per distinct identity. The
+serializer holds two byte buffers, object/field ranges, and decoded sort keys
+for one object at a time. None escapes into `ServedMessage`. Existing request
+ownership and [retained served-message accounting][canonical-retention] remain
+unchanged; no process-local cache or declared retained budget is added. Peak
+scratch usage and latency are not measured by these correctness checks. The
+[handler's parse charge][canonical-request-charge] stays held through dispatch
+and response settlement; its decoded-tree estimate is not a proof of total
+transform peak memory.
+
+Characterization before production edits passed literal bytes, real measured
+`Served` frame writes, original and typed frozen-corpus comparisons, latent
+metadata edits, unknown fields, duplicate candidates, and floating signed-zero
+selection. The [source guard][canonical-source] then failed on the old
+`to_value` round trip. A numeric counterexample also rejected a proposed
+derived-`Hash` identity: serde JSON hashes integer zero and floating zero with
+the same input despite unequal values. Its distinct receipt selected candidate
+5 instead of candidate 6. The streamed tuple digest passes this counterexample;
+no memory-store derive or serializer change remains.
+
+Focused checks pass with `cargo test -p daemon --lib --all-features --locked`
+and filters `served_` (18),
+`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline` (1),
+`differential` (8), `wire::tests` (14), `native` (35), and `tag_baseline`
+(7 passed, 1 manual timing test ignored). Filters overlap. The
+[single-serialization counter][canonical-once] and scalar/key fixtures prove
+one serde traversal and unchanged nested scalar bytes. The frozen
+`differential_goldens.rs` and all existing fixture bytes remain unchanged.
+
+No benchmarks, environment capture, or measurement-artifact edits run here.
+Six independent reviews and full repository gates remain controller work.
+`cargo fmt --all --check`, daemon all-target/all-feature Clippy with
+`--locked -- -D warnings`, the comment-marker script, and `git diff --check`
+pass. `cargo check -p daemon --release --all-features --locked` passes.
+The release all-target check exposes an unchanged host-bin test defect:
+`phase_cap_override_only_widens` calls a helper gated by `debug_assertions`.
+The release production check does not include that test target and passes.
+
+After restoring positional equality, focused reruns use
+`cargo test -p daemon --lib --all-features --locked` with `served_` (18),
+`fingerprint` (12), `differential` (8),
+`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline` (1), and `native`
+(35). All pass; the filters overlap. The controller reports its full 14-gate
+pass before this restoration. That result does not stand in for these reruns.
+
+[canonical-constructor]: ../../../../../crates/daemon/src/transform.rs#L164-L227
+[canonical-encoder]: ../../../../../crates/daemon/src/served_json.rs#L112-L141
+[canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L892
+[canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
+[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13891
+[canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L255-L282
+[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11811-L11833
+[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L14036
+[canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L148
+
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
 [shell-build]: ../../../../../crates/daemon/src/wire.rs#L546-L565
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
@@ -365,8 +474,8 @@ the historical evidence and bound golden remain intact.
 [diff-bytes]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L329-L337
 [flatten]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L680-L743
 [fp-reuse]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L833-L842
-[served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
-[ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
+[served-reusing]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L164-L216
+[ser-served]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011
 [assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
 [prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912

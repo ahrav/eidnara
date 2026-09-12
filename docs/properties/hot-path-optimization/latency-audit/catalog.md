@@ -328,6 +328,12 @@ The [shell metadata check][shell-metadata] reparses nonempty origin and provider
 extras with non-default, non-synthetic harness metadata. It checks that replay
 drops only the unknown message field while retaining every block and known
 shell field. The exact allocation oracle includes nonzero metadata heap terms.
+The [served-byte witnesses][served-byte-witnesses] compare literal canonical
+bytes and measured `Served` segment writes for original, latent-edited, typed,
+and block-edited shells. The frozen wire corpus also runs with fully typed
+blocks against the value-round-trip reference. Fallback witnesses distinguish
+latent fields, unknown originals, duplicate candidates, positional precedence,
+integer zero, and signed floating zero.
 Guarantee: The projection, the native attachment, and the served message
 bytes depend only on message values, never on which allocation holds them or
 which lane assembled them.
@@ -357,10 +363,17 @@ serde_json::to_vec(&serde_json::to_value(&message))`, which sorts object keys
 because the workspace enables only [`raw_value`][serde-features];
 `canonical_hash == sha256(canonical_bytes)`; the prepared output writes
 exactly `canonical_bytes` per [`Served` segment][segment-served]
-([segment construction][segments]); each `block_fingerprints[i]` equals
-`(fingerprint(to_string(block)), to_string(block).len())`; and the projected
-`content_hash` is reused only when [`flat.wire == served`][fp-reuse] under
-`WireBlock`'s derived equality, which includes `original`. `always` because
+([segment construction][segments]). Fingerprints retain the positional-first
+rule: the positional helper uses exact `WireBlock` equality without hashing
+either identity. An unequal positional candidate forces a fresh wire hash;
+only an absent position searches the first identity-equal candidate. The fallback
+index uses a [request-local SHA-256 identity][block-identity] over typed kind,
+provider extras, and retained original, normalizing floating signed zero but
+not integer zero. Its key is distinct from the projected serialized-byte hash.
+A matching candidate supplies its fingerprint and byte length; otherwise the
+result is `(fingerprint(to_string(block)), to_string(block).len())`.
+Equal floating zeros can therefore reuse a candidate whose byte spelling
+differs, as in the structural-equality baseline. `always` because
 every pass projects and serves, every plugin turn attaches, and every
 downstream digest keys on these fields.
 Fault/timing angle: None in time. A projector that shares block backing but
@@ -393,8 +406,10 @@ and fresh/full native byte equality. Projection and request snapshot caches
 charge shell backing, content capacity, retained block JSON, and Arc counters
 using the existing conservative full-charge-per-holder rule. Cached prefix
 charges can exceed the canonical shell's smaller footprint; only suffix sizes
-are recomputed. Cache budgets are unchanged. Dedicated served-segment write oracles
-remain outside this change; all checks remain unaudited for adequacy.
+are recomputed. Cache budgets are unchanged. Canonical serialization uses
+serde formatter spans rather than a materialized `Value` round trip. The
+positional map, lazy digest index, and serialization spans are per-message
+scratch, not retained cache entries. All checks remain unaudited for adequacy.
 Impact: Output identity, served fingerprints, token caches, tag mint, and the
 plugin's replay source can drift from the message values.
 Open questions:
@@ -404,8 +419,6 @@ Open questions:
   or a developer switch? The transform catalog's
   [portfolio evaluation][tc-g2] queued this as gap G2 and it is still open.
   (needs human input)
-- Is sorted-key canonical JSON a contract with the plugin or an artifact of
-  `preserve_order` being off? No wire document names it. (needs human input)
 
 ### synthetic-normalization-is-scoped-to-the-pass
 
@@ -2342,7 +2355,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [A1][a1] | Drive `Handler::handle` directly with oversize and pool-short bodies; measure retained copies from the typed request. |
 | [A2][a2] | Build the discriminator and decode corpus once; run it through both lanes and the probe. |
 | [A3][a3] | Construct concurrent parses with a barrier so the shortfall is observable. |
-| [B1][b1] | Selection inputs, native prefix chunks, snapshot fallback, and sidecar order/pins are checked. Extend integration coverage for sorted-key served output. |
+| [B1][b1] | Selection inputs, native prefix chunks, snapshot fallback, sidecar order/pins, and canonical `Served` segment writes are checked. Broader cross-process coverage remains separate. |
 | [B2][b2] | Typed-flag reference and delta comparisons run. Extend the finite observer corpus when new replay shapes appear. |
 | [B3][b3] | Failed-commit rollback and clean-source equality are exercised. Resolve equality semantics for detected secrets. |
 | [B4][b4] | Digest separation and memo correctness checks pass; the controller's local payoff run is pending. |
@@ -2494,12 +2507,14 @@ evaluation of this area and its disposition are recorded in
 [native-attach]: ../../../../crates/daemon/src/lib.rs#L13092-L13106
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13319-L13336
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14425-L14440
-[segments]: ../../../../crates/daemon/src/lib.rs#L14445-L14452
+[segments]: ../../../../crates/daemon/src/lib.rs#L14456-L14463
 [cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567
 [sel-kind]: ../../../../crates/daemon/src/lib.rs#L16629
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2035-L2059
-[served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
-[ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
+[served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L227
+[ser-served]: ../../../../crates/daemon/src/transform.rs#L304-L311
+[served-byte-witnesses]: evidence/derived-artifacts-are-ownership-independent.md#canonical-served-bytes-and-fingerprint-identity
+[block-identity]: ../../../../crates/daemon/src/wire.rs#L892
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2116-L2132
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6353
@@ -2524,7 +2539,7 @@ evaluation of this area and its disposition are recorded in
 [reattach]: ../../../../crates/daemon/src/wire.rs#L216-L243
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L373-L381
 [flatten]: ../../../../crates/daemon/src/wire.rs#L731-L796
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L886-L895
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L881-L890
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1745
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1792
 [shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1704

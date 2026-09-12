@@ -33,6 +33,7 @@ pub mod scheduler;
 pub mod search_catchup;
 pub mod search_projection;
 pub mod selection;
+mod served_json;
 pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
