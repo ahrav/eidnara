@@ -19,6 +19,34 @@ pub struct OccurrenceCandidate {
     pub candidate: EligibilityCandidate,
 }
 
+const LIVE_CANDIDATES_SQL: &str =
+    "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest
+     FROM occurrences o
+     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+     WHERE t.occurrence_id IS NULL
+     ORDER BY o.class,o.occurrence_id
+     LIMIT ?1";
+
+const LIVE_CANDIDATES_BY_CLASS_SQL: &str =
+    "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest
+     FROM occurrences o
+     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+     WHERE t.occurrence_id IS NULL AND o.class=?1
+     ORDER BY o.class,o.occurrence_id
+     LIMIT ?2";
+
+type LiveRow = (String, String, String, i64, String);
+
+fn live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
 /// Live occurrences of `class`, or of every class, in `(class, occurrence_id)` order. A set larger than `max` is refused whole rather than truncated.
 ///
 /// # Errors
@@ -30,28 +58,16 @@ pub fn live_candidates(
     max: NonZeroUsize,
 ) -> Result<Vec<OccurrenceCandidate>, ProjectionError> {
     let limit = i64::try_from(max.get()).map_err(|_| ProjectionError::CorruptRow)?;
-    let mut statement = conn.prepare_cached(
-        "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest
-         FROM occurrences o
-         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-         WHERE t.occurrence_id IS NULL AND (?1 IS NULL OR o.class=?1)
-         ORDER BY o.class,o.occurrence_id
-         LIMIT ?2",
-    )?;
-    let rows = statement
-        .query_map(
-            params![class.map(OccurrenceClass::code), limit + 1],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows: Vec<LiveRow> = match class {
+        Some(class) => conn
+            .prepare_cached(LIVE_CANDIDATES_BY_CLASS_SQL)?
+            .query_map(params![class.code(), limit + 1], live_row)?
+            .collect::<rusqlite::Result<_>>()?,
+        None => conn
+            .prepare_cached(LIVE_CANDIDATES_SQL)?
+            .query_map(params![limit + 1], live_row)?
+            .collect::<rusqlite::Result<_>>()?,
+    };
     if rows.len() > max.get() {
         return Err(ProjectionError::TooManyRecords { count: rows.len() });
     }
@@ -172,4 +188,76 @@ pub fn judge_occurrences(
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LIVE_CANDIDATES_BY_CLASS_SQL;
+    use rusqlite::{Connection, StatementStatus, params};
+
+    /// A class-scoped read must search `idx_occurrences_source` by class and remain bounded as an unrelated class grows.
+    #[test]
+    fn class_scoped_live_candidates_query_does_not_scan_other_classes() {
+        let mut measured = Vec::new();
+        for count in [1_024, 16_384] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(crate::BASELINE).unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            conn.execute_batch("INSERT INTO payloads VALUES ('p',x'61',1,0);")
+                .unwrap();
+            conn.execute(
+                "WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<?1)
+                 INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                     payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
+                     source_artifact_digest,created_commit_seq,persisted_at)
+                 SELECT printf('m%05d',n),x'00','lineage','messages',1,'text','p','domain','normal',
+                     'source','evidence','digest',1,0 FROM ids",
+                [count],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                     payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
+                     source_artifact_digest,created_commit_seq,persisted_at)
+                 VALUES ('pm1',x'00','l','promoted_memory',1,'text','p','d','normal','s','e','digest',1,0),
+                        ('pm2',x'00','l','promoted_memory',1,'text','p','d','normal','s','e','digest',1,0),
+                        ('pm3',x'00','l','promoted_memory',1,'text','p','d','normal','s','e','digest',1,0);",
+            )
+            .unwrap();
+            let plan = conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {LIVE_CANDIDATES_BY_CLASS_SQL}"
+                ))
+                .unwrap()
+                .query_map(params!["promoted_memory", 65], |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|detail| detail
+                    .contains("SEARCH o USING INDEX idx_occurrences_source (class=?)")),
+                "class filter must search the class index range: {plan:?}"
+            );
+            let mut statement = conn.prepare(LIVE_CANDIDATES_BY_CLASS_SQL).unwrap();
+            let ids = statement
+                .query_map(params!["promoted_memory", 65], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(ids, ["pm1", "pm2", "pm3"]);
+            measured.push((count, statement.get_status(StatementStatus::VmStep)));
+        }
+        assert!(
+            measured.iter().all(|(_, steps)| *steps < 256),
+            "class-scoped read must not walk the messages backlog: {measured:?}"
+        );
+        assert!(
+            measured[1].1 <= measured[0].1 * 2,
+            "step count must not grow with an unrelated class: {measured:?}"
+        );
+    }
 }
