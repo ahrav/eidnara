@@ -440,7 +440,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`preserved_json_identities_do_not_exempt_integrity_fields_credential_names_or_nested_values`][t-preserved] | identity preservation limited to structural scalar names | unaudited |
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | commit redacts core payload, preserves legacy ids, refuses integrity secret in meta | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | new-versus-existing session decided inside the fenced transaction | unaudited |
-| [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` pinned on open and re-pinned per fenced write | unaudited |
+| [`a_read_callback_cannot_lower_fence_durability`][t-sync] | `synchronous=FULL` pinned on open and re-pinned per fenced write | unaudited |
 
 None found:
 
@@ -514,10 +514,10 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4579-L4580
 [snapshot]: ../../../../../crates/daemon/src/transform.rs#L3006
 [snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6228-L6358
-[with-conn]: ../../../../../crates/storage/src/lib.rs#L286-L302
-[fenced]: ../../../../../crates/storage/src/lib.rs#L290-L316
-[pin-sync]: ../../../../../crates/storage/src/lib.rs#L906-L907
-[claim-fence]: ../../../../../crates/storage/src/lib.rs#L1765-L1783
+[with-conn]: ../../../../../crates/storage/src/lib.rs#L305-L321
+[fenced]: ../../../../../crates/storage/src/lib.rs#L369-L433
+[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1170-L1171
+[claim-fence]: ../../../../../crates/storage/src/lib.rs#L1899-L1917
 [pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2245-L2272
 [audit]: ../../../../../crates/memory-store/src/lib.rs#L2291-L2449
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2470-L2473
@@ -641,4 +641,4 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15166
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15309
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L3445
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L3716-L3781
