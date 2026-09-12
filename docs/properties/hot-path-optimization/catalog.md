@@ -335,12 +335,7 @@ Callback installation, release, shadow checks, and facade scope sites are read.
 Existing check: [Guarded-store checks](existing-checks.md#guarded-store) are
 unaudited and cover cached statements, shadows, and restoration.
 Impact: Setup elision can authorize stale privileges or target shadow objects.
-Open questions:
-- Resolved by the connection-open unit (#430): the read path's `query_only`
-  toggle stays. It expires every cached statement on the connection, and it is
-  the read callback's only write barrier for main and temp alike because
-  `deny_scope_escapes` allows DML on every non-infrastructure table; the two
-  pragma statements are the price of that barrier.
+Open questions: None.
 
 ### callback-batching-preserves-observation-boundaries
 

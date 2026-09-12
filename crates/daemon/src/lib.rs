@@ -2263,6 +2263,7 @@ pub const STORAGE_CONNECTIONS: u64 = 2;
 /// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
 /// The search projection's connection holds `search_projection::CACHE_KIB` of page cache.
+/// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
