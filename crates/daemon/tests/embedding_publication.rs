@@ -2456,6 +2456,50 @@ fn corrupted_payload_bytes_quarantine_open_and_terminal_jobs() {
 }
 
 #[test]
+fn oversized_corrupted_payload_quarantines_completion_and_obsoletion() {
+    for stale in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let oversized = i64::try_from(kernel::MAX_PAYLOAD_BYTES + 1).unwrap();
+        assert_eq!(
+            mutate(&search_path(dir.path()))
+                .execute(
+                    "UPDATE payloads SET bytes=zeroblob(?2),byte_length=?2 WHERE payload_id=?1",
+                    rusqlite::params![&row.detail.payload_id, oversized],
+                )
+                .unwrap(),
+            1,
+        );
+        if stale {
+            corpus.retire(&object);
+        }
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+        let result = publish_once(
+            &mut publisher,
+            &publication(row, &generation, &vector),
+            &project,
+        )
+        .0;
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("oversized payload must quarantine stale={stale}: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        assert_eq!(
+            durable(dir.path(), &row.detail.occurrence_id),
+            (Some("pending".to_string()), None),
+        );
+    }
+}
+
+#[test]
 fn completion_and_obsoletion_compare_every_immutable_occurrence_field() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
