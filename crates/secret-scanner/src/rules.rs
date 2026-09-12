@@ -765,25 +765,28 @@ mod tests {
         assert!(prepared > 0, "no rule compiled a prepared matcher");
     }
 
+    /// A document that does not deserialize is a document error; a document
+    /// that deserializes with an empty name is a policy error, because the
+    /// identity loop assumes every parsed name is non-empty.
     #[test]
-    fn malformed_rules_return_typed_errors() {
-        assert_eq!(
-            parse_document(b"rules:\n- name: bad\n", RuleSource::Upstream).err(),
-            Some(ConstructionError::InvalidRuleDocument)
-        );
-    }
-
-    /// The identity loop assumes every parsed name is non-empty.
-    #[test]
-    fn an_empty_rule_name_is_rejected_before_the_identity_check() {
-        assert_eq!(
-            parse_document(
-                b"rules:\n- name: ''\n  regex: 'x'\n  anchors: ['x']\n  radius: 16\n",
-                RuleSource::Upstream
-            )
-            .err(),
-            Some(ConstructionError::InvalidRulePolicy)
-        );
+    fn malformed_rule_documents_return_their_typed_errors() {
+        for (document, expected) in [
+            (
+                b"rules:\n- name: bad\n".as_slice(),
+                ConstructionError::InvalidRuleDocument,
+            ),
+            (
+                b"rules:\n- name: ''\n  regex: 'x'\n  anchors: ['x']\n  radius: 16\n".as_slice(),
+                ConstructionError::InvalidRulePolicy,
+            ),
+        ] {
+            assert_eq!(
+                parse_document(document, RuleSource::Upstream).err(),
+                Some(expected),
+                "{}",
+                String::from_utf8_lossy(document)
+            );
+        }
     }
 
     #[test]
@@ -856,39 +859,11 @@ mod tests {
         }
     }
 
+    /// The digest depends on rule semantics, scan limits, and evaluator
+    /// version, not on corpus order.
     #[test]
-    fn semantic_digest_ignores_corpus_order() {
+    fn semantic_digest_ignores_corpus_order_and_tracks_every_finding_affecting_input() {
         let mut rules = RuleSet::from_embedded().unwrap();
-        let expected = rules
-            .semantic_digest(ScanProfile::Comprehensive, ScanLimits::default())
-            .unwrap();
-        rules.rules.reverse();
-        assert_eq!(
-            rules
-                .semantic_digest(ScanProfile::Comprehensive, ScanLimits::default())
-                .unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn finding_affecting_rule_changes_change_semantic_digest() {
-        let mut rules = RuleSet::from_embedded().unwrap();
-        let expected = rules
-            .semantic_digest(ScanProfile::Comprehensive, ScanLimits::default())
-            .unwrap();
-        rules.rules[0].declaration.radius += 1;
-        assert_ne!(
-            rules
-                .semantic_digest(ScanProfile::Comprehensive, ScanLimits::default())
-                .unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn every_scan_limit_changes_semantic_digest() {
-        let rules = RuleSet::from_embedded().unwrap();
         let base = ScanLimits::default();
         let expected = rules
             .semantic_digest(ScanProfile::Comprehensive, base)
@@ -914,6 +889,30 @@ mod tests {
                 expected
             );
         }
+        assert_ne!(
+            rules
+                .semantic_digest_with_version(
+                    ScanProfile::Comprehensive,
+                    base,
+                    crate::api::REVISION.semantic_digest_version + 1,
+                )
+                .unwrap(),
+            expected
+        );
+        rules.rules.reverse();
+        assert_eq!(
+            rules
+                .semantic_digest(ScanProfile::Comprehensive, base)
+                .unwrap(),
+            expected
+        );
+        rules.rules[0].declaration.radius += 1;
+        assert_ne!(
+            rules
+                .semantic_digest(ScanProfile::Comprehensive, base)
+                .unwrap(),
+            expected
+        );
     }
 
     fn safelist_digest(context: &[&str], value: &[&str]) -> [u8; 32] {
@@ -922,29 +921,34 @@ mod tests {
         hash.finalize().into()
     }
 
+    /// Each pair shares its pattern bytes but differs in list membership or
+    /// pattern boundaries.
     #[test]
-    fn moving_a_pattern_between_safelists_changes_the_safelist_digest() {
-        assert_ne!(
-            safelist_digest(&["a", "b"], &["c"]),
-            safelist_digest(&["a"], &["b", "c"])
-        );
-        assert_ne!(
-            safelist_digest(CONTEXT_SAFELIST, VALUE_SAFELIST),
-            safelist_digest(&CONTEXT_SAFELIST[..CONTEXT_SAFELIST.len() - 1], &{
-                let mut moved = vec![CONTEXT_SAFELIST[CONTEXT_SAFELIST.len() - 1]];
-                moved.extend_from_slice(VALUE_SAFELIST);
-                moved
-            })
-        );
-    }
-
-    /// Both digest inputs have the same pattern count and concatenated bytes but different pattern boundaries.
-    #[test]
-    fn moving_a_safelist_pattern_boundary_changes_the_safelist_digest() {
-        assert_ne!(
-            safelist_digest(&["ab", "c"], VALUE_SAFELIST),
-            safelist_digest(&["a", "bc"], VALUE_SAFELIST)
-        );
+    fn safelist_digest_separates_list_membership_and_pattern_boundaries() {
+        let moved_context_tail: Vec<&str> = {
+            let mut moved = vec![CONTEXT_SAFELIST[CONTEXT_SAFELIST.len() - 1]];
+            moved.extend_from_slice(VALUE_SAFELIST);
+            moved
+        };
+        for (left, right) in [
+            (
+                safelist_digest(&["a", "b"], &["c"]),
+                safelist_digest(&["a"], &["b", "c"]),
+            ),
+            (
+                safelist_digest(CONTEXT_SAFELIST, VALUE_SAFELIST),
+                safelist_digest(
+                    &CONTEXT_SAFELIST[..CONTEXT_SAFELIST.len() - 1],
+                    &moved_context_tail,
+                ),
+            ),
+            (
+                safelist_digest(&["ab", "c"], VALUE_SAFELIST),
+                safelist_digest(&["a", "bc"], VALUE_SAFELIST),
+            ),
+        ] {
+            assert_ne!(left, right);
+        }
     }
 
     #[test]
@@ -998,24 +1002,5 @@ mod tests {
             .find(|rule| rule.declaration.name == "generic-api-key")
             .expect("generic-api-key is missing from the corpus");
         assert_eq!(rule.declaration.min_confidence, Some(5));
-    }
-
-    #[test]
-    fn evaluator_version_changes_semantic_digest() {
-        let rules = RuleSet::from_embedded().unwrap();
-        let limits = ScanLimits::default();
-        let expected = rules
-            .semantic_digest(ScanProfile::Comprehensive, limits)
-            .unwrap();
-        assert_ne!(
-            rules
-                .semantic_digest_with_version(
-                    ScanProfile::Comprehensive,
-                    limits,
-                    crate::api::REVISION.semantic_digest_version + 1,
-                )
-                .unwrap(),
-            expected
-        );
     }
 }

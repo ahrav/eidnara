@@ -44,7 +44,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 const CONSUMER: &str = "search";
-const KERNEL_INCARNATION: &str = "kernel-1";
 const POLICY: &str = "source-policy.v1";
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PROJECT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -242,10 +241,10 @@ fn generation() -> VectorGeneration {
     }
 }
 
-fn identity() -> ProjectionIdentity {
+fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
     ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+        kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
         identity_contract_version: "search-projection-identity-v2".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -563,9 +562,20 @@ impl Corpus {
     fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
+        let kernel_incarnation_id: String = Connection::open_with_flags(
+            data_home.join("kernel/kernel.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(), 1)?;
+                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
                 register_generation(conn, &generation(), 1)?;
                 Ok(())
             })
@@ -576,7 +586,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id,
                 hold_id: "0123456789abcdef0123456789abcdef".to_string(),
                 snapshot_commit_seq: snapshot,
                 through_commit_seq: snapshot,

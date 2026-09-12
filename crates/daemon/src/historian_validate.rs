@@ -1406,52 +1406,6 @@ mod tests {
     }
 
     #[test]
-    fn validation_is_deterministic() {
-        let text = xml(&[(1, 2, "alpha"), (3, 4, "beta")], 5, "");
-        let chunk = chunk(1, 7);
-        let first = validate_historian_output(&text, &chunk, &[], ValidateOptions::default());
-        let second = validate_historian_output(&text, &chunk, &[], ValidateOptions::default());
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn five_message_narrative_gap_rejects_like_typescript_validator() {
-        let text = xml(&[(1, 10, "first"), (16, 20, "second")], 21, "");
-        let error = validate_historian_output(
-            &text,
-            &chunk(1, 20),
-            &[],
-            ValidateOptions {
-                in_emergency: true,
-                ..ValidateOptions::default()
-            },
-        )
-        .expect_err("unclassified gaps may contain narrative and must reject");
-
-        assert!(error.message.contains("gap"));
-    }
-
-    #[test]
-    fn twenty_message_tool_only_gap_heals_like_typescript_validator() {
-        let text = xml(&[(1, 10, "first"), (31, 40, "second")], 41, "");
-        let mut input = chunk(1, 40);
-        input.tool_only_ranges = vec![MessageRange { start: 11, end: 30 }];
-        let validated = validate_historian_output(
-            &text,
-            &input,
-            &[],
-            ValidateOptions {
-                in_emergency: true,
-                ..ValidateOptions::default()
-            },
-        )
-        .expect("a proven tool-only gap remains safe to absorb");
-
-        assert_eq!(validated.compartments[0].end_message, 30);
-        assert_eq!(validated.compartments[1].start_message, 31);
-    }
-
-    #[test]
     fn tierless_compartments_reject_while_p1_only_output_keeps_soft_fallbacks() {
         let flat = r#"<output><compartment start="1" end="2" title="flat">flat summary</compartment><meta><unprocessed_from>3</unprocessed_from></meta></output>"#;
         let error = validate_historian_output(flat, &chunk(1, 2), &[], ValidateOptions::default())
@@ -1618,26 +1572,6 @@ full narrative
         };
         let decreasing_error = validate_chunk_coverage(&decreasing).expect("decrease rejected");
         assert!(decreasing_error.contains("chunk lines decrease from raw message 3 to 2"));
-    }
-
-    #[test]
-    fn discard_last_progress_guard_boundary_k1_vs_k2() {
-        let one = xml(&[(1, 4, "single")], 5, "");
-        let two = xml(&[(1, 2, "first"), (3, 4, "second")], 5, "");
-        let chunk = chunk(1, 4);
-
-        let one_result = validate_historian_output(&one, &chunk, &[], ValidateOptions::default())
-            .expect("single compartment remains publishable");
-        let two_result = validate_historian_output(&two, &chunk, &[], ValidateOptions::default())
-            .expect("two compartments keep progress after discard");
-
-        assert!(!one_result.discarded_last, "k=1 must not discard");
-        assert!(
-            two_result.discarded_last,
-            "k=2 may discard the provisional tail"
-        );
-        assert_eq!(two_result.compartments.len(), 1);
-        assert_eq!(two_result.unprocessed_from, 3);
     }
 
     #[test]

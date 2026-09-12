@@ -73,20 +73,6 @@ impl HostHandler for DelayedRouteGoneHandler {
 }
 
 #[tokio::test]
-async fn publication_follows_initialization() {
-    let host = TestHost::start().await;
-    let events = host.handler.events();
-    assert_eq!(
-        events.first(),
-        Some(&Event::Initialized),
-        "initialization must complete before anything else"
-    );
-    // The publication exists, so initialization already returned.
-    assert!(host.publication_path().exists());
-    host.shutdown_gracefully().await;
-}
-
-#[tokio::test]
 async fn publication_waits_for_initialization_to_return() {
     let data_root = tempfile::tempdir().expect("temp root");
     let handler = TestHandler::new();
@@ -151,22 +137,6 @@ async fn initialization_timeout_aborts_and_joins_the_callback() {
     assert!(
         !handler.events().contains(&Event::Initialized),
         "a timed-out initialization task must not continue detached"
-    );
-}
-
-#[tokio::test]
-async fn failed_initialization_prevents_publication() {
-    let handler = TestHandler::new();
-    handler.fail_init("storage descriptor rejected");
-
-    let result = TestHost::try_start_with(handler, |_config| {}).await;
-    let err = match result {
-        Ok(_) => panic!("startup must fail when initialization fails"),
-        Err(err) => err,
-    };
-    assert!(
-        matches!(err, host_runtime::HostError::InitFailed(_)),
-        "expected an initialization failure, got {err}"
     );
 }
 

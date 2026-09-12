@@ -103,35 +103,58 @@ describe("parseHistorianDumpMeta", () => {
 
     it("counts gaps and overlaps against the running coverage end", () => {
         const dir = dumpDir();
-        const path = writeDump(dir, "ranges.xml", outputDocument([1, 10], [2, 3], [8, 12]));
-
-        const meta = parseHistorianDumpMeta(path);
-        if ("error" in meta) throw new Error(meta.error);
-        expect(meta.compartmentCount).toBe(3);
-        expect(meta.minStart).toBe(1);
-        expect(meta.maxEnd).toBe(12);
-        expect(meta.ordinalGapCount).toBe(0);
-        expect(meta.ordinalOverlapCount).toBe(2);
-    });
-
-    it("counts a real gap after an enclosing range", () => {
-        const dir = dumpDir();
-        const path = writeDump(dir, "gap.xml", outputDocument([1, 10], [2, 3], [12, 14]));
-
-        const meta = parseHistorianDumpMeta(path);
-        if ("error" in meta) throw new Error(meta.error);
-        expect(meta.ordinalGapCount).toBe(1);
-        expect(meta.ordinalOverlapCount).toBe(1);
-    });
-
-    it("counts neither for contiguous ranges", () => {
-        const dir = dumpDir();
-        const path = writeDump(dir, "contiguous.xml", outputDocument([1, 4], [5, 9], [10, 10]));
-
-        const meta = parseHistorianDumpMeta(path);
-        if ("error" in meta) throw new Error(meta.error);
-        expect(meta.ordinalGapCount).toBe(0);
-        expect(meta.ordinalOverlapCount).toBe(0);
+        const cases: {
+            name: string;
+            ranges: [number, number][];
+            maxEnd: number;
+            gaps: number;
+            overlaps: number;
+        }[] = [
+            // The running end of [1, 10] already covers [2, 3] and part of [8, 12].
+            {
+                name: "overlaps.xml",
+                ranges: [
+                    [1, 10],
+                    [2, 3],
+                    [8, 12],
+                ],
+                maxEnd: 12,
+                gaps: 0,
+                overlaps: 2,
+            },
+            // A range beyond the enclosing range's end opens a real gap.
+            {
+                name: "gap.xml",
+                ranges: [
+                    [1, 10],
+                    [2, 3],
+                    [12, 14],
+                ],
+                maxEnd: 14,
+                gaps: 1,
+                overlaps: 1,
+            },
+            {
+                name: "contiguous.xml",
+                ranges: [
+                    [1, 4],
+                    [5, 9],
+                    [10, 10],
+                ],
+                maxEnd: 10,
+                gaps: 0,
+                overlaps: 0,
+            },
+        ];
+        for (const { name, ranges, maxEnd, gaps, overlaps } of cases) {
+            const meta = parseHistorianDumpMeta(writeDump(dir, name, outputDocument(...ranges)));
+            if ("error" in meta) throw new Error(meta.error);
+            expect(meta.compartmentCount, name).toBe(3);
+            expect(meta.minStart, name).toBe(1);
+            expect(meta.maxEnd, name).toBe(maxEnd);
+            expect(meta.ordinalGapCount, name).toBe(gaps);
+            expect(meta.ordinalOverlapCount, name).toBe(overlaps);
+        }
     });
 });
 

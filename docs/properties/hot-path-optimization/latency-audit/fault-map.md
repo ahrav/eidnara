@@ -56,10 +56,10 @@ raw-row provider, and foreign-owner stat are controlled seams.
 | [A2][a2] | The discriminator and shape corpus through both lanes and the probe. | The reference reader's route, admit decision, and typed result. |
 | [A3][a3] | Two concurrent bodies whose footprints sum above the scratch reserve while each fits alone. | Footprint and pool availability at reservation entry. |
 | [B1][b1] | A cache-hit delta turn with tool calls, repeated ids, an equal-but-not-pointer-equal chunk, and every served shell kind. | Full projection, full native encode, and `to_vec(to_value(msg))` computed independently. |
-| [B2][b2] | The B5 situation: a replayed unflagged pair on a delta turn with a firing. | Synthetic sets at each observer and served bytes with and without the flag. |
+| [B2][b2] | The B5 situation, fresh and passthrough inputs, a carrier-targeted overlay, non-subagent ordinal rebasing, and third-turn cached-prefix reuse. | Executed: projection/digests, canonical and native bytes, tag rows, boundary/chunk inputs, captured production prompts, and passthrough fingerprint IDs. Comparisons keep the handler-observer input fixed; full raw ingress and reattached normalized prefixes retain different synthetic sets. |
 | [B3][b3] | A warm baseline entry, a minting pass, a second pass; a mint commit that fails. | The store's ordered rows and the cache entry read directly. |
 | [B4][b4] | A tail with every part kind and an excluded block, measured twice. | Independent `sha256(kind ++ NUL ++ content)` per part. |
-| [B5][b5] | A prior bust pass, a harness replay without the flag, a delta body, a configured `model_chain`. | The three preconditions recorded at normalization and firing preparation. |
+| [B5][b5] | A prior bust pass, a harness replay without the flag, a delta body, enabled compaction, a configured `model_chain`, and `serve_native` on. | Executed: frozen call ID, unflagged suffix, two reattached prefix messages, and a prepared firing. The pair starts in the protected tail, then enters an 84-message reused prefix on the third turn. An unflagged selected-chunk replay can retain the baseline identity refusal. |
 | [C1][c1] | A committing pass with a new no-fire reason; an Emergency95 pass with a publication in the window; a CAS conflict; rows with absent, unknown, `null`, and corrupt fields. | Post-commit `row_version` and a paired full `MemoryStore::load`. |
 | [C2][c2] | Reject, stable, rerun, and fresh-session passes; an injected `pass_trace` failure beside a commit. | `pass_trace` counters and `cache_state.row_version` read after each pass. |
 | [C3][c3] | A firing with all three kinds; a crash or abort between mark and delete; a second drainer between load and deliver; `now_ms` around the backoff. | Target table row counts and outbox state read directly. |
@@ -86,8 +86,8 @@ raw-row provider, and foreign-owner stat are controlled seams.
 | [W6][w6] | A `Local` zone with DST; unsatisfiable and once-satisfiable expressions; `i64` extremes. | The minute stepper's `Option<i64>`. |
 | [W7][w7] | Tier rewrites with later mtimes; an override edit; two bound project roots. | A fresh merge of the current file contents. |
 | [W8][w8] | A committing pass with a pinned guidance date; an abort in the window (W11); a second pass. | The next pass's `ProducerContext` inputs and the projection cache read directly. |
-| [W9][w9] | SOFT passes at update counts 40 and 41, at the 0.20 budget boundary, and at m0 499 and 500 with the 0.15 ratio boundary; a placeholder m1; no m0 unit. | Direct token counts on the frozen m0 and composed m1 recorded before the candidate runs. |
-| [W10][w10] | More than 40 updates; an m1 over a fifth of a small budget; an m0 of at least 500 tokens with an m1 over 15 percent of it; a pass below all three. | The three inputs measured independently per pass. |
+| [W9][w9] | SOFT passes at the 0.20 budget boundary and at m0 499/500 with the 0.15 ratio boundary; a placeholder m1; no m0 unit at the predicate seam. | Frozen direct-tokenizer reference and injected spy. The dead update-count disjunct is removed by owner decision. |
+| [W10][w10] | An m1 over a fifth of a small budget; an m0 of at least 500 tokens with an m1 over 15 percent of it; neither condition. | Direct counts recorded before the candidate; three constant witnesses. The update-count witness is retired, not covered. |
 | [W11][w11] | The interleave hook or its relocation-era equivalent triggering an abort. | Commit through `row_version` and abort ordering observed separately. |
 | [W12][w12] | A sentinel-bearing panic inside a `kernel_routes::blocking` closure or the relocated transform, in a child process; the same panic on the runtime worker as the control. | The child's stderr bytes and the terminal frame, read by the parent process. |
 | [W13][w13] | A `ScriptedHost` project with a valid cron in `MODULE` authority and a `ManualClock` advanced past the instant; or a user tier with `dreamer_review_user_memories_schedule` set and a bound `MODULE` route. | The project, schedule, `now_ms`, and finite instant recorded at the `next_due` call. |
@@ -95,8 +95,9 @@ raw-row provider, and foreign-owner stat are controlled seams.
 ## Coverage checks to add
 
 A3, B5, C5, C6, G3, P5, T4, W1, W10, W11, and W13 use their slugs as
-constant, globally unique marker names. W10 uses four constant markers
-suffixed `-updates`, `-budget-share`, `-m0-ratio`, and `-below`; C6 uses
+constant, globally unique marker names. W10 uses three constant markers
+suffixed `-budget-share`, `-m0-ratio`, and `-below`; its `-updates` marker is
+retired with the dead disjunct, as recorded in the evidence. C6 uses
 three suffixed `-event`, `-primer`, and `-user-observation`; G3 uses five
 suffixed `-cleanup`, `-recovery`, `-reclaim`, `-purge`, and `-retry`; W1
 uses one per stage the specification enumerates. All are named in full in
@@ -105,8 +106,9 @@ scheduling preconditions, never the defect:
 
 - A3 asserts footprint fit and pool shortfall, not the handler's code or side
   effects.
-- B5 asserts delta, the replayed-id input, and firing, not observer
-  agreement.
+- B5 is implemented by the [delta witness][synthetic-delta-witness]. It asserts
+  delta prefix reuse, the replayed-id input, enabled compaction, configured
+  models, native serving and firing, not observer agreement.
 - C5 asserts the foreign commit's `row_version` and its ordering before the
   pass's post-commit read, not a stale consumer.
 - C6 asserts a due outbox row per kind at the pass drain, not the delivery.
@@ -201,6 +203,7 @@ in the records' open questions.
 [b3]: catalog.md#tag-baseline-cache-entry-is-never-mutated-by-a-pass
 [b4]: catalog.md#hygiene-digest-is-kind-prefixed-part-content
 [b5]: catalog.md#replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [c1]: catalog.md#consolidated-cache-state-reads-match-per-consumer-loads
 [c2]: catalog.md#pass-trace-writes-count-every-pass-outside-the-cache-cas
 [c3]: catalog.md#side-channel-drain-delivers-each-row-once-and-keeps-its-schedule

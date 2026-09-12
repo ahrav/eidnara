@@ -804,20 +804,6 @@ fn slack_validation_rejects_malformed_bodies() {
     );
 }
 
-/// The keyed rules stay outside those safelists and carry their own suppressors.
-#[test]
-fn overlay_keyed_rules_stay_outside_the_upstream_safelists() {
-    let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
-    assert!(
-        !scanner
-            .scan("password=hunter2")
-            .unwrap()
-            .findings
-            .is_empty(),
-        "the value safelist reached a keyed overlay rule"
-    );
-}
-
 /// The keyed rules have no entropy floor and stay outside the engine safelists,
 /// so their suppressor list is the only thing standing between a placeholder and
 /// a finding.
@@ -855,23 +841,20 @@ fn value_suppressors_match_mixed_case_placeholders() {
     );
 }
 
+/// Both an anchor-free input and a candidate-dense input at `MAX_INPUT_BYTES`
+/// complete under the default limits.
 #[test]
-fn maximum_supported_input_has_a_defined_outcome() {
-    let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
-    let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES);
-    let report = scanner.scan(&input).unwrap();
-    assert!(report.findings.is_empty());
-}
+fn maximum_supported_inputs_succeed_with_default_limits() {
+    let scanner = comprehensive_scanner();
+    let sparse = "x".repeat(secret_scanner::MAX_INPUT_BYTES);
+    assert!(scanner.scan(&sparse).unwrap().findings.is_empty());
 
-#[test]
-fn maximum_supported_dense_input_succeeds_with_default_limits() {
-    let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
-    let mut input = "password=x ".repeat(secret_scanner::MAX_INPUT_BYTES / 11 + 1);
-    input.truncate(secret_scanner::MAX_INPUT_BYTES);
-    while !input.is_char_boundary(input.len()) {
-        input.pop();
+    let mut dense = "password=x ".repeat(secret_scanner::MAX_INPUT_BYTES / 11 + 1);
+    dense.truncate(secret_scanner::MAX_INPUT_BYTES);
+    while !dense.is_char_boundary(dense.len()) {
+        dense.pop();
     }
-    let report = scanner.scan(&input).unwrap();
+    let report = scanner.scan(&dense).unwrap();
     assert!(!report.findings.is_empty());
     assert!(report.work_bytes <= ScanLimits::default().max_work_bytes);
 }

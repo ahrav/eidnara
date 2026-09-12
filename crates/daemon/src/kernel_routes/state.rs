@@ -478,8 +478,12 @@ mod tests {
         outcomes
     }
 
+    /// The TypeScript client derives its key from the wire object as
+    /// `kind` or `kind:reason` (`stateKey` in `kernel-client/state.ts`), so
+    /// `state_key` must be that same function of the serialized fields for
+    /// every outcome. Keys index guidance, so no two outcomes may share one.
     #[test]
-    fn state_key_joins_kind_and_reason_with_a_colon() {
+    fn state_key_is_the_serialized_kind_and_reason_and_distinct_for_every_outcome() {
         assert_eq!(KernelOutcome::Available.state_key(), "available");
         assert_eq!(
             KernelOutcome::Abstained {
@@ -497,21 +501,9 @@ mod tests {
             KernelOutcome::invalid(InvalidReason::ProjectMismatch).state_key(),
             "invalid:project_mismatch"
         );
-        let keys: std::collections::HashSet<String> = all_outcomes()
-            .iter()
-            .map(KernelOutcome::state_key)
-            .collect();
-        assert_eq!(keys.len(), all_outcomes().len(), "state keys are distinct");
-    }
-
-    /// The TypeScript client derives its key from the wire object as
-    /// `kind` or `kind:reason` (`stateKey` in `kernel-client/state.ts`); the
-    /// Rust key must be the same function of the same serialized fields for
-    /// every outcome, so a variant rename moves both or neither.
-    #[test]
-    fn state_key_agrees_with_the_serialized_kind_and_reason_for_every_outcome() {
-        for outcome in all_outcomes() {
-            let wire = serde_json::to_value(&outcome).unwrap();
+        let outcomes = all_outcomes();
+        for outcome in &outcomes {
+            let wire = serde_json::to_value(outcome).unwrap();
             let kind = wire["kind"].as_str().unwrap();
             let expected = match wire.get("reason").and_then(serde_json::Value::as_str) {
                 Some(reason) => format!("{kind}:{reason}"),
@@ -519,6 +511,9 @@ mod tests {
             };
             assert_eq!(outcome.state_key(), expected, "{wire}");
         }
+        let keys: std::collections::HashSet<String> =
+            outcomes.iter().map(KernelOutcome::state_key).collect();
+        assert_eq!(keys.len(), outcomes.len(), "state keys are distinct");
     }
 
     #[test]

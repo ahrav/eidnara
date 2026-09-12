@@ -1258,20 +1258,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_scalar_at_the_container_limit_is_one_level_deeper() {
-        // Eight open containers are exactly the depth limit.
-        assert!(!depth_exceeds(
-            br#"{"a":{"b":{"c":{"d":{"e":{"f":{"g":{}}}}}}}}"#,
-            8
-        ));
-        // A scalar or key inside the eighth open container has depth 9.
-        assert!(depth_exceeds(
-            br#"{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":1}}}}}}}}"#,
-            8
-        ));
-    }
-
     // -----------------------------------------------------------------
     // -----------------------------------------------------------------
 

@@ -70,11 +70,16 @@ describe("collectDiagnostics plugin registration", () => {
         expect(report.tuiConfigHasPlugin).toBe(true);
     });
 
-    it("does not treat a tuple naming another package as our plugin", async () => {
-        const { configHome, cwd } = isolatedRoot();
+    it("does not treat a tuple or a local checkout naming another package as our plugin", async () => {
+        const { root, configHome, cwd } = isolatedRoot();
+        const other = join(root, "checkout", "eidnara-theme");
+        mkdirSync(other, { recursive: true });
+        writeFileSync(join(other, "package.json"), JSON.stringify({ name: "eidnara-theme" }));
         writeFileSync(
             join(configHome, "opencode", "opencode.json"),
-            JSON.stringify({ plugin: [["@eidnara/opencode-theme", {}], "other-plugin"] }),
+            JSON.stringify({
+                plugin: [["@eidnara/opencode-theme", {}], "other-plugin", `file://${other}`],
+            }),
         );
 
         const report = await collectDiagnostics(cwd);
@@ -113,21 +118,6 @@ describe("collectDiagnostics plugin registration", () => {
         const report = await collectDiagnostics(cwd);
 
         expect(report.opencodeConfigHasPlugin).toBe(true);
-    });
-
-    it("does not treat an unrelated local path as this plugin", async () => {
-        const { root, configHome, cwd } = isolatedRoot();
-        const other = join(root, "checkout", "eidnara-theme");
-        mkdirSync(other, { recursive: true });
-        writeFileSync(join(other, "package.json"), JSON.stringify({ name: "eidnara-theme" }));
-        writeFileSync(
-            join(configHome, "opencode", "opencode.json"),
-            JSON.stringify({ plugin: [`file://${other}`] }),
-        );
-
-        const report = await collectDiagnostics(cwd);
-
-        expect(report.opencodeConfigHasPlugin).toBe(false);
     });
 
     it("reports a registration that only a custom or inline layer provides", async () => {
@@ -247,8 +237,8 @@ describe("collectDiagnostics plugin registration", () => {
         },
     );
 
-    it("says so when the project has no opencode config", async () => {
-        const { cwd } = isolatedRoot();
+    it("reports every absent artifact on a bare root: no project opencode config, canonical tier paths, missing log, unavailable session discovery", async () => {
+        const { configHome, cwd } = isolatedRoot();
 
         const report = await collectDiagnostics(cwd);
 
@@ -260,6 +250,16 @@ describe("collectDiagnostics plugin registration", () => {
         expect(renderDiagnosticsMarkdown(report)).toContain(
             "- Plugin registered in project opencode config: false (no project opencode config)",
         );
+        expect(report.eidnaraConfig.path).toBe(join(configHome, "eidnara", "eidnara.jsonc"));
+        expect(report.eidnaraConfig.exists).toBe(false);
+        expect(report.projectConfig.exists).toBe(false);
+        expect(report.projectConfig.flags).toEqual({});
+        expect(report.logFile.exists).toBe(false);
+        expect(report.logFile.sizeKb).toBe(0);
+        // Session discovery returns "unavailable" instead of an empty "ok" because
+        // append-only log records can outlive the database that attributes them.
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("unavailable");
     });
 });
 
@@ -283,17 +283,6 @@ describe("collectDiagnostics Eidnara config tiers", () => {
         expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
         expect(report.projectConfig.exists).toBe(true);
         expect(report.projectConfig.flags).toEqual({ sidekick: { disable: true } });
-    });
-
-    it("reports a missing tier at its canonical `.jsonc` path", async () => {
-        const { configHome, cwd } = isolatedRoot();
-
-        const report = await collectDiagnostics(cwd);
-
-        expect(report.eidnaraConfig.path).toBe(join(configHome, "eidnara", "eidnara.jsonc"));
-        expect(report.eidnaraConfig.exists).toBe(false);
-        expect(report.projectConfig.exists).toBe(false);
-        expect(report.projectConfig.flags).toEqual({});
     });
 
     it("captures a project parse error and renders it sanitized", async () => {
@@ -375,7 +364,7 @@ describe("collectDiagnostics recent sessions", () => {
         ]);
     });
 
-    it("falls back to the next database when the newest candidate is not a session database", async () => {
+    it("falls back to the next database when the newest candidate is not a session database and reports discovery ok", async () => {
         const { root, cwd } = isolatedRoot();
         const dataHome = process.env.XDG_DATA_HOME as string;
         seedSessionDb(join(dataHome, "opencode", "opencode.db"), join(root, "project"));
@@ -387,6 +376,7 @@ describe("collectDiagnostics recent sessions", () => {
 
         const report = await collectDiagnostics(cwd);
 
+        expect(report.sessionDiscovery).toBe("ok");
         expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
             "ses_channel01",
         ]);
@@ -472,55 +462,9 @@ describe("collectDiagnostics session discovery status", () => {
         expect(report.recentSessions).toEqual([]);
         expect(report.sessionDiscovery).toBe("unavailable");
     });
-
-    it("reports session discovery as unavailable when no database exists", async () => {
-        const { cwd } = isolatedRoot();
-
-        const report = await collectDiagnostics(cwd);
-
-        // The append-only log can outlive the database, so its records stay
-        // unattributable and the issue flow must ask before bundling them.
-        expect(report.recentSessions).toEqual([]);
-        expect(report.sessionDiscovery).toBe("unavailable");
-    });
-
-    it("reports session discovery as ok once the database is readable", async () => {
-        const { root, cwd } = isolatedRoot();
-        const dataHome = process.env.XDG_DATA_HOME as string;
-        const path = join(dataHome, "opencode", "opencode.db");
-        mkdirSync(join(path, ".."), { recursive: true });
-        const db = new Database(path);
-        try {
-            db.run(
-                "CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER, parent_id TEXT)",
-            );
-            db.run(
-                "INSERT INTO session VALUES ('ses_default001', ?, 'default session', 1700000000000, NULL, NULL)",
-                [join(root, "project")],
-            );
-        } finally {
-            db.close();
-        }
-
-        const report = await collectDiagnostics(cwd);
-
-        expect(report.sessionDiscovery).toBe("ok");
-        expect(report.recentSessions.map((session) => session.sessionId)).toEqual([
-            "ses_default001",
-        ]);
-    });
 });
 
 describe("collectDiagnostics log file", () => {
-    it("reports a missing log as absent instead of throwing", async () => {
-        const { cwd } = isolatedRoot();
-
-        const report = await collectDiagnostics(cwd);
-
-        expect(report.logFile.exists).toBe(false);
-        expect(report.logFile.sizeKb).toBe(0);
-    });
-
     it("reports the size of an existing log", async () => {
         const { root, cwd } = isolatedRoot();
         mkdirSync(join(root, "log"), { recursive: true });

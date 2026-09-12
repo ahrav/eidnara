@@ -17,6 +17,7 @@ use storage::GuardedConn;
 
 use crate::ProjectionError;
 use crate::batch::VectorGeneration;
+use crate::vectors::Obsoletion;
 
 /// The verified lane identity and the host incarnation that serves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +556,47 @@ pub fn stop_job(
         params![job_id, reason, now],
     )?;
     Ok(changed == 1)
+}
+
+pub fn obsolete_judged_job(
+    conn: &GuardedConn<'_>,
+    occurrence_id: &str,
+    generation_id: &str,
+    source_object_id: &str,
+    source_revision: i64,
+    source_artifact_digest: &str,
+    now: i64,
+) -> Result<Obsoletion, ProjectionError> {
+    let changed = conn.execute(
+        "UPDATE embedding_jobs SET state='obsolete',updated_at=?6
+         WHERE occurrence_id=?1 AND generation_id=?2 AND state IN ('pending','admitted')
+           AND EXISTS(SELECT 1 FROM occurrences o
+                      WHERE o.occurrence_id=?1 AND o.source_object_id=?3
+                        AND o.revision=?4 AND o.source_artifact_digest=?5)",
+        params![
+            occurrence_id,
+            generation_id,
+            source_object_id,
+            source_revision,
+            source_artifact_digest,
+            now
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(Obsoletion::Marked);
+    }
+    let state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM embedding_jobs WHERE occurrence_id=?1 AND generation_id=?2",
+            params![occurrence_id, generation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match state.as_deref() {
+        None => Ok(Obsoletion::NoJob),
+        Some("pending" | "admitted") => Err(ProjectionError::IdentityMismatch),
+        Some(_) => Ok(Obsoletion::AlreadyTerminal),
+    }
 }
 
 /// The episode identity is the host's item identity, which the host bounds at 256 bytes: a 64-byte job identity, `/auth/`, and a 128-byte reference total 198.

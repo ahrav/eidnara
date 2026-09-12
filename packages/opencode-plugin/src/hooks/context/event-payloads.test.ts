@@ -37,14 +37,11 @@ describe("getSessionCreatedInfo", () => {
         });
     });
 
-    it("#given info without a string id #when resolved #then returns null", () => {
-        expect(getSessionCreatedInfo({ info: { parentID: "ses_root" } })).toBeNull();
-        expect(getSessionCreatedInfo({ info: { id: 42 } })).toBeNull();
-    });
-
-    it("#given properties without an info record #when resolved #then returns null", () => {
+    it("#given properties without an info record carrying a string id #when resolved #then returns null", () => {
         expect(getSessionCreatedInfo(undefined)).toBeNull();
         expect(getSessionCreatedInfo({})).toBeNull();
         expect(getSessionCreatedInfo({ info: "ses_root" })).toBeNull();
+        expect(getSessionCreatedInfo({ info: { parentID: "ses_root" } })).toBeNull();
+        expect(getSessionCreatedInfo({ info: { id: 42 } })).toBeNull();
     });
 });

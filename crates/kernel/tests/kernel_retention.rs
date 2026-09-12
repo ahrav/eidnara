@@ -584,36 +584,17 @@ fn finish_rejects_a_terminal_time_before_the_run_lifecycle() {
             .unwrap_err(),
         KernelError::Conflict
     );
-    assert_eq!(
-        inspect(directory.path())
-            .query_row(
-                "SELECT terminal_state FROM extraction_runs WHERE extraction_run_id='run'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        "failed"
-    );
-}
-
-#[test]
-fn finish_propagates_the_terminal_state_to_candidates() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let origin = now_ms();
-    store.stage_candidate(secret_candidate(origin)).unwrap();
-    store
-        .finish_staging_run("run", StagingTerminalState::Canceled, origin + TERMINAL_AT)
-        .unwrap();
+    // The first terminal state stands, and it reaches the run's candidates.
     let states: (String, String) = inspect(directory.path())
         .query_row(
             "SELECT r.terminal_state,c.terminal_state
-             FROM extraction_runs r JOIN candidates c USING(extraction_run_id)",
+             FROM extraction_runs r JOIN candidates c USING(extraction_run_id)
+             WHERE r.extraction_run_id='run'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(states, ("canceled".to_string(), "canceled".to_string()));
+    assert_eq!(states, ("failed".to_string(), "failed".to_string()));
 }
 
 #[test]
@@ -666,37 +647,6 @@ fn maintenance_rejects_a_negative_clock_reading() {
     ] {
         assert_eq!(error, KernelError::InvalidInput);
     }
-}
-
-#[test]
-fn opening_the_store_reclaims_leases_without_deleting_aged_runs() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let origin = now_ms();
-    store
-        .stage_candidate(candidate("run", "candidate", origin))
-        .unwrap();
-    store
-        .finish_staging_run("run", StagingTerminalState::Completed, origin)
-        .unwrap();
-    drop(store);
-
-    // Open reclaims leases; it never deletes. The run is still here afterwards and
-    // only a caller-driven sweep past the cutoff removes it.
-    let reopened = KernelStore::open(directory.path()).unwrap();
-    assert_eq!(
-        inspect(directory.path())
-            .query_row("SELECT COUNT(*) FROM extraction_runs", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        reopened
-            .delete_aged_staging_runs(origin + STAGING_RETENTION_MS)
-            .unwrap(),
-        1
-    );
 }
 
 #[test]

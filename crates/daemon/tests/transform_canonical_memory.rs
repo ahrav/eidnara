@@ -202,6 +202,14 @@ async fn transform_composes_project_memory_from_canonical_rows_and_observes_abse
     assert_eq!(third["status"], "ok", "{third}");
     assert_ne!(third["action"], "HARD", "{third}");
     assert_eq!(third["project_memory"], second["project_memory"]);
+
+    // Unknown top-level fields such as `claim_lane` are ignored rather than rejected.
+    let mut with_lane = transform_request("third");
+    with_lane["claim_lane"] = json!({"enabled": true, "snapshot_vector": null});
+    let ignored = daemon.call(with_lane).await;
+    assert_eq!(ignored["status"], "ok", "{ignored}");
+    assert_eq!(ignored["project_memory"], third["project_memory"]);
+    assert_eq!(served_text(&ignored), served_text(&third));
     daemon.shutdown().await;
 }
 
@@ -432,22 +440,5 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
         second["project_memory"]["revision"], first["project_memory"]["revision"],
         "{second}"
     );
-    daemon.shutdown().await;
-}
-
-/// The transform wire tolerates unknown top-level keys (hosts send `method`), so
-/// a retired `claim_lane` field is ignored rather than rejected, and changes
-/// nothing about the composition.
-#[tokio::test]
-async fn a_retired_claim_lane_field_is_ignored() {
-    let daemon = KernelDaemon::start().await;
-    let plain = daemon.call(transform_request("plain")).await;
-    assert_eq!(plain["status"], "ok", "{plain}");
-    let mut with_lane = transform_request("plain");
-    with_lane["claim_lane"] = json!({"enabled": true, "snapshot_vector": null});
-    let ignored = daemon.call(with_lane).await;
-    assert_eq!(ignored["status"], "ok", "{ignored}");
-    assert_eq!(ignored["project_memory"], plain["project_memory"]);
-    assert_eq!(served_text(&ignored), served_text(&plain));
     daemon.shutdown().await;
 }

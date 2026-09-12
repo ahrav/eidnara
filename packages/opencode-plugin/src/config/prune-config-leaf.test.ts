@@ -13,11 +13,9 @@ describe("pruneNestedConfigLeaf", () => {
         expect(block).toEqual({ enabled: false, injection_budget_tokens: 4000 });
     });
 
-    it("prunes the DEEPEST leaf of a 3-level path, preserving a disabled sibling", () => {
-        const block = {
-            enabled: true,
-            git_commit_indexing: { enabled: false, since_days: 99999 },
-        };
+    it("prunes the DEEPEST leaf of a 3-level path, preserving a disabled sibling without sharing references", () => {
+        const inner = { enabled: false, since_days: 99999 };
+        const block = { enabled: true, git_commit_indexing: inner };
         const result = pruneNestedConfigLeaf(block, ["git_commit_indexing", "since_days"]);
         expect(result).not.toBeNull();
         expect(result?.block).toEqual({
@@ -25,6 +23,7 @@ describe("pruneNestedConfigLeaf", () => {
             git_commit_indexing: { enabled: false },
         });
         expect(result?.removed).toEqual(["git_commit_indexing", "since_days"]);
+        expect(result?.block.git_commit_indexing).not.toBe(inner);
         expect(block.git_commit_indexing).toEqual({ enabled: false, since_days: 99999 });
     });
 
@@ -50,19 +49,9 @@ describe("pruneNestedConfigLeaf", () => {
         expect(result?.block).toEqual({ system_prompt_injection: { enabled: true } });
     });
 
-    it("returns null when the leaf is absent", () => {
+    it("returns null when the leaf is absent or the path is empty", () => {
         const block = { auto_search: { enabled: false } };
         expect(pruneNestedConfigLeaf(block, ["auto_search", "missing"])).toBeNull();
-    });
-
-    it("returns null for an empty path", () => {
         expect(pruneNestedConfigLeaf({ a: 1 }, [])).toBeNull();
-    });
-
-    it("deep-clones intermediate objects (no shared references with input)", () => {
-        const inner = { enabled: false, since_days: 1 };
-        const block = { git_commit_indexing: inner };
-        const result = pruneNestedConfigLeaf(block, ["git_commit_indexing", "since_days"]);
-        expect(result?.block.git_commit_indexing).not.toBe(inner);
     });
 });

@@ -85,7 +85,7 @@ describe("platform gate (U3 scenario 5)", () => {
         expect(gate).toEqual({ ok: true, target: "linux-x64-gnu" });
     });
 
-    test("below-floor, musl-like, capability-missing, and unverifiable hosts fail", () => {
+    test("below-floor, musl-like, capability-missing, unverifiable, and non-Linux hosts fail", () => {
         const rejected: Array<[string, PlatformReaders]> = [
             ["kernel 4.17", linuxReaders({ kernelRelease: () => "4.17.19" })],
             ["glibc 2.27", linuxReaders({ glibcVersion: () => "2.27" })],
@@ -93,18 +93,15 @@ describe("platform gate (U3 scenario 5)", () => {
             ["no procfs self-fd", linuxReaders({ procSelfFdUsable: () => false })],
             ["non-x64", linuxReaders({ arch: "arm64" })],
             ["unparseable kernel", linuxReaders({ kernelRelease: () => "next" })],
+            ["darwin", linuxReaders({ platform: "darwin" })],
+            ["win32", linuxReaders({ platform: "win32" })],
+            ["freebsd", linuxReaders({ platform: "freebsd" })],
         ];
         for (const [name, readers] of rejected) {
             const gate = checkPlatform(readers);
             expect({ name, ok: gate.ok }).toEqual({ name, ok: false });
             if (!gate.ok) expect(gate.reason).toBe("unsupported_platform");
         }
-    });
-
-    test("unknown operating systems are unsupported before any package byte", () => {
-        expect(checkPlatform(linuxReaders({ platform: "darwin" })).ok).toBe(false);
-        expect(checkPlatform(linuxReaders({ platform: "win32" })).ok).toBe(false);
-        expect(checkPlatform(linuxReaders({ platform: "freebsd" })).ok).toBe(false);
     });
 
     test("the self-fd probe certifies a real procfs", () => {
@@ -789,6 +786,12 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
                 absentReason = (error as BootstrapError).reason;
             }
             expect(absentReason).toBe("native_payload_missing");
+            // An absent store directory is treated as absence, not a fallback.
+            expect(
+                reasonOf(() =>
+                    revalidateRetainedBootstrap("/nonexistent/bootstrap", "d".repeat(64)),
+                ),
+            ).toBe("native_payload_missing");
 
             // ENOTDIR: a regular file where the store directory belongs is a damaged store, not an absent bootstrap.
             const fileStore = path.join(dir, "file-store");
@@ -873,16 +876,6 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
-    });
-
-    test("an absent retained bootstrap is native_payload_missing, never a fallback", () => {
-        let reason: string | null = null;
-        try {
-            revalidateRetainedBootstrap("/nonexistent/bootstrap", "d".repeat(64));
-        } catch (error) {
-            reason = (error as BootstrapError).reason;
-        }
-        expect(reason).toBe("native_payload_missing");
     });
 
     test("a symlinked or group-writable destination is rejected before any output exists", () => {

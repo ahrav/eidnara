@@ -14,16 +14,17 @@ use host_runtime::synapse::{
     SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
 };
 use kernel::{
-    CurrentInputExpectation, EligibilityBinding, EligibilityCandidate, EligibilityVerdict,
-    KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+    CurrentInputDescriptor, CurrentInputExpectation, EligibilityBinding, EligibilityCandidate,
+    EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, StaleInput,
 };
 use retrieval::ProjectionError;
 use retrieval::dispatch::{
     Admission, BindingOutcome, CandidateReadiness, DispatchCandidate, DispatchCursor, DispatchJob,
     Disposition, EXHAUSTED, EpisodeGrant, JobLedger, LaneBinding, bind_lane, charge_admission,
-    dispatch_job, job_ledger, open_job_candidates, rebind_host_job, record_retry, stop_job,
+    dispatch_job, job_ledger, obsolete_judged_job, open_job_candidates, rebind_host_job,
+    record_retry, stop_job,
 };
-use retrieval::vectors::{Obsoletion, completion_status, obsolete_embedding};
+use retrieval::vectors::{Obsoletion, completion_status};
 
 use crate::embedding_publication::{
     EmbeddingPublisher, Publication, PublicationError, VectorPublication,
@@ -88,6 +89,10 @@ pub enum Blocked {
     SearchDeadline,
     /// The completion's outcome is unknown; the row keeps its admitted state so the next pass reconciles it from the durable vector instead of charging again.
     LocalCommitUnresolved,
+    /// The pass's logical `now` is outside the Unix-epoch-millisecond domain, so no publication can settle under it; the admitted row is unchanged until a pass with a valid clock runs.
+    PassTimeInvalid,
+    /// Another projection writer advanced the durable fence before publication began; nothing was written and only a rebuilt writer can dispatch again.
+    ProjectionFenced,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,6 +176,9 @@ struct PendingObsoletion {
     job_id: String,
     occurrence_id: String,
     generation_id: String,
+    source_object_id: String,
+    source_revision: i64,
+    source_artifact_digest: String,
     reason: &'static str,
 }
 
@@ -180,6 +188,9 @@ impl PendingObsoletion {
             job_id: candidate.job_id.clone(),
             occurrence_id: candidate.occurrence_id.clone(),
             generation_id: candidate.generation_id.clone(),
+            source_object_id: candidate.source_object_id.clone(),
+            source_revision: candidate.source_revision,
+            source_artifact_digest: candidate.source_artifact_digest.clone(),
             reason,
         }
     }
@@ -526,14 +537,12 @@ impl<'a> EmbeddingDispatcher<'a> {
                         }
                     };
                     // `page` stays alive through publication so its lease keeps the result bytes counted while the vector is in use.
+                    let input = match self.current_input(job, pass)? {
+                        Ok(input) => input,
+                        Err(blocked) => return Ok(blocked),
+                    };
                     let publication = VectorPublication {
-                        expectation: CurrentInputExpectation {
-                            object_id: job.source_object_id.clone(),
-                            source_revision: job.revision,
-                            occurrence_id: job.occurrence_id.clone(),
-                            payload_id: job.payload_id.clone(),
-                            artifact_digest: job.source_artifact_digest.clone(),
-                        },
+                        input,
                         generation: &job.generation,
                         vector,
                         input_bytes: job.text.len() as u64,
@@ -725,6 +734,40 @@ impl<'a> EmbeddingDispatcher<'a> {
         Ok(Ok(host_job_id))
     }
 
+    fn current_input(
+        &mut self,
+        job: &DispatchJob,
+        pass: &Pass<'_>,
+    ) -> Result<Result<CurrentInputDescriptor, Option<Blocked>>, DispatchError> {
+        let expectation = CurrentInputExpectation {
+            object_id: job.source_object_id.clone(),
+            source_revision: job.revision,
+            occurrence_id: job.occurrence_id.clone(),
+            payload_id: job.payload_id.clone(),
+            artifact_digest: job.source_artifact_digest.clone(),
+        };
+        let deadline = Instant::now() + pass.bounds.guard_deadline;
+        match self
+            .kernel
+            .guard_current_input(&expectation, pass.eligibility, deadline)
+        {
+            Ok(Ok(guard)) => Ok(Ok(guard.descriptor().clone())),
+            // `WrongScope` is a verdict about the binding, not the input, so the row is left open under the wrong binding rather than obsoleted.
+            Ok(Err(stale))
+                if matches!(
+                    stale.reason(),
+                    StaleInput::Ineligible(EligibilityVerdict::WrongScope)
+                ) =>
+            {
+                Ok(Err(Some(Blocked::WrongScope)))
+            }
+            // The row stays open; the next scan's eligibility judgment retires it through the one obsoletion path.
+            Ok(Err(_)) => Ok(Err(None)),
+            Err(KernelError::Deadline) => Ok(Err(Some(Blocked::GuardDeadline))),
+            Err(error) => Err(eligibility_error(error)),
+        }
+    }
+
     fn publish(
         &mut self,
         job: &DispatchJob,
@@ -760,6 +803,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(PublicationError::LocalCommitUnresolved) => {
                 Ok(Some(Blocked::LocalCommitUnresolved))
             }
+            Err(PublicationError::NegativeTime { .. }) => Ok(Some(Blocked::PassTimeInvalid)),
+            Err(PublicationError::ProjectionFenced) => Ok(Some(Blocked::ProjectionFenced)),
             // The publisher only hands back admission and identity refusals; its other classes already quarantined it.
             Err(PublicationError::Refused(error)) => match classify(&error) {
                 Refusal::Identity => Ok(Some(Blocked::IdentityChanged)),
@@ -873,10 +918,13 @@ impl<'a> EmbeddingDispatcher<'a> {
             candidates
                 .iter()
                 .map(|candidate| {
-                    obsolete_embedding(
+                    obsolete_judged_job(
                         conn,
                         &candidate.occurrence_id,
                         &candidate.generation_id,
+                        &candidate.source_object_id,
+                        candidate.source_revision,
+                        &candidate.source_artifact_digest,
                         now,
                     )
                 })
@@ -928,6 +976,9 @@ impl<'a> EmbeddingDispatcher<'a> {
                 job_id: job.job_id.clone(),
                 occurrence_id: job.occurrence_id.clone(),
                 generation_id: job.generation.generation_id.clone(),
+                source_object_id: job.source_object_id.clone(),
+                source_revision: job.revision,
+                source_artifact_digest: job.source_artifact_digest.clone(),
                 reason,
             }],
             deadline,

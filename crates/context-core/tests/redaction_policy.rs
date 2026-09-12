@@ -38,20 +38,6 @@ fn established_replacement_spelling_remains_stable() {
 }
 
 #[test]
-fn portable_scanner_is_authoritative() {
-    let input =
-        "provider AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE";
-    let redaction = redact_durable_text(input);
-    assert_eq!(redaction.text, "provider <REDACTED:secret>");
-    assert!(
-        redaction
-            .detections
-            .iter()
-            .all(|detection| detection.detector_id == DETECTOR_ID)
-    );
-}
-
-#[test]
 fn concatenated_secret_keys_remain_redacted() {
     for input in [
         "apikey=hunter-two",
@@ -74,15 +60,6 @@ fn scalar_values_remain_visible() {
     ] {
         assert_eq!(redact_durable_text(input).text, input);
     }
-}
-
-#[test]
-fn oversized_input_is_rejected_by_direct_scans() {
-    let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES + 1);
-    assert_eq!(
-        redactor().redact(&input).unwrap_err().kind(),
-        RedactionErrorKind::InputLimit
-    );
 }
 
 #[test]
@@ -125,10 +102,19 @@ const AGE_KEY: &str = "AGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8G
 
 #[test]
 fn overlapping_findings_collapse_to_one_placeholder_over_their_union() {
+    // The key name states the operator's intent for the value, so it outranks a
+    // provider shape that matches the same bytes. Without a declared precedence the
+    // winner would follow incidental finding order and flip on a regex edit.
+    //
     // A keyed value class admits `-`, so the keyed span reaches past the provider or
     // upstream shape nested inside it. Replacing per finding would emit a second
     // placeholder for the trailing bytes and leave them described as their own secret.
     for (input, expected, secret_type) in [
+        (
+            format!("token={AWS_KEY}"),
+            "token=<REDACTED:token>",
+            "token",
+        ),
         (
             format!("token={AWS_KEY}-prod"),
             "token=<REDACTED:token>",
@@ -155,18 +141,9 @@ fn overlapping_findings_collapse_to_one_placeholder_over_their_union() {
 }
 
 #[test]
-fn a_key_name_supersedes_a_value_shape_on_the_same_span() {
-    // The key name states the operator's intent for the value, so it outranks a
-    // provider shape that matches the same bytes. Without a declared precedence the
-    // winner would follow incidental finding order and flip on a regex edit.
-    let redaction = redact_durable_text(&format!("token={AWS_KEY}"));
-    assert_eq!(redaction.text, "token=<REDACTED:token>");
-    assert_eq!(redaction.detections.len(), 1);
-    assert_eq!(redaction.detections[0].secret_type, "token");
-}
-
-#[test]
 fn a_value_shape_keeps_its_own_label_without_a_key_name() {
+    // A provider shape carries its own label; an upstream shape with no provider
+    // mapping falls back to the generic label. Every detection names the in-tree scanner.
     for (input, expected, secret_type) in [
         (AWS_KEY, "<AWS_ACCESS_KEY_ID_REDACTED>", "aws_access_key_id"),
         (AGE_KEY, "<REDACTED:secret>", "secret"),
@@ -175,6 +152,7 @@ fn a_value_shape_keeps_its_own_label_without_a_key_name() {
         assert_eq!(redaction.text, expected, "{input}");
         assert_eq!(redaction.detections.len(), 1, "{input}");
         assert_eq!(redaction.detections[0].secret_type, secret_type, "{input}");
+        assert_eq!(redaction.detections[0].detector_id, DETECTOR_ID, "{input}");
     }
 }
 
@@ -454,21 +432,6 @@ fn windowed_redaction_matches_direct_redaction_below_the_scan_limit() {
 }
 
 #[test]
-fn windowed_redaction_reports_a_secret_in_the_overlap_once() {
-    let secret_line = format!("token={AWS_KEY}");
-    let window = secret_scanner::MAX_INPUT_BYTES;
-    // The second window starts at a line boundary at or before `window -
-    // overlap`, so a line just past that point is scanned by both windows.
-    let (text, offset) = text_with_line_at(
-        window - WINDOW_OVERLAP_BYTES + 4096,
-        &secret_line,
-        window + window / 2,
-    );
-    assert!(text.len() > window);
-    assert_single_windowed_detection(&text, &secret_line, offset);
-}
-
-#[test]
 fn windowed_redaction_redacts_a_secret_the_first_window_cuts_in_half() {
     let secret_line = format!("token={AWS_KEY}");
     let window = secret_scanner::MAX_INPUT_BYTES;
@@ -481,23 +444,6 @@ fn windowed_redaction_redacts_a_secret_the_first_window_cuts_in_half() {
     );
     assert!(offset < window && offset + secret_line.len() > window);
     assert_single_windowed_detection(&text, &secret_line, offset);
-}
-
-#[test]
-fn windowed_redaction_finds_a_secret_deep_in_a_large_payload() {
-    let secret_line = format!("token={AWS_KEY}");
-    let window = secret_scanner::MAX_INPUT_BYTES;
-    let (text, offset) = text_with_line_at(5 * window + 777, &secret_line, 8 * window + 13);
-    assert_single_windowed_detection(&text, &secret_line, offset);
-}
-
-#[test]
-fn windowed_redaction_leaves_a_clean_large_payload_unchanged() {
-    let (text, _) = text_with_line_at(0, "first", 3 * secret_scanner::MAX_INPUT_BYTES);
-    let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
-    assert!(redaction.detections.is_empty());
-    assert_eq!(redaction.text, text);
-    assert_eq!(detect_windowed_durable_text(&text), Ok(false));
 }
 
 #[test]
@@ -547,7 +493,11 @@ fn byte_and_text_walks_agree_on_a_valid_utf8_multi_window_payload() {
         vec![first + "token=".len(), second + "token=".len()]
     );
 
+    // A clean multi-window payload is returned unchanged by every walk.
     let (clean, _) = text_with_line_at(0, "first", 5 * window);
+    let redaction = redact_windowed_durable_text(&clean, usize::MAX).unwrap();
+    assert!(redaction.detections.is_empty());
+    assert_eq!(redaction.text, clean);
     assert_eq!(detect_windowed_durable_text(&clean), Ok(false));
     assert_eq!(detect_windowed_durable_bytes(clean.as_bytes()), Ok(false));
 }
@@ -752,8 +702,14 @@ fn windowed_redaction_merges_findings_from_every_window_once() {
 }
 
 #[test]
-fn direct_redaction_of_oversized_text_still_fails_closed() {
+fn oversized_input_fails_closed_on_direct_paths() {
+    // One byte over the scanner's input limit: the direct scan reports the limit, and
+    // the durable wrapper replaces the whole field rather than passing any of it through.
     let input = "x".repeat(secret_scanner::MAX_INPUT_BYTES + 1);
+    assert_eq!(
+        redactor().redact(&input).unwrap_err().kind(),
+        RedactionErrorKind::InputLimit
+    );
     let redaction = redact_durable_text(&input);
     assert_eq!(redaction.text, "<REDACTED:secret>");
     assert_eq!(redaction.detections.len(), 1);

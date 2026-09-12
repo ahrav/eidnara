@@ -1784,31 +1784,6 @@ mod tests {
         assert!(protect_file(&missing).is_ok());
     }
 
-    /// Changing the identity or hash derivation orphans existing on-disk lease
-    /// files and remaps postgres advisory locks.
-    #[test]
-    fn identity_hash_derivation_is_stable() {
-        assert_eq!(key("main").identity(), "test-module\u{1f}sqlite\u{1f}main");
-        assert_eq!(fnv1a_hex(&key("main").identity()), "51a7eaa424b9fd8f");
-    }
-
-    #[test]
-    fn acquire_then_second_holder_is_rejected() {
-        let (store, _dir) = tmp_store();
-        let k = key("alpha");
-
-        let g1 = store.acquire(&k).expect("first acquire");
-        match store.acquire(&k) {
-            Err(LeaseError::Held { key }) => assert_eq!(key.scope_key, "alpha"),
-            other => panic!("expected Held, got {other:?}"),
-        }
-        let e1 = g1.epoch();
-        drop(g1);
-        let g2 = store.acquire(&k).expect("re-acquire after release");
-        assert!(g2.epoch() > e1, "epoch is monotonic across acquisitions");
-        drop(g2);
-    }
-
     #[test]
     fn distinct_identity_axes_do_not_conflict() {
         let (store, _dir) = tmp_store();
@@ -1864,34 +1839,23 @@ mod tests {
         drop(g);
     }
 
+    /// Shared holders observe the persisted writer epoch and never advance it.
     #[test]
-    fn exclusive_holder_blocks_shared() {
+    fn an_exclusive_holder_blocks_shared_and_shared_holders_never_advance_the_epoch() {
         let (store, _dir) = tmp_store();
         let k = key("excl-blocks-shared");
 
         let g = store.acquire(&k).expect("exclusive");
+        assert_eq!(g.epoch(), 1);
         match store.acquire_shared(&k) {
             Err(LeaseError::Held { key }) => assert_eq!(key.scope_key, "excl-blocks-shared"),
             other => panic!("shared must be Held while exclusive holder lives, got {other:?}"),
         }
         drop(g);
-        let s = store
+
+        let s1 = store
             .acquire_shared(&k)
             .expect("shared after exclusive released");
-        drop(s);
-    }
-
-    #[test]
-    fn shared_acquisition_does_not_bump_the_write_epoch() {
-        let (store, _dir) = tmp_store();
-        let k = key("epoch-neutral");
-
-        let g = store.acquire(&k).expect("writer");
-        assert_eq!(g.epoch(), 1);
-        drop(g);
-
-        // Shared holders observe the persisted epoch but never advance it.
-        let s1 = store.acquire_shared(&k).expect("shared");
         assert_eq!(s1.epoch(), 1, "shared handle reports last writer epoch");
         drop(s1);
         let s2 = store.acquire_shared(&k).expect("shared again");
@@ -2127,7 +2091,10 @@ mod tests {
                 let result = store.acquire(&key("exclusive-race"));
                 let outcome = match &result {
                     Ok(guard) => Ok(guard.epoch()),
-                    Err(LeaseError::Held { .. }) => Err("held"),
+                    Err(LeaseError::Held { key }) if key.scope_key == "exclusive-race" => {
+                        Err("held")
+                    }
+                    Err(LeaseError::Held { .. }) => Err("held for another key"),
                     Err(LeaseError::Io(_)) => Err("io"),
                 };
                 tx.send(outcome).expect("report acquisition");

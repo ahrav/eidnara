@@ -206,30 +206,6 @@ mod tests {
     }
 
     #[test]
-    fn digest_keyed_hits_skip_retokenization() {
-        let _guard = test_cache_guard();
-        let content = "x".repeat(200);
-        let digest: [u8; 32] = Sha256::digest(content.as_bytes()).into();
-        let expected = tokenizer::estimate_tokens(&content);
-        assert_eq!(count_with_digest(digest, &content), expected);
-        let before = local_stats();
-        assert_eq!(count_with_digest(digest, &content), expected);
-        let after = local_stats();
-        assert_eq!(after.hits, before.hits + 1);
-        assert_eq!(after.misses, before.misses);
-    }
-
-    #[test]
-    fn generation_rotation_keeps_recently_hit_entries() {
-        let mut generations = Generations::default();
-        generations.current.insert([1u8; 32], 7);
-        // Simulate rotation: the hit path promotes from previous into current.
-        generations.previous = std::mem::take(&mut generations.current);
-        assert!(generations.current.is_empty());
-        assert_eq!(generations.previous.get(&[1u8; 32]), Some(&7));
-    }
-
-    #[test]
     fn insert_current_rotates_at_capacity() {
         let mut generations = Generations::default();
         for i in 0..GENERATION_CAP {

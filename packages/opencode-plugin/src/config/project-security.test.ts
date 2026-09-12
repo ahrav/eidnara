@@ -74,26 +74,20 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("sqlite"))).toBe(true);
     });
 
-    it("strips storage.enforce_private_permissions from project config (only-key case)", () => {
-        const raw: Record<string, unknown> = {
-            storage: { enforce_private_permissions: false },
-        };
+    it("strips storage.enforce_private_permissions from project config whether or not a sibling key is present", () => {
+        for (const [storage, remaining] of [
+            [{ enforce_private_permissions: false }, {}],
+            [{ enforce_private_permissions: false, futureSibling: 1 }, { futureSibling: 1 }],
+        ] as Array<[Record<string, unknown>, Record<string, unknown>]>) {
+            const raw: Record<string, unknown> = { storage };
 
-        const warnings = stripUnsafeProjectConfigFields(raw);
+            const warnings = stripUnsafeProjectConfigFields(raw);
 
-        expect(raw.storage).toEqual({});
-        expect(warnings.some((w) => w.includes("storage.enforce_private_permissions"))).toBe(true);
-    });
-
-    it("strips storage.enforce_private_permissions but keeps a sibling key", () => {
-        const raw: Record<string, unknown> = {
-            storage: { enforce_private_permissions: false, futureSibling: 1 },
-        };
-
-        const warnings = stripUnsafeProjectConfigFields(raw);
-
-        expect(raw.storage).toEqual({ futureSibling: 1 });
-        expect(warnings.some((w) => w.includes("storage.enforce_private_permissions"))).toBe(true);
+            expect(raw.storage).toEqual(remaining);
+            expect(warnings).toEqual([
+                expect.stringContaining("storage.enforce_private_permissions"),
+            ]);
+        }
     });
 
     it("strips Pi subagent extension allowlists from project config", () => {
@@ -177,36 +171,35 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
-    it("strips hidden-agent maxSteps and maxTokens so a project cannot raise a user cost cap", () => {
-        const raw: Record<string, unknown> = {
-            historian: { maxSteps: 500, maxTokens: 100_000, temperature: 0.2 },
-            sidekick: { maxSteps: 500, timeout_ms: 3_600_000, model: "x" },
-        };
+    it("strips hidden-agent cost caps and reasoning depth so a project cannot raise a user limit", () => {
+        const cases: Array<{
+            historian: Record<string, unknown>;
+            sidekick: Record<string, unknown>;
+            warnings: string[];
+        }> = [
+            {
+                historian: { maxSteps: 500, maxTokens: 100_000 },
+                sidekick: { maxSteps: 500, timeout_ms: 3_600_000 },
+                warnings: ["historian.maxSteps/maxTokens", "sidekick.maxSteps/timeout_ms"],
+            },
+            {
+                historian: { thinking_level: "max", variant: "high" },
+                sidekick: { thinking_level: "xhigh" },
+                warnings: ["historian.thinking_level/variant", "sidekick.thinking_level"],
+            },
+        ];
+        for (const { historian, sidekick, warnings: expected } of cases) {
+            const raw: Record<string, unknown> = {
+                historian: { ...historian, temperature: 0.2 },
+                sidekick: { ...sidekick, model: "x" },
+            };
 
-        const warnings = stripUnsafeProjectConfigFields(raw);
+            const warnings = stripUnsafeProjectConfigFields(raw);
 
-        expect(raw.historian).toEqual({ temperature: 0.2 });
-        expect(raw.sidekick).toEqual({ model: "x" });
-        expect(warnings).toEqual([
-            expect.stringContaining("historian.maxSteps/maxTokens"),
-            expect.stringContaining("sidekick.maxSteps/timeout_ms"),
-        ]);
-    });
-
-    it("strips hidden-agent thinking_level and variant so a project cannot raise reasoning depth", () => {
-        const raw: Record<string, unknown> = {
-            historian: { thinking_level: "max", variant: "high", temperature: 0.2 },
-            sidekick: { thinking_level: "xhigh", model: "x" },
-        };
-
-        const warnings = stripUnsafeProjectConfigFields(raw);
-
-        expect(raw.historian).toEqual({ temperature: 0.2 });
-        expect(raw.sidekick).toEqual({ model: "x" });
-        expect(warnings).toEqual([
-            expect.stringContaining("historian.thinking_level/variant"),
-            expect.stringContaining("sidekick.thinking_level"),
-        ]);
+            expect(raw.historian).toEqual({ temperature: 0.2 });
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual(expected.map((text) => expect.stringContaining(text)));
+        }
     });
 
     it("strips keep_subagents and memory.injection_budget_tokens from project config", () => {
@@ -266,26 +259,20 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
-    it("strips mural.model from project config but keeps the feature switch", () => {
-        const raw: Record<string, unknown> = {
+    it("strips mural.model in both the current and legacy experimental locations but keeps the feature switch", () => {
+        const current: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },
         };
+        const currentWarnings = stripUnsafeProjectConfigFields(current);
+        expect(current.mural).toEqual({ enabled: true });
+        expect(currentWarnings.some((w) => w.includes("mural.model"))).toBe(true);
 
-        const warnings = stripUnsafeProjectConfigFields(raw);
-
-        expect(raw.mural).toEqual({ enabled: true });
-        expect(warnings.some((w) => w.includes("mural.model"))).toBe(true);
-    });
-
-    it("strips the legacy experimental mural model before migration", () => {
-        const raw: Record<string, unknown> = {
+        const legacy: Record<string, unknown> = {
             experimental: { mural: { enabled: true, model: "repo-controlled-model" } },
         };
-
-        const warnings = stripUnsafeProjectConfigFields(raw);
-
-        expect(raw.experimental).toEqual({ mural: { enabled: true } });
-        expect(warnings.some((w) => w.includes("experimental.mural.model"))).toBe(true);
+        const legacyWarnings = stripUnsafeProjectConfigFields(legacy);
+        expect(legacy.experimental).toEqual({ mural: { enabled: true } });
+        expect(legacyWarnings.some((w) => w.includes("experimental.mural.model"))).toBe(true);
     });
 
     it("strips hidden-agent prompt/permission/tools but keeps benign fields", () => {
@@ -326,39 +313,23 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("sidekick.system_prompt"))).toBe(true);
     });
 
-    it("strips hidden-agent disable in both directions so a project cannot reactivate an agent", () => {
-        for (const disable of [false, true]) {
-            const raw: Record<string, unknown> = {
-                historian: { disable, temperature: 0.2 },
-                sidekick: { disable, model: "x" },
-            };
+    it("strips hidden-agent disable and legacy enabled in both directions so a project cannot reactivate an agent", () => {
+        for (const key of ["disable", "enabled"]) {
+            for (const value of [false, true]) {
+                const raw: Record<string, unknown> = {
+                    historian: { [key]: value, temperature: 0.2 },
+                    sidekick: { [key]: value, model: "x" },
+                };
 
-            const warnings = stripUnsafeProjectConfigFields(raw);
+                const warnings = stripUnsafeProjectConfigFields(raw);
 
-            expect(raw.historian).toEqual({ temperature: 0.2 });
-            expect(raw.sidekick).toEqual({ model: "x" });
-            expect(warnings).toEqual([
-                expect.stringContaining("historian.disable"),
-                expect.stringContaining("sidekick.disable"),
-            ]);
-        }
-    });
-
-    it("strips the legacy hidden-agent enabled key so a project cannot undo a user's enabled=false", () => {
-        for (const enabled of [false, true]) {
-            const raw: Record<string, unknown> = {
-                historian: { enabled, temperature: 0.2 },
-                sidekick: { enabled, model: "x" },
-            };
-
-            const warnings = stripUnsafeProjectConfigFields(raw);
-
-            expect(raw.historian).toEqual({ temperature: 0.2 });
-            expect(raw.sidekick).toEqual({ model: "x" });
-            expect(warnings).toEqual([
-                expect.stringContaining("historian.enabled"),
-                expect.stringContaining("sidekick.enabled"),
-            ]);
+                expect(raw.historian).toEqual({ temperature: 0.2 });
+                expect(raw.sidekick).toEqual({ model: "x" });
+                expect(warnings).toEqual([
+                    expect.stringContaining(`historian.${key}`),
+                    expect.stringContaining(`sidekick.${key}`),
+                ]);
+            }
         }
     });
 
@@ -380,38 +351,22 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(raw.disabled_hooks).toEqual(["a", "b"]);
     });
 
-    it("strips compaction.enabled from project config (only-key case)", () => {
-        const raw: Record<string, unknown> = {
-            compaction: { enabled: false },
-            sidekick: { model: "x" },
-        };
-        const warnings = stripUnsafeProjectConfigFields(raw);
-        const compaction = raw.compaction as Record<string, unknown>;
-        expect("enabled" in compaction).toBe(false);
-        expect(raw.compaction).toEqual({});
-        expect(raw.sidekick).toEqual({ model: "x" });
-        expect(warnings.some((w) => w.includes("compaction.enabled"))).toBe(true);
-    });
+    it("strips compaction.enabled field-scoped, keeping siblings and leaving a block without it untouched", () => {
+        for (const [compaction, remaining] of [
+            [{ enabled: false }, {}],
+            [{ enabled: false, futureSibling: 1 }, { futureSibling: 1 }],
+        ] as Array<[Record<string, unknown>, Record<string, unknown>]>) {
+            const raw: Record<string, unknown> = { compaction, sidekick: { model: "x" } };
+            const warnings = stripUnsafeProjectConfigFields(raw);
+            expect(raw.compaction).toEqual(remaining);
+            expect(raw.sidekick).toEqual({ model: "x" });
+            expect(warnings).toEqual([expect.stringContaining("compaction.enabled")]);
+        }
 
-    it("strips compaction.enabled but keeps a sibling key (field-scoped, not block-scoped)", () => {
-        const raw: Record<string, unknown> = {
-            compaction: { enabled: false, futureSibling: 1 },
-            sidekick: { model: "x" },
-        };
-        const warnings = stripUnsafeProjectConfigFields(raw);
-        const compaction = raw.compaction as Record<string, unknown>;
-        expect("enabled" in compaction).toBe(false);
-        expect(compaction.futureSibling).toBe(1);
-        expect(warnings.some((w) => w.includes("compaction.enabled"))).toBe(true);
-    });
-
-    it("does not touch a compaction block that has no enabled key", () => {
-        const raw: Record<string, unknown> = {
-            compaction: { futureSibling: 1 },
-        };
-        const warnings = stripUnsafeProjectConfigFields(raw);
-        expect(raw.compaction).toEqual({ futureSibling: 1 });
-        expect(warnings.some((w) => w.includes("compaction"))).toBe(false);
+        const untouched: Record<string, unknown> = { compaction: { futureSibling: 1 } };
+        const untouchedWarnings = stripUnsafeProjectConfigFields(untouched);
+        expect(untouched.compaction).toEqual({ futureSibling: 1 });
+        expect(untouchedWarnings.some((w) => w.includes("compaction"))).toBe(false);
     });
 
     it("is a no-op for a clean project config", () => {
@@ -422,16 +377,6 @@ describe("stripUnsafeProjectConfigFields", () => {
         const warnings = stripUnsafeProjectConfigFields(raw);
         expect(warnings).toHaveLength(0);
         expect(raw).toEqual({ sidekick: { model: "x" }, memory: { enabled: true } });
-    });
-
-    it("ignores non-object agent blocks", () => {
-        const raw: Record<string, unknown> = { sidekick: true, historian: "x" };
-        const warnings = stripUnsafeProjectConfigFields(raw);
-        expect(raw).toEqual({});
-        expect(warnings).toEqual([
-            expect.stringContaining("Ignoring historian from project config"),
-            expect.stringContaining("Ignoring sidekick from project config"),
-        ]);
     });
 
     it("strips non-object replacements for every block that carries user-only leaves", () => {
@@ -484,18 +429,26 @@ describe("stripUnsafeProjectConfigFields", () => {
 });
 
 describe("constrainProjectThresholdOverrides", () => {
-    it("raises a lower scalar project percentage in the 81-90 band back to the trusted value", () => {
+    it("raises a lower scalar project percentage in the 81-90 band back to the trusted value and allows a higher one at the 90 cap", () => {
         // The schema accepts percentages through 90, so the sanitizer must recognize
         // them; otherwise the merged project value survives unconstrained.
-        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 85 };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
+        const lowered: Record<string, unknown> = { execute_threshold_percentage: 85 };
+        const loweredWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: lowered,
             projectRaw: { execute_threshold_percentage: 85 },
             trustedBaseConfig: { execute_threshold_percentage: 90 },
         });
+        expect(lowered.execute_threshold_percentage).toBe(90);
+        expect(loweredWarnings).toEqual([expect.stringContaining("execute_threshold_percentage")]);
 
-        expect(mergedRaw.execute_threshold_percentage).toBe(90);
-        expect(warnings).toEqual([expect.stringContaining("execute_threshold_percentage")]);
+        const raised: Record<string, unknown> = { execute_threshold_percentage: 90 };
+        const raisedWarnings = constrainProjectThresholdOverrides({
+            mergedRaw: raised,
+            projectRaw: { execute_threshold_percentage: 90 },
+            trustedBaseConfig: { execute_threshold_percentage: 65 },
+        });
+        expect(raised.execute_threshold_percentage).toBe(90);
+        expect(raisedWarnings).toHaveLength(0);
     });
 
     it("drops lower object project percentages in the 81-90 band and warns per entry", () => {
@@ -513,18 +466,6 @@ describe("constrainProjectThresholdOverrides", () => {
             expect.stringContaining("execute_threshold_percentage.default"),
             expect.stringContaining("execute_threshold_percentage.openai/gpt-4"),
         ]);
-    });
-
-    it("allows a higher project percentage at the schema's 90 cap", () => {
-        const mergedRaw: Record<string, unknown> = { execute_threshold_percentage: 90 };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
-            projectRaw: { execute_threshold_percentage: 90 },
-            trustedBaseConfig: { execute_threshold_percentage: 65 },
-        });
-
-        expect(mergedRaw.execute_threshold_percentage).toBe(90);
-        expect(warnings).toHaveLength(0);
     });
 
     it("restores the trusted percentage when the project value is out of range or mistyped", () => {
@@ -567,20 +508,32 @@ describe("constrainProjectThresholdOverrides", () => {
         ]);
     });
 
-    it("compares a qualified project key with the trusted value the lookup walk reaches", () => {
-        const mergedRaw: Record<string, unknown> = {
-            execute_threshold_percentage: { default: 65, "gpt-4": 80, "openai/gpt-4": 70 },
-        };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
-            projectRaw: { execute_threshold_percentage: { "openai/gpt-4": 70 } },
-            trustedBaseConfig: { execute_threshold_percentage: { default: 65, "gpt-4": 80 } },
-        });
+    it("compares a qualified project key with the trusted value the lookup walk reaches for both threshold fields", () => {
+        const cases: Array<{ field: string; trusted: Record<string, number>; value: number }> = [
+            {
+                field: "execute_threshold_percentage",
+                trusted: { default: 65, "gpt-4": 80 },
+                value: 70,
+            },
+            {
+                field: "execute_threshold_tokens",
+                trusted: { default: 10_000, "gpt-4": 20_000 },
+                value: 15_000,
+            },
+        ];
+        for (const { field, trusted, value } of cases) {
+            const mergedRaw: Record<string, unknown> = {
+                [field]: { ...trusted, "openai/gpt-4": value },
+            };
+            const warnings = constrainProjectThresholdOverrides({
+                mergedRaw,
+                projectRaw: { [field]: { "openai/gpt-4": value } },
+                trustedBaseConfig: { [field]: trusted },
+            });
 
-        expect(mergedRaw.execute_threshold_percentage).toEqual({ default: 65, "gpt-4": 80 });
-        expect(warnings).toEqual([
-            expect.stringContaining("execute_threshold_percentage.openai/gpt-4"),
-        ]);
+            expect([field, mergedRaw[field]]).toEqual([field, trusted]);
+            expect(warnings).toEqual([expect.stringContaining(`${field}.openai/gpt-4`)]);
+        }
     });
 
     it("compares dash-shortened and wildcard trusted keys against qualified project keys", () => {
@@ -984,62 +937,53 @@ describe("constrainProjectThresholdOverrides", () => {
         expect(mergedRaw.execute_threshold_tokens).toBeUndefined();
     });
 
-    it("compares qualified project token keys with the trusted value the lookup walk reaches", () => {
-        const trusted = { default: 10_000, "gpt-4": 20_000 };
-        const mergedRaw: Record<string, unknown> = {
-            execute_threshold_tokens: { ...trusted, "openai/gpt-4": 15_000 },
-        };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
-            projectRaw: { execute_threshold_tokens: { "openai/gpt-4": 15_000 } },
-            trustedBaseConfig: { execute_threshold_tokens: trusted },
-        });
+    it("compares a project token default with the trusted default and refuses one without a trusted baseline", () => {
+        const cases: Array<{
+            title: string;
+            trusted: Record<string, unknown>;
+            value: number;
+            expected: unknown;
+            warnings: number;
+        }> = [
+            {
+                title: "lower default is dropped",
+                trusted: { execute_threshold_tokens: { default: 12_000 } },
+                value: 9_000,
+                expected: { default: 12_000 },
+                warnings: 1,
+            },
+            {
+                title: "higher default is kept",
+                trusted: { execute_threshold_tokens: { default: 12_000 } },
+                value: 18_000,
+                expected: { default: 18_000 },
+                warnings: 0,
+            },
+            {
+                title: "no trusted baseline removes the field",
+                trusted: {},
+                value: 18_000,
+                expected: undefined,
+                warnings: 1,
+            },
+        ];
+        for (const { title, trusted, value, expected, warnings: count } of cases) {
+            const mergedRaw: Record<string, unknown> = {
+                execute_threshold_tokens: { default: value },
+            };
+            const warnings = constrainProjectThresholdOverrides({
+                mergedRaw,
+                projectRaw: { execute_threshold_tokens: { default: value } },
+                trustedBaseConfig: trusted,
+            });
 
-        expect(mergedRaw.execute_threshold_tokens).toEqual(trusted);
-        expect(warnings).toEqual([
-            expect.stringContaining("execute_threshold_tokens.openai/gpt-4"),
-        ]);
-    });
-
-    it("drops lower project token thresholds and warns", () => {
-        const mergedRaw: Record<string, unknown> = {
-            execute_threshold_tokens: { default: 9_000 },
-        };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
-            projectRaw: { execute_threshold_tokens: { default: 9_000 } },
-            trustedBaseConfig: { execute_threshold_tokens: { default: 12_000 } },
-        });
-
-        expect(mergedRaw.execute_threshold_tokens).toEqual({ default: 12_000 });
-        expect(warnings).toEqual([expect.stringContaining("execute_threshold_tokens.default")]);
-    });
-
-    it("allows higher project token thresholds", () => {
-        const mergedRaw: Record<string, unknown> = {
-            execute_threshold_tokens: { default: 18_000 },
-        };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
-            projectRaw: { execute_threshold_tokens: { default: 18_000 } },
-            trustedBaseConfig: { execute_threshold_tokens: { default: 12_000 } },
-        });
-
-        expect(mergedRaw.execute_threshold_tokens).toEqual({ default: 18_000 });
-        expect(warnings).toHaveLength(0);
-    });
-
-    it("does not let project config introduce token thresholds without a trusted baseline", () => {
-        const mergedRaw: Record<string, unknown> = {
-            execute_threshold_tokens: { default: 18_000 },
-        };
-        const warnings = constrainProjectThresholdOverrides({
-            mergedRaw,
-            projectRaw: { execute_threshold_tokens: { default: 18_000 } },
-            trustedBaseConfig: {},
-        });
-
-        expect(mergedRaw.execute_threshold_tokens).toBeUndefined();
-        expect(warnings).toEqual([expect.stringContaining("execute_threshold_tokens.default")]);
+            expect([title, mergedRaw.execute_threshold_tokens]).toEqual([title, expected]);
+            expect([title, warnings]).toEqual([
+                title,
+                Array.from({ length: count }, () =>
+                    expect.stringContaining("execute_threshold_tokens.default"),
+                ),
+            ]);
+        }
     });
 });

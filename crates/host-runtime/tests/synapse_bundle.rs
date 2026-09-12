@@ -334,26 +334,18 @@ async fn one_bit_changes_to_each_artifact_disable_the_lane() {
 }
 
 #[tokio::test]
-async fn missing_artifact_disables_the_lane() {
+async fn bundle_content_faults_disable_the_lane() {
     expect_disabled_with(
         |dir| std::fs::remove_file(dir.join("embedding.bin")).expect("remove"),
         "missing",
     )
     .await;
-}
-
-#[tokio::test]
-async fn unlisted_extra_file_disables_the_lane() {
     expect_disabled_with(
         |dir| std::fs::write(dir.join("extra-initializer.bin"), b"x").expect("write"),
         "unlisted",
     )
     .await;
-}
-
-#[tokio::test]
-async fn symlinked_artifact_disables_the_lane() {
-    // The listed entry set makes this test reach symlink rejection before unlisted-entry rejection.
+    // The listed entry set makes this case reach symlink rejection before unlisted-entry rejection.
     // Artifacts open with `O_NOFOLLOW`, so the symlink fails with `ELOOP` and its target never has to exist.
     expect_disabled_with(
         |dir| {
@@ -364,10 +356,6 @@ async fn symlinked_artifact_disables_the_lane() {
         "not a regular file",
     )
     .await;
-}
-
-#[tokio::test]
-async fn duplicate_manifest_key_disables_the_lane() {
     expect_disabled_with(
         |dir| {
             let path = dir.join("manifest.json");
@@ -380,6 +368,18 @@ async fn duplicate_manifest_key_disables_the_lane() {
             std::fs::write(&path, duplicated).expect("write");
         },
         "strict JSON",
+    )
+    .await;
+    expect_disabled_with(
+        |dir| {
+            let path = dir.join("tokenizer_config.json");
+            let contents = br#"{"model_max_length": 8}"#;
+            std::fs::write(&path, contents).expect("write");
+            edit_manifest(dir, |m| {
+                m["tokenizer"]["tokenizer_config"]["sha256"] = sha256_hex(contents).into();
+            });
+        },
+        "pad_token",
     )
     .await;
 }
@@ -454,35 +454,35 @@ fn a_bundle_manifest_outside_the_committed_digest_does_not_load() {
     );
 }
 
+/// Host limits that contradict the manifest's own serving bounds disable the lane before ORT loads.
 #[tokio::test]
-async fn a_recommended_batch_above_the_admission_cap_disables_the_lane() {
-    // `recommended_page_size` must not exceed `max_batch_items` because clients receive the recommendation verbatim while admission rejects larger batches.
-    let dir = tempfile::tempdir().expect("temp bundle dir");
-    copy_fixture_to(dir.path());
-    let ort = pre_ort_identity();
-    let mut config = config_for(dir.path(), &ort);
-    config.limits.max_batch_items = 8;
-    let component = initialize(config).await;
-    let reason = disabled_reason(&component);
-    assert!(
-        reason.contains("recommended batch rows") && reason.contains("max batch items"),
-        "reason {reason:?} does not name the admission mismatch"
-    );
-}
-
-#[tokio::test]
-async fn retained_result_cap_below_the_manifest_batch_bound_disables_before_ort() {
-    let dir = tempfile::tempdir().expect("temp bundle dir");
-    copy_fixture_to(dir.path());
-    let mut config = config_for(dir.path(), &pre_ort_identity());
-    config.limits.max_retained_result_bytes = 1;
-
-    let component = initialize(config).await;
-    let reason = disabled_reason(&component);
-    assert!(
-        reason.contains("maximum batch result") && reason.contains("retained-result limit"),
-        "reason {reason:?} does not name the composed result bound"
-    );
+async fn limits_incoherent_with_the_manifest_disable_the_lane_before_ort() {
+    type IncoherentLimit = (fn(&mut SynapseLimits), [&'static str; 2]);
+    let cases: [IncoherentLimit; 2] = [
+        // `recommended_page_size` must not exceed `max_batch_items` because clients receive the recommendation verbatim while admission rejects larger batches.
+        (
+            |limits| limits.max_batch_items = 8,
+            ["recommended batch rows", "max batch items"],
+        ),
+        (
+            |limits| limits.max_retained_result_bytes = 1,
+            ["maximum batch result", "retained-result limit"],
+        ),
+    ];
+    for (mutate, fragments) in cases {
+        let dir = tempfile::tempdir().expect("temp bundle dir");
+        copy_fixture_to(dir.path());
+        let mut config = config_for(dir.path(), &pre_ort_identity());
+        mutate(&mut config.limits);
+        let component = initialize(config).await;
+        let reason = disabled_reason(&component);
+        for fragment in fragments {
+            assert!(
+                reason.contains(fragment),
+                "reason {reason:?} does not mention {fragment:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -579,22 +579,6 @@ async fn manifest_field_bounds_disable_the_lane() {
     expect_disabled_with(
         |dir| edit_manifest(dir, |m| m["unexpected_field"] = 1.into()),
         "schema invalid",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn missing_pad_token_disables_the_lane() {
-    expect_disabled_with(
-        |dir| {
-            let path = dir.join("tokenizer_config.json");
-            let contents = br#"{"model_max_length": 8}"#;
-            std::fs::write(&path, contents).expect("write");
-            edit_manifest(dir, |m| {
-                m["tokenizer"]["tokenizer_config"]["sha256"] = sha256_hex(contents).into();
-            });
-        },
-        "pad_token",
     )
     .await;
 }

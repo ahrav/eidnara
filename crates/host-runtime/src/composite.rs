@@ -558,42 +558,29 @@ mod tests {
         assert_eq!(composite.child_of_route(unknown), None);
     }
 
+    /// A primary health panic is reported like any other child panic, whether `health()` panics
+    /// while the returned future is polled or synchronously before returning a future.
     #[tokio::test]
-    async fn a_primary_health_panic_is_reported_like_any_other_child_panic() {
-        let composite = StaticComposite::new(
+    async fn a_primary_health_panic_at_either_stage_is_a_failing_report_with_healthy_siblings() {
+        for primary in [
             Fake::panicking_health("primary"),
-            Fake::new("secondary"),
-            Fake::new("tertiary"),
-        )
-        .expect("distinct ids");
-
-        let report = composite.health().await;
-        assert_eq!(report.status, HealthStatus::Failing);
-        assert_eq!(
-            report.detail.as_deref(),
-            Some("primary health check panicked")
-        );
-        let components = &report.metrics.expect("aggregate metrics")["components"];
-        assert_eq!(components["primary"]["status"], "failing");
-        assert_eq!(components["secondary"]["status"], "ok");
-        assert_eq!(components["tertiary"]["status"], "ok");
-    }
-
-    #[tokio::test]
-    async fn a_panic_before_the_health_future_exists_is_still_a_failing_report() {
-        let composite = StaticComposite::new(
             Fake::panicking_before_any_future("primary"),
-            Fake::new("secondary"),
-            Fake::new("tertiary"),
-        )
-        .expect("distinct ids");
+        ] {
+            let composite =
+                StaticComposite::new(primary, Fake::new("secondary"), Fake::new("tertiary"))
+                    .expect("distinct ids");
 
-        let report = composite.health().await;
-        assert_eq!(report.status, HealthStatus::Failing);
-        assert_eq!(
-            report.detail.as_deref(),
-            Some("primary health check panicked")
-        );
+            let report = composite.health().await;
+            assert_eq!(report.status, HealthStatus::Failing);
+            assert_eq!(
+                report.detail.as_deref(),
+                Some("primary health check panicked")
+            );
+            let components = &report.metrics.expect("aggregate metrics")["components"];
+            assert_eq!(components["primary"]["status"], "failing");
+            assert_eq!(components["secondary"]["status"], "ok");
+            assert_eq!(components["tertiary"]["status"], "ok");
+        }
     }
 
     #[tokio::test]
@@ -661,6 +648,8 @@ mod tests {
         .await;
         assert_eq!(outcome, Err(ChildPanic));
 
+        // Cancelling the boundary while the child is pending drops the child future from the
+        // timeout's teardown, not from `catch_child_panic`'s own code.
         let cancelled = tokio::time::timeout(
             std::time::Duration::from_millis(10),
             catch_child_panic(|| async {
@@ -676,24 +665,5 @@ mod tests {
         )
         .await;
         assert!(cancelled.is_err(), "only the timeout can complete");
-    }
-
-    #[tokio::test]
-    async fn a_drop_panic_during_cancellation_does_not_escape() {
-        let child = || async {
-            let _state = PanicsOnDrop;
-            std::future::pending::<()>().await;
-        };
-        // Cancelling the boundary while the child is pending drops the child future from the
-        // timeout's teardown, not from `catch_child_panic`'s own code.
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            catch_child_panic(child),
-        )
-        .await;
-        assert!(
-            outcome.is_err(),
-            "the child never completes; only the timeout can"
-        );
     }
 }

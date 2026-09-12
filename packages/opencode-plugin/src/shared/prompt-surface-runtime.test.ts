@@ -126,44 +126,33 @@ describe("prompt-surface runtime", () => {
         }
     });
 
-    it("rejects a guidance override larger than the 1 MiB cap", () => {
-        const directory = tempDir();
-        const oversized = `## Eidnara\n\n${"x".repeat(MAX_GUIDANCE_OVERRIDE_BYTES)}`;
-        writeFileSync(join(directory, "big.md"), oversized);
-        const warnings: string[] = [];
-        const runtime = createPromptSurfaceRuntime({
-            userConfigDirectory: directory,
-            warn: (warning) => warnings.push(warning),
-        });
-
-        const selection = runtime.resolveGuidance(
-            { default: "full", guidance_override_path: "big.md" },
-            "provider/model",
-        );
-
-        expect(selection.primaryOverride).toBeUndefined();
-        expect(warnings).toHaveLength(1);
-        expect(warnings[0]).toContain(`exceeds ${MAX_GUIDANCE_OVERRIDE_BYTES} bytes`);
-    });
-
-    it("accepts a guidance override exactly at the 1 MiB cap", () => {
+    it("accepts a guidance override exactly at the 1 MiB cap and rejects one byte over it", () => {
         const directory = tempDir();
         const marker = "## Eidnara\n\n";
-        const content = `${marker}${"x".repeat(MAX_GUIDANCE_OVERRIDE_BYTES - marker.length)}`;
-        writeFileSync(join(directory, "max.md"), content);
+        const atCap = `${marker}${"x".repeat(MAX_GUIDANCE_OVERRIDE_BYTES - marker.length)}`;
+        const overCap = `${marker}${"x".repeat(MAX_GUIDANCE_OVERRIDE_BYTES - marker.length + 1)}`;
+        writeFileSync(join(directory, "max.md"), atCap);
+        writeFileSync(join(directory, "big.md"), overCap);
         const warnings: string[] = [];
         const runtime = createPromptSurfaceRuntime({
             userConfigDirectory: directory,
             warn: (warning) => warnings.push(warning),
         });
 
-        const selection = runtime.resolveGuidance(
+        const accepted = runtime.resolveGuidance(
             { default: "full", guidance_override_path: "max.md" },
             "provider/model",
         );
-
-        expect(selection.primaryOverride).toBe(content);
+        expect(accepted.primaryOverride).toBe(atCap);
         expect(warnings).toEqual([]);
+
+        const rejected = runtime.resolveGuidance(
+            { default: "full", guidance_override_path: "big.md" },
+            "provider/model",
+        );
+        expect(rejected.primaryOverride).toBeUndefined();
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain(`exceeds ${MAX_GUIDANCE_OVERRIDE_BYTES} bytes`);
     });
 
     it.skipIf(process.platform === "win32")("does not follow a symlinked guidance override", () => {
@@ -297,36 +286,24 @@ describe("prompt-surface runtime", () => {
         expect(warnings[0]).toContain("unknown_tool");
     });
 
-    it("lets a user description override the built-in light catalog", () => {
-        const runtime = createPromptSurfaceRuntime({
-            userConfigDirectory: tempDir(),
-            warn: () => undefined,
-        });
-        const registration = runtime.resolveRegistration({
-            default: "light",
-            tool_descriptions: { ctx_search: "User light search" },
-        });
-
-        expect(registration.descriptionFor("ctx_search", "Full search")).toBe("User light search");
-        expect(registration.descriptionFor("ctx_reduce", "Full reduce")).toBe(
-            LIGHT_TOOL_DESCRIPTIONS.ctx_reduce,
-        );
-    });
-
-    it("serves built-in light descriptions without a fallback notice", () => {
+    it("serves built-in light descriptions without a fallback notice and lets a user description override them", () => {
         const warnings: string[] = [];
         const runtime = createPromptSurfaceRuntime({
             userConfigDirectory: tempDir(),
             warn: (warning) => warnings.push(warning),
         });
-        const config = { default: "light" as const };
+        const config = {
+            default: "light" as const,
+            tool_descriptions: { ctx_search: "User light search" },
+        };
 
         const registration = runtime.resolveRegistration(config);
         const guidance = runtime.resolveGuidance(config, "provider/model");
         runtime.resolveGuidance(config, "provider/other");
 
-        expect(registration.descriptionFor("ctx_search", "Full search")).toBe(
-            LIGHT_TOOL_DESCRIPTIONS.ctx_search,
+        expect(registration.descriptionFor("ctx_search", "Full search")).toBe("User light search");
+        expect(registration.descriptionFor("ctx_reduce", "Full reduce")).toBe(
+            LIGHT_TOOL_DESCRIPTIONS.ctx_reduce,
         );
         expect(guidance.preset).toBe("light");
         expect(warnings).toEqual([]);

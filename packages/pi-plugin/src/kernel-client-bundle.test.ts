@@ -33,8 +33,17 @@ const MODULE_GRAPH_REPORT = resolve(
 /** The `build` script's real entry points; both bundle roots together must reach every shipped module. */
 const BUILD_ENTRIES = ["index.ts", "subagent-entry.ts"].map((entry) => join(SRC, entry));
 
-/** The test runner shares its module registry with the in-process bundler, so build entry graphs run in a child process. */
-function buildEntryGraphs(): Record<string, Omit<ModuleGraph, "text">> {
+type EntryGraphs = Record<string, Omit<ModuleGraph, "text">>;
+
+let entryGraphs: EntryGraphs | undefined;
+
+/**
+ * The test runner shares its module registry with the in-process bundler, so build entry
+ * graphs run in a child process. The report is a pure function of the checked-in sources,
+ * so one child process serves every test in this file.
+ */
+function buildEntryGraphs(): EntryGraphs {
+    if (entryGraphs) return entryGraphs;
     const report = Bun.spawnSync({
         cmd: ["bun", MODULE_GRAPH_REPORT, ...BUILD_ENTRIES],
         cwd: PACKAGE_ROOT,
@@ -44,7 +53,8 @@ function buildEntryGraphs(): Record<string, Omit<ModuleGraph, "text">> {
     if (report.exitCode !== 0) {
         throw new Error(`module graph report failed: ${report.stderr.toString()}`);
     }
-    return JSON.parse(report.stdout.toString());
+    entryGraphs = JSON.parse(report.stdout.toString()) as EntryGraphs;
+    return entryGraphs;
 }
 
 /**
@@ -125,18 +135,13 @@ describe("Pi kernel-client bundle reachability", () => {
         }
     }, 120_000);
 
-    it("the shipped entry points bundle under the build script's externals", () => {
+    it("every build entry bundles under the build script's externals, no bundle root reaches a not-ported subsystem, and every module without a consumer is named", () => {
         const graphs = buildEntryGraphs();
         expect(Object.keys(graphs).sort()).toEqual([...BUILD_ENTRIES].sort());
-        for (const graph of Object.values(graphs)) {
-            expect(graph.inputs.length).toBeGreaterThan(0);
-        }
-    }, 120_000);
-
-    it("no bundle root reaches a not-ported subsystem, and every module without a consumer is named", () => {
         const reached = new Set<string>();
         const notPorted: string[] = [];
-        for (const graph of Object.values(buildEntryGraphs())) {
+        for (const graph of Object.values(graphs)) {
+            expect(graph.inputs.length).toBeGreaterThan(0);
             for (const input of graph.inputs) reached.add(resolve(PACKAGE_ROOT, input));
             for (const path of [...graph.inputs, ...graph.externals]) {
                 // Third-party packages (typebox ships a `system/memory/` tree) are outside the not-ported scan.

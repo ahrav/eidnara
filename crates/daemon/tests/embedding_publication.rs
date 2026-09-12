@@ -14,14 +14,15 @@ use daemon::embedding_publication::{
     EmbeddingPublisher, ObsoleteCause, Publication, PublicationError, PublicationEvent,
     PublicationFault, VectorPublication,
 };
-use daemon::search_projection::SearchProjection;
+use daemon::search_projection::{SearchProjection, SearchProjectionError};
+use daemon::search_writer::QuarantineKind;
 use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, BackupRequest,
-    CommitIntent, CurrentInputExpectation, Dimension, DomainSpec, EligibilityBinding,
-    EligibilityVerdict, EventKind, ExportWindow, KernelStore, ProjectScope, ProviderEgress,
-    RemediationTarget, RepositoryProvenance, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass,
-    SourceDescriptorRequest, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    CommitIntent, CurrentInputDescriptor, CurrentInputExpectation, Dimension, DomainSpec,
+    EligibilityBinding, EligibilityVerdict, EventKind, ExportWindow, KernelStore, ProjectScope,
+    ProviderEgress, RemediationTarget, RepositoryProvenance, ScopeSpec, ScopeTermSpec, Sensitivity,
+    SourceClass, SourceDescriptorRequest, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourcePageBounds, SourceRow, StaleInput, TaintClass,
 };
 use retrieval::ProjectionError;
@@ -31,14 +32,13 @@ use retrieval::batch::{
 };
 use retrieval::vectors::{
     CompletionOutcome, ObsoleteReason, VectorCompletion, complete_embedding_observed,
-    completion_status, encode,
+    completion_status, encode, obsolete_embedding,
 };
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 const CONSUMER: &str = "search";
-const KERNEL_INCARNATION: &str = "kernel-1";
 const POLICY: &str = "source-policy.v1";
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SCOPE: &str = "project:a";
@@ -59,6 +59,142 @@ fn intent(key: &str) -> CommitIntent {
     }
 }
 
+#[test]
+fn a_damaged_projection_fence_quarantines_the_completion() {
+    for (label, damage) in [
+        ("missing", "DELETE FROM fence"),
+        (
+            "corrupt",
+            "PRAGMA ignore_check_constraints=ON; UPDATE fence SET epoch=-1 WHERE id=0",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish(label, "msg-fence", "1", "damaged fence");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let vector = unit(8);
+        let row = row_for(&rows, &object);
+        mutate(&search_path(dir.path()))
+            .execute_batch(damage)
+            .unwrap();
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+        let (result, _) = publish_once(
+            &mut publisher,
+            &publication(row, &generation, &vector),
+            &project,
+        );
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("{label} fence damage must quarantine: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity, "{label}");
+        assert_eq!(
+            durable(dir.path(), &row.detail.occurrence_id),
+            (Some("pending".to_string()), None),
+            "{label}",
+        );
+    }
+}
+
+#[test]
+fn negative_time_is_refused_before_requesting_the_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("negative-time", "msg-time", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let vector = unit(8);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let mut events = Vec::new();
+
+    let result = publisher.publish(
+        &publication(row, &generation, &vector),
+        eligibility(&project),
+        deadline(),
+        -1,
+        &mut |event| events.push(event),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PublicationError::NegativeTime { now: -1 })
+    ));
+    assert!(events.is_empty());
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn a_superseded_projection_writer_is_rejected_without_reconciliation_or_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("superseded", "msg-fence", "1", "superseded fence");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute("UPDATE fence SET epoch=epoch+1 WHERE id=0", [])
+        .unwrap();
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &unit(8)),
+        &project,
+    );
+    assert!(matches!(result, Err(PublicationError::ProjectionFenced)));
+    assert!(publisher.quarantine().is_none());
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn an_obsoletion_without_its_fence_row_quarantines_the_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("obsolete-fence", "msg-obsolete", "1", "obsolete fence");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = unit(8);
+    let row = row_for(&rows, &object);
+    corpus.retire(&object);
+    assert_eq!(
+        mutate(&search_path(dir.path()))
+            .execute("DELETE FROM fence", [])
+            .unwrap(),
+        1,
+    );
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &vector),
+        &project,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a missing fence row must quarantine");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
 fn generation(dimension: u32) -> VectorGeneration {
     VectorGeneration {
         generation_id: format!("gen-{dimension}"),
@@ -69,10 +205,10 @@ fn generation(dimension: u32) -> VectorGeneration {
     }
 }
 
-fn identity(dimension: u32) -> ProjectionIdentity {
+fn identity(dimension: u32, kernel_incarnation_id: &str) -> ProjectionIdentity {
     ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+        kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
         identity_contract_version: "search-projection-identity-v2".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -318,9 +454,20 @@ impl Corpus {
     ) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
+        let kernel_incarnation_id: String = inspect(&data_home.join("kernel/kernel.sqlite"))
+            .query_row(
+                "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(generation.vector_dimension), 1)?;
+                install_identity(
+                    conn,
+                    &identity(generation.vector_dimension, &kernel_incarnation_id),
+                    1,
+                )?;
                 register_generation(conn, generation, 1)?;
                 Ok(())
             })
@@ -331,7 +478,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id,
                 hold_id: "0123456789abcdef0123456789abcdef".to_string(),
                 snapshot_commit_seq: snapshot,
                 through_commit_seq: snapshot,
@@ -351,6 +498,17 @@ fn expectation_for(row: &SourceRow) -> CurrentInputExpectation {
         occurrence_id: row.detail.occurrence_id.clone(),
         payload_id: row.detail.payload_id.clone(),
         artifact_digest: row.detail.artifact_digest.clone(),
+    }
+}
+
+fn descriptor_for(row: &SourceRow) -> CurrentInputDescriptor {
+    CurrentInputDescriptor {
+        object_id: row.object_id.clone(),
+        source_revision: row.revision,
+        detail: row.detail.clone(),
+        domain_id: row.domain_id.clone(),
+        sensitivity: row.sensitivity,
+        created_commit_seq: row.created_commit_seq,
     }
 }
 
@@ -412,7 +570,7 @@ fn publication<'a>(
     vector: &'a [f32],
 ) -> VectorPublication<'a> {
     VectorPublication {
-        expectation: expectation_for(row),
+        input: descriptor_for(row),
         generation,
         vector,
         input_bytes: row.text.as_ref().map_or(0, |text| text.len() as u64),
@@ -828,7 +986,7 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
 
     // Both inputs are read, then both are retired before publication.
     let stale_guarded = publication(row_for(&rows, &guarded), &generation, &vector);
-    let stale_unguarded = publication(row_for(&rows, &unguarded), &generation, &vector);
+    let stale_unguarded_descriptor = descriptor_for(row_for(&rows, &unguarded));
     corpus.retire(&guarded);
     corpus.retire(&unguarded);
 
@@ -838,9 +996,8 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
             complete_embedding_observed(
                 conn,
                 &VectorCompletion {
-                    occurrence_id: &stale_unguarded.expectation.occurrence_id,
+                    input: &stale_unguarded_descriptor,
                     generation: &generation,
-                    payload_id: &stale_unguarded.expectation.payload_id,
                     vector: &vector,
                     input_bytes: 14,
                     input_tokens: 3,
@@ -866,12 +1023,147 @@ fn an_unguarded_publication_of_a_stale_pre_read_is_the_control_the_guard_refuses
         events,
         [
             PublicationEvent::VectorValidated,
-            PublicationEvent::GuardRequested
+            PublicationEvent::GuardRequested,
+            PublicationEvent::StaleWriterReleased,
         ]
     );
-    let (state, bytes) = durable(dir.path(), &stale_guarded.expectation.occurrence_id);
+    let (state, bytes) = durable(dir.path(), &stale_guarded.input.detail.occurrence_id);
     assert_eq!((state.as_deref(), bytes), (Some("obsolete"), None));
     assert_kernel_writable(&corpus, "after-control");
+}
+
+#[test]
+fn a_mismatched_publication_cannot_change_a_live_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let victim = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = unit(8);
+    let publication = publication(row_for(&rows, &victim), &generation, &vector);
+    let mut wrong_object = publication.clone();
+    wrong_object.input.object_id = "srcdesc:never:1".to_string();
+    let mut wrong_artifact = publication.clone();
+    wrong_artifact.input.detail.artifact_digest = "0".repeat(64);
+    let mut wrong_payload = publication.clone();
+    wrong_payload.input.detail.payload_id = "1".repeat(64);
+    let mut wrong_creation = publication.clone();
+    wrong_creation.input.created_commit_seq += 1;
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    for (label, forged, stale_verdict) in [
+        ("object", wrong_object, true),
+        ("artifact", wrong_artifact, true),
+        ("payload", wrong_payload, true),
+        ("creation", wrong_creation, false),
+    ] {
+        let (result, events) = publish_once(&mut publisher, &forged, &project);
+        assert!(
+            matches!(
+                result,
+                Err(PublicationError::Refused(ProjectionError::IdentityMismatch)),
+            ),
+            "{label}: {result:?}",
+        );
+        assert_eq!(
+            durable(dir.path(), &forged.input.detail.occurrence_id),
+            (Some("pending".to_string()), None),
+            "a stale verdict about another {label} obsoleted the live job: {result:?}",
+        );
+        let mut expected = vec![
+            PublicationEvent::VectorValidated,
+            PublicationEvent::GuardRequested,
+        ];
+        if stale_verdict {
+            expected.push(PublicationEvent::StaleWriterReleased);
+        }
+        assert_eq!(events, expected, "{label}");
+    }
+    assert!(publisher.quarantine().is_none());
+}
+
+#[test]
+fn a_quarantine_entered_after_the_guard_stops_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = unit(8);
+    let publication = publication(row_for(&rows, &object), &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let result = publisher.publish(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            // The test-only hook places doubt after the vector insert while the projection connection is held. The transaction rolls back the write.
+            if event == PublicationEvent::VectorStaged {
+                projection.enter_quarantine_for_test(QuarantineKind::Integrity, &"peer doubt");
+            }
+        },
+    );
+    assert!(
+        matches!(result, Err(PublicationError::Quarantined(_))),
+        "a publication committed into a quarantined projection: {result:?}",
+    );
+    assert_eq!(
+        durable(dir.path(), &publication.input.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn a_projection_from_another_kernel_incarnation_refuses_the_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "UPDATE projection_identity SET kernel_incarnation_id=?1 WHERE singleton=1",
+            ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        )
+        .unwrap();
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = unit(8);
+    let publication = publication(row_for(&rows, &object), &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(&mut publisher, &publication, &project);
+    assert!(
+        matches!(
+            result,
+            Err(PublicationError::Refused(ProjectionError::IdentityMismatch))
+        ),
+        "eligibility from one kernel completed work in another kernel's projection: {result:?}",
+    );
+    assert_eq!(
+        durable(dir.path(), &publication.input.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+
+    corpus.retire(&object);
+    let (stale, _) = publish_once(&mut publisher, &publication, &project);
+    assert!(
+        matches!(
+            stale,
+            Err(PublicationError::Refused(ProjectionError::IdentityMismatch))
+        ),
+        "a stale verdict from one kernel obsoleted work in another kernel's projection: {stale:?}",
+    );
+    assert_eq!(
+        durable(dir.path(), &publication.input.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
 }
 
 fn f32_fixture() -> serde_json::Value {
@@ -983,13 +1275,13 @@ fn f32_fixtures_pin_the_stored_representation_and_invalid_vectors_never_embed() 
         );
         // The projection refuses the shape on its own too, without the daemon's norm check.
         if case["reason"] != "norm" {
+            let descriptor = descriptor_for(row);
             let refused = projection.write(|conn| {
                 complete_embedding_observed(
                     conn,
                     &VectorCompletion {
-                        occurrence_id: &row.detail.occurrence_id,
+                        input: &descriptor,
                         generation: &generation,
-                        payload_id: &row.detail.payload_id,
                         vector: &vector,
                         input_bytes: 1,
                         input_tokens: 1,
@@ -1053,7 +1345,13 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
     // The durable rows are consulted only after the guard has dropped.
     let (guarded, reconciled) = events.split_at(7);
     assert_guarded_order(guarded);
-    assert_eq!(reconciled, [PublicationEvent::Reconciling]);
+    assert_eq!(
+        reconciled,
+        [
+            PublicationEvent::Reconciling,
+            PublicationEvent::ReconciliationRead,
+        ]
+    );
     assert_kernel_writable(&corpus, "after-lost");
 
     // Duplicate delivery of the same result is a replay; a different vector for the same job is a conflict that stops automatic dispatch.
@@ -1099,10 +1397,11 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
         "a rolled-back commit whose reply is lost is unresolved: {result:?}"
     );
     assert_eq!(
-        &events[events.len() - 2..],
+        &events[events.len() - 3..],
         [
             PublicationEvent::GuardReleased,
-            PublicationEvent::Reconciling
+            PublicationEvent::Reconciling,
+            PublicationEvent::ReconciliationRead,
         ],
         "the guard is released before the durable rows are consulted"
     );
@@ -1527,7 +1826,7 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
     let project = ProjectScope::new(PROJECT).unwrap();
     let vector = unit(8);
 
-    // A tombstone the projection already holds refuses completion under the guard; the kernel still judges the input current.
+    // The raw projection operation obsoletes a job whose occurrence is tombstoned.
     let row = row_for(&rows, &tombstoned);
     mutate(&search_path(dir.path()))
         .execute(
@@ -1536,25 +1835,33 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
             [&row.detail.occurrence_id],
         )
         .unwrap();
-    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
-    let (result, events) = publish_once(
-        &mut publisher,
-        &publication(row, &generation, &vector),
-        &project,
-    );
+    let tombstoned_descriptor = descriptor_for(row);
+    let result = projection.write(|conn| {
+        complete_embedding_observed(
+            conn,
+            &VectorCompletion {
+                input: &tombstoned_descriptor,
+                generation: &generation,
+                vector: &vector,
+                input_bytes: 1,
+                input_tokens: 1,
+            },
+            3,
+            &mut |_| {},
+        )
+    });
     assert_eq!(
         result.unwrap(),
-        Publication::Obsolete(ObsoleteCause::Projected(ObsoleteReason::Tombstoned))
+        CompletionOutcome::Obsolete(ObsoleteReason::Tombstoned)
     );
-    assert_eq!(events.last(), Some(&PublicationEvent::GuardReleased));
-    assert!(!events.contains(&PublicationEvent::VectorStaged));
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("obsolete".to_string()), None)
     );
     assert_kernel_writable(&corpus, "after-tombstone");
 
-    // A tombstone recorded after the job completed reports what the redelivered vector is, not a transition that did not happen: the completed job keeps its state and its vector.
+    // A tombstoned terminal job reports `Tombstoned` before replay while retaining its state and vector.
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
     let row = row_for(&rows, &completed);
     let (result, _) = publish_once(
         &mut publisher,
@@ -1570,42 +1877,40 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
         )
         .unwrap();
     let embedded = (Some("embedded".to_string()), Some(encode(&vector)));
-    let (result, _) = publish_once(
-        &mut publisher,
-        &publication(row, &generation, &vector),
-        &project,
-    );
+    let descriptor = descriptor_for(row);
+    let result = projection.write(|conn| {
+        complete_embedding_observed(
+            conn,
+            &VectorCompletion {
+                input: &descriptor,
+                generation: &generation,
+                vector: &vector,
+                input_bytes: 1,
+                input_tokens: 1,
+            },
+            5,
+            &mut |_| {},
+        )
+    });
     assert_eq!(
         result.unwrap(),
-        Publication::Replayed,
-        "the same vector for a completed job is a replay, tombstone or not"
-    );
-    assert_eq!(durable(dir.path(), &row.detail.occurrence_id), embedded);
-    let mut other = unit(8);
-    other[0] = 0.0;
-    other[2] = 1.0;
-    let (result, _) = publish_once(
-        &mut publisher,
-        &publication(row, &generation, &other),
-        &project,
-    );
-    assert!(
-        matches!(result, Err(PublicationError::IdempotencyConflict)),
-        "a different vector for a completed job is a conflict, tombstone or not: {result:?}"
+        CompletionOutcome::Obsolete(ObsoleteReason::Tombstoned),
+        "the tombstone is reported before the durable vector is replayed"
     );
     assert_eq!(durable(dir.path(), &row.detail.occurrence_id), embedded);
     assert!(publisher.quarantine().is_none());
 
     let row = row_for(&rows, &object);
     // A payload the vector was not produced from is obsolete, not completed.
+    let mut replaced_descriptor = descriptor_for(row);
+    replaced_descriptor.detail.payload_id = payload_digest("other bytes");
     let outcome = projection
         .write(|conn| {
             complete_embedding_observed(
                 conn,
                 &VectorCompletion {
-                    occurrence_id: &row.detail.occurrence_id,
+                    input: &replaced_descriptor,
                     generation: &generation,
-                    payload_id: &payload_digest("other bytes"),
                     vector: &vector,
                     input_bytes: 1,
                     input_tokens: 1,
@@ -1668,6 +1973,666 @@ fn a_completed_job_missing_its_vector_quarantines_instead_of_refusing() {
     );
     assert_eq!(publisher.quarantine(), Some(quarantine));
     assert_kernel_writable(&corpus, "after-vector-loss");
+}
+
+#[test]
+fn stale_obsoletion_quarantines_a_terminal_job_missing_its_vector() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let vector = unit(8);
+    let row = row_for(&rows, &object);
+    let publication = publication(row, &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    assert_eq!(
+        publish_once(&mut publisher, &publication, &project)
+            .0
+            .unwrap(),
+        Publication::Embedded,
+    );
+    mutate(&search_path(dir.path()))
+        .execute(
+            "DELETE FROM occurrence_vectors WHERE occurrence_id=?1",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    corpus.retire(&object);
+
+    let mut intent_visible_at_release = false;
+    let mut synchronization_started_after_release = false;
+    let result = publisher.publish(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            if event == PublicationEvent::StaleWriterReleased {
+                intent_visible_at_release = projection.quarantine().is_some();
+            }
+            if event == PublicationEvent::QuarantineSynchronizing {
+                assert_kernel_writable(&corpus, "before-stale-quarantine-synchronization");
+                synchronization_started_after_release = true;
+            }
+        },
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("terminal vector loss during obsoletion must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert!(intent_visible_at_release);
+    assert!(synchronization_started_after_release);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("embedded".to_string()), None),
+    );
+}
+
+#[test]
+fn stale_writer_is_released_before_obsoletion_reconciliation() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    corpus.retire(&object);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let mut reconciled_after_release = false;
+    let mut events = Vec::new();
+
+    let result = publisher.publish_with_fault_for_test(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            events.push(event);
+            if event == PublicationEvent::Reconciling {
+                assert_kernel_writable(&corpus, "during-obsoletion-reconciliation");
+                reconciled_after_release = true;
+            }
+        },
+        PublicationFault::LoseLocalCommitReply,
+    );
+
+    let publication = result.unwrap();
+    assert!(reconciled_after_release, "publication did not reconcile");
+    assert!(matches!(
+        publication,
+        Publication::Obsolete(ObsoleteCause::Canonical(_))
+    ));
+    assert_eq!(
+        events,
+        [
+            PublicationEvent::VectorValidated,
+            PublicationEvent::GuardRequested,
+            PublicationEvent::StaleWriterReleased,
+            PublicationEvent::Reconciling,
+            PublicationEvent::ReconciliationRead,
+        ]
+    );
+    assert!(publisher.quarantine().is_none());
+}
+
+#[test]
+fn quarantine_during_reconciliation_refuses_a_durable_completion() {
+    for quarantine_at in [
+        PublicationEvent::Reconciling,
+        PublicationEvent::ReconciliationRead,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let publication = publication(row, &generation, &vector);
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+        let result = publisher.publish_with_fault_for_test(
+            &publication,
+            eligibility(&project),
+            deadline(),
+            3,
+            &mut |event| {
+                if event == quarantine_at {
+                    projection.enter_quarantine_for_test(
+                        QuarantineKind::Integrity,
+                        &"reconciliation test",
+                    );
+                }
+            },
+            PublicationFault::LoseLocalCommitReply,
+        );
+
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("reconciliation must refuse a quarantined projection: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        assert_eq!(quarantine.detail, "reconciliation test");
+        assert_eq!(
+            durable(dir.path(), &row.detail.occurrence_id),
+            (Some("embedded".to_string()), Some(encode(&vector))),
+        );
+    }
+}
+
+#[test]
+fn a_projection_tombstone_that_contradicts_the_guard_quarantines() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 4)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &unit(8)),
+        &project,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a guarded tombstone disagreement must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn a_projection_tombstone_on_a_terminal_job_quarantines() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    assert_eq!(
+        publish_once(&mut publisher, &publication, &project)
+            .0
+            .unwrap(),
+        Publication::Embedded,
+    );
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 4)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+
+    let result = publish_once(&mut publisher, &publication, &project).0;
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a terminal tombstone must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("embedded".to_string()), Some(encode(&vector))),
+    );
+}
+
+#[test]
+fn guarded_payload_disagreement_publishes_quarantine_before_releasing_the_guard() {
+    for terminal in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let other = corpus.publish("b", "msg-b", "1", "second message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let publication = publication(row, &generation, &vector);
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+        if terminal {
+            assert_eq!(
+                publish_once(&mut publisher, &publication, &project)
+                    .0
+                    .unwrap(),
+                Publication::Embedded,
+            );
+        }
+        let other_payload = &row_for(&rows, &other).detail.payload_id;
+        mutate(&search_path(dir.path()))
+            .execute(
+                "UPDATE occurrences SET payload_id=?2 WHERE occurrence_id=?1",
+                rusqlite::params![&row.detail.occurrence_id, other_payload],
+            )
+            .unwrap();
+        let mut intent_visible = false;
+
+        let result = publisher.publish(
+            &publication,
+            eligibility(&project),
+            deadline(),
+            3,
+            &mut |event| {
+                if event == PublicationEvent::GuardReleased {
+                    intent_visible = projection.quarantine().is_some();
+                }
+            },
+        );
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("guarded payload disagreement must quarantine: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        assert!(intent_visible, "guard release preceded quarantine intent");
+        let expected = if terminal {
+            (Some("embedded".to_string()), Some(encode(&vector)))
+        } else {
+            (Some("pending".to_string()), None)
+        };
+        assert_eq!(durable(dir.path(), &row.detail.occurrence_id), expected);
+    }
+}
+
+#[test]
+fn a_lost_reply_fault_does_not_mask_projection_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 4)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let result = publisher.publish_with_fault_for_test(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |_| {},
+        PublicationFault::LoseLocalCommitReply,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("a guarded tombstone disagreement must quarantine: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn concurrent_obsoletion_after_a_rolled_back_commit_reconciles_without_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let occurrence_id = row.detail.occurrence_id.clone();
+    let generation_id = generation.generation_id.clone();
+    let kernel = Arc::clone(&corpus.kernel);
+    let search = search_path(dir.path());
+    let (released_tx, released_rx) = mpsc::channel();
+    let (obsolete_tx, obsolete_rx) = mpsc::channel();
+    let retire_object = object.clone();
+    let helper = std::thread::spawn(move || {
+        if released_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+            return;
+        }
+        kernel
+            .commit_before(
+                Instant::now() + Duration::from_secs(5),
+                intent("retire-during-reconciliation"),
+                |envelope| {
+                    envelope.retire_observation(&retire_object)?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+        let connection = mutate(&search);
+        connection
+            .execute(
+                "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+                 VALUES (?1,99,'retired',4)",
+                [&occurrence_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE embedding_jobs SET state='obsolete',updated_at=4
+                 WHERE occurrence_id=?1 AND generation_id=?2 AND state IN ('pending','admitted')",
+                rusqlite::params![occurrence_id, generation_id],
+            )
+            .unwrap();
+        obsolete_tx.send(()).unwrap();
+    });
+    let vector = unit(8);
+    let publication = publication(row, &generation, &vector);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let result = publisher.publish_with_fault_for_test(
+        &publication,
+        eligibility(&project),
+        deadline(),
+        3,
+        &mut |event| {
+            if event == PublicationEvent::GuardReleased {
+                released_tx.send(()).unwrap();
+                obsolete_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        },
+        PublicationFault::LoseLocalCommit,
+    );
+    drop(released_tx);
+    helper.join().unwrap();
+    assert_eq!(
+        result.unwrap(),
+        Publication::Obsolete(ObsoleteCause::ProjectedReconciled),
+    );
+    assert!(publisher.quarantine().is_none());
+}
+
+#[test]
+fn corrupted_projection_provenance_quarantines_guarded_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    mutate(&search_path(dir.path()))
+        .execute(
+            "UPDATE occurrences SET source_object_id='forged-object' WHERE occurrence_id=?1",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+    let (result, _) = publish_once(
+        &mut publisher,
+        &publication(row, &generation, &unit(8)),
+        &project,
+    );
+    let Err(PublicationError::Quarantined(quarantine)) = result else {
+        panic!("corrupted projection provenance must quarantine publication: {result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
+fn corrupted_payload_bytes_quarantine_open_and_terminal_jobs() {
+    for terminal in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let publication = publication(row, &generation, &vector);
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+        if terminal {
+            assert_eq!(
+                publish_once(&mut publisher, &publication, &project)
+                    .0
+                    .unwrap(),
+                Publication::Embedded,
+            );
+        }
+        let replacement = b"other message";
+        assert_eq!(
+            row.text.as_deref().unwrap().len(),
+            replacement.len(),
+            "the corruption must preserve the schema's byte length"
+        );
+        assert_eq!(
+            mutate(&search_path(dir.path()))
+                .execute(
+                    "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
+                    rusqlite::params![&row.detail.payload_id, replacement.as_slice()],
+                )
+                .unwrap(),
+            1,
+        );
+
+        let result = publish_once(&mut publisher, &publication, &project).0;
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("corrupted payload bytes must quarantine: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        let expected = if terminal {
+            (Some("embedded".to_string()), Some(encode(&vector)))
+        } else {
+            (Some("pending".to_string()), None)
+        };
+        assert_eq!(durable(dir.path(), &row.detail.occurrence_id), expected);
+    }
+}
+
+#[test]
+fn oversized_corrupted_payload_quarantines_completion_and_obsoletion() {
+    for stale in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let oversized = i64::try_from(kernel::MAX_PAYLOAD_BYTES + 1).unwrap();
+        assert_eq!(
+            mutate(&search_path(dir.path()))
+                .execute(
+                    "UPDATE payloads SET bytes=zeroblob(?2),byte_length=?2 WHERE payload_id=?1",
+                    rusqlite::params![&row.detail.payload_id, oversized],
+                )
+                .unwrap(),
+            1,
+        );
+        if stale {
+            corpus.retire(&object);
+        }
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+        let result = publish_once(
+            &mut publisher,
+            &publication(row, &generation, &vector),
+            &project,
+        )
+        .0;
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("oversized payload must quarantine stale={stale}: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        assert_eq!(
+            durable(dir.path(), &row.detail.occurrence_id),
+            (Some("pending".to_string()), None),
+        );
+    }
+}
+
+#[test]
+fn completion_and_obsoletion_compare_every_immutable_occurrence_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "msg-a", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let row = row_for(&rows, &object);
+    let input = descriptor_for(row);
+    let vector = unit(8);
+    let path = search_path(dir.path());
+
+    for (label, corrupt) in [
+        (
+            "tuple",
+            "UPDATE occurrences SET tuple=X'00' WHERE occurrence_id=?1",
+        ),
+        (
+            "lineage",
+            "UPDATE occurrences SET lineage_id='forged' WHERE occurrence_id=?1",
+        ),
+        (
+            "class",
+            "UPDATE occurrences SET class='canonical_claims' WHERE occurrence_id=?1",
+        ),
+        (
+            "revision",
+            "UPDATE occurrences SET revision=revision+1 WHERE occurrence_id=?1",
+        ),
+        (
+            "representation",
+            "UPDATE occurrences SET representation='forged' WHERE occurrence_id=?1",
+        ),
+        (
+            "span",
+            "UPDATE occurrences SET span_start=0,span_end=0 WHERE occurrence_id=?1",
+        ),
+        (
+            "domain",
+            "UPDATE occurrences SET domain_id='forged' WHERE occurrence_id=?1",
+        ),
+        (
+            "sensitivity",
+            "UPDATE occurrences SET sensitivity='secret' WHERE occurrence_id=?1",
+        ),
+        (
+            "source object",
+            "UPDATE occurrences SET source_object_id='forged' WHERE occurrence_id=?1",
+        ),
+        (
+            "source evidence",
+            "UPDATE occurrences SET source_evidence_id='forged' WHERE occurrence_id=?1",
+        ),
+        (
+            "artifact",
+            "UPDATE occurrences SET source_artifact_digest='forged' WHERE occurrence_id=?1",
+        ),
+        (
+            "creation",
+            "UPDATE occurrences SET created_commit_seq=created_commit_seq+1 WHERE occurrence_id=?1",
+        ),
+    ] {
+        mutate(&path)
+            .execute(corrupt, [&row.detail.occurrence_id])
+            .unwrap();
+        let result = projection.write(|conn| {
+            complete_embedding_observed(
+                conn,
+                &VectorCompletion {
+                    input: &input,
+                    generation: &generation,
+                    vector: &vector,
+                    input_bytes: 1,
+                    input_tokens: 1,
+                },
+                3,
+                &mut |_| {},
+            )
+        });
+        assert!(
+            matches!(
+                result,
+                Err(SearchProjectionError::Projection(
+                    ProjectionError::CorruptRow
+                ))
+            ),
+            "{label}: {result:?}",
+        );
+        let result =
+            projection.write(|conn| obsolete_embedding(conn, &input, &generation.generation_id, 3));
+        let rejected = match &result {
+            Err(SearchProjectionError::Projection(ProjectionError::IdentityMismatch)) => {
+                matches!(label, "source object" | "artifact")
+            }
+            Err(SearchProjectionError::Projection(ProjectionError::CorruptRow)) => {
+                !matches!(label, "source object" | "artifact")
+            }
+            _ => false,
+        };
+        assert!(rejected, "stale obsoletion {label}: {result:?}",);
+        let (span_start, span_end) = row.detail.span.map_or((None, None), |(start, end)| {
+            (
+                Some(i64::try_from(start).unwrap()),
+                Some(i64::try_from(end).unwrap()),
+            )
+        });
+        mutate(&path)
+            .execute(
+                "UPDATE occurrences SET
+                     tuple=?2,lineage_id=?3,class=?4,revision=?5,representation=?6,
+                     span_start=?7,span_end=?8,domain_id=?9,sensitivity=?10,
+                     source_object_id=?11,source_evidence_id=?12,
+                     source_artifact_digest=?13,created_commit_seq=?14
+                 WHERE occurrence_id=?1",
+                rusqlite::params![
+                    &row.detail.occurrence_id,
+                    &row.detail.occurrence_tuple,
+                    &row.detail.lineage_id,
+                    &row.detail.class,
+                    row.revision,
+                    &row.detail.representation,
+                    span_start,
+                    span_end,
+                    &row.domain_id,
+                    row.sensitivity.as_str(),
+                    &row.object_id,
+                    &row.detail.evidence_id,
+                    &row.detail.artifact_digest,
+                    row.created_commit_seq,
+                ],
+            )
+            .unwrap();
+    }
 }
 
 // ---- Named-boundary process crashes ----------------------------------------
@@ -1744,6 +2709,18 @@ fn decode_expectation(text: &str) -> CurrentInputExpectation {
     }
 }
 
+fn current_descriptor(
+    kernel: &KernelStore,
+    expectation: &CurrentInputExpectation,
+    project: &ProjectScope,
+) -> CurrentInputDescriptor {
+    let guard = kernel
+        .guard_current_input(expectation, eligibility(project), deadline())
+        .unwrap()
+        .expect("the crash fixture input is current");
+    guard.descriptor().clone()
+}
+
 /// The child reopens both stores the parent prepared and publishes one vector, parking at the named boundary until the parent kills it.
 #[test]
 #[ignore = "re-executed by the crash-cut test with its environment set"]
@@ -1756,10 +2733,11 @@ fn crash_child_entrypoint_reexecuted_by_the_parent() {
     let generation = generation(8);
     let vector = unit(8);
     let project = ProjectScope::new(PROJECT).unwrap();
+    let input = current_descriptor(&kernel, &expectation, &project);
     let mut publisher = EmbeddingPublisher::new(&kernel, &projection);
     let result = publisher.publish(
         &VectorPublication {
-            expectation,
+            input,
             generation: &generation,
             vector: &vector,
             input_bytes: 13,
@@ -1824,14 +2802,15 @@ fn run_crash_child(root: &Path, cut: Cut, expectation: &CurrentInputExpectation)
 fn crash_cuts_reopen_to_both_durable_records_or_neither() {
     for cut in [Cut::VectorStaged, Cut::LocalStaged, Cut::LocalReleased] {
         let dir = tempfile::tempdir().unwrap();
-        let (expectation, tip) = {
+        let (input, expectation, tip) = {
             let corpus = Corpus::open(dir.path());
             corpus.seed();
             let object = corpus.publish("a", "msg-a", "1", "first message");
             let generation = generation(8);
             let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
             drop(projection);
-            (expectation_for(row_for(&rows, &object)), corpus.tip())
+            let row = row_for(&rows, &object);
+            (descriptor_for(row), expectation_for(row), corpus.tip())
         };
         run_crash_child(dir.path(), cut, &expectation);
         let expected = match cut {
@@ -1864,7 +2843,7 @@ fn crash_cuts_reopen_to_both_durable_records_or_neither() {
         let (result, events) = publish_once(
             &mut publisher,
             &VectorPublication {
-                expectation: expectation.clone(),
+                input: input.clone(),
                 generation: &generation,
                 vector: &vector,
                 input_bytes: 13,

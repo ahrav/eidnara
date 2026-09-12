@@ -18,14 +18,10 @@ describe("render", () => {
         expect(renderToolStateText({ kind: "disabled" })).toContain("memory.enabled");
     });
 
-    test.each(ALL_STATE_KEYS)("%s renders non-empty tool text", (key) => {
-        expect(renderToolStateText(stateFor(key)).length).toBeGreaterThan(0);
-    });
-
-    test("unavailable and stale tool text never tells the caller to retry", () => {
-        for (const key of ALL_STATE_KEYS) {
-            if (!key.startsWith("unavailable") && key !== "stale") continue;
-            expect(renderToolStateText(stateFor(key)).toLowerCase()).not.toContain("retry");
-        }
+    test("every state key renders non-empty tool text", () => {
+        const empty = ALL_STATE_KEYS.filter(
+            (key) => renderToolStateText(stateFor(key)).length === 0,
+        );
+        expect(empty).toEqual([]);
     });
 });

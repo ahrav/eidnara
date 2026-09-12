@@ -204,29 +204,11 @@ describe("OMP setup transaction", () => {
         expect(prompts.messages.join("\n")).toContain("refusing to mutate the global config");
     });
 
-    it("fails closed when registration is skipped and the plugin list has an unknown shape", async () => {
-        const { root, binary, state } = makeFakeOmp({ pluginListPayload: "{}" });
-        const prompts = new MockPrompts([]);
-
-        const result = await __test.OMP_HOST.beforeWrite?.({
-            binaryPath: binary,
-            cwd: root,
-            prompts,
-            dryRun: false,
-            configureHost: false,
-            eidnara: { enabled: true, compactionEnabled: true, memoryEnabled: true },
-        });
-
-        expect(result).toBe(false);
-        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
-            compaction: true,
-            memory: "mnemopi",
-        });
-        expect(prompts.messages.join("\n")).toContain("Could not list OMP plugins");
-    });
-
-    it("fails closed when registration is skipped and the plugin probe fails", async () => {
-        const { root, binary, state } = makeFakeOmp({ failPluginList: true });
+    it.each([
+        { label: "has an unknown shape", fake: { pluginListPayload: "{}" } },
+        { label: "cannot be read", fake: { failPluginList: true } },
+    ])("fails closed when registration is skipped and the plugin list $label", async ({ fake }) => {
+        const { root, binary, state } = makeFakeOmp(fake);
         const prompts = new MockPrompts([]);
 
         const result = await __test.OMP_HOST.beforeWrite?.({

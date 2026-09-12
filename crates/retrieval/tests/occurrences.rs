@@ -15,6 +15,7 @@ use retrieval::{
     tombstone_occurrence,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
 };
@@ -496,6 +497,63 @@ fn missing_or_altered_payload_is_corruption_not_absence() {
             })
             .unwrap();
     }
+}
+
+#[test]
+fn oversized_payload_with_a_matching_digest_is_corruption() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = {
+        let store = open(dir.path());
+        store
+            .with_conn_fenced(|conn| {
+                Ok(persist_all(conn, std::slice::from_ref(&record))
+                    .unwrap()
+                    .remove(0))
+            })
+            .unwrap()
+    };
+    let oversized = kernel::MAX_PAYLOAD_BYTES + 1;
+    let mut digest = Sha256::new();
+    let zeros = [0_u8; 64 * 1024];
+    for _ in 0..oversized / zeros.len() {
+        digest.update(zeros);
+    }
+    digest.update(&zeros[..oversized % zeros.len()]);
+    let oversized_payload_id = format!("{:x}", digest.finalize());
+    let oversized_sql = i64::try_from(oversized).unwrap();
+    {
+        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+        assert_eq!(
+            raw.execute(
+                "INSERT INTO payloads(payload_id,bytes,byte_length,created_at)
+                 SELECT ?2,zeroblob(?3),?3,created_at FROM payloads WHERE payload_id=?1",
+                rusqlite::params![outcome.payload_id, oversized_payload_id, oversized_sql],
+            )
+            .unwrap(),
+            1,
+        );
+        assert_eq!(
+            raw.execute(
+                "UPDATE occurrences SET payload_id=?2 WHERE occurrence_id=?1",
+                rusqlite::params![outcome.occurrence_id, oversized_payload_id],
+            )
+            .unwrap(),
+            1,
+        );
+    }
+
+    let store = open(dir.path());
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                read_occurrence(conn, &outcome.occurrence_id),
+                Err(ProjectionError::CorruptRow),
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1391,33 +1449,25 @@ fn replay_with_different_immutable_metadata_is_a_collision_not_a_noop() {
     }
 }
 
+/// A stored row whose tuple bytes, derived columns, or tombstone disagree with
+/// the retained tuple reads as corruption rather than as a served identity.
 #[test]
-fn altered_tuple_bytes_are_corruption_not_served_identity() {
-    let fixtures = fixtures();
-    let record = Owned::from_json(&fixtures["records"][0]);
-    let identity = borrowed(&record.identity);
-    let dir = tempfile::tempdir().unwrap();
-    let outcome = {
-        let store = open(dir.path());
-        store
-            .with_conn_fenced(|conn| {
-                Ok(
-                    persist_occurrences(conn, &[record.record(&identity)], bounds(), 1)
-                        .unwrap()
-                        .remove(0),
-                )
-            })
-            .unwrap()
-    };
-
-    // Same-length bit flip in the stored tuple: type and foreign-key
-    // constraints cannot see it, only the digest relation can.
-    {
-        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+fn stored_rows_that_disagree_with_their_tuple_are_corruption_not_served_identity() {
+    type Damage = Box<dyn Fn(&rusqlite::Connection, &str) -> usize>;
+    fn execute(sql: &'static str) -> Damage {
+        Box::new(
+            move |raw: &rusqlite::Connection, occurrence_id: &str| -> usize {
+                raw.execute(sql, [occurrence_id]).unwrap()
+            },
+        )
+    }
+    // A same-length bit flip keeps the tuple's size; the digest relation
+    // detects it.
+    fn flip_last_tuple_byte(raw: &rusqlite::Connection, occurrence_id: &str) -> usize {
         let mut tuple: Vec<u8> = raw
             .query_row(
                 "SELECT tuple FROM occurrences WHERE occurrence_id=?1",
-                [&outcome.occurrence_id],
+                [occurrence_id],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1425,29 +1475,13 @@ fn altered_tuple_bytes_are_corruption_not_served_identity() {
         *tuple.last_mut().unwrap() ^= 1;
         assert_eq!(tuple.len(), original.len());
         assert_ne!(tuple, original);
-        let changed = raw
-            .execute(
-                "UPDATE occurrences SET tuple=?2 WHERE occurrence_id=?1",
-                rusqlite::params![outcome.occurrence_id, tuple],
-            )
-            .unwrap();
-        assert_eq!(changed, 1);
+        raw.execute(
+            "UPDATE occurrences SET tuple=?2 WHERE occurrence_id=?1",
+            rusqlite::params![occurrence_id, tuple],
+        )
+        .unwrap()
     }
 
-    let store = open(dir.path());
-    store
-        .with_conn(|conn| {
-            assert_eq!(
-                read_occurrence(conn, &outcome.occurrence_id),
-                Err(ProjectionError::CorruptRow)
-            );
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn altered_tuple_derived_columns_are_corruption_not_served_identity() {
     let fixtures = fixtures();
     let record = Owned::from_json(&fixtures["records"][0]);
     let with_span = Owned::from_json(
@@ -1459,39 +1493,57 @@ fn altered_tuple_derived_columns_are_corruption_not_served_identity() {
             .unwrap(),
     );
 
-    // Each derived column swapped to a schema-valid value that disagrees with
-    // the retained tuple: SQLite's CHECK vocabulary accepts all of them.
-    let damages: &[(&str, &str)] = &[
+    // The damaged columns stay schema-valid but disagree with the retained
+    // tuple. The writer refuses a tombstone at or before `created_commit_seq`
+    // (7); both boundary values must also be refused when found already stored.
+    let damages: Vec<(&str, Damage)> = vec![
+        ("tuple_bit_flip", Box::new(flip_last_tuple_byte) as Damage),
         (
             "class",
-            "UPDATE occurrences SET class='git_commits' WHERE occurrence_id=?1",
+            execute("UPDATE occurrences SET class='git_commits' WHERE occurrence_id=?1"),
         ),
         (
             "revision",
-            "UPDATE occurrences SET revision=9 WHERE occurrence_id=?1",
+            execute("UPDATE occurrences SET revision=9 WHERE occurrence_id=?1"),
         ),
         (
             "representation",
-            "UPDATE occurrences SET representation='tool_output' WHERE occurrence_id=?1",
+            execute("UPDATE occurrences SET representation='tool_output' WHERE occurrence_id=?1"),
         ),
         (
             "lineage_id",
-            "UPDATE occurrences SET lineage_id='0000000000000000000000000000000000000000000000000000000000000000' WHERE occurrence_id=?1",
+            execute(
+                "UPDATE occurrences SET lineage_id='0000000000000000000000000000000000000000000000000000000000000000' WHERE occurrence_id=?1",
+            ),
         ),
         (
             "span_added",
-            "UPDATE occurrences SET span_start=0, span_end=5 WHERE occurrence_id=?1",
+            execute("UPDATE occurrences SET span_start=0, span_end=5 WHERE occurrence_id=?1"),
         ),
         (
             "span_removed",
-            "UPDATE occurrences SET span_start=NULL, span_end=NULL WHERE occurrence_id=?1",
+            execute("UPDATE occurrences SET span_start=NULL, span_end=NULL WHERE occurrence_id=?1"),
         ),
         (
             "span_shifted",
-            "UPDATE occurrences SET span_end=span_end-1 WHERE occurrence_id=?1",
+            execute("UPDATE occurrences SET span_end=span_end-1 WHERE occurrence_id=?1"),
+        ),
+        (
+            "tombstone_at_creation",
+            execute(
+                "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+                 VALUES (?1,7,'retired',1)",
+            ),
+        ),
+        (
+            "tombstone_before_creation",
+            execute(
+                "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+                 VALUES (?1,3,'retired',1)",
+            ),
         ),
     ];
-    for (damage, sql) in damages {
+    for (damage, apply_damage) in &damages {
         let target = match *damage {
             "span_removed" | "span_shifted" => &with_span,
             _ => &record,
@@ -1510,9 +1562,10 @@ fn altered_tuple_derived_columns_are_corruption_not_served_identity() {
                 })
                 .unwrap()
         };
+        // Corruption injection uses a raw connection; the guarded store is closed.
         {
             let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
-            let changed = raw.execute(sql, [&outcome.occurrence_id]).unwrap();
+            let changed = apply_damage(&raw, outcome.occurrence_id.as_str());
             assert_eq!(changed, 1, "{damage}");
         }
         let store = open(dir.path());
@@ -1522,52 +1575,6 @@ fn altered_tuple_derived_columns_are_corruption_not_served_identity() {
                     read_occurrence(conn, &outcome.occurrence_id),
                     Err(ProjectionError::CorruptRow),
                     "{damage}"
-                );
-                Ok(())
-            })
-            .unwrap();
-    }
-}
-
-#[test]
-fn stored_tombstone_at_or_before_creation_is_corruption() {
-    let fixtures = fixtures();
-    let record = Owned::from_json(&fixtures["records"][0]);
-    let identity = borrowed(&record.identity);
-    // The writer refuses seq <= created_commit_seq (7); both boundary values
-    // must also be refused when found already stored.
-    for planted_seq in [7, 3] {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = {
-            let store = open(dir.path());
-            store
-                .with_conn_fenced(|conn| {
-                    Ok(
-                        persist_occurrences(conn, &[record.record(&identity)], bounds(), 1)
-                            .unwrap()
-                            .remove(0),
-                    )
-                })
-                .unwrap()
-        };
-        {
-            let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
-            let changed = raw
-                .execute(
-                    "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
-                     VALUES (?1,?2,'retired',1)",
-                    rusqlite::params![outcome.occurrence_id, planted_seq],
-                )
-                .unwrap();
-            assert_eq!(changed, 1);
-        }
-        let store = open(dir.path());
-        store
-            .with_conn(|conn| {
-                assert_eq!(
-                    read_occurrence(conn, &outcome.occurrence_id),
-                    Err(ProjectionError::CorruptRow),
-                    "seq={planted_seq}"
                 );
                 Ok(())
             })

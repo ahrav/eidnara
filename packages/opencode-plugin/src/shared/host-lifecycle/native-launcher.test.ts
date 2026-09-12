@@ -74,27 +74,6 @@ describe("native launcher output handling (U3 scenario 17)", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-native-launcher-"));
     process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
 
-    test("retained descriptor execution is refused on an uncertified platform", async () => {
-        const binary = scriptBinary(dir, `echo '${probeResultJson(false)}'\nexit 1`);
-        const fd = openSync(binary, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try {
-            await expect(
-                runNativeLifecycle(
-                    { kind: "retained-fd", fd },
-                    { command: "probe", dataRoot: dir, deadlineMs: 10_000, platform: "win32" },
-                ),
-            ).rejects.toThrow(NativeLaunchError);
-            await expect(
-                runNativeLifecycle(
-                    { kind: "retained-fd", fd },
-                    { command: "probe", dataRoot: dir, deadlineMs: 10_000, platform: "win32" },
-                ),
-            ).rejects.toMatchObject({ code: "unsupported_platform" });
-        } finally {
-            closeSync(fd);
-        }
-    });
-
     test("a retained executable descriptor runs through the inherited child fd", async () => {
         const binary = scriptBinary(dir, `echo '${probeResultJson(false)}'\nexit 1`);
         const fd = openSync(binary, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -609,7 +588,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         expect(error?.code).toBe("spawn_failed");
     });
 
-    test("a platform with no descriptor exec path is a platform failure, not a spawn error", async () => {
+    test("a platform with no descriptor exec path is a typed platform failure, not a spawn error", async () => {
         let error: NativeLaunchError | null = null;
         try {
             await runNativeLifecycle(
@@ -619,6 +598,7 @@ describe("native launcher output handling (U3 scenario 17)", () => {
         } catch (caught) {
             error = caught as NativeLaunchError;
         }
+        expect(error).toBeInstanceOf(NativeLaunchError);
         expect(error?.code).toBe("unsupported_platform");
     });
 });

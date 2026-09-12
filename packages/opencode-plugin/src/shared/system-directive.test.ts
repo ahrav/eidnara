@@ -56,16 +56,10 @@ describe("removeSystemReminders", () => {
 });
 
 describe("isSystemDirective", () => {
-    it("recognizes the Eidnara directive prefix after leading whitespace", () => {
+    it("recognizes the Eidnara, Oh My OpenCode, and Oh My Claude prefixes after leading whitespace and rejects other text", () => {
         expect(isSystemDirective("  [SYSTEM DIRECTIVE: EIDNARA do x]")).toBe(true);
-    });
-
-    it("recognizes the Oh My OpenCode and Oh My Claude directive prefixes", () => {
         expect(isSystemDirective("[SYSTEM DIRECTIVE: OH-MY-OPENCODE do x]")).toBe(true);
         expect(isSystemDirective("[SYSTEM DIRECTIVE: OH-MY-CLAUDE do x]")).toBe(true);
-    });
-
-    it("rejects text that does not start with the directive prefix", () => {
         expect(isSystemDirective("hello [SYSTEM DIRECTIVE: EIDNARA]")).toBe(false);
         expect(isSystemDirective("hello")).toBe(false);
     });

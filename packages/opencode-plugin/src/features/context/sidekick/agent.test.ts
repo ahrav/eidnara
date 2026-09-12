@@ -86,44 +86,30 @@ describe("runSidekick", () => {
         });
     });
 
-    it("strips thinking blocks from the final output", async () => {
-        const client = createSidekickClient({
-            messages: [
-                {
-                    info: { role: "assistant", time: { created: Date.now() } },
-                    parts: [{ type: "text", text: "<think>hidden</think>Focused result" }],
-                },
-            ],
-        });
+    it("strips closed and trailing unterminated thinking blocks and rejects reasoning-only output", async () => {
+        for (const [text, expected] of [
+            ["<think>hidden</think>Focused result", "Focused result"],
+            ["<think>hidden</think>Focused result<think>more reasoning", "Focused result"],
+            ["<think>reasoning cut off mid-", null],
+        ] as const) {
+            const client = createSidekickClient({
+                messages: [
+                    {
+                        info: { role: "assistant", time: { created: Date.now() } },
+                        parts: [{ type: "text", text }],
+                    },
+                ],
+            });
 
-        const result = await runSidekick({
-            client,
-            projectPath: "/repo/project",
-            userMessage: "Implement sidekick.",
-            config: baseConfig,
-        });
+            const result = await runSidekick({
+                client,
+                projectPath: "/repo/project",
+                userMessage: "Implement sidekick.",
+                config: baseConfig,
+            });
 
-        expect(result).toBe("Focused result");
-    });
-
-    it("rejects output that is only an unterminated thinking block", async () => {
-        const client = createSidekickClient({
-            messages: [
-                {
-                    info: { role: "assistant", time: { created: Date.now() } },
-                    parts: [{ type: "text", text: "<think>reasoning cut off mid-" }],
-                },
-            ],
-        });
-
-        const result = await runSidekick({
-            client,
-            projectPath: "/repo/project",
-            userMessage: "Implement sidekick.",
-            config: baseConfig,
-        });
-
-        expect(result).toBeNull();
+            expect(result).toBe(expected);
+        }
     });
 
     it("returns null for the no-result sentinel instead of an augmentation", async () => {
@@ -151,31 +137,6 @@ describe("runSidekick", () => {
         expect(result).toBeNull();
         // The sentinel is a completed run, so it must not trigger a fallback-model retry.
         expect(client.session.prompt).toHaveBeenCalledTimes(1);
-    });
-
-    it("strips a trailing unterminated thinking block after a closed one", async () => {
-        const client = createSidekickClient({
-            messages: [
-                {
-                    info: { role: "assistant", time: { created: Date.now() } },
-                    parts: [
-                        {
-                            type: "text",
-                            text: "<think>hidden</think>Focused result<think>more reasoning",
-                        },
-                    ],
-                },
-            ],
-        });
-
-        const result = await runSidekick({
-            client,
-            projectPath: "/repo/project",
-            userMessage: "Implement sidekick.",
-            config: baseConfig,
-        });
-
-        expect(result).toBe("Focused result");
     });
 
     it("returns null when the child session cannot be created", async () => {

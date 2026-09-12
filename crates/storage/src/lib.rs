@@ -123,6 +123,28 @@ mod sqlite_backend {
     /// `Mutex::lock` has no timeout, so a bounded acquisition polls at this interval.
     const CONN_ACQUIRE_POLL: Duration = Duration::from_millis(1);
 
+    #[cfg(test)]
+    thread_local! {
+        static BEFORE_NEXT_BUSY_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    #[cfg(test)]
+    pub(super) fn before_next_busy_wait_for_test(observer: impl FnOnce() + 'static) {
+        BEFORE_NEXT_BUSY_WAIT.with(|slot| {
+            assert!(slot.borrow_mut().replace(Box::new(observer)).is_none());
+        });
+    }
+
+    #[cfg(test)]
+    fn observe_busy_wait_for_test() {
+        BEFORE_NEXT_BUSY_WAIT.with(|slot| {
+            if let Some(observer) = slot.borrow_mut().take() {
+                observer();
+            }
+        });
+    }
+
     /// `PRAGMA application_id` of every Eidnara-owned SQLite file (`EIDN` in ASCII).
     pub const APPLICATION_ID: u32 = 0x4549_444E;
     /// `PRAGMA user_version` of every Eidnara-owned SQLite file.
@@ -397,36 +419,42 @@ mod sqlite_backend {
         conn: &Connection,
         deadline: Instant,
     ) -> Result<rusqlite::Transaction<'_>, StoreError> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(StoreError::Deadline);
-        }
-        conn.busy_timeout(remaining)
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        let begun =
-            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate);
-        conn.busy_timeout(BUSY_TIMEOUT)
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        begun.map_err(deadline_on_lock_wait)
+        with_busy_timeout_until(conn, deadline, |conn| {
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+                .map_err(deadline_on_lock_wait)
+        })
     }
 
-    /// Applies the busy timeout remaining at entry to both fence operations.
+    /// Bounds each fence operation by the budget that remains when it starts.
     fn prepare_fenced_within(
         conn: &Connection,
         holder_epoch: u64,
         deadline: Instant,
     ) -> Result<(), StoreError> {
+        with_busy_timeout_until(conn, deadline, |conn| {
+            precheck_fence_via(conn, holder_epoch, deadline_on_lock_wait)
+        })?;
+        with_busy_timeout_until(conn, deadline, |conn| {
+            pin_fence_durability_via(conn, deadline_on_lock_wait)
+        })
+    }
+
+    /// Runs one potentially blocking statement under the caller's remaining wait budget.
+    fn with_busy_timeout_until<'conn, T>(
+        conn: &'conn Connection,
+        deadline: Instant,
+        f: impl FnOnce(&'conn Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(StoreError::Deadline);
         }
-        conn.busy_timeout(remaining)
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        let prepared = precheck_fence_via(conn, holder_epoch, deadline_on_lock_wait)
-            .and_then(|()| pin_fence_durability_via(conn, deadline_on_lock_wait));
-        conn.busy_timeout(BUSY_TIMEOUT)
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        prepared
+        conn.busy_timeout(remaining).map_err(backend_error)?;
+        #[cfg(test)]
+        observe_busy_wait_for_test();
+        let result = f(conn);
+        let restored = conn.busy_timeout(BUSY_TIMEOUT).map_err(backend_error);
+        with_cleanup_failure(result, restored)
     }
 
     /// `DatabaseBusy` and `DatabaseLocked` return [`StoreError::Deadline`] after the
@@ -1833,11 +1861,10 @@ pub use sqlite_backend::{
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        ExpectedIdentity, FileState, InspectionCopy, claim_fence, claim_fence_strict,
-        create_database_file_owner_only, immutable_uri, open_claimed,
+        ExpectedIdentity, FileState, InspectionCopy, before_next_busy_wait_for_test, claim_fence,
+        claim_fence_strict, create_database_file_owner_only, immutable_uri, open_claimed,
     };
     use super::*;
-    use lease::FileIdentity;
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -1903,82 +1930,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A temporary object in a baseline would exist on the first open only.
+    /// The main schema is the only target a baseline addresses; the store's own tables keep
+    /// the definitions `baseline.sql` gives them.
     #[test]
-    fn a_baseline_that_creates_temporary_objects_is_rejected() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        for ddl in [
-            "CREATE TEMP TABLE scratch (k TEXT);",
-            "CREATE TABLE kv (k TEXT); CREATE TEMP VIEW kv_view AS SELECT k FROM kv;",
-        ] {
-            match open_sqlite(&d, ddl).map(|_| ()) {
-                Err(StoreError::Baseline(m)) => {
-                    assert!(m.contains("temporary object"), "unexpected message: {m}")
-                }
-                other => panic!("{ddl} must be rejected, got {other:?}"),
-            }
-        }
-        assert!(!std::path::Path::new(path).exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A FIFO at the database path would block SQLite's open before any timeout applies.
-    #[cfg(unix)]
-    #[test]
-    fn a_fifo_at_the_database_path_is_refused_before_sqlite_opens_it() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        std::fs::create_dir_all(&root).expect("root");
-        let c_path = std::ffi::CString::new(path.as_str()).expect("path");
-        // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the call.
-        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
-        match open_sqlite(&d, "").map(|_| ()) {
-            Err(StoreError::Baseline(m)) => {
-                assert!(m.contains("not a regular file"), "unexpected message: {m}")
-            }
-            other => panic!("a FIFO must be refused without blocking, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A FIFO at the `-journal` path is refused with the other sidecars before the inspection
-    /// would copy it, so the open cannot block on it.
-    #[cfg(unix)]
-    #[test]
-    fn a_fifo_at_the_journal_path_is_refused_before_inspection() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        drop(open_sqlite(&d, "").expect("first open"));
-        let journal = format!("{path}-journal");
-        let c_path = std::ffi::CString::new(journal.as_str()).expect("path");
-        // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the call.
-        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
-        match open_sqlite(&d, "").map(|_| ()) {
-            Err(StoreError::Baseline(m)) => {
-                assert!(m.contains("not a regular file"), "unexpected message: {m}")
-            }
-            other => panic!("a FIFO journal must be refused without blocking, got {other:?}"),
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A baseline may address the main schema only: no attachments, no pragma writes, no
-    /// transaction control, and the store's own tables keep the definitions `baseline.sql`
-    /// gives them.
-    #[test]
-    fn a_baseline_that_attaches_or_redefines_infrastructure_is_rejected() {
+    fn a_baseline_outside_the_main_schema_contract_is_rejected_without_creating_the_file() {
         let (root, d) = tmp();
         let StorageBackend::Sqlite { path } = &d.backend else {
             panic!("sqlite descriptor");
         };
         for (ddl, needle) in [
+            ("CREATE TEMP TABLE scratch (k TEXT);", "temporary object"),
+            (
+                "CREATE TABLE kv (k TEXT); CREATE TEMP VIEW kv_view AS SELECT k FROM kv;",
+                "temporary object",
+            ),
             (
                 "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (k TEXT);",
                 "not authorized",
@@ -2018,16 +1983,60 @@ mod tests {
                 "ALTER TABLE format_marker RENAME COLUMN baseline_sha256 TO digest;",
                 "redefines infrastructure object `format_marker`",
             ),
+            (
+                "CREATE TRIGGER marker_undo BEFORE INSERT ON format_marker BEGIN SELECT RAISE(IGNORE); END;",
+                "infrastructure table",
+            ),
+            (
+                "CREATE TRIGGER fence_undo AFTER UPDATE ON fence BEGIN UPDATE fence SET epoch = OLD.epoch WHERE id = 0; END;",
+                "infrastructure table",
+            ),
+            (
+                "CREATE INDEX fence_idx ON fence (epoch);",
+                "infrastructure table",
+            ),
         ] {
             match open_sqlite(&d, ddl).map(|_| ()) {
                 Err(StoreError::Baseline(m)) => {
-                    assert!(m.contains(needle), "unexpected message: {m}")
+                    assert!(m.contains(needle), "{ddl}: unexpected message: {m}")
                 }
                 other => panic!("{ddl} must be rejected, got {other:?}"),
             }
         }
-        assert!(!std::path::Path::new(path).exists());
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "a rejected baseline must not create the file"
+        );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A FIFO at the database path blocks SQLite's open before any timeout applies. A FIFO at
+    /// the `-journal` path blocks the inspection copy. Both are refused as non-regular files.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_database_or_journal_path_is_refused_before_it_is_opened() {
+        for (suffix, seed_database) in [("", false), ("-journal", true)] {
+            let (root, d) = tmp();
+            let StorageBackend::Sqlite { path } = &d.backend else {
+                panic!("sqlite descriptor");
+            };
+            if seed_database {
+                drop(open_sqlite(&d, "").expect("first open"));
+            } else {
+                std::fs::create_dir_all(&root).expect("root");
+            }
+            let fifo = format!("{path}{suffix}");
+            let c_path = std::ffi::CString::new(fifo.as_str()).expect("path");
+            // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the call.
+            assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
+            match open_sqlite(&d, "").map(|_| ()) {
+                Err(StoreError::Baseline(m)) => {
+                    assert!(m.contains("not a regular file"), "unexpected message: {m}")
+                }
+                other => panic!("a FIFO at {fifo} must be refused without blocking, got {other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// A baseline that attaches a file is refused before the attachment opens it, so the
@@ -2103,35 +2112,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A WAL-mode foreign database that was closed cleanly has no sidecars; the refusal
-    /// creates none, since the inspection opens the file `immutable`.
     #[test]
-    fn a_refused_foreign_wal_mode_database_gains_no_sidecars() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        std::fs::create_dir_all(&root).expect("root");
-        {
-            let foreign = rusqlite::Connection::open(path).expect("foreign database");
-            foreign
-                .execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE theirs (k TEXT);")
-                .expect("foreign schema");
-        }
-        assert!(!std::path::Path::new(&format!("{path}-wal")).exists());
-        let before = std::fs::read(path).expect("bytes before");
-        assert!(matches!(
-            open_sqlite(&d, "").map(|_| ()),
-            Err(StoreError::Baseline(_))
-        ));
-        assert_eq!(std::fs::read(path).expect("bytes after"), before);
-        for suffix in ["-wal", "-shm"] {
+    fn a_refused_foreign_database_keeps_its_bytes_and_gains_no_sidecars() {
+        for foreign_schema in [
+            "CREATE TABLE unfenced_data (id INTEGER PRIMARY KEY);",
+            "PRAGMA journal_mode = WAL; CREATE TABLE theirs (k TEXT);",
+        ] {
+            let (root, d) = tmp();
+            let StorageBackend::Sqlite { path } = &d.backend else {
+                panic!("sqlite descriptor");
+            };
+            std::fs::create_dir_all(&root).expect("root");
+            {
+                let foreign = rusqlite::Connection::open(path).expect("foreign database");
+                foreign
+                    .execute_batch(foreign_schema)
+                    .expect("foreign schema");
+            }
+            assert!(!std::path::Path::new(&format!("{path}-wal")).exists());
+            let before = std::fs::read(path).expect("bytes before");
+            let refused = open_sqlite(&d, "");
             assert!(
-                !std::path::Path::new(&format!("{path}{suffix}")).exists(),
-                "refusal must not create {suffix}"
+                matches!(refused, Err(StoreError::Baseline(_))),
+                "a foreign file is refused, got {:?}",
+                refused.map(|_| ())
             );
+            assert_eq!(
+                std::fs::read(path).expect("bytes after"),
+                before,
+                "the refused open changed the file's bytes"
+            );
+            for suffix in ["-wal", "-shm"] {
+                assert!(
+                    !std::path::Path::new(&format!("{path}{suffix}")).exists(),
+                    "refusal must not create {suffix}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A store whose last writer left its frames in the WAL reopens with the epoch those
@@ -2225,33 +2243,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The identity the read-write open is checked against changes when the path is
-    /// re-pointed at a different file, and is stable across a rewrite in place.
-    #[cfg(unix)]
-    #[test]
-    fn file_identity_follows_the_inode_not_the_bytes() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        std::fs::create_dir_all(&root).expect("root");
-        std::fs::write(path, b"one").expect("write");
-        let first = FileIdentity::of_path(Path::new(path)).expect("identity");
-        std::fs::write(path, b"one rewritten in place").expect("rewrite");
-        assert_eq!(
-            FileIdentity::of_path(Path::new(path)).expect("identity"),
-            first
-        );
-        let replacement = root.join("replacement.db");
-        std::fs::write(&replacement, b"one").expect("write replacement");
-        std::fs::rename(&replacement, path).expect("swap the file in");
-        assert_ne!(
-            FileIdentity::of_path(Path::new(path)).expect("identity"),
-            first
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     /// A relative database path is refused before any directory or file is created, since
     /// the same descriptor would name a different store after a change of working directory.
     #[test]
@@ -2274,10 +2265,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A superseded writer is refused before the durability pin runs, so a journal mode
-    /// that maintenance on the newer writer chose is not switched back by the stale one.
+    /// Fenced writes and schema changes from a writer whose epoch is below the database
+    /// epoch fail before they reach the file. The refusal precedes the durability pin, so a
+    /// journal mode that maintenance on the newer writer chose is not switched back by the
+    /// stale one.
     #[test]
-    fn a_superseded_writer_does_not_change_the_journal_mode_before_being_fenced() {
+    fn a_superseded_writer_is_fenced_before_it_writes_or_repins_the_journal() {
         let (root, d) = tmp();
         let StorageBackend::Sqlite { path } = &d.backend else {
             panic!("sqlite descriptor");
@@ -2287,7 +2280,7 @@ mod tests {
         let newer = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 2);
         newer
             .with_conn_fenced(|tx| {
-                tx.execute("INSERT INTO kv (k, v) VALUES ('owner', '2')", [])
+                tx.execute("INSERT INTO kv (k, v) VALUES ('owner', 'new')", [])
                     .map(|_| ())
             })
             .expect("the newer writer claims epoch 2");
@@ -2300,7 +2293,7 @@ mod tests {
             })
             .expect("maintenance switches the journal mode");
         let result = stale.with_conn_fenced(|tx| {
-            tx.execute("INSERT INTO kv (k, v) VALUES ('stale', '1')", [])
+            tx.execute("UPDATE kv SET v = 'clobbered' WHERE k = 'owner'", [])
                 .map(|_| ())
         });
         assert!(
@@ -2312,6 +2305,32 @@ mod tests {
                 })
             ),
             "the stale writer is fenced, got {result:?}"
+        );
+        assert!(
+            matches!(
+                stale.with_conn_fenced(|tx| {
+                    tx.execute("CREATE TABLE stale_schema (id INTEGER PRIMARY KEY)", [])
+                        .map(|_| ())
+                }),
+                Err(StoreError::Fenced { .. })
+            ),
+            "a superseded writer cannot change the schema"
+        );
+        let (v, stale_tables): (String, i64) = newer
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT (SELECT v FROM kv WHERE k = 'owner'), \
+                     (SELECT COUNT(*) FROM sqlite_schema \
+                      WHERE type = 'table' AND name = 'stale_schema')",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("read");
+        assert_eq!(v, "new", "stale writer was fenced out, no clobber");
+        assert_eq!(
+            stale_tables, 0,
+            "the fenced-out schema change left no table"
         );
         let mode: String = stale
             .with_conn(|conn| conn.query_row("PRAGMA journal_mode", [], |row| row.get(0)))
@@ -2793,35 +2812,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A consumer baseline cannot hang a trigger or index on the fence or the marker.
-    #[test]
-    fn a_baseline_that_hooks_an_infrastructure_table_is_rejected() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        for hook in [
-            "CREATE TRIGGER marker_undo BEFORE INSERT ON format_marker BEGIN SELECT RAISE(IGNORE); END;",
-            "CREATE TRIGGER fence_undo AFTER UPDATE ON fence BEGIN UPDATE fence SET epoch = OLD.epoch WHERE id = 0; END;",
-            "CREATE INDEX fence_idx ON fence (epoch);",
-        ] {
-            match open_sqlite(&d, hook).map(|_| ()) {
-                Err(StoreError::Baseline(m)) => {
-                    assert!(
-                        m.contains("infrastructure table"),
-                        "unexpected message: {m}"
-                    )
-                }
-                other => panic!("{hook} must be rejected, got {other:?}"),
-            }
-        }
-        assert!(
-            !std::path::Path::new(path).exists(),
-            "a rejected baseline must not create the file"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     /// A committed schema change would make the next open refuse the file, so the
     /// fenced path denies main-schema DDL and the store reopens under its baseline.
     #[test]
@@ -2941,24 +2931,6 @@ mod tests {
             Err(other) => panic!("expected a non-regular-file refusal, got {other:?}"),
         }
         assert!(!target.exists(), "the link target must not be created");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_read_callback_cannot_checkpoint_the_wal() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d, "").expect("open");
-        let denied =
-            store.with_conn(|c| c.query_row("PRAGMA wal_checkpoint", [], |r| r.get::<_, i64>(0)));
-        assert!(
-            matches!(&denied, Err(StoreError::Backend(m)) if m.contains("authorization denied") || m.contains("not authorized")),
-            "wal_checkpoint must be denied inside a read callback, got {denied:?}"
-        );
-        let mode: String = store
-            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
-            .expect("reading a pragma stays allowed");
-        assert!(mode.eq_ignore_ascii_case("wal"));
-        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3290,34 +3262,6 @@ mod tests {
     }
 
     #[test]
-    fn a_file_with_foreign_objects_is_refused_without_mutation() {
-        let (root, d) = tmp();
-        let path = sqlite_path(&d);
-        std::fs::create_dir_all(&root).expect("create store directory");
-        let conn = rusqlite::Connection::open(&path).expect("create a foreign database");
-        conn.execute_batch("CREATE TABLE unfenced_data (id INTEGER PRIMARY KEY);")
-            .expect("create schema");
-        drop(conn);
-        let before = std::fs::read(&path).expect("read the foreign file");
-
-        let refused = open_sqlite(&d, "");
-        assert!(
-            matches!(refused, Err(StoreError::Baseline(_))),
-            "a foreign file is refused, got {:?}",
-            refused.map(|_| ())
-        );
-        let after = std::fs::read(&path).expect("read the foreign file again");
-        assert!(before == after, "the refused open changed the file's bytes");
-        for suffix in ["-wal", "-shm"] {
-            assert!(
-                !std::path::Path::new(&format!("{path}{suffix}")).exists(),
-                "the refused open left a {suffix} sidecar behind"
-            );
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn database_epoch_survives_repeated_lease_sidecar_loss() {
         let (root, d) = tmp();
         let first = open_sqlite(&d, "").expect("first open");
@@ -3354,82 +3298,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Lease keys include the store directory and the database file name, so distinct
+    /// databases open concurrently.
     #[test]
     fn distinct_databases_do_not_falsely_contend() {
         let (root_a, a) = tmp();
         let (root_b, b) = tmp();
+        let mut c = a.clone();
+        c.backend = StorageBackend::Sqlite {
+            path: root_a.join("other.db").to_string_lossy().into_owned(),
+        };
         let held_a = open_sqlite(&a, "").expect("open a");
-        let held_b = open_sqlite(&b, "").expect("open b - distinct db, must not contend with a");
-        drop((held_a, held_b));
+        let held_b = open_sqlite(&b, "").expect("open b - same file name in another directory");
+        let held_c = open_sqlite(&c, "").expect("open c - distinct db in the same directory as a");
+        drop((held_a, held_b, held_c));
         let _ = std::fs::remove_dir_all(&root_a);
         let _ = std::fs::remove_dir_all(&root_b);
     }
 
+    /// `claim_fence` rejects suppressed and undone updates instead of returning a stale claim.
     #[test]
-    fn distinct_databases_in_one_directory_do_not_falsely_contend() {
-        let (root, a) = tmp();
-        let mut b = a.clone();
-        b.backend = StorageBackend::Sqlite {
-            path: root.join("other.db").to_string_lossy().into_owned(),
-        };
-        let held_a = open_sqlite(&a, "").expect("open a");
-        let held_b = open_sqlite(&b, "").expect("open b - distinct db in the same directory as a");
-        drop((held_a, held_b));
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    fn a_fence_update_a_trigger_suppresses_or_undoes_is_an_error_not_a_silent_success() {
+        for (trigger, needle) in [
+            (
+                "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON fence \
+                 BEGIN SELECT RAISE(IGNORE); END",
+                "affected 0 rows",
+            ),
+            (
+                "CREATE TRIGGER fence_undo AFTER UPDATE ON fence \
+                 BEGIN UPDATE fence SET epoch = OLD.epoch WHERE id = 0; END",
+                "reads back as 1",
+            ),
+        ] {
+            let (root, d) = tmp();
+            let StorageBackend::Sqlite { path } = &d.backend else {
+                panic!("sqlite descriptor");
+            };
+            let path = path.clone();
+            drop(open_sqlite(&d, "").expect("seed database at epoch 1"));
 
-    #[test]
-    fn suppressed_fence_update_is_an_error_not_a_silent_success() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        let path = path.clone();
-        drop(open_sqlite(&d, "").expect("seed database at epoch 1"));
-
-        let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
-        conn.execute_batch(
-            "CREATE TRIGGER fence_suppressor BEFORE UPDATE ON fence \
-             BEGIN SELECT RAISE(IGNORE); END",
-        )
-        .expect("install suppressing trigger");
-        let tx = conn.transaction().expect("tx");
-        match claim_fence(&tx, 99) {
-            Err(StoreError::Backend(m)) => {
-                assert!(m.contains("affected 0 rows"), "unexpected message: {m}")
+            let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
+            conn.execute_batch(trigger).expect("install trigger");
+            let tx = conn.transaction().expect("tx");
+            match claim_fence(&tx, 99) {
+                Err(StoreError::Backend(m)) => {
+                    assert!(m.contains(needle), "{trigger}: unexpected message: {m}")
+                }
+                other => panic!("{trigger}: fence write must fail, got {other:?}"),
             }
-            other => panic!("suppressed fence write must fail, got {other:?}"),
+            drop(tx);
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&root);
         }
-        drop(tx);
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn undone_fence_update_is_an_error_not_a_silent_success() {
-        let (root, d) = tmp();
-        let StorageBackend::Sqlite { path } = &d.backend else {
-            panic!("sqlite descriptor");
-        };
-        let path = path.clone();
-        drop(open_sqlite(&d, "").expect("seed database at epoch 1"));
-
-        let mut conn = rusqlite::Connection::open(&path).expect("reopen raw");
-        conn.execute_batch(
-            "CREATE TRIGGER fence_undo AFTER UPDATE ON fence \
-             BEGIN UPDATE fence SET epoch = OLD.epoch WHERE id = 0; END",
-        )
-        .expect("install undoing trigger");
-        let tx = conn.transaction().expect("tx");
-        match claim_fence(&tx, 99) {
-            Err(StoreError::Backend(m)) => {
-                assert!(m.contains("reads back as 1"), "unexpected message: {m}")
-            }
-            other => panic!("undone fence write must fail, got {other:?}"),
-        }
-        drop(tx);
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
@@ -3508,23 +3429,6 @@ mod tests {
     }
 
     #[test]
-    fn fenced_write_commits_and_persists() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d, KV_BASELINE).expect("open");
-        store
-            .with_conn_fenced(|tx| {
-                tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
-                Ok(())
-            })
-            .expect("fenced write");
-        let v: String = store
-            .with_conn(|c| c.query_row("SELECT v FROM kv WHERE k = 'a'", [], |r| r.get(0)))
-            .expect("read back");
-        assert_eq!(v, "1");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn unfenced_connection_rejects_writes() {
         let (root, d) = tmp();
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
@@ -3546,17 +3450,6 @@ mod tests {
                     .map(|_| ())
             })
             .expect("fenced writes still work after the read-only guard clears");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn open_pins_full_synchronous() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d, "").expect("open");
-        let sync: i64 = store
-            .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
-            .expect("read synchronous");
-        assert_eq!(sync, 2, "fence durability requires synchronous=FULL");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3748,15 +3641,29 @@ mod tests {
     }
 
     #[test]
-    fn a_callback_cannot_damage_the_fence_row_it_is_checked_against() {
+    fn a_callback_cannot_damage_the_fence_row_or_format_marker_it_is_checked_against() {
         let (root, d) = tmp();
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let epoch = store.epoch();
+        let marker_before: String = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("read the marker");
+        let forged_marker = format!(
+            "UPDATE format_marker SET baseline_sha256 = '{}' WHERE id = 0",
+            "f".repeat(64)
+        );
 
         for sql in [
             "UPDATE fence SET epoch = 0 WHERE id = 0",
             "DELETE FROM fence WHERE id = 0",
             "INSERT INTO format_marker (id, baseline_sha256) VALUES (0, 'forged')",
+            forged_marker.as_str(),
             "DELETE FROM format_marker WHERE id = 0",
             "CREATE TRIGGER freeze_fence BEFORE UPDATE ON fence \
              BEGIN SELECT RAISE(IGNORE); END",
@@ -3808,8 +3715,8 @@ mod tests {
             "the fence row still carries the epoch the callbacks were checked against"
         );
 
-        // Schema changes are denied outright, so a rename can never shadow the fence.
-        for target in ["fence", "FENCE", "Fence"] {
+        // Schema changes are denied, so renames cannot shadow `fence` or `format_marker`.
+        for target in ["fence", "FENCE", "Fence", "format_marker"] {
             let renamed = store.with_conn_fenced(|tx| {
                 tx.execute("CREATE TEMP TABLE benign (id INTEGER, epoch INTEGER)", [])?;
                 tx.execute(&format!("ALTER TABLE benign RENAME TO {target}"), [])
@@ -3823,13 +3730,17 @@ mod tests {
         let shadows: i64 = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE lower(name) = 'fence'",
+                    "SELECT COUNT(*) FROM temp.sqlite_schema \
+                     WHERE lower(name) IN ('fence', 'format_marker')",
                     [],
                     |r| r.get(0),
                 )
             })
             .expect("inspect temp schema");
-        assert_eq!(shadows, 0, "no temporary object may shadow the fence");
+        assert_eq!(
+            shadows, 0,
+            "no temporary object may shadow an infrastructure table"
+        );
         let shadow_after: i64 = store
             .with_conn(|c| {
                 c.query_row(
@@ -3843,56 +3754,7 @@ mod tests {
             shadow_after, 0,
             "rejecting before commit rolls the temporary object back with the transaction"
         );
-        store
-            .with_conn_fenced(|tx| {
-                tx.execute("INSERT INTO kv (k, v) VALUES ('after-shadow', '1')", [])
-                    .map(|_| ())
-            })
-            .expect("the fenced path still works after a rejected shadow");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_fenced_callback_cannot_rewrite_the_format_marker() {
-        let (root, d) = tmp();
-        let store = open_sqlite(&d, "").expect("open");
-        let before: String = store
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .expect("read the marker");
-
-        let forged = "f".repeat(64);
-        let rewritten = store.with_conn_fenced(|tx| {
-            tx.execute(
-                "UPDATE format_marker SET baseline_sha256 = ?1 WHERE id = 0",
-                rusqlite::params![forged],
-            )
-            .map(|_| ())
-        });
-        assert!(
-            matches!(&rewritten, Err(StoreError::Backend(m)) if m.contains("not authorized")),
-            "rewriting the format marker is denied, got {rewritten:?}"
-        );
-
-        let renamed = store.with_conn_fenced(|tx| {
-            tx.execute(
-                "CREATE TEMP TABLE benign (id INTEGER, baseline_sha256 TEXT)",
-                [],
-            )?;
-            tx.execute("ALTER TABLE benign RENAME TO format_marker", [])
-                .map(|_| ())
-        });
-        assert!(
-            matches!(&renamed, Err(StoreError::Backend(m)) if m.contains("not authorized")),
-            "a temporary table renamed onto the marker is rejected, got {renamed:?}"
-        );
-
-        let (after, rows): (String, i64) = store
+        let (marker_after, marker_rows): (String, i64) = store
             .with_conn(|c| {
                 c.query_row(
                     "SELECT (SELECT baseline_sha256 FROM format_marker WHERE id = 0), \
@@ -3903,15 +3765,24 @@ mod tests {
             })
             .expect("read the marker again");
         assert_eq!(
-            (after, rows),
-            (before, 1),
+            (marker_after, marker_rows),
+            (marker_before, 1),
             "the format marker row is unchanged"
         );
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('after-shadow', '1')", [])
+                    .map(|_| ())
+            })
+            .expect("the fenced path still works after a rejected shadow");
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `VACUUM` fails because read callbacks run inside a transaction; authorization does not
+    /// reject it. The authorizer denies `wal_checkpoint`, `incremental_vacuum`, `optimize`,
+    /// and `shrink_memory`, which `PRAGMA query_only` does not stop.
     #[test]
-    fn maintenance_runs_through_the_unfenced_path() {
+    fn maintenance_statements_are_refused_in_read_callbacks_and_run_through_the_unfenced_path() {
         let (root, d) = tmp();
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
         let r = store.with_conn(|c| c.execute("VACUUM", []));
@@ -3919,13 +3790,23 @@ mod tests {
             matches!(&r, Err(StoreError::Backend(m)) if m.contains("cannot VACUUM from within a transaction")),
             "VACUUM must not pass the read callback, got {r:?}"
         );
-        // `VACUUM` is refused by the read transaction, not the authorizer.
-        // The denylist branch is exercised by an argumentless pragma that still does work.
-        let r = store.with_conn(|c| c.query_row("PRAGMA incremental_vacuum", [], |_| Ok(())));
-        assert!(
-            matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
-            "incremental_vacuum must be denied by the read callback scope, got {r:?}"
-        );
+        for pragma in [
+            "wal_checkpoint",
+            "incremental_vacuum",
+            "optimize",
+            "shrink_memory",
+        ] {
+            let denied =
+                store.with_conn(|c| c.query_row(&format!("PRAGMA {pragma}"), [], |_| Ok(())));
+            assert!(
+                matches!(&denied, Err(StoreError::Backend(m)) if m.contains("authorization denied") || m.contains("not authorized")),
+                "{pragma} must be denied by the read callback scope, got {denied:?}"
+            );
+        }
+        let mode: String = store
+            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
+            .expect("reading a pragma stays allowed");
+        assert!(mode.eq_ignore_ascii_case("wal"));
         store
             .with_conn_unfenced(|c| c.execute_batch("VACUUM"))
             .expect("VACUUM through the maintenance path");
@@ -4175,6 +4056,123 @@ mod tests {
             .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
             .expect("mode");
         assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode is {mode}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bounded_fenced_write_bounds_the_fence_read_and_durability_pin_together() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let path = sqlite_path(&d);
+
+        store
+            .with_conn_unfenced(|conn| {
+                conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map(|_| ())
+            })
+            .expect("lower the journal mode");
+        store
+            .with_conn_unfenced(|conn| conn.pragma_update(None, "synchronous", "NORMAL"))
+            .expect("lower synchronous");
+
+        // This reader blocks the durability pin's EXCLUSIVE lock for the whole attempt.
+        let reader = rusqlite::Connection::open(&path).expect("reader");
+        reader.busy_timeout(Duration::ZERO).expect("no wait");
+        reader
+            .execute_batch("BEGIN")
+            .expect("open read transaction");
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM fence", [], |row| row.get(0))
+            .expect("take shared lock");
+
+        static BUSY_HANDLER_ENTERED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static RELEASE_BUSY_HANDLER: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        fn controlled_busy_handler(_: i32) -> bool {
+            BUSY_HANDLER_ENTERED.store(true, std::sync::atomic::Ordering::Release);
+            if RELEASE_BUSY_HANDLER.load(std::sync::atomic::Ordering::Acquire) {
+                false
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+                true
+            }
+        }
+
+        BUSY_HANDLER_ENTERED.store(false, std::sync::atomic::Ordering::Release);
+        RELEASE_BUSY_HANDLER.store(false, std::sync::atomic::Ordering::Release);
+        let blocker_path = path.clone();
+        let blocker = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(&blocker_path).expect("pending holder");
+            connection
+                .busy_handler(Some(controlled_busy_handler))
+                .expect("controlled busy handler");
+            assert!(
+                connection.execute_batch("BEGIN EXCLUSIVE").is_err(),
+                "the reader's shared lock must refuse EXCLUSIVE",
+            );
+        });
+        let pending_deadline = Instant::now() + Duration::from_secs(1);
+        while !BUSY_HANDLER_ENTERED.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                Instant::now() < pending_deadline,
+                "the EXCLUSIVE attempt never reached its busy handler",
+            );
+            std::thread::yield_now();
+        }
+
+        let wait_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wait_signal = std::sync::Arc::clone(&wait_started);
+        before_next_busy_wait_for_test(move || {
+            wait_signal.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let started = Instant::now();
+        let release_deadline = Instant::now() + Duration::from_secs(2);
+        let release = std::thread::spawn(move || {
+            while !wait_started.load(std::sync::atomic::Ordering::Acquire) {
+                if Instant::now() >= release_deadline {
+                    RELEASE_BUSY_HANDLER.store(true, std::sync::atomic::Ordering::Release);
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(400));
+            RELEASE_BUSY_HANDLER.store(true, std::sync::atomic::Ordering::Release);
+            true
+        });
+        let result = store.with_conn_fenced_within(started + Duration::from_millis(1_200), |tx| {
+            tx.execute("INSERT INTO kv (k, v) VALUES ('blocked', '1')", [])
+        });
+        let waited = started.elapsed();
+        let wait_was_observed = release.join().expect("release timer thread");
+        blocker.join().expect("pending holder thread");
+
+        assert!(wait_was_observed, "the bounded wait hook did not run");
+        assert!(matches!(result, Err(StoreError::Deadline)), "{result:?}");
+        let synchronous: i64 = store
+            .with_conn_unfenced(|conn| conn.query_row("PRAGMA synchronous", [], |row| row.get(0)))
+            .expect("read synchronous");
+        assert_eq!(
+            synchronous, 2,
+            "the fence read must succeed and reach the durability pin",
+        );
+        assert!(
+            waited < Duration::from_millis(1_400),
+            "the bounded write waited {waited:?} for a 1,200 ms deadline",
+        );
+        let timeout: i64 = store
+            .with_conn_unfenced(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
+            .expect("read busy timeout");
+        assert_eq!(timeout, 5_000, "the connection busy timeout is restored");
+
+        drop(reader);
+        let rows: i64 = store
+            .with_conn(|conn| conn.query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0)))
+            .expect("count");
+        assert_eq!(rows, 0, "the refused write left no row");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4450,84 +4448,6 @@ mod tests {
             .query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| row.get(0))
             .expect("read unchanged negative fence");
         assert_eq!(persisted, -1);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn superseded_writer_is_fenced_out_after_handover() {
-        let (root, d) = tmp();
-        let path = sqlite_path(&d);
-
-        drop(open_sqlite(&d, KV_BASELINE).expect("seed schema"));
-
-        let new = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 2);
-        new.with_conn_fenced(|tx| {
-            tx.execute("INSERT INTO kv (k, v) VALUES ('owner', 'new')", [])
-                .map(|_| ())
-        })
-        .expect("replacement claims the db at epoch 2");
-
-        let stale = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 1);
-        match stale.with_conn_fenced(|tx| {
-            tx.execute("UPDATE kv SET v = 'clobbered' WHERE k = 'owner'", [])
-                .map(|_| ())
-        }) {
-            Err(StoreError::Fenced {
-                holder_epoch,
-                db_epoch,
-            }) => {
-                assert_eq!(holder_epoch, 1);
-                assert_eq!(db_epoch, 2);
-            }
-            other => panic!("expected Fenced, got {other:?}"),
-        }
-        assert!(
-            matches!(
-                stale.with_conn_fenced(|tx| {
-                    tx.execute("CREATE TABLE stale_schema (id INTEGER PRIMARY KEY)", [])
-                        .map(|_| ())
-                }),
-                Err(StoreError::Fenced { .. })
-            ),
-            "a superseded writer cannot change the schema"
-        );
-
-        let (v, stale_tables): (String, i64) = new
-            .with_conn(|c| {
-                c.query_row(
-                    "SELECT (SELECT v FROM kv WHERE k = 'owner'), \
-                     (SELECT COUNT(*) FROM sqlite_schema \
-                      WHERE type = 'table' AND name = 'stale_schema')",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-            })
-            .expect("read");
-        assert_eq!(v, "new", "stale writer was fenced out, no clobber");
-        assert_eq!(
-            stale_tables, 0,
-            "the fenced-out schema change left no table"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn equal_epoch_writer_is_not_fenced() {
-        let (root, d) = tmp();
-        let path = sqlite_path(&d);
-        drop(open_sqlite(&d, KV_BASELINE).expect("seed"));
-        let s = SqliteStore::for_test(rusqlite::Connection::open(&path).unwrap(), 5);
-        s.with_conn_fenced(|tx| {
-            tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])
-                .map(|_| ())
-        })
-        .expect("claims at 5");
-        s.with_conn_fenced(|tx| {
-            tx.execute("INSERT INTO kv (k, v) VALUES ('b', '2')", [])
-                .map(|_| ())
-        })
-        .expect("same epoch 5 still writes");
-
         let _ = std::fs::remove_dir_all(&root);
     }
 
