@@ -362,7 +362,9 @@ delta in any fault table.
 | [`evaluator_constants_are_pinned`][t-pinned] | Evaluator tables and constants digest are pinned. | unaudited |
 | [`windows_start_on_line_boundaries_and_overlap_when_lines_are_short`][t-windows] | Redaction window placement and overlap. | unaudited |
 | [`scanner_is_the_only_redaction_path`][t-only-path] | No redaction path bypasses the scanner. | unaudited |
-| [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-chunk-fp] | The fingerprint literal `id:kind:len`. | unaudited |
+| [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-chunk-fp] | The length-only literal `id:kind:len`, empty input, explicit UTF-8 lengths distinct from UTF-16 units, and unescaped delimiters. | unaudited |
+| [`historian_boundary_construction_matches_owned_reference`][t-boundary-construction] | Owned boundary reference versus borrowed IDs/shared bytes; length-only snapshots versus copied strings; exact frozen transcript, prompt, and raw-message bytes; empty, non-ASCII, tool, system, synthetic, excluded-tail, and oversized inputs. Unflagged reserved synthetic messages with no projected identity preserve the no-fire result. A matching frozen-size entry and pending drop check exact percentages against the owned reference, an independent formula, and a no-entry control. | unaudited |
+| [`unflagged_synthetic_delta_prepares_historian_and_native_output`][t-firing-capture] | Scripted producer captures actual handler prompts on cached-prefix and reconstructed-prefix lanes. Full prompts compare across lanes and their SHA-256 values are pinned to the construction baseline. | unaudited |
 | [`optimized_matches_frozen_reference_at_production_windows`][diff-prod] | Truncation bytes equal the frozen reference at production windows (24 cases, budget 1..32_001). | unaudited |
 | [`exact_token_budget_returns_original_input`][diff-exact] | Input at budget returns unchanged. | unaudited |
 | [`optimized_matches_frozen_reference`][diff-small] | Small-window byte equality. | unaudited |
@@ -435,10 +437,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19197
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27959
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27710
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23503
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23854
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L29040
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27890
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23230
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23573
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L14080
 [served-shells]: ../../../../crates/daemon/src/transform.rs#L13808
 [served-corpus]: ../../../../crates/daemon/src/transform.rs#L13854
@@ -591,12 +593,14 @@ not a claim that no related check exists anywhere in the repository.
 [t-pinned]: ../../../../crates/secret-scanner/src/evaluator.rs#L1660-L1683
 [t-windows]: ../../../../crates/context-core/src/redaction.rs#L827-L856
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
-[t-chunk-fp]: ../../../../crates/daemon/src/historian.rs#L4006-L4033
+[t-chunk-fp]: ../../../../crates/daemon/src/historian.rs#L4006
+[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L17519
+[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L23573
 [diff-prod]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L100-L113
 [diff-exact]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L115-L129
 [diff-small]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L131-L140
-[t-golden]: ../../../../crates/daemon/src/historian_chunk.rs#L1749-L1760
-[t-marker]: ../../../../crates/daemon/src/historian_chunk.rs#L1762-L1763
+[t-golden]: ../../../../crates/daemon/src/historian_chunk.rs#L1751-L1761
+[t-marker]: ../../../../crates/daemon/src/historian_chunk.rs#L1764-L1777
 [t-vixie]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1594
 [t-extreme]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1580-L1591
 [t-golden-cron]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1126

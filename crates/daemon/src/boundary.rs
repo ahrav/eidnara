@@ -11,6 +11,7 @@ use crate::chunk_text::{
     clean_user_text, clean_user_text_cow, compact_role, compact_text_for_summary, extract_key_arg,
     format_block_line, is_system_directive, merge_commit_hashes, normalize_text,
 };
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -81,8 +82,8 @@ impl Role {
 /// `BoundaryBlock` retains the original pre-reduction content block.
 #[derive(Debug, Clone)]
 pub struct BoundaryBlock<'a> {
-    /// The block retains its stable `id`.
-    pub id: String,
+    /// Borrows the projection's identity; standalone callers may supply an owned ID.
+    pub id: Cow<'a, str>,
     /// Message-level algorithms use the parent message ordinal, not this block ordinal.
     /// Callers that preserve block order use the block ordinal.
     pub ordinal: u64,
@@ -1911,7 +1912,7 @@ mod tests {
                     .blocks
                     .iter()
                     .map(|block| BoundaryBlock {
-                        id: block.id.clone(),
+                        id: block.id.clone().into(),
                         ordinal: block.ordinal,
                         kind: parse_kind(&block.kind),
                         provider_executed: block.provider_executed,
@@ -2145,7 +2146,7 @@ mod tests {
             message_id: format!("m-{ord}"),
             role,
             blocks: vec![BoundaryBlock {
-                id: format!("m-{ord}#text"),
+                id: format!("m-{ord}#text").into(),
                 ordinal: ord,
                 kind: SelKind::Text,
                 provider_executed: false,
@@ -2165,7 +2166,7 @@ mod tests {
             message_id: format!("m-{ord}"),
             role: Role::Assistant,
             blocks: vec![BoundaryBlock {
-                id: format!("{arc_id}#call"),
+                id: format!("{arc_id}#call").into(),
                 ordinal: ord,
                 kind: SelKind::ToolCall {
                     name: "bash".to_string(),
@@ -2187,7 +2188,7 @@ mod tests {
         message.blocks.insert(
             0,
             BoundaryBlock {
-                id: format!("{arc_id}#reasoning"),
+                id: format!("{arc_id}#reasoning").into(),
                 ordinal: ord,
                 kind: SelKind::Reasoning,
                 provider_executed: false,
@@ -2208,7 +2209,7 @@ mod tests {
             message_id: format!("m-{ord}"),
             role: Role::User,
             blocks: vec![BoundaryBlock {
-                id: format!("{arc_id}#result"),
+                id: format!("{arc_id}#result").into(),
                 ordinal: ord,
                 kind: SelKind::ToolResult {
                     tool_name: "bash".to_string(),
@@ -2492,7 +2493,7 @@ mod tests {
             blocks: ["arc-a", "arc-b", "arc-c"]
                 .iter()
                 .map(|arc| BoundaryBlock {
-                    id: format!("{arc}#call"),
+                    id: format!("{arc}#call").into(),
                     ordinal: 2,
                     kind: SelKind::ToolCall {
                         name: "bash".to_string(),
@@ -2515,7 +2516,7 @@ mod tests {
             blocks: ["arc-a", "arc-b", "arc-c"]
                 .iter()
                 .map(|arc| BoundaryBlock {
-                    id: format!("{arc}#result"),
+                    id: format!("{arc}#result").into(),
                     ordinal: 3,
                     kind: SelKind::ToolResult {
                         tool_name: "bash".to_string(),

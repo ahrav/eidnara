@@ -27,12 +27,12 @@ use crate::historian_validate::{
 use crate::wire::{BlockKind, FlatBlock, IngressMessage};
 use std::sync::Arc;
 
-/// `ChunkSnapshotOwnedItem` stores block identity and bytes used to fingerprint a historian chunk.
+/// Stores block identity and UTF-8 byte length without retaining block content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSnapshotOwnedItem {
     pub id: String,
     pub kind: String,
-    pub bytes: String,
+    pub byte_len: usize,
 }
 
 impl ChunkSnapshotOwnedItem {
@@ -41,7 +41,7 @@ impl ChunkSnapshotOwnedItem {
         ChunkSnapshotItem {
             id: &self.id,
             kind: &self.kind,
-            bytes: &self.bytes,
+            byte_len: self.byte_len,
         }
     }
 }
@@ -426,7 +426,7 @@ pub fn build_historian_chunk(
         .map(|block| ChunkSnapshotOwnedItem {
             id: block.id.clone(),
             kind: block.kind_tag.clone(),
-            bytes: block.bytes.to_string(),
+            byte_len: block.bytes.len(),
         })
         .collect();
     HistorianBuiltChunk {
