@@ -915,7 +915,7 @@ fn retirement_stops_waiting_for_the_writer_when_the_budget_is_cancelled() {
     assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
 }
 
-/// The inventory's reads acquire pooled readers under the budget: an episode cancelled while every reader is held returns `Cancelled(Inventory)` while they are still held.
+/// The inventory's reads acquire pooled readers under the budget: a descriptor page under an exhausted budget refuses at once, and an episode cancelled while every reader is held returns `Cancelled(Inventory)` while they are still held.
 #[test]
 fn inventory_stops_waiting_for_a_reader_when_the_budget_is_cancelled() {
     let dir = tempfile::tempdir().unwrap();
@@ -925,6 +925,7 @@ fn inventory_stops_waiting_for_a_reader_when_the_budget_is_cancelled() {
     let c1 = repo.commit(MAIN, &[], "one\n", 1);
     corpus.publish(&repo, std::slice::from_ref(&c1));
     let budget = EvalBudget::new(None, Arc::new(AtomicBool::new(false)));
+    let snapshot = corpus.kernel.tip().unwrap();
     // The kernel's read pool holds two connections; both are occupied for the whole test.
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -946,6 +947,15 @@ fn inventory_stops_waiting_for_a_reader_when_the_budget_is_cancelled() {
         }
         held_rx.recv().unwrap();
         held_rx.recv().unwrap();
+        // A descriptor page under an already exhausted budget refuses without waiting for a reader; the episode below then covers the snapshot read the same way.
+        let page = corpus.kernel.live_source_descriptors(
+            OccurrenceClass::GitCommits,
+            snapshot,
+            None,
+            NonZeroUsize::new(64).unwrap(),
+            &exhausted(),
+        );
+        assert!(matches!(page, Err(KernelError::Deadline)), "{page:?}");
         let cancel = &budget;
         scope.spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
