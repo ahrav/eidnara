@@ -865,7 +865,7 @@ returned after the loop completes. `always` because
 which rows a pass touches.
 Fault/timing angle: Process crash between the mark commit and the
 [per-row delete][delete-one]; the publish task's own drain
-([`:11037-11046`][publish-drain]) overlapping the pass drain on one session;
+([`:11074-11083`][publish-drain]) overlapping the pass drain on one session;
 a target insert failing after the outbox state change in a reordered
 transaction; an empty-drain shortcut that skips the [leftover delete][delete-all];
 a delete-in-place that changes which rows [count as pending][status-sc].
@@ -893,10 +893,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Duplicate names, key-directed substitution, container
-refusal, integrity refusal, and the cache-state policy test exist; none
-covers byte identity of a clean stored `meta` against
-`serde_json::to_string(meta)` or a secret inside a `BTreeMap` key.
+Exercised: yes - Duplicate names, key-directed substitution, container
+refusal, integrity refusal, and the cache-state policy test exist; the
+[single-pass tests](evidence/meta-json-preparation-scans-every-persisted-byte.md#single-pass-evidence)
+add byte identity of a clean stored `meta` against
+`serde_json::to_string(meta)`, a secret in a `block_identity_by_mid` value
+substituted and recorded, and a secret in a `block_identity_by_mid` key
+refused.
 Guarantee: No byte reaches the `meta` column that the scanner did not walk,
 and the audit receipt matches the bytes stored.
 Check: `always` - For the `meta` text handed to [`json_content`][json-content]
@@ -904,12 +907,13 @@ at [`commit_transform`][commit-meta], the stored bytes are either
 byte-identical to `serde_json::to_string(meta)` when no substitution occurred
 (the [unchanged-input branch][clean-branch]) or the serialization of the
 redacted tree; a duplicate object name at any depth refuses the write; every
-object key is bound-checked and scanned ([`validate_json_keys`][keys]); a
-detected value under an identity or integrity key refuses; a protected key
-with a container value refuses; a protected scalar substitutes and records a
-detection ([`record_observed_scan`][record-scan]); and the recorded scan for
-field `meta` carries the same detections as the walk observed. `always`
-because every committing pass runs this path.
+object key is bound-checked and scanned, in the [object arm][walk-keys] of
+the walk for containers it descends and by [`validate_json_keys`][keys] for a
+subtree it judges whole; a detected value under an identity or integrity key
+refuses; a protected key with a container value refuses; a protected scalar
+substitutes and records a detection ([`record_observed_scan`][record-scan]);
+and the recorded scan for field `meta` carries the same detections as the
+walk observed. `always` because every committing pass runs this path.
 Fault/timing angle: A single-pass redaction streams input and returns the
 original bytes for an unchanged prefix while a later duplicate name shadows
 an earlier value, which is the bypass the [comment][unique-doc] on
@@ -922,12 +926,13 @@ level and nested; a secret in a `BTreeMap` key such as
 object; a clean `meta` compared byte-for-byte with the stored column.
 Confidence: high - [Evidence](evidence/meta-json-preparation-scans-every-persisted-byte.md).
 The [policy][policy], [`prepare_json_content_collecting`][prepare-collecting],
+[`prepare_json_content_single_pass`][single-pass],
 [`prepare_value`][prepare-value], and the clean branch are source-verified;
 every reader deserializes and the transform compares values
 ([`next_meta != loaded.meta`][value-compare]), so no reader depends on byte
 form.
 Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list five preparation tests; the canonical policy records are
+list eight preparation tests; the canonical policy records are
 [preserved-identity-name-does-not-exempt-its-value][ms-preserved] and
 [refused-durable-write-leaves-no-row-and-no-receipt][ms-refused]; all
 unaudited.
@@ -995,7 +1000,7 @@ Check: `sometimes` - Under three constant markers
 from the handler's pass drain ([`:8199-8203`][pass-drain]), the outbox holds
 at entry, for that kind, at least one row with `delivered_at_ms IS NULL` and
 `next_attempt_at_ms <= now_ms` for the `now_ms` the call passes (the due
-predicate at [`:11168-11169`][due-predicate]). Each marker records the
+predicate at [`:11205-11206`][due-predicate]). Each marker records the
 pending rows read from the outbox and the drain's `now_ms` before delivery
 runs, never the delivery result. `sometimes` because the drain lines execute
 on every pass while a due row may never exist, so `reachable` would be
@@ -1004,9 +1009,9 @@ Fault/timing angle: Under default configuration no [`model_chain`][cfg-models]
 is set, so nothing publishes, the outbox is empty on every pass, and C3's
 per-row clauses are never evaluated. With publishing,
 [`publish_historian_chunk`][publish] drains inline right after its commit
-([`:11037-11046`][publish-drain]), so the pass drain finds a due row only when
+([`:11074-11083`][publish-drain]), so the pass drain finds a due row only when
 that inline delivery failed (the next attempt is
-`now + 1000 * 2^min(attempt, 6)` ms, [`:11256-11260`][backoff]) or when the
+`now + 1000 * 2^min(attempt, 6)` ms, [`:11293-11297`][backoff]) or when the
 process ended between the enqueue commit and the inline drain.
 Required faults and enabling state: A published firing with events, primers,
 and user observations (a direct `publish_historian_chunk` call in a unit
@@ -2583,7 +2588,6 @@ evaluation of this area and its disposition are recorded in
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2129
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6380
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6846-L6871
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6891-L6896
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6969-L7031
 [mint-input]: ../../../../crates/daemon/src/transform.rs#L7231-L7236
 [append-mint]: ../../../../crates/daemon/src/transform.rs#L7338-L7361
@@ -2616,7 +2620,6 @@ evaluation of this area and its disposition are recorded in
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
-[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
@@ -2624,13 +2627,12 @@ evaluation of this area and its disposition are recorded in
 [tail-reclaim]: ../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../crates/memory-store/src/lib.rs#L210-L216
-[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8509-L8524
+[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8546-L8561
 [tag-content-policy]: ../../../../crates/memory-store/src/lib.rs#L2289-L2318
-[load-order]: ../../../../crates/memory-store/src/lib.rs#L7520-L7548
+[load-order]: ../../../../crates/memory-store/src/lib.rs#L7557-L7585
 [serde-features]: ../../../../Cargo.toml#L45
-
-[load]: ../../../../crates/memory-store/src/lib.rs#L6351-L6498
-[full-select]: ../../../../crates/memory-store/src/lib.rs#L4666-L4667
+[load]: ../../../../crates/memory-store/src/lib.rs#L6388-L6415
+[full-select]: ../../../../crates/memory-store/src/lib.rs#L4703-L4704
 [epoch-read]: ../../../../crates/daemon/src/lib.rs#L4308-L4323
 [epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4190-L4220
 [active]: ../../../../crates/daemon/src/lib.rs#L4600-L4618
@@ -2655,45 +2657,47 @@ evaluation of this area and its disposition are recorded in
 [value-compare]: ../../../../crates/daemon/src/transform.rs#L3227
 [truncate]: ../../../../crates/daemon/src/transform.rs#L4139-L4145
 [sched-test]: ../../../../crates/daemon/src/transform.rs#L13689
-[received]: ../../../../crates/memory-store/src/lib.rs#L6760-L6810
-[received-doc]: ../../../../crates/memory-store/src/lib.rs#L6757-L6759
-[flagged]: ../../../../crates/memory-store/src/lib.rs#L6771-L6789
-[stable]: ../../../../crates/memory-store/src/lib.rs#L6815-L6907
-[completed]: ../../../../crates/memory-store/src/lib.rs#L6912-L6960
-[completed-doc]: ../../../../crates/memory-store/src/lib.rs#L6909-L6911
-[rejected]: ../../../../crates/memory-store/src/lib.rs#L6966-L7019
-[sched-history]: ../../../../crates/memory-store/src/lib.rs#L7067-L7100
+[received]: ../../../../crates/memory-store/src/lib.rs#L6797-L6847
+[received-doc]: ../../../../crates/memory-store/src/lib.rs#L6794-L6796
+[flagged]: ../../../../crates/memory-store/src/lib.rs#L6808-L6826
+[stable]: ../../../../crates/memory-store/src/lib.rs#L6852-L6944
+[completed]: ../../../../crates/memory-store/src/lib.rs#L6949-L6997
+[completed-doc]: ../../../../crates/memory-store/src/lib.rs#L6946-L6948
+[rejected]: ../../../../crates/memory-store/src/lib.rs#L7003-L7056
+[sched-history]: ../../../../crates/memory-store/src/lib.rs#L7104-L7137
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L852-L869
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8581-L8590
-[commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8702-L8769
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8618-L8627
+[commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8739-L8806
 [json-content]: ../../../../crates/memory-store/src/lib.rs#L2201-L2211
 [record-scan]: ../../../../crates/memory-store/src/lib.rs#L2218-L2228
 [policy]: ../../../../crates/memory-store/src/lib.rs#L3162-L3183
-[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3194-L3372
-[keys]: ../../../../crates/memory-store/src/lib.rs#L3242-L3255
-[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3266-L3361
-[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3367-L3371
-[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3374-L3375
-[unique]: ../../../../crates/memory-store/src/lib.rs#L3376-L3457
-[recomp]: ../../../../crates/memory-store/src/lib.rs#L10332-L10425
+[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3201-L3211
+[single-pass]: ../../../../crates/memory-store/src/lib.rs#L3217-L3409
+[keys]: ../../../../crates/memory-store/src/lib.rs#L3267-L3280
+[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3291-L3392
+[walk-keys]: ../../../../crates/memory-store/src/lib.rs#L3382-L3388
+[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3403-L3408
+[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3411-L3412
+[unique]: ../../../../crates/memory-store/src/lib.rs#L3413-L3494
+[recomp]: ../../../../crates/memory-store/src/lib.rs#L10369-L10462
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1472-L1473
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1588-L1589
 [phase]: ../../../../crates/memory-store/src/lib.rs#L622-L631
-[drain]: ../../../../crates/memory-store/src/lib.rs#L11081-L11126
-[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11078-L11080
-[status-sc]: ../../../../crates/memory-store/src/lib.rs#L11128-L11154
-[load-due]: ../../../../crates/memory-store/src/lib.rs#L11156-L11190
-[deliver]: ../../../../crates/memory-store/src/lib.rs#L11192-L11248
-[failure]: ../../../../crates/memory-store/src/lib.rs#L11250-L11289
-[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11291-L11304
-[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11306-L11328
-[publish]: ../../../../crates/memory-store/src/lib.rs#L10834
-[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L11037-L11046
-[kinds]: ../../../../crates/memory-store/src/lib.rs#L4598-L4601
-[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13855-L13876
-[mark]: ../../../../crates/memory-store/src/lib.rs#L14014-L14039
-[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L14041-L14083
-[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L14085-L14106
+[drain]: ../../../../crates/memory-store/src/lib.rs#L11118-L11163
+[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11115-L11117
+[status-sc]: ../../../../crates/memory-store/src/lib.rs#L11165-L11191
+[load-due]: ../../../../crates/memory-store/src/lib.rs#L11193-L11227
+[deliver]: ../../../../crates/memory-store/src/lib.rs#L11229-L11285
+[failure]: ../../../../crates/memory-store/src/lib.rs#L11287-L11326
+[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11328-L11341
+[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11343-L11365
+[publish]: ../../../../crates/memory-store/src/lib.rs#L10871
+[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L11074-L11083
+[kinds]: ../../../../crates/memory-store/src/lib.rs#L4635-L4638
+[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13892-L13913
+[mark]: ../../../../crates/memory-store/src/lib.rs#L14051-L14076
+[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L14078-L14120
+[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L14122-L14143
 [idx-order]: ../../../../crates/memory-store/baseline.sql#L531-L535
 
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
@@ -2707,12 +2711,6 @@ evaluation of this area and its disposition are recorded in
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L300-L357
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
-[pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
-[pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
-[numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
-[bodyvalid]: ../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L494-L501
-[encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
-[utf8body]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
 [sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
 [log-gate-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
@@ -2720,8 +2718,6 @@ evaluation of this area and its disposition are recorded in
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[hostpage]: ../../../../crates/daemon/src/lib.rs#L748-L749
-[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9385-L9391
 
 [agents]: ../../../../crates/shm-transport/AGENTS.md
 [arena-const]: ../../../../crates/shm-transport/src/arena.rs#L4-L7
@@ -2846,7 +2842,6 @@ evaluation of this area and its disposition are recorded in
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24521
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21486
 [serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28295
-[tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
 [radius-window]: ../../../../crates/secret-scanner/src/evaluator.rs#L266-L297
@@ -2932,13 +2927,13 @@ evaluation of this area and its disposition are recorded in
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 
 [pass-drain]: ../../../../crates/daemon/src/lib.rs#L8199-L8203
-[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11168-L11169
-[backoff]: ../../../../crates/memory-store/src/lib.rs#L11256-L11260
-[fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6055-L6064
+[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11205-L11206
+[backoff]: ../../../../crates/memory-store/src/lib.rs#L11293-L11297
+[fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6092-L6101
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36750
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19183
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19388
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19314
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19519
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261
 [sched-due-projects]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L265-L296
 [sched-idle]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L36

@@ -305,8 +305,8 @@ passes 86 tests. The anchors below are to that merged tree.
 [maintenance-exit]: ../../../../crates/storage/src/lib.rs#L565-L574
 [unwind-test]: ../../../../crates/storage/src/lib.rs#L2596-L2645
 [profile]: ../../../../crates/memory-store/src/lib.rs#L496-L538
-[profile-test]: ../../../../crates/memory-store/src/lib.rs#L15544-L15572
-[sort-spill]: ../../../../crates/memory-store/src/lib.rs#L15574-L15604
+[profile-test]: ../../../../crates/memory-store/src/lib.rs#L15582-L15609
+[sort-spill]: ../../../../crates/memory-store/src/lib.rs#L15616-L15641
 [capacity]: ../../../../crates/memory-store/src/lib.rs#L478
 [resource-pragmas]: ../../../../crates/storage/src/lib.rs#L5184-L5222
 [eviction-probe]: ../../../../crates/storage/src/lib.rs#L5228-L5287

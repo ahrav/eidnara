@@ -271,7 +271,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   selects only `delivered_at_ms IS NULL`, so a marked row is never redelivered
   even if the process dies before the [per-row delete][delete-one]; the
   [drain start][drain] deletes leftovers. The publish task also drains
-  ([lib.rs:11037-11046][publish-drain]), so two drainers can load the same due
+  ([lib.rs:11074-11083][publish-drain]), so two drainers can load the same due
   row; the loser's mark returns `changed == 0`. With delete-in-place the
   equivalent guard is a `DELETE` that affects one row, else rollback.
   [`historian_side_channel_status`][status-sc] counts pending as
@@ -345,7 +345,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Guarantee: No byte reaches the `meta` column that the scanner did not walk,
   and the audit receipt matches the bytes stored.
 - Rationale: `commit_transform` serializes `meta` and hands the text to
-  `json_content` at [lib.rs:8581-8590][commit-meta]. The [comment][unique-doc]
+  `json_content` at [lib.rs:8618-8627][commit-meta]. The [comment][unique-doc]
   on [`parse_json_with_unique_names`][unique] states the security invariant:
   `serde_json::Value` keeps only the last duplicate name, so an earlier
   secret-bearing value would bypass `prepare_value` and persist when the
@@ -483,7 +483,7 @@ with `let _ =` in the handler, so a regression in either surfaces only through
 - Sibling catalog anchors are stale against this HEAD. The memory-store
   record [preserved-identity-name-does-not-exempt-its-value][ms-preserved]
   cites `lib.rs:4027-4036` and `lib.rs:17258`; the preparation code is at
-  [3194-3372][prepare-collecting] and the test is at [15768][t-preserved]
+  [3201-3211][prepare-collecting] and the test is at [15899][t-preserved]
   here. Not edited by this lens.
 
 ## Anchors
@@ -507,11 +507,11 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [ms-preserved]: ../../../memory-store/catalog.md#preserved-identity-name-does-not-exempt-its-value
 [ms-refused]: ../../../memory-store/catalog.md#refused-durable-write-leaves-no-row-and-no-receipt
 
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6351-L6498
-[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4666-L4667
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4664-L4665
+[load]: ../../../../../crates/memory-store/src/lib.rs#L6388-L6415
+[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4703-L4704
+[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4701-L4702
 [snapshot]: ../../../../../crates/daemon/src/transform.rs#L3009
-[snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6503-L6633
+[snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6540-L6670
 [with-conn]: ../../../../../crates/storage/src/lib.rs#L343-L360
 [fenced]: ../../../../../crates/storage/src/lib.rs#L409-L473
 [pin-sync]: ../../../../../crates/storage/src/lib.rs#L1500-L1501
@@ -557,32 +557,31 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [main-commit]: ../../../../../crates/daemon/src/transform.rs#L4950
 [sched-test]: ../../../../../crates/daemon/src/transform.rs#L13578
 
-[received]: ../../../../../crates/memory-store/src/lib.rs#L6760-L6810
-[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6757-L6759
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6771-L6789
-[stable]: ../../../../../crates/memory-store/src/lib.rs#L6815-L6907
-[completed]: ../../../../../crates/memory-store/src/lib.rs#L6912-L6960
-[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6909-L6911
-[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6966-L7019
-[load-trace]: ../../../../../crates/memory-store/src/lib.rs#L7022-L7062
-[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L7067-L7100
+[received]: ../../../../../crates/memory-store/src/lib.rs#L6797-L6847
+[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6794-L6796
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6808-L6826
+[stable]: ../../../../../crates/memory-store/src/lib.rs#L6852-L6944
+[completed]: ../../../../../crates/memory-store/src/lib.rs#L6949-L6997
+[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6946-L6948
+[rejected]: ../../../../../crates/memory-store/src/lib.rs#L7003-L7056
+[load-trace]: ../../../../../crates/memory-store/src/lib.rs#L7059-L7099
+[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L7104-L7137
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L852-L869
 [pass-trace-sql]: ../../../../../crates/memory-store/baseline.sql#L83-L91
-
-[commit]: ../../../../../crates/memory-store/src/lib.rs#L8447-L8907
-[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8581-L8590
-[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8702-L8769
+[commit]: ../../../../../crates/memory-store/src/lib.rs#L8484-L8944
+[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8618-L8627
+[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8739-L8806
 [json-content]: ../../../../../crates/memory-store/src/lib.rs#L2201-L2211
 [record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2218-L2228
 [prepare-field]: ../../../../../crates/memory-store/src/lib.rs#L2289-L2328
 [policy]: ../../../../../crates/memory-store/src/lib.rs#L3162-L3183
-[prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3194-L3372
-[keys]: ../../../../../crates/memory-store/src/lib.rs#L3242-L3255
-[prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3266-L3361
-[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3367-L3371
-[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3374-L3375
-[unique]: ../../../../../crates/memory-store/src/lib.rs#L3376-L3457
-[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10332-L10425
+[prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3201-L3211
+[keys]: ../../../../../crates/memory-store/src/lib.rs#L3267-L3280
+[prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3291-L3392
+[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3403-L3408
+[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3411-L3412
+[unique]: ../../../../../crates/memory-store/src/lib.rs#L3413-L3494
+[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10369-L10462
 [serde-feat]: ../../../../../Cargo.toml#L45
 
 [meta-struct]: ../../../../../crates/memory-store/src/lib.rs#L1426
@@ -593,22 +592,22 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [phase]: ../../../../../crates/memory-store/src/lib.rs#L622-L631
 [hds-state]: ../../../../../crates/memory-store/src/lib.rs#L664-L667
 
-[drain]: ../../../../../crates/memory-store/src/lib.rs#L11081-L11126
-[drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L11078-L11080
-[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L11128-L11154
-[load-due]: ../../../../../crates/memory-store/src/lib.rs#L11156-L11190
-[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11192-L11248
-[failure]: ../../../../../crates/memory-store/src/lib.rs#L11250-L11289
-[delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11291-L11304
-[delete-one]: ../../../../../crates/memory-store/src/lib.rs#L11306-L11328
-[publish]: ../../../../../crates/memory-store/src/lib.rs#L10834
-[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L11037-L11046
-[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4598-L4601
-[events-insert]: ../../../../../crates/memory-store/src/lib.rs#L13855-L13876
-[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L13988-L14012
-[mark]: ../../../../../crates/memory-store/src/lib.rs#L14014-L14039
-[primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L14041-L14083
-[obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L14085-L14106
+[drain]: ../../../../../crates/memory-store/src/lib.rs#L11118-L11163
+[drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L11115-L11117
+[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L11165-L11191
+[load-due]: ../../../../../crates/memory-store/src/lib.rs#L11193-L11227
+[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11229-L11285
+[failure]: ../../../../../crates/memory-store/src/lib.rs#L11287-L11326
+[delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11328-L11341
+[delete-one]: ../../../../../crates/memory-store/src/lib.rs#L11343-L11365
+[publish]: ../../../../../crates/memory-store/src/lib.rs#L10871
+[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L11074-L11083
+[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4635-L4638
+[events-insert]: ../../../../../crates/memory-store/src/lib.rs#L13892-L13913
+[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L14025-L14049
+[mark]: ../../../../../crates/memory-store/src/lib.rs#L14051-L14076
+[primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L14078-L14120
+[obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L14122-L14143
 [outbox-sql]: ../../../../../crates/memory-store/baseline.sql#L489-L505
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
@@ -623,19 +622,19 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32860
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L17055
-[t-snap-keeps]: ../../../../../crates/memory-store/src/lib.rs#L17109
-[t-cas-empty]: ../../../../../crates/memory-store/src/lib.rs#L17178
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18068
-[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15978
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19387
-[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L19182
-[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19505
-[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L20967
-[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15714
-[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15631
-[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15731
-[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15768
-[t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15911
-[t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
+[t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L17186
+[t-snap-keeps]: ../../../../../crates/memory-store/src/lib.rs#L17240
+[t-cas-empty]: ../../../../../crates/memory-store/src/lib.rs#L17309
+[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18200
+[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L16109
+[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19519
+[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L19314
+[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19637
+[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L21099
+[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15845
+[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15762
+[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15862
+[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15899
+[t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L16042
+[t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L728
 [t-sync]: ../../../../../crates/storage/src/lib.rs#L4286-L4351

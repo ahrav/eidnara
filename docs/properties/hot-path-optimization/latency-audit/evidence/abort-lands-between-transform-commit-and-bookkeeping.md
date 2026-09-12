@@ -105,7 +105,7 @@ with completion.
 [pc-store]: ../../../../../crates/daemon/src/lib.rs#L8444-L8451
 [guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8474-L8479
 [store-commit]: ../../../../../crates/daemon/src/transform.rs#L4947-L4985
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6351-L6498
+[load]: ../../../../../crates/memory-store/src/lib.rs#L6388-L6415
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955
 [host-close]: ../../../../../crates/host-runtime/src/dispatch.rs#L1239-L1259
 [e3]: ../../catalog.md#request-close-overlaps-live-work

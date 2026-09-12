@@ -203,9 +203,11 @@ only; no test ran and nothing outside this file changed.
   limited to the span from [`protected_tail_floor_ordinal`][floor] to
   `post_end_revision_inputs_moved`. Direct `tokenizer::estimate_tokens`
   calls in production transform code at HEAD: the SOFT pressure predicate's
-  `m0_tokens` and `m1_tokens` at [4309-4320][soft-direct] (finding 10), the
-  tag-mint `token_count` persisted into tag rows at [7163][mint-direct], and
-  `ActiveTagForNudge.token_count` at [8572][nudge-direct]. The tokenizer
+  `m0_tokens` and `m1_tokens` at [4298-4309][soft-direct] (finding 10) and
+  `ActiveTagForNudge.token_count` at [8558][nudge-direct]; the tag-mint
+  `token_count` persisted into tag rows now goes through
+  [`cached_estimate_tokens`][mint-direct] (transform.rs:7234), whose cache accounting
+  the [tag-mint check][mint-check] covers. The tokenizer
   crate exposes no call counter ([`estimate_tokens`][tok-fn]), so the only
   runtime oracle is the injected estimator plus the thread-local stats.
 - Fault/timing angle: none.
@@ -636,7 +638,8 @@ call site.
 [ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2851
 [floor]: ../../../../../crates/daemon/src/transform.rs#L5849
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
-[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7163
+[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7234
+[mint-check]: ../../../../../crates/daemon/src/transform.rs#L29170-L29194
 [nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8572
 [t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24458-L24469
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148

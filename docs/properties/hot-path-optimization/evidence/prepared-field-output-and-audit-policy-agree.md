@@ -14,9 +14,9 @@ the metadata used to describe that result in durable audit rows.
   detected NewIdentity input, chooses output, checks its bound, then appends.
 - [2435-2509][audit] writes detector provenance, detection count/labels, field
   owners, and the policy action without reading retained redacted text.
-- [3513-3579][units] applies durable and transaction preparation to core units.
-  Production callers include [8581][durable-call] and [9196-9206][transaction-call].
-- [18773-18814][test] compares preserved identity output with substituted content
+- [3550-3616][units] applies durable and transaction preparation to core units.
+  Production callers include [8618][durable-call] and [9233-9243][transaction-call].
+- [18826-18867][test] compares preserved identity output with substituted content
   and their persisted actions. It remains unaudited.
 
 ## Failure scenario
@@ -62,7 +62,7 @@ No six-policy experiment runs here; this record is not exercised.
 
 [prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
 [audit]: ../../../../crates/memory-store/src/lib.rs#L2435-L2509
-[units]: ../../../../crates/memory-store/src/lib.rs#L3513-L3579
-[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8581
-[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L9196-L9206
-[test]: ../../../../crates/memory-store/src/lib.rs#L18773-L18814
+[units]: ../../../../crates/memory-store/src/lib.rs#L3550-L3616
+[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8618
+[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L9233-L9243
+[test]: ../../../../crates/memory-store/src/lib.rs#L18826-L18867

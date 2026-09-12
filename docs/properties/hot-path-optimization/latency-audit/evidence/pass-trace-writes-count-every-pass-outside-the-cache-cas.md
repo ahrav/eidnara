@@ -27,14 +27,14 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   contends with or extends the pass commit. A secret-bearing `session_id` is
   [tolerated only when the row already exists][flagged].
 - [`trace_pass_rejected`][rejected] updates `reject_count + 1`
-  ([`:7013`][reject-bump]); its [doc][rejected-doc] calls it a single plain
+  ([`:7050`][reject-bump]); its [doc][rejected-doc] calls it a single plain
   UPSERT outside the fenced transaction. [`trace_pass_completed`][completed]'s
   [doc][completed-doc] says it cannot alter CAS semantics or hold the commit
   transaction open longer.
 - [`trace_pass_stable`][stable] appends one `scheduler_history` observation
-  with the 256-entry ring ([`:6869-6876`][stable-ring]); the
+  with the 256-entry ring ([`:6906-6913`][stable-ring]); the
   [in-commit upsert][commit-trace] does the same, initializes `receive_count`
-  to `0` on a fresh insert ([`:8716`][commit-init]), and leaves it alone on
+  to `0` on a fresh insert ([`:8753`][commit-init]), and leaves it alone on
   conflict.
 - The [`PassTrace` doc][passtrace-doc] says the counters are stored apart from
   `cache_state` so a rejected pass leaves a trail without advancing
@@ -136,19 +136,19 @@ channel, the authority route read, and dreamer tasks only.
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
 [sched-test]: ../../../../../crates/daemon/src/transform.rs#L13592
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L852-L869
-[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6757-L6759
-[received]: ../../../../../crates/memory-store/src/lib.rs#L6760-L6810
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6771-L6789
-[stable]: ../../../../../crates/memory-store/src/lib.rs#L6815-L6907
-[stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6869-L6876
-[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6909-L6911
-[completed]: ../../../../../crates/memory-store/src/lib.rs#L6912-L6960
-[rejected-doc]: ../../../../../crates/memory-store/src/lib.rs#L6962-L6965
-[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6966-L7019
-[reject-bump]: ../../../../../crates/memory-store/src/lib.rs#L7013
-[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L7067-L7100
-[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8702-L8769
-[commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8716
-[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15977
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18068
+[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6794-L6796
+[received]: ../../../../../crates/memory-store/src/lib.rs#L6797-L6847
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6808-L6826
+[stable]: ../../../../../crates/memory-store/src/lib.rs#L6852-L6944
+[stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6906-L6913
+[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6946-L6948
+[completed]: ../../../../../crates/memory-store/src/lib.rs#L6949-L6997
+[rejected-doc]: ../../../../../crates/memory-store/src/lib.rs#L6999-L7002
+[rejected]: ../../../../../crates/memory-store/src/lib.rs#L7003-L7056
+[reject-bump]: ../../../../../crates/memory-store/src/lib.rs#L7050
+[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L7104-L7137
+[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8739-L8806
+[commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8753
+[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L16109
+[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18200
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268

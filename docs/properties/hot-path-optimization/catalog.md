@@ -645,8 +645,8 @@ them without creating implementation tickets.
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2330-L2356
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4034-L4061
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
-[core-prep]: ../../../crates/memory-store/src/lib.rs#L3513-L3544
-[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3547-L3579
+[core-prep]: ../../../crates/memory-store/src/lib.rs#L3550-L3581
+[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3584-L3616
 [prepare-field]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L21-L32
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159-L248

@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The single-pass evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -36,12 +38,12 @@ column specifically.
   secret-bearing value bypass `prepare_value` and persist when the unchanged
   input is returned.
 - [`prepare_value`][prepare-value]: a detected value under an identity or
-  integrity key refuses ([`:3298-3302`][refuse-identity]); a protected key
-  holding a container with text refuses ([`:3311-3318`][refuse-container]); a
+  integrity key refuses ([`:3213-3217`][refuse-identity]); a protected key
+  holding a container with text refuses ([`:3226-3233`][refuse-container]); a
   protected scalar substitutes `<REDACTED:label>` and records a synthetic
-  detection when the scanner found none ([`:3328-3344`][substitute]); object
+  detection when the scanner found none ([`:3243-3259`][substitute]); object
   keys are bound-checked and scanned again during the walk
-  ([`:3351-3357`][walk-keys]).
+  ([`:3266-3272`][walk-keys]).
 - The [policy enum][policy] distinguishes durable from transaction and
   reject-protected from preserve-identities; the `meta` column uses durable
   preserve-identities.
@@ -103,28 +105,108 @@ covers byte identity of a clean stored `meta` or a `BTreeMap`-key secret.
 
 [ms-preserved]: ../../../memory-store/catalog.md#preserved-identity-name-does-not-exempt-its-value
 [ms-refused]: ../../../memory-store/catalog.md#refused-durable-write-leaves-no-row-and-no-receipt
-[content-sig]: ../../../../../crates/memory-store/src/lib.rs#L1393
-[bim]: ../../../../../crates/memory-store/src/lib.rs#L1600
-[json-content]: ../../../../../crates/memory-store/src/lib.rs#L2201-L2211
-[record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2218-L2228
-[policy]: ../../../../../crates/memory-store/src/lib.rs#L3162-L3183
-[prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3194-L3372
-[keys]: ../../../../../crates/memory-store/src/lib.rs#L3242-L3255
-[prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3266-L3361
-[refuse-identity]: ../../../../../crates/memory-store/src/lib.rs#L3298-L3302
-[refuse-container]: ../../../../../crates/memory-store/src/lib.rs#L3311-L3318
-[substitute]: ../../../../../crates/memory-store/src/lib.rs#L3328-L3344
-[walk-keys]: ../../../../../crates/memory-store/src/lib.rs#L3351-L3357
-[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3367-L3371
-[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3374-L3375
-[unique]: ../../../../../crates/memory-store/src/lib.rs#L3376-L3457
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6351-L6498
-[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8581-L8590
-[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10332-L10425
-[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15631
-[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15714
-[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15731
-[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15768
-[t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3195
-[serde-features]: ../../../../../Cargo.toml#L45
+[content-sig]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1308
+[bim]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1515
+[json-content]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L2116-L2126
+[record-scan]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L2133-L2143
+[policy]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3077-L3098
+[prepare-collecting]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3109-L3287
+[keys]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3157-L3170
+[prepare-value]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3181-L3276
+[refuse-identity]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3213-L3217
+[refuse-container]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3226-L3233
+[substitute]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3243-L3259
+[walk-keys]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3266-L3272
+[clean-branch]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3282-L3286
+[unique-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3289-L3290
+[unique]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3291-L3372
+[load]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6196-L6223
+[commit-meta]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L8306-L8315
+[recomp]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10057-L10150
+[t-keydir]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15029
+[t-dup]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15112
+[t-container]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15129
+[t-preserved]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15166
+[t-cache-redact]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/tests/production_redaction.rs#L606
+[value-compare]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L3184
+[serde-features]: https://github.com/ahrav/eidnara/blob/9132344/Cargo.toml#L45
+
+## Single-pass evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/433)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+[`prepare_json_content_single_pass`][single-pass] keeps the unique-name parse
+ahead of one walk, and the walk does the rest: it validates every object key it
+descends through, refuses or substitutes protected values, records detections,
+and sets a [`changed` flag][changed] when a value is replaced by different
+text. The separate key-validation pass is gone. The clone-and-compare is gone
+from release builds; a debug build keeps the [clone][debug-clone] and asserts
+that the flag agrees with the [structural compare][debug-compare], so a
+mutation site that forgets the flag fails every test run. The
+[clean branch][clean-branch-live] returns the input when nothing changed and
+re-serializes otherwise. The walk judges a subtree whole without descending in
+two cases, an integrity-named value and an identity-named value under a policy
+that does not preserve identities, and runs the [key validation][keys-live]
+over that subtree, so a secret-bearing key under `{"signature": {...}}` is
+refused there. Under the `DurablePreserveIdentities` policy that `meta` uses,
+an identity-named scalar is [preserved][preserved-live] and an identity-named
+container falls through to the ordinary walk, whose [object arm][walk-keys-live]
+validates each key, so a secret-bearing key under `{"id": {...}}` is refused
+by the walk itself. The
+[wrapper][collecting-live] that callers use asserts in debug builds that a
+change left a detection for the receipt; byte identity of clean output is the
+clean branch's construction rather than an assertion.
+
+The order in which a document with two independent faults reports its error
+can differ from the baseline, where every key was validated before any value;
+the outcome on one fault is unchanged and detections gathered before a refusal
+are discarded with the refused write, as before. `serde_json::Value` walks
+object members in `serde_json::Map` order, so a value precedes a refusing key
+only when its own key sorts first; a fixture that plants the value under a
+later-sorting key never reaches the refusal with a detection in hand.
+
+The [unit test][unit-live] shows clean input returned byte for byte with
+`changed` false, a substitution with `changed` true and one recorded detection,
+and refusals for a secret-bearing key under an integrity-named and under an
+identity-named container. The [refusal-ordering test][refusal-live] serializes
+the store test's `keyed` fixture, a `block_identity_by_mid` map whose `a-mid`
+entry carries a value secret and whose second key is itself a secret, and shows
+the caller's vector holding one detection when `prepare_json_content_collecting`
+returns the refusal. The [store test][store-live] shows, through `commit`,
+clean `meta` stored equal to `serde_json::to_string` of the value with a
+`meta` receipt whose `finding_count` is zero, a secret planted in a
+`block_identity_by_mid` entry's value substituted with a `meta` receipt whose
+`finding_count` is one (`scan_detections` deduplicates labels, so the count
+is the oracle), and the same `keyed` fixture refused with no row stored and
+every scan-audit table count unchanged from before the refused `commit`, so
+the detection the walk gathered before the refusal was discarded rather than
+recorded. Duplicate object names remain
+refused by [`parse_json_with_unique_names`][unique-live] and its
+[existing test][t-dup-live].
+
+### Focused execution, 2026-09-12
+
+At the merged tree `39f706b6`, `cargo test -p memory-store --locked` passed
+every test in each binary: 144 in the library, 5 in `baseline.rs`, 8 in
+`dreamer_ledger.rs`, and 22 in `production_redaction.rs`, the three above
+among them. `cargo test -p daemon --locked` passed 1021; the two
+`dreamer_run_task_bounds_*` tests fail under full-suite load on the base
+branch as well and pass in isolation.
+
+[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3217-L3409
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3372-L3375
+[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3395-L3396
+[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3401-L3402
+[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3403-L3408
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3267-L3280
+[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3305-L3315
+[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3382-L3388
+[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3201-L3211
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3477-L3479
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15845-L15857
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15665-L15718
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15720-L15757
+[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

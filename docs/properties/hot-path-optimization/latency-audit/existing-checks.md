@@ -197,6 +197,9 @@ not performance measurements or a full-workspace gate.
 | [`cache_state_full_load_counters_key_on_the_prepared_statement`][t-counters] | The full-select run and eviction counters key on the prepared statement text; a cache of one alternating two statements records one re-creation. | unaudited |
 | [`a_steady_pass_loads_meta_once_before_the_transform_and_the_full_row_once_after`][t-load-count] | A steady pass runs the `meta` select once and the full select never before the transform, and the full select once after the commit, split by the interleave hook, on handles that were never evicted. | unaudited |
 | [`pass_state_load_has_its_own_timing_bucket`][t-timing] | The pre-transform `meta` load is reported as the `pass_state_load` pass-trace bucket, present and non-zero on a steady pass. | unaudited |
+| [`single_pass_preparation_reports_change_and_validates_unwalked_keys`][t-single-pass] | Clean input returns byte-identical with `changed` false; a substitution sets `changed` and records one detection; a secret-bearing key under an integrity- or identity-named container is refused. | unaudited |
+| [`a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector`][t-refusal-order] | The `keyed` store fixture, serialized and prepared directly, is refused with one detection in the caller's vector, so the store test's receipt count discriminates. | unaudited |
+| [`cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key`][t-meta-bytes] | Through `commit`: clean `meta` is stored as its serialization; a nested map value secret is substituted and recorded on the `meta` scan; a nested map key secret, preceded in walk order by a substituted value, is refused with no row and no added receipt. | unaudited |
 | [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
 | [`historian_active_rereads_a_loaded_active_phase_when_no_run_is_live`][t-phase-reread] | A loaded non-idle phase with no live run is re-read from the store; a run that committed idle after the pass load does not report active. | unaudited |
 
@@ -205,8 +208,7 @@ NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
 commits twice; a `pass_trace` write failure beside a successful cache commit;
 a crash between the outbox mark commit and the delete commit; two drainers
 overlapping on one session; outbox ordering across firings, the per-kind
-limit, or the backoff values; byte identity of a clean stored `meta` against
-`serde_json::to_string`; a secret in a `BTreeMap` key of `ModuleMeta`.
+limit, or the backoff values.
 
 Suspiciously quiet: the drain result and every trace result are discarded
 with `let _ =` in the handler, so a regression in either surfaces only
@@ -526,30 +528,30 @@ not a claim that no related check exists anywhere in the repository.
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5510
 [t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36886
 [t-emergency]: ../../../../crates/daemon/src/lib.rs#L36093
-[t-cas]: ../../../../crates/daemon/src/lib.rs#L23425
-[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L17055
-[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L17109
-[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L17178
+[t-cas]: ../../../../crates/daemon/src/lib.rs#L23426
+[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L17186
+[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L17240
+[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L17309
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-success]: ../../../../crates/daemon/src/lib.rs#L24562
+[t-success]: ../../../../crates/daemon/src/lib.rs#L24563
 [t-repeat]: ../../../../crates/daemon/src/lib.rs#L24578
-[t-frozen]: ../../../../crates/daemon/src/lib.rs#L24606
+[t-frozen]: ../../../../crates/daemon/src/lib.rs#L24607
 [t-status]: ../../../../crates/daemon/src/lib.rs#L24809
-[t-divergence]: ../../../../crates/daemon/src/lib.rs#L32860
-[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L18069
+[t-divergence]: ../../../../crates/daemon/src/lib.rs#L32861
+[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L18200
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13549
-[t-secret]: ../../../../crates/memory-store/src/lib.rs#L15978
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19388
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19183
+[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16109
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19519
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19314
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36750
-[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19506
-[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L20967
-[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15714
-[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L15631
-[t-container]: ../../../../crates/memory-store/src/lib.rs#L15731
-[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15768
-[t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15911
+[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19637
+[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L21099
+[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15845
+[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L15762
+[t-container]: ../../../../crates/memory-store/src/lib.rs#L15862
+[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15899
+[t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L728
+[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16042
 [t-sync]: ../../../../crates/storage/src/lib.rs#L4286-L4351
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
@@ -654,8 +656,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
-[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15279-L15507
-[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15509-L15542
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15325-L15544
+[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15551-L15579
 [t-load-count]: ../../../../crates/daemon/src/lib.rs#L24695-L24747
 [t-timing]: ../../../../crates/daemon/src/lib.rs#L24753-L24765
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24771-L24784
@@ -664,3 +666,10 @@ not a claim that no related check exists anywhere in the repository.
 The five checks above were added with the single-load pass (implementation
 base `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage
 units); their links are to the live tree.
+
+The three preparation checks were added with the single-pass `meta`
+preparation; their links are to the live tree.
+
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15665-L15718
+[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L15720-L15757
+[t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
