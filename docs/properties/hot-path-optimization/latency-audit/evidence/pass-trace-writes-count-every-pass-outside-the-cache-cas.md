@@ -299,5 +299,5 @@ as well.
 [two-writer-test]: ../../../../../crates/memory-store/src/lib.rs#L17311-L17360
 [fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17140-L17187
 [reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24780-L24803
-[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L25119-L25163
 [receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7067

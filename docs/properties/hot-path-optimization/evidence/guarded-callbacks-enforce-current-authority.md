@@ -310,7 +310,7 @@ passes 86 tests. The anchors below are to that merged tree.
 [capacity]: ../../../../crates/memory-store/src/lib.rs#L478
 [resource-pragmas]: ../../../../crates/storage/src/lib.rs#L5184-L5222
 [eviction-probe]: ../../../../crates/storage/src/lib.rs#L5228-L5287
-[pass-probe]: ../../../../crates/daemon/src/lib.rs#L24656-L24807
+[pass-probe]: ../../../../crates/daemon/src/lib.rs#L25895-L25925
 [flush-test]: ../../../../crates/storage/src/lib.rs#L5530-L5572
 [rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5616-L5655
 [foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5579-L5609

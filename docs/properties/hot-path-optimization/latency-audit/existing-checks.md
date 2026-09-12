@@ -24,15 +24,27 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | [`entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does`][t-probe] | The probe resolves `method` then `kind` as dispatch does, counts every page key with `null`, keeps the last repeated key, splits an overlong `method` between cap widening and route, refuses non-object and malformed bodies, probes an over-deep body that `tree_decode_parses` refuses, and keeps an escaped discriminator off the direct lane while `lane_probe` skips a body with no literal `transform`. | unaudited |
 | [`tree_parse_witness_refuses_what_the_tree_refuses`][t-witness] | `tree_decode_parses` agrees with a `Value` parse on scalar, array, string, out-of-range, lone-surrogate, trailing, malformed, and empty bodies; refuses an object holding the raw-value token as any key wherever it sits, including the shapes the tree accepts, and shows the tree's `from_value` re-read refusing the token after another key. | unaudited |
 | [`raw_value_token_matches_serde_json`][t-token] | The pinned `RAW_VALUE_TOKEN` literal is the key a `Value` parse reads as a boxed raw document: a document string decodes to that document, a non-string or a following key is refused, a later position is an ordinary key. | unaudited |
-| [`direct_and_tree_transform_decodes_agree_on_the_corpus`][t-decode-diff] | `tree_decode_parses` implies the tree parses the body; both decodes give one request where both accept (eighteen bodies pinned); only repeated keys are tree-only; only derive-lenient shapes under an ignored field or the discriminator and retained values holding the token after another key, six of them raw-value-token shapes, are direct-only, each refused by `tree_decode_parses`; a two-page assembly decodes to the one-slice request. | unaudited |
-| [`unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths`][t-entry-diff] | Every corpus body gives the same response or the same code and message through `dispatch_body` and through the tree dispatch; the nine direct-lane bodies are pinned and the valid body is served. | unaudited |
-| [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The footprint bound covers the tree decode's peak, and the direct decode peaks at or below it. | unaudited |
-| [`parse_charge_covers_escaped_text_direct_decode_peak`][t-peak-escaped] | The footprint bound covers the direct decode's peak on a 4 MiB and a 64 KiB text block holding one escape, and on the 4 MiB block without one. | unaudited |
+| [`direct_and_tree_transform_decodes_agree_on_the_corpus`][t-decode-diff] | `tree_decode_parses` implies the tree parses the body; both decodes give one request where both accept (nineteen bodies pinned); only repeated keys are tree-only; only derive-lenient shapes under an ignored field or the discriminator and retained values holding the token after another key, six of them raw-value-token shapes, are direct-only, each refused by `tree_decode_parses`; a two-page assembly decodes to the one-slice request. | unaudited |
+| [`unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths`][t-entry-diff] | Every corpus body gives the same response or the same code and message through `dispatch_body` and through the tree dispatch; the eleven direct-lane bodies are pinned and the valid body is served. | unaudited |
+| [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The metered footprint covers the tree decode's heap peak, the direct decode peaks at or below it, and the direct lane's own metered count covers its peak with the values under an ignored field. | unaudited |
+| [`parse_charge_covers_escaped_text_direct_decode_peak`][t-peak-escaped] | The metered footprint covers the direct decode's peak on a 4 MiB and a 64 KiB text block holding one escape, and on the 4 MiB block without one. | unaudited |
 | [`byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation`][t-cap-alloc] | A 900 KiB body whose one key holds an escape passes the byte cap allocating less than half its size. | unaudited |
+| [`a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string`][t-held] | Against a reserve that grants nothing, the metered walk that gates the direct lane is refused as transient at its first value and allocates under 64 KiB for a body holding a 4 MiB escaped text block. | unaudited |
+| [`a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped`][t-prefix] | With 64 KiB of pool, a body holding a 4 MiB escaped text block is refused as transient by the up-front unescape-buffer charge and allocates under 64 KiB. | unaudited |
 | [`request_observed_to_handler_ends_before_the_typed_decode`][t-observed] | A typed decode begun ten seconds before the handler is not counted in `request_observed_to_handler`. | unaudited |
-| [`value_footprint_counts_nodes_outside_strings_only`][t-fp] | Separators inside strings and escaped quotes do not count as nodes. | unaudited |
-| [`value_footprint_charges_every_retained_copy_of_string_bytes`][t-fp] | The bound is at least three copies of a 1 MiB text block. | unaudited |
-| [`scalar_dense_bodies_bound_far_above_their_wire_size`][t-fp] | Node cost dominates for `[1,1,...]`; string bytes are not charged as nodes. | unaudited |
+| [`decode_footprint_counts_values_and_retained_string_copies`][t-footprint] | Separators inside strings are not values; a 1 MiB text block is charged three times; a scalar-dense body's footprint is far above its wire size and string bytes are not charged as values; a cut body counts its decoded part. | unaudited |
+| [`metered_decode_charges_incrementally_and_refuses_above_capacity`][t-meter] | A fitting decode holds at least its footprint and under two steps more; a footprint above the capacity is refused as permanent with every byte released; a restarted meter reuses held bytes. | unaudited |
+| [`a_small_body_holds_no_more_than_twice_its_footprint`][t-small] | A body under one mebibyte holds at least its footprint and at most twice it. | unaudited |
+| [`a_nearly_drained_pool_is_charged_in_a_bounded_number_of_acquisitions`][t-acquire] | A body decoded against a pool with less than a batch free is refused as transient in under a hundred reservation attempts. | unaudited |
+| [`a_capacity_bound_count_stops_at_the_value_that_crosses_it`][t-count] | The count-only decode against a capacity stops within one node of it and agrees with the footprint on either side. | unaudited |
+| [`footprint_of_counts_what_the_value_decode_charges`][t-footprint-oracle] | The count-only footprint equals the meter's count under a `Value` decode on the raw-value token in first and later positions, with a string, a non-string, and a following key, and on escaped strings. | unaudited |
+| [`footprint_floor_counts_the_values_the_meter_visits`][t-floor] | The byte-derived floor equals the footprint on string-free bodies, including nesting to the depth limit, is the footprint less the retained string copies and the longest escaped string's scratch charge on a body with strings, and its refusal agrees with the footprint on either side of the capacity. | unaudited |
+| [`footprint_floor_never_exceeds_the_decoded_footprint`][t-floor-corpus] | For every well-formed corpus body the floor is at most the decoded footprint. | unaudited |
+| [`a_doomed_body_is_refused_without_touching_the_pool`][t-doomed] | A paged and an unpaged body of two hundred thousand values are refused as too large through `dispatch_body` with the pool never asked and no value counted. | unaudited |
+| [`both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies`][t-lanes] | Every corpus body, one with twenty thousand values under an ignored field among them, gives one outcome and one counted footprint through both lanes with a pool one byte short and a pool that just fits; the short pool refuses as too large. | unaudited |
+| [`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`][t-drain] | A held charge makes a fitting body's decode a transient refusal that releases its bytes, records the meter's shortfall marker, and returns `queue_full`; the body decodes once the holder releases; a body the pool could never hold is transient while the pool is held and too large once it has room to count it. | unaudited |
+| [`a_refused_decode_has_no_dispatch_side_effect`][t-effect] | A permanent and a transient refusal through `dispatch_body` return the prior codes and leave the handler's route table and the store row untouched, checked directly on the tested route; the body is served with room and only then binds the route. | unaudited |
+| [`refused_bodies_emit_one_terminal_and_leave_no_dispatch_state`][t-ring] | Through the direct-host fixture, a body over each byte cap and two dense bodies the byte-derived floor refuses before either decode each return `host.invalid_params` to the managed client, which settles on the first terminal and drops a later one; the session shows no pass trace or row; a transform is then served and counted once. In-decode refusal and charge release are not exercised at ring level. | unaudited |
 | [`dispatch_routes_each_envelope_class_to_a_distinct_arm`][t-dispatch] | `kind` routing, `facade_envelope_not_supported`, `unrecognized_request_shape` for object and non-object bodies. | unaudited |
 | [`management_drop_alias_routes_are_rejected`][t-shape] | Retired aliases return `unrecognized_request_shape`. | unaudited |
 | [`indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape`][t-shape2] | Internal names are not routable by `method`, `kind`, or facade. | unaudited |
@@ -44,11 +56,10 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | [`try_charge_is_exact_and_all_or_none`][t-budget] | Over-capacity acquisition leaves the budget unchanged; `u32` overflow refuses. | unaudited |
 | [`the_resident_cap_splits_into_three_non_overlapping_pools`][t-pools] | Ingress, egress, and scratch pools sum to the floor. | unaudited |
 
-None found: a handler-level test that drives `Handler::handle` with an
-over-cap or over-footprint body and asserts `invalid_params`, or drains the
-scratch pool and asserts `queue_full` (`RequestCtx` is transport-private, so
-tests enter at [`dispatch_value`][testentry] or [`dispatch_body`][bodyentry]);
-a test that counts string copies retained by the typed decode. The `request_too_large` assertion in
+None found: a ring-level test that drains the scratch pool and asserts
+`queue_full` (the fixture's pool is the fixed `SCRATCH_RESERVED_BYTES` and the
+handler exposes no barrier); a test that counts string copies retained by the
+typed decode. The `request_too_large` assertion in
 [direct_host.rs][fixture] tests the fixture's line-based control channel,
 not the handler.
 
@@ -467,26 +478,40 @@ Production guards go to
 categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12587-L12592
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12601-L12608
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L19323-L19400
-[t-fp]: ../../../../crates/daemon/src/lib.rs#L19922-L19986
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L28734-L28790
-[t-shape]: ../../../../crates/daemon/src/lib.rs#L34556-L34574
-[t-shape2]: ../../../../crates/daemon/src/lib.rs#L34576-L34617
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L19316-L19393
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L29077-L29132
+[t-shape]: ../../../../crates/daemon/src/lib.rs#L33096-L33113
+[t-shape2]: ../../../../crates/daemon/src/lib.rs#L33116-L33156
 [t-envelope]: ../../../../crates/daemon/src/transform.rs#L16470-L16497
-[t-probe]: ../../../../crates/daemon/src/lib.rs#L19402-L19461
-[t-witness]: ../../../../crates/daemon/src/lib.rs#L19466-L19496
-[t-token]: ../../../../crates/daemon/src/lib.rs#L19501-L19513
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19720-L19859
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19877-L19920
-[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L89-L127
-[t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L143-L164
-[t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L166-L187
-[t-observed]: ../../../../crates/daemon/src/lib.rs#L21513-L21541
-[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12667-L12689
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L19396-L19454
+[t-witness]: ../../../../crates/daemon/src/lib.rs#L19459-L19489
+[t-token]: ../../../../crates/daemon/src/lib.rs#L19494-L19506
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19733-L19864
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19886-L19929
+[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
+[t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
+[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L284-L308
+[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L237-L261
+[t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222
+[t-observed]: ../../../../crates/daemon/src/lib.rs#L21855-L21883
+[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12675-L12716
+[t-footprint]: ../../../../crates/daemon/src/lib.rs#L20027-L20062
+[t-meter]: ../../../../crates/daemon/src/lib.rs#L20068-L20101
+[t-small]: ../../../../crates/daemon/src/lib.rs#L20105-L20122
+[t-acquire]: ../../../../crates/daemon/src/lib.rs#L20127-L20155
+[t-count]: ../../../../crates/daemon/src/metered_decode.rs#L1055-L1083
+[t-footprint-oracle]: ../../../../crates/daemon/src/metered_decode.rs#L1085-L1106
+[t-floor]: ../../../../crates/daemon/src/metered_decode.rs#L1108-L1146
+[t-floor-corpus]: ../../../../crates/daemon/src/lib.rs#L20263-L20275
+[t-doomed]: ../../../../crates/daemon/src/lib.rs#L20223-L20258
+[t-drain]: ../../../../crates/daemon/src/lib.rs#L20161-L20218
+[t-effect]: ../../../../crates/daemon/src/lib.rs#L20280-L20328
+[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19934-L19980
+[t-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
-[directhost]: ../../../../crates/daemon/tests/direct_host.rs#L48-L128
+[directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49-L128
 [t-prep]: ../../../../crates/daemon/tests/prepared_output.rs#L103-L115
 [t-budget]: ../../../../crates/host-runtime/src/wire.rs#L825-L865
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503
@@ -495,20 +520,20 @@ not a claim that no related check exists anywhere in the repository.
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031-L2046
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1520
 [t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1817
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L38258-L38375
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L38600-L38717
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1707
-[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1746
-[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1793
-[shell-charge]: ../../../../crates/daemon/src/wire.rs#L955
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L23935-L23976
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L22652-L22713
+[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1749
+[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1796
+[shell-charge]: ../../../../crates/daemon/src/wire.rs#L958
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L24277-L24318
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L22994-L23055
 [t-pending]: ../../../../crates/daemon/src/transform.rs#L19406
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L24849-L24959
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25192-L25301
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27889
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24566-L24847
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24909-L25189
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13993
 [served-shells]: ../../../../crates/daemon/src/transform.rs#L13714
 [served-corpus]: ../../../../crates/daemon/src/transform.rs#L13760
@@ -519,12 +544,12 @@ not a claim that no related check exists anywhere in the repository.
 [served-source]: ../../../../crates/daemon/src/transform.rs#L13942
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13604
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L32-L52
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L21972-L22288
-[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L22290-L22410
-[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L22412-L22483
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L23462-L23509
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L23392-L23460
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L23978-L24022
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L22314-L22630
+[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L22632-L22752
+[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L22754-L22825
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L23804-L23851
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L23734-L23802
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L24320-L24364
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22515
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22651
@@ -548,32 +573,32 @@ not a claim that no related check exists anywhere in the repository.
 [t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1855
 [t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1905
 [t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1970
-[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L21230-L21369
+[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L21572-L21711
 [t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22584
-[hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
+[hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L83-L97
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
-[hook]: ../../../../crates/daemon/src/lib.rs#L8268-L8276
-[no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5512-L5526
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L37834-L37878
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37041-L37115
-[t-cas]: ../../../../crates/daemon/src/lib.rs#L24322-L24393
+[hook]: ../../../../crates/daemon/src/lib.rs#L8276-L8284
+[no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5520-L5534
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38176-L38220
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37383-L37457
+[t-cas]: ../../../../crates/daemon/src/lib.rs#L24664-L24735
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18542
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18596
 [t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18665
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-success]: ../../../../crates/daemon/src/lib.rs#L25459-L25473
-[t-repeat]: ../../../../crates/daemon/src/lib.rs#L25475-L25501
-[t-frozen]: ../../../../crates/daemon/src/lib.rs#L25503-L25541
-[t-status]: ../../../../crates/daemon/src/lib.rs#L25757-L25802
-[t-divergence]: ../../../../crates/daemon/src/lib.rs#L33808-L33901
+[t-success]: ../../../../crates/daemon/src/lib.rs#L25801-L25815
+[t-repeat]: ../../../../crates/daemon/src/lib.rs#L25817-L25843
+[t-frozen]: ../../../../crates/daemon/src/lib.rs#L25845-L25883
+[t-status]: ../../../../crates/daemon/src/lib.rs#L26099-L26144
+[t-divergence]: ../../../../crates/daemon/src/lib.rs#L34150-L34243
 [t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19556
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13549
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L16547
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21046
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20670
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L37698-L37756
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38040-L38098
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21164
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22626
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16283
@@ -668,8 +693,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-windows]: ../../../../crates/context-core/src/redaction.rs#L827-L856
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
 [t-chunk-fp]: ../../../../crates/daemon/src/historian.rs#L3925
-[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L17935-L18262
-[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L24566-L24847
+[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L17928-L18255
+[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L24908-L25189
 [diff-prod]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L102-L112
 [diff-exact]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L117-L128
 [diff-small]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L133-L140
@@ -688,10 +713,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 [t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15763-L15982
 [t-counters]: ../../../../crates/memory-store/src/lib.rs#L15989-L16017
-[t-load-count]: ../../../../crates/daemon/src/lib.rs#L25590-L25642
-[t-timing]: ../../../../crates/daemon/src/lib.rs#L25646-L25662
-[t-phase]: ../../../../crates/daemon/src/lib.rs#L25666-L25679
-[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L25734-L25755
+[t-load-count]: ../../../../crates/daemon/src/lib.rs#L25932-L25984
+[t-timing]: ../../../../crates/daemon/src/lib.rs#L25988-L26004
+[t-phase]: ../../../../crates/daemon/src/lib.rs#L26008-L26021
+[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L26076-L26097
 
 The five checks above were added with the single-load pass (implementation
 base `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage
@@ -718,4 +743,4 @@ preparation; their links are to the live tree.
 [t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17365-L17432
 [t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24780-L24803
 [t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20883-L21043
-[t-outcome]: ../../../../crates/daemon/src/lib.rs#L25688-L25732
+[t-outcome]: ../../../../crates/daemon/src/lib.rs#L26030-L26074

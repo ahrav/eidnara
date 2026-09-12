@@ -15,20 +15,20 @@ a campaign that never opens the window.
 
 ## Evidence trail
 
-- The first `run_transform()` call is at [`:8288-8291`][commit-call]; the store
+- The first `run_transform()` call is at [`:8296-8299`][commit-call]; the store
   commit inside it is at [`commit_transform:4947-4985`][store-commit]. The
   first in-memory update after it is the lineage-root insert at
-  [`:8297-8302`][roots-insert].
+  [`:8305-8310`][roots-insert].
 - Between those two points there is no `.await`. The next `.await` on the
-  handler task is [`:8329`][await-a], then [`:8353`][await-b] and
-  [`:8377`][await-c], all inside the Emergency95 branch at
-  [`:8329-8433`][emergency]. Each is followed by another `run_transform()`
+  handler task is [`:8337`][await-a], then [`:8361`][await-b] and
+  [`:8385`][await-c], all inside the Emergency95 branch at
+  [`:8337-8441`][emergency]. Each is followed by another `run_transform()`
   and a floor reload before control reaches the projection-cache store at
-  [`:8444-8451`][pc-store] and the `guidance_dates` removal at
-  [`:8474-8479`][guidance-remove].
+  [`:8452-8459`][pc-store] and the `guidance_dates` removal at
+  [`:8482-8487`][guidance-remove].
 - The only seam after the commit is the `#[cfg(test)]`
-  [`between_transform_and_prepare`][hook] hook at [`:8308-8316`][hook],
-  declared at [`:2921-2924`][hook-field] as a test-only interleave point. It
+  [`between_transform_and_prepare`][hook] hook at [`:8316-8324`][hook],
+  declared at [`:2929-2932`][hook-field] as a test-only interleave point. It
   runs after the roots insert and before `prepare_historian_fire`, so it can
   separate the commit from every update except the first. No `test-support`
   feature exposes it to `crates/daemon/tests/` or the benches.
@@ -65,7 +65,7 @@ can hit while the worker has already committed.
 
 A pass whose transform commits (observe `row_version` advance through a
 second store handle), then an abort of the handler task before
-[`:8297-8302`][roots-insert] executes, then a marker recording both facts and
+[`:8305-8310`][roots-insert] executes, then a marker recording both facts and
 their order. At HEAD the [hook][hook] is the seam for everything after the
 roots insert; the Emergency95 awaits are the only seam for the roots insert
 itself. A relocation-era seam must be added by the specification. No existing
@@ -82,7 +82,7 @@ with completion.
 
 - Sources examined: [`dispatch.rs:938-955`][host-cancel],
   [`:1239-1259`][host-close], the `run_transform` closure at
-  [`:8195-8261`][h-run], the parent's [E3][e3].
+  [`:8203-8269`][h-run], the parent's [E3][e3].
 - Findings: The host has one abort primitive, `JoinHandle::abort`, and one
   observable, the tracker emptying. A blocking worker does not observe abort;
   the handler task does, at the join await. The worker's completion, the
@@ -93,17 +93,17 @@ with completion.
 - Missing evidence: A worker design and its completion channel.
 - Conclusion: needs human input.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2921-L2924
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8288-L8291
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8297-L8302
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8308-L8316
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8329-L8433
-[await-a]: ../../../../../crates/daemon/src/lib.rs#L8329
-[await-b]: ../../../../../crates/daemon/src/lib.rs#L8353
-[await-c]: ../../../../../crates/daemon/src/lib.rs#L8377
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8444-L8451
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8474-L8479
+[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2929-L2932
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8203-L8269
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8296-L8299
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8305-L8310
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8316-L8324
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8337-L8441
+[await-a]: ../../../../../crates/daemon/src/lib.rs#L8337
+[await-b]: ../../../../../crates/daemon/src/lib.rs#L8361
+[await-c]: ../../../../../crates/daemon/src/lib.rs#L8385
+[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8452-L8459
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8482-L8487
 [store-commit]: ../../../../../crates/daemon/src/transform.rs#L4947-L4985
 [load]: ../../../../../crates/memory-store/src/lib.rs#L6640-L6667
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955

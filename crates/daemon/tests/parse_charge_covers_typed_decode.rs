@@ -1,4 +1,4 @@
-//! The parse charge must cover the typed decode's heap peak, not only the retained request.
+//! The decode's footprint must cover the typed decode's heap peak, not only the retained request.
 
 #![cfg(feature = "test-support")]
 
@@ -6,8 +6,21 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use daemon::metered_decode::{ResidentMeter, ResidentReserve, decode_metered, footprint_of};
+
+/// A reserve with room for anything; the test reads what the meter counted, not what it held.
+struct Unmetered;
+
+impl ResidentReserve for Unmetered {
+    fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        Some(host_runtime::wire::ByteCharge::none())
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
 use daemon::transform::TransformRequest;
-use daemon::value_footprint_bound_for_test;
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -92,7 +105,7 @@ fn parse_charge_covers_dense_native_typed_decode_peak() {
     // Element counts on both sides of a power of two exercise both vector capacity states.
     for element_count in [1usize << 16, (1 << 16) + 1, 1 << 18] {
         let body = dense_native_body(element_count);
-        let charge = value_footprint_bound_for_test(&body).expect("bound fits usize");
+        let charge = footprint_of(&body);
 
         let base = reset_peak();
         let tree: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
@@ -124,6 +137,28 @@ fn parse_charge_covers_dense_native_typed_decode_peak() {
             "{element_count} native elements peaked at {direct_peak} bytes during the direct \
              decode, above the tree decode's {peak}"
         );
+
+        // The charge the direct lane takes covers its own peak, with the dense values under
+        // an ignored field the derive skips.
+        let mut ignored = Vec::from(
+            br#"{"kind":"transform","session_id":"s","render_config":"r","junk":[0"#.as_slice(),
+        );
+        for _ in 1..element_count {
+            ignored.extend_from_slice(b",0");
+        }
+        ignored.extend_from_slice(b"]}");
+        let meter = ResidentMeter::new(&Unmetered);
+        let base = reset_peak();
+        let request: TransformRequest = decode_metered(&ignored, &meter).expect("metered decode");
+        let metered_peak = peak_since(base);
+        drop(request);
+        assert!(
+            meter.needed() >= metered_peak,
+            "{element_count} ignored elements peaked at {metered_peak} bytes but the direct lane \
+             counted only {}",
+            meter.needed()
+        );
+        assert_eq!(meter.needed(), footprint_of(&ignored));
     }
 }
 
@@ -147,7 +182,7 @@ fn parse_charge_covers_escaped_text_direct_decode_peak() {
     // direct decode holds beside the retained copies; a string without one is borrowed.
     for (text_bytes, escaped) in [(1usize << 22, true), (1 << 22, false), (1 << 16, true)] {
         let body = text_body(text_bytes, escaped);
-        let charge = value_footprint_bound_for_test(&body).expect("bound fits usize");
+        let charge = footprint_of(&body);
 
         let base = reset_peak();
         let request: TransformRequest = serde_json::from_slice(&body).expect("direct decode");
@@ -183,5 +218,91 @@ fn byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation() {
         peak < key_bytes / 2,
         "the byte cap allocated {peak} bytes before the resident reservation for a {} byte body",
         body.len()
+    );
+}
+
+/// A reserve that is already drained: every charge is refused as transient.
+struct Drained;
+
+impl ResidentReserve for Drained {
+    fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        None
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
+#[test]
+fn a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string() {
+    let _serial = measure();
+    // The walk that gates the direct lane is charged like the decodes, so a pool that has no
+    // bytes free refuses it at its first value and serde_json never grows an unescape buffer
+    // for the 4 MiB text block further into the body.
+    let body = text_body(1 << 22, true);
+    assert!(
+        footprint_of(&body) > 1 << 22,
+        "the body's footprint covers its text"
+    );
+
+    let base = reset_peak();
+    let outcome = daemon::direct_lane_admission_for_test(&body, &Drained);
+    let peak = peak_since(base);
+    assert!(
+        peak < 64 * 1024,
+        "the refusal allocated {peak} bytes against a held pool; the 4 MiB text block was \
+         unescaped before any charge (outcome: {outcome:?})"
+    );
+    assert!(
+        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+        "the held pool refuses the body as transient: {outcome:?}"
+    );
+}
+
+/// A reserve that grants charges until `limit` bytes are held, then refuses every one.
+struct Granting {
+    limit: usize,
+    held: std::sync::atomic::AtomicUsize,
+}
+
+impl ResidentReserve for Granting {
+    fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        let held = self.held.load(Ordering::Relaxed);
+        if held + bytes > self.limit {
+            return None;
+        }
+        self.held.store(held + bytes, Ordering::Relaxed);
+        Some(host_runtime::wire::ByteCharge::none())
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
+#[test]
+fn a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped() {
+    let _serial = measure();
+    // The pool admits the body's leading values but not the 4 MiB text block. The charge for
+    // the unescape buffer that block needs is taken from the bytes before any decode, so the
+    // refusal arrives before serde_json has grown that buffer.
+    let body = text_body(1 << 22, true);
+    let reserve = Granting {
+        limit: 64 * 1024,
+        held: std::sync::atomic::AtomicUsize::new(0),
+    };
+
+    let base = reset_peak();
+    let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
+    let peak = peak_since(base);
+    assert!(
+        peak < 64 * 1024,
+        "the refusal allocated {peak} bytes with 64 KiB of pool; the 4 MiB text block was \
+         unescaped before its charge (outcome: {outcome:?})"
+    );
+    assert!(
+        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+        "the short pool refuses the body as transient: {outcome:?}"
     );
 }

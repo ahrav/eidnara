@@ -43,10 +43,10 @@ only; no test ran and nothing outside this file changed.
   on an already-typed request built by [`serde_json::from_value`][hp-req]
   against a [fresh tempfile store][hp-store]. The production handler wraps
   that call with work the bench never sees: the projection-cache lookup,
-  side-channel drain, and `trace_pass_received` at [8181-8198][h-pre], the
+  side-channel drain, and `trace_pass_received` at [8190-8207][h-pre], the
   `project_memory` read, `historian_active`, and guidance-date lookups inside
   [`run_transform`][h-run], a `Some` projection-cache input at
-  [8250-8256][h-call], `prepare_historian_fire`, and response encoding in
+  [8259-8265][h-call], `prepare_historian_fire`, and response encoding in
   [`respond_transform`][respond]. The bench tops out at 1_000 messages because
   the store's 512 KiB durable-text bound rejects a 1_400-message first HARD
   pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]); that cliff is
@@ -111,7 +111,7 @@ only; no test ran and nothing outside this file changed.
   ([1026-1207][tt]), so a dropped field deserializes as zero and the plugin
   prints `n/a` only when the key is absent from the JSON object
   ([1019-1024][ts-stage-fn]). The handler assigns its stage fields from
-  `Instant` pairs taken on the handler task at [8540-8564][h-timings]; a
+  `Instant` pairs taken on the handler task at [8549-8573][h-timings]; a
   `spawn_blocking` relocation separates those pairs from the worker's.
   [`record_token_cache_delta`][rtcd] subtracts two reads of the
   [thread-local counters][tc-local]; both reads sit inside the synchronous
@@ -127,8 +127,8 @@ only; no test ran and nothing outside this file changed.
 - Required faults and enabling state: none beyond a code change and a pass
   that populates `timings`.
 - Reachability: default-production - the handler populates `timings` on the
-  ordinary path ([8540-8564][h-timings]) and [`respond_transform`][respond] emits
-  the line for every response ([14521-14539][emit-call]).
+  ordinary path ([8549-8573][h-timings]) and [`respond_transform`][respond] emits
+  the line for every response ([14558-14576][emit-call]).
 - Existing check: [`pass_timing_line_is_parseable_for_an_empty_session`][t-line]
   pins the line's key set; [`timings_are_present_and_old_responses_deserialize_without_them`][t-timings]
   pins the default; the plugin test at [test.ts:244][ts-test] asserts the
@@ -158,7 +158,7 @@ only; no test ran and nothing outside this file changed.
   exactly two generations of that cap and is one term of
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared], whose doc says the runtime
   bound holds only when the declaration is truthful and lists each retention
-  class so a change cannot omit one ([2243-2248][declared-doc]); no test
+  class so a change cannot omit one ([2252-2257][declared-doc]); no test
   checks the sum. [`count_with_digest`][tc-cwd] returns counts above `u32`
   uncached ([135-137][tc-u32]) and tokenizes outside the lock, so concurrent
   misses may tokenize twice ([107-109][tc-concurrent]).
@@ -396,9 +396,9 @@ only; no test ran and nothing outside this file changed.
   clone of the merged config at [288][eff-clone]. Per-pass callers are
   [`maybe_spawn_reattach`][call-reattach],
   [`prepare_historian_fire`][call-fire], and the wrapup path
-  [5417][call-wrapup]; [`bind`][call-bind] freezes a copy into
+  [5426][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
-  open ([lib.rs:223-224][binding-doc]). One `ConfigCache` per handler holds
+  open ([lib.rs:232-233][binding-doc]). One `ConfigCache` per handler holds
   one project tier, so two bound project roots alternating re-read the file
   every call ([368-398][tier-cached]). The staleness contract at HEAD
   already ignores a same-mtime edit ([test 2182-2188][t-mtime]).
@@ -451,7 +451,7 @@ only; no test ran and nothing outside this file changed.
 - Every process-global cache is declared.
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared]
   lists each retention class so a budget change cannot omit one
-  ([2243-2248][declared-doc]); a merged-config cache, a sharded token cache,
+  ([2252-2257][declared-doc]); a merged-config cache, a sharded token cache,
   a cron cache, or a scanner anchor index adds its bound there. No test
   checks the sum.
 - Scanner semantics are versioned. An evaluator change that can alter any
@@ -586,8 +586,8 @@ call site.
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L291-L293
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
-[bi-tc]: ../../../../../crates/daemon/src/lib.rs#L192-L200
-[bi-trim]: ../../../../../crates/daemon/src/lib.rs#L173-L181
+[bi-tc]: ../../../../../crates/daemon/src/lib.rs#L201-L209
+[bi-trim]: ../../../../../crates/daemon/src/lib.rs#L182-L190
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
 [he-blocked]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
@@ -597,13 +597,13 @@ call site.
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8181-L8198
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
-[h-call]: ../../../../../crates/daemon/src/lib.rs#L8250-L8256
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8540-L8564
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14462
-[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14521-L14539
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14543-L14565
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8190-L8207
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8204-L8270
+[h-call]: ../../../../../crates/daemon/src/lib.rs#L8259-L8265
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8549-L8573
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14499
+[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14558-L14576
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14580-L14602
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
 [rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
 [fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
@@ -633,8 +633,8 @@ call site.
 [t-tc-alias]: ../../../../../crates/daemon/src/token_cache.rs#L241
 [th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
 [tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
-[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2256-L2286
+[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2252-L2257
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2265-L2295
 [ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2851
 [floor]: ../../../../../crates/daemon/src/transform.rs#L5849
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
@@ -699,12 +699,12 @@ call site.
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4586-L4595
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4839
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5100
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5417
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11846
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4595-L4604
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L232-L233
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4848
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5109
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5426
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11857
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288

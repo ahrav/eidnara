@@ -226,13 +226,13 @@ only the five values asserted by the retained tests.
 [trunc]: ../../../../../crates/daemon/src/historian_chunk.rs#L744-L777
 [t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1773-L1859
 [t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1744-L1757
-[boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16663-L16723
-[construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17601
-[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23662
-[frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16770-L16828
+[boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16672-L16732
+[construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17657
+[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23962
+[frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16779-L16837
 [normalize]: ../../../../../crates/daemon/src/transform.rs#L2129-L2145
 [apply-normalized]: ../../../../../crates/daemon/src/transform.rs#L2898-L2911
-[handler-observers]: ../../../../../crates/daemon/src/lib.rs#L8404-L8416
+[handler-observers]: ../../../../../crates/daemon/src/lib.rs#L8412-L8424
 [identity-exclusion]: ../../../../../crates/daemon/src/wire.rs#L615-L617
 [assembly-identity]: ../../../../../crates/daemon/src/historian_chunk.rs#L646-L658
 [fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
@@ -240,7 +240,7 @@ only the five values asserted by the retained tests.
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925
-[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4934-L4936
+[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4942-L4944
 [diff-header]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L100-L113

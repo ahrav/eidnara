@@ -19,7 +19,7 @@ The present claim concerns tracked callbacks; moving work must extend that gate.
   again. Failure to stop trips fatal state and returns false, not cleanup.
 - [The wire contract:767-781][wire] requires best-effort cancellation and
   cleanup-gated reuse, and preserves unknown outcomes after unobserved terminals.
-- [daemon/lib.rs:8187-8262][transform] invokes the transform synchronously;
+- [daemon/lib.rs:8195-8270][transform] invokes the transform synchronously;
   no off-worker transform completion protocol is demonstrated by this site.
 - [tests/dispatch.rs:832-887][overlap] starts a hanging callback, sends route
   Goodbye, then checks cancellation and one cleanup callback. It is unaudited.
@@ -64,5 +64,5 @@ are unaudited, and no new physical-completion trace runs here.
 [cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L937-L954
 [close]: ../../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [wire]: ../../../host-wire-protocol.md#L765-L781
-[transform]: ../../../../crates/daemon/src/lib.rs#L8187-L8262
+[transform]: ../../../../crates/daemon/src/lib.rs#L8195-L8270
 [overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L832-L887

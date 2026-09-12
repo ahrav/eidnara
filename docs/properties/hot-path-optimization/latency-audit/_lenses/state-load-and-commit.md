@@ -101,7 +101,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   a publication landing between the transform and the floor check; a CAS
   conflict injected between snapshot and commit.
 - Reachability: default-production - the handler path at
-  [lib.rs:8171-8434][handler] runs for every transform request;
+  [lib.rs:8180-8443][handler] runs for every transform request;
   `compaction_enabled` defaults to `true` ([config.rs:121][cfg-compaction]).
   The Emergency95 arm needs usage at or above the emergency threshold.
 - Existing check: [`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`][t-no-fire]
@@ -141,7 +141,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   [`expand_transform_tail_delta`][epoch-read-delta] map any load error to
   `None`, and [`historian_active`][active] maps it to `false`; a corrupt
   `core_state` column trips both because [`load`][load] decodes both columns.
-  The comment at [lib.rs:4203][epoch-comment] states why the epoch must be the
+  The comment at [lib.rs:4208][epoch-comment] states why the epoch must be the
   persisted one. `ModuleMeta` has no `deny_unknown_fields` and no `flatten`, and
   `revert_epoch` grows by `saturating_add`, so the SQLite integer range is not
   a practical concern but belongs in the equivalence statement.
@@ -192,7 +192,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   transaction at all ([`record_stable_pass_trace`][stable-call] runs only when
   `!committed`). Consumers: [session status][status-read] and
   [health][health-read] JSON, the `newest_pass_at` age computation at
-  [lib.rs:6300-6311][age], and the plugin's `Passes: N received, M rejected`
+  [lib.rs:6309-6320][age], and the plugin's `Passes: N received, M rejected`
   line at [command-handler.ts:265-268][plugin]. No scheduler decision reads
   `pass_trace`; [`load_pass_scheduler_history`][sched-history] has one
   non-store caller and it is a test at [transform.rs:13578][sched-test].
@@ -229,7 +229,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   ignores trace-write errors with `let _ =` on every call site.
 - Guarantee: Diagnostics cannot veto or enlarge the state commit.
 - Rationale: Every trace call site discards its result
-  ([8206][received-call], [8280-8287][rejected-call], [8512][completed-call],
+  ([8215][received-call], [8289-8296][rejected-call], [8521][completed-call],
   [1823-1847][stable-call]). The doc comments on [`trace_pass_received`][received-doc]
   and [`trace_pass_completed`][completed-doc] state that these writes stay
   outside the fenced cache-state transaction so they cannot contend with,
@@ -289,7 +289,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   after the insert; a second drainer that read the row before the first
   retired it.
 - Reachability: default-production for the drain call
-  ([lib.rs:8199-8203][drain-call]); explicit-config-only for row delivery, because
+  ([lib.rs:8208-8212][drain-call]); explicit-config-only for row delivery, because
   outbox rows come from [`publish_historian_chunk`][publish] and firing
   requires a configured `model_chain` ([config.rs:119][cfg-models],
   [`no_models` gate][no-models]); `user_observation` rows further require
@@ -400,7 +400,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   the interleaving that makes the first property meaningful may never occur.
 - Guarantee: The campaign exercises the state that distinguishes
   one-load-per-pass from per-consumer loads.
-- Rationale: The rerun logic at [lib.rs:8425-8444][floor-b] exists for this
+- Rationale: The rerun logic at [lib.rs:8434-8453][floor-b] exists for this
   interleaving. Without it, a single-load design and the current design are
   indistinguishable.
 - Fault/timing angle: The window between `commit_transform` and
@@ -527,27 +527,27 @@ tree's line numbers: `MemoryStore::load` closes at 6223, not
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
 [max-text]: ../../../../../crates/memory-store/src/lib.rs#L550
 
-[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4305-L4323
-[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4187-L4217
-[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4203
-[active]: ../../../../../crates/daemon/src/lib.rs#L4597-L4615
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5043-L5116
-[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5499-L5512
-[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5498
-[no-models]: ../../../../../crates/daemon/src/lib.rs#L5238-L5245
-[handler]: ../../../../../crates/daemon/src/lib.rs#L8171-L8434
-[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8199-L8203
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8206
-[run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8280-L8287
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8303-L8308
-[rerun]: ../../../../../crates/daemon/src/lib.rs#L8330-L8337
-[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8425-L8444
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8512
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8308-L8316
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6246-L6300
-[age]: ../../../../../crates/daemon/src/lib.rs#L6300-L6311
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7903-L7942
+[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4314-L4332
+[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4196-L4226
+[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4208
+[active]: ../../../../../crates/daemon/src/lib.rs#L4606-L4624
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5052-L5125
+[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5508-L5521
+[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5507
+[no-models]: ../../../../../crates/daemon/src/lib.rs#L5247-L5254
+[handler]: ../../../../../crates/daemon/src/lib.rs#L8180-L8443
+[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8208-L8212
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8215
+[run]: ../../../../../crates/daemon/src/lib.rs#L8204-L8270
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8289-L8296
+[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8312-L8317
+[rerun]: ../../../../../crates/daemon/src/lib.rs#L8339-L8346
+[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8434-L8453
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8521
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8317-L8325
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6255-L6309
+[age]: ../../../../../crates/daemon/src/lib.rs#L6309-L6320
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7912-L7951
 [cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L121
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
@@ -617,14 +617,14 @@ tree's line numbers: `MemoryStore::load` closes at 6223, not
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36886
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36093
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23425
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24606
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L24809
-[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32860
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36887
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36370
+[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23455
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L24839
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24611
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24877
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L24900
+[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L33137
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L18542
