@@ -140,8 +140,8 @@ specification enumerates the stages, and no name is built at run time.
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L352-L354
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
-[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12400-L12405
-[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27800-L27806
+[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
+[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
 [h-pre]: ../../../../../crates/daemon/src/lib.rs#L8181-L8198
 [h-run]: ../../../../../crates/daemon/src/lib.rs#L8204-L8270
 [respond]: ../../../../../crates/daemon/src/lib.rs#L14479

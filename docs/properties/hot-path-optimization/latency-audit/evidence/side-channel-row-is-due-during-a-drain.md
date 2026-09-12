@@ -95,7 +95,7 @@ test records the marker, and none has all three kinds due in one pass drain.
 - Conclusion: resolved with answer - constructible; the witness is recorded.
 
 [pass-drain]: ../../../../../crates/daemon/src/lib.rs#L8180-L8184
-[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L36152
+[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L36714
 [daemon-cargo]: ../../../../../crates/daemon/Cargo.toml#L92
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
@@ -109,5 +109,5 @@ test records the marker, and none has all three kinds due in one pass drain.
 [due-predicate]: ../../../../../crates/memory-store/src/lib.rs#L11168-L11169
 [backoff]: ../../../../../crates/memory-store/src/lib.rs#L11256-L11260
 [enqueue]: ../../../../../crates/memory-store/src/lib.rs#L13988-L14012
-[t-faults-sc]: ../../../../../crates/memory-store/src/lib.rs#L19306-L19403
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19522-L19576
+[t-faults-sc]: ../../../../../crates/memory-store/src/lib.rs#L19182-L19280
+[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19387-L19442
