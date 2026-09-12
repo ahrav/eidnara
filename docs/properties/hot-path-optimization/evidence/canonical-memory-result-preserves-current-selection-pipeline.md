@@ -57,8 +57,8 @@ lineage restrictions, and both row and payload boundaries. Existing checks are
   Oracle packaging as a test-only adapter or reference executable is a test-design
   choice, not an open semantic acceptance rule; candidate helpers are not oracles.
 
-[pass]: ../../../../crates/daemon/src/lib.rs#L8176-L8253
-[reruns]: ../../../../crates/daemon/src/lib.rs#L8317-L8419
+[pass]: ../../../../crates/daemon/src/lib.rs#L8177-L8254
+[reruns]: ../../../../crates/daemon/src/lib.rs#L8318-L8420
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
 [query]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248

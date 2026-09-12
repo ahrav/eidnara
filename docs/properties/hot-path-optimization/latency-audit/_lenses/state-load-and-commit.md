@@ -440,7 +440,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`preserved_json_identities_do_not_exempt_integrity_fields_credential_names_or_nested_values`][t-preserved] | identity preservation limited to structural scalar names | unaudited |
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | commit redacts core payload, preserves legacy ids, refuses integrity secret in meta | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | new-versus-existing session decided inside the fenced transaction | unaudited |
-| [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` pinned on open and re-pinned per fenced write | unaudited |
+| [`a_read_callback_cannot_lower_fence_durability`][t-sync] | `synchronous=FULL` pinned on open and re-pinned by the first fenced write after a maintenance callback | unaudited |
 
 None found:
 
@@ -509,41 +509,41 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [ms-preserved]: ../../../memory-store/catalog.md#preserved-identity-name-does-not-exempt-its-value
 [ms-refused]: ../../../memory-store/catalog.md#refused-durable-write-leaves-no-row-and-no-receipt
 
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6236-L6263
-[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4575-L4576
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4573-L4574
+[load]: ../../../../../crates/memory-store/src/lib.rs#L6242-L6269
+[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4581-L4582
+[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4579-L4580
 [snapshot]: ../../../../../crates/daemon/src/transform.rs#L3009
-[snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6268-L6511
-[with-conn]: ../../../../../crates/storage/src/lib.rs#L302-L318
-[fenced]: ../../../../../crates/storage/src/lib.rs#L306-L332
-[pin-sync]: ../../../../../crates/storage/src/lib.rs#L930-L931
-[claim-fence]: ../../../../../crates/storage/src/lib.rs#L1789-L1807
-[pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2239-L2266
-[audit]: ../../../../../crates/memory-store/src/lib.rs#L2285-L2443
-[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2464-L2467
+[snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6274-L6517
+[with-conn]: ../../../../../crates/storage/src/lib.rs#L343-L360
+[fenced]: ../../../../../crates/storage/src/lib.rs#L409-L473
+[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1492-L1493
+[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2221-L2239
+[pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2245-L2272
+[audit]: ../../../../../crates/memory-store/src/lib.rs#L2291-L2449
+[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2470-L2473
 [max-text]: ../../../../../crates/memory-store/src/lib.rs#L465
 
-[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4299-L4317
-[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4181-L4211
-[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4197
-[active]: ../../../../../crates/daemon/src/lib.rs#L4591-L4604
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5037-L5110
-[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5493-L5506
-[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5492
-[no-models]: ../../../../../crates/daemon/src/lib.rs#L5232-L5239
-[handler]: ../../../../../crates/daemon/src/lib.rs#L8165-L8428
-[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8174-L8178
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8181
-[run]: ../../../../../crates/daemon/src/lib.rs#L8189-L8251
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8252-L8262
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8276-L8284
-[rerun]: ../../../../../crates/daemon/src/lib.rs#L8324-L8331
-[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8409-L8428
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8487
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8285-L8295
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6240-L6290
-[age]: ../../../../../crates/daemon/src/lib.rs#L6281-L6290
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7869-L7917
+[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4300-L4318
+[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4182-L4212
+[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4198
+[active]: ../../../../../crates/daemon/src/lib.rs#L4592-L4605
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5038-L5111
+[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5494-L5507
+[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5493
+[no-models]: ../../../../../crates/daemon/src/lib.rs#L5233-L5240
+[handler]: ../../../../../crates/daemon/src/lib.rs#L8166-L8429
+[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8175-L8179
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8182
+[run]: ../../../../../crates/daemon/src/lib.rs#L8190-L8252
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8253-L8263
+[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8303-L8308
+[rerun]: ../../../../../crates/daemon/src/lib.rs#L8325-L8332
+[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8410-L8429
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8488
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8309-L8317
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6241-L6291
+[age]: ../../../../../crates/daemon/src/lib.rs#L6282-L6291
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7870-L7918
 [cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L121
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
@@ -615,15 +615,15 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36240
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L35450
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23002
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23851
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23881
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23897
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23929
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23961
-[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32168
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36241
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L35451
+[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23003
+[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23852
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L23882
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23898
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23930
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L23962
+[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32169
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13535
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L16895
@@ -641,4 +641,4 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15608
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15751
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L3471
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L4278-L4343

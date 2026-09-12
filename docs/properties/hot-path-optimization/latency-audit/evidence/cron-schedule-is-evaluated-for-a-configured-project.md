@@ -101,9 +101,9 @@ route in `MODULE` authority. No existing test records the marker.
 [sched-fixture]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L586-L593
 [sched-scripted]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L595-L600
 [t-sched-cron]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L680-L704
-[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L14031-L14080
-[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L14050-L14055
-[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L14075
+[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L14032-L14081
+[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L14051-L14056
+[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L14076
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L887
 [valid]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L205-L210
