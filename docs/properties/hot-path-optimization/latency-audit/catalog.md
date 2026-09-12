@@ -714,17 +714,21 @@ executes after `commit_transform`, [`descend_lineage`][descend],
 firing observes a `row_version` at least as new as the one that work
 returned, any CAS write derived from that read ([`record_no_fire`][no-fire]
 under `loaded.row_version`) uses that value, and the two Emergency95
-`publication_floor_ordinal` reads ([`:8213-8221`][floor-a],
+`publication_floor_ordinal` reads ([`:8303-8308`][floor-a],
 [`:8425-8444`][floor-b]) stay distinct because their comparison is the rerun
 trigger. Decode: for every stored `meta` text, a scalar projection of
 `revert_epoch` and `historian.state` returns the same value as
-`serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when it
-fails, or when `core_state` fails to deserialize, the consumer takes the
-branch it takes today (`None` for the projection cache at
+`serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when that
+field fails to deserialize the consumer takes the branch it took on a failed
+full load (`None` for the projection cache at
 [`lookup_full_projection_cache`][epoch-read] and
 [`expand_transform_tail_delta`][epoch-read-delta], `false` for
-[`historian_active`][active]). `always` because the daemon consumes these
-reads on every pass, not only under a fault.
+[`historian_active`][active]), except for the recorded divergences: a
+corrupt `core_state` or a corrupt sibling field no longer takes that branch
+(the pass proceeds and the transform's own snapshot load refuses the row
+before any commit), a non-object `historian` reads as `Idle`, and an epoch
+above `i64::MAX` fails the scalar read alone. `always` because the daemon
+consumes these reads on every pass, not only under a fault.
 Fault/timing angle: A consolidation reuses a snapshot taken before
 `commit_transform` for a consumer placed after it, or reuses the first
 `run_transform` snapshot for an Emergency95 rerun after an inline firing; a
