@@ -145,15 +145,17 @@ Checks added with the mode-gated authorizer (implementation base
 | [Mode restoration after panic][mode-restore-test] | Maintenance regains pragma writes after a panicking read and a panicking fenced callback; `query_only` is restored, the partial write is rolled back, and the next fenced write re-pins `synchronous=FULL`. | unaudited |
 | [Baseline escapes on the store connection][baseline-gate-test] | A pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or format-marker delete in baseline text is refused by the store connection's gate; the pristine file then opens with benign text. | unaudited |
 | [Store statements stay uncached][surface-guard-test] | No fence or durability-pin statement is found in the statement cache after an open. | unaudited |
+| [Maintenance flush survives a panic][flush-unwind-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a maintenance callback creates main `late` and panics before returning; no temp `late` is created. Failed with `Ok(())` before the flush moved into a drop guard. | unaudited |
 | [Unrestricted statements do not reach guarded callbacks][gate-tests] | A fence upsert prepared unrestricted is reused without re-authorization until the cache is flushed, then refused; every `deny_baseline_escapes` denial is reachable; nested mode entry is a debug assertion. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4029-L4113
-[read-witness]: ../../../crates/storage/src/lib.rs#L4120-L4149
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L4156-L4179
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4185-L4237
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4243-L4273
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4280-L4300
-[gate-tests]: ../../../crates/storage/src/lib.rs#L1794-L1896
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4472-L4549
+[read-witness]: ../../../crates/storage/src/lib.rs#L4551-L4585
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L4587-L4615
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4617-L4673
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4675-L4709
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4711-L4736
+[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L4738-L4780
+[gate-tests]: ../../../crates/storage/src/lib.rs#L1985-L2087
 
 ## History render
 

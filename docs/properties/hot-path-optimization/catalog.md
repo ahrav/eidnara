@@ -309,7 +309,9 @@ run in `cargo test -p storage`: a warm fenced statement is not re-prepared
 across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, and a
 temp-shadow statement cached before it is refused afterwards; a statement
 prepared under the unrestricted mode is refused in a guarded callback once the
-cache is flushed; a panicking read or fenced callback returns the connection to
+cache is flushed; the flush also runs when a maintenance callback panics, so a
+temp-shadow statement cached before that callback's main DDL is refused
+afterwards; a panicking read or fenced callback returns the connection to
 the unrestricted mode and rolls its partial write back; and baseline text with
 a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
 format-marker delete is refused by the store connection's gate. No

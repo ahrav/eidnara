@@ -336,12 +336,10 @@ mod sqlite_backend {
             f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let guard = self.lock_conn()?;
-            let out = f(&MaintenanceConn::new(&guard));
             // The authorizer runs at prepare time and a cached statement is not re-authorized
-            // on reuse, so nothing prepared under the unrestricted mode may remain in the
-            // cache when a guarded callback runs.
-            guard.flush_prepared_statement_cache();
-            out.map_err(|e| StoreError::Backend(e.to_string()))
+            // on reuse; `_flush` clears cached statements on return and during unwinding.
+            let _flush = FlushStatementCacheOnDrop(&guard);
+            f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
         }
 
         /// Run a closure inside an epoch-fenced write transaction. The write is
@@ -519,6 +517,16 @@ mod sqlite_backend {
         }
     }
 
+    /// Cached statements bypass re-authorization; main DDL does not expire temp-schema
+    /// statements, so maintenance flushes the cache.
+    struct FlushStatementCacheOnDrop<'c>(&'c Connection);
+
+    impl Drop for FlushStatementCacheOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.flush_prepared_statement_cache();
+        }
+    }
+
     /// `Connection::authorizer` takes `&self`, so a callback holding `&Connection` could
     /// replace the gate installed by [`SqliteStore`]. `GuardedConn` omits authorizer
     /// control, pragma writes, statement batches, and transaction control.
@@ -631,7 +639,7 @@ mod sqlite_backend {
         ///
         /// Only a guarded callback may populate the cache: [`MaintenanceConn`] exposes no
         /// cached preparation, the store's own statements are uncached, and the cache is
-        /// flushed when a maintenance callback returns.
+        /// flushed when a maintenance callback ends, whether it returns or panics.
         pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
             self.conn.set_prepared_statement_cache_capacity(capacity);
         }
@@ -4724,6 +4732,50 @@ mod tests {
             );
         }
         drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Main DDL on the store's own connection leaves a cached temp-DDL statement valid, so
+    /// the maintenance flush is the only step that forces its re-authorization, and a
+    /// panicking maintenance callback must not skip that flush. The warm-up prepares without
+    /// executing so no temp object exists for the entry scan to notice and no temp DDL
+    /// expires the cache.
+    #[test]
+    fn a_panicking_maintenance_callback_still_flushes_the_statement_cache() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement without running it");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_unfenced(|c| -> rusqlite::Result<()> {
+                c.execute_batch("CREATE TABLE late (x)")?;
+                panic!("maintenance panics after main DDL")
+            })
+        }));
+        assert!(panicked.is_err());
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the cached temp-shadow statement must be re-authorized against the new \
+             main-schema names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
         let _ = std::fs::remove_dir_all(&root);
     }
 

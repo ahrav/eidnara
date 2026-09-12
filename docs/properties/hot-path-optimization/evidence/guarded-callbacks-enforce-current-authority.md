@@ -88,7 +88,8 @@ the cache is not re-authorized. The gate keeps that safe by construction:
 - Only guarded callbacks populate the cache. `MaintenanceConn` exposes no
   cached preparation, the store's own fence and pragma statements run through
   uncached `execute` and `query_row`, and the [maintenance path flushes the
-  cache][flush] when its callback returns. The [internal gate tests][gate-tests]
+  cache][flush] through a [drop guard][flush-guard] when its callback ends,
+  on return and on unwind. The [internal gate tests][gate-tests]
   pin both halves: an unrestricted-prepared fence upsert is reused without
   re-authorization when the cache is not flushed, and is refused with
   `not authorized` after the flush. The [surface test][surface-test] shows no
@@ -105,6 +106,16 @@ the cache is not re-authorized. The gate keeps that safe by construction:
   second connection creates main `late`, then shows the cached statement is
   refused `not authorized` in the next callback, which also reads the new
   table.
+- Main DDL on the store's own connection is the case the cookie does not
+  cover. `sqlite3EndTable` emits `ChangeCookie` and `ParseSchema` but no
+  `OP_Expire`, and it keeps the in-memory main cookie equal to the file's, so
+  no schema reset reaches the temp schema; a cached `CREATE TEMP TABLE`
+  statement verifies only the temp schema when it runs and stays valid. The
+  maintenance flush is what discards it, and the [flush-on-unwind
+  test][flush-test] pins that a maintenance callback that creates main `late`
+  and then panics still leaves the next fenced callback's cached
+  `CREATE TEMP TABLE late (x)` refused `not authorized`, with no temp `late`
+  created. Before the drop guard the statement ran and created the shadow.
 
 The [probe][probe] reads `SQLITE_STMTSTATUS_REPREPARE` on a cached insert: it is
 zero across two consecutive fenced callbacks, and it rises after the foreign
@@ -138,25 +149,34 @@ the mechanism; the latency effect is a W1 measurement and is not claimed here.
 passed before it, four internal gate tests, and six store-level tests added
 here. The denial-matrix tests that existed at the baseline pass unchanged.
 
+After the flush moved into a drop guard, `cargo test -p storage --locked`
+passed 72 tests at `perf/mode-gated-authorizer` merged with `origin/main`:
+the 68 above, three tests the merge brought in, and the flush-on-unwind test.
+Review-time verification: the new test failed with `Ok(())` in place of
+`not authorized` before the guard and passes with it. The anchors below are to
+the live tree at that state.
+
 [lock]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L195-L209
-[read]: ../../../../crates/storage/src/lib.rs#L248-L264
-[write]: ../../../../crates/storage/src/lib.rs#L314-L340
+[read]: ../../../../crates/storage/src/lib.rs#L305-L321
+[write]: ../../../../crates/storage/src/lib.rs#L369-L433
 [scope]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L624-L705
 [cache]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L487-L498
 [facade]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5563-L5586
 [notes]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5999-L6025
 [scope-owners]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4772-L4823
-[mode]: ../../../../crates/storage/src/lib.rs#L540-L551
-[gate-install]: ../../../../crates/storage/src/lib.rs#L1141
-[flush]: ../../../../crates/storage/src/lib.rs#L277-L289
-[scope-install]: ../../../../crates/storage/src/lib.rs#L698-L793
-[mode-hold]: ../../../../crates/storage/src/lib.rs#L601-L609
-[apply]: ../../../../crates/storage/src/lib.rs#L1641-L1679
-[gate-tests]: ../../../../crates/storage/src/lib.rs#L1794-L1896
-[probe]: ../../../../crates/storage/src/lib.rs#L4029-L4113
-[read-witness]: ../../../../crates/storage/src/lib.rs#L4120-L4149
-[temp-write]: ../../../../crates/storage/src/lib.rs#L4156-L4179
-[restore-test]: ../../../../crates/storage/src/lib.rs#L4185-L4237
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L4243-L4273
-[surface-test]: ../../../../crates/storage/src/lib.rs#L4280-L4300
-[cached-test]: ../../../../crates/storage/src/lib.rs#L3982
+[mode]: ../../../../crates/storage/src/lib.rs#L709-L720
+[gate-install]: ../../../../crates/storage/src/lib.rs#L1317
+[flush]: ../../../../crates/storage/src/lib.rs#L334-L343
+[flush-guard]: ../../../../crates/storage/src/lib.rs#L522-L535
+[scope-install]: ../../../../crates/storage/src/lib.rs#L867-L969
+[mode-hold]: ../../../../crates/storage/src/lib.rs#L770-L779
+[apply]: ../../../../crates/storage/src/lib.rs#L1824-L1862
+[gate-tests]: ../../../../crates/storage/src/lib.rs#L1985-L2087
+[probe]: ../../../../crates/storage/src/lib.rs#L4472-L4549
+[read-witness]: ../../../../crates/storage/src/lib.rs#L4551-L4585
+[temp-write]: ../../../../crates/storage/src/lib.rs#L4587-L4615
+[restore-test]: ../../../../crates/storage/src/lib.rs#L4617-L4673
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L4675-L4709
+[surface-test]: ../../../../crates/storage/src/lib.rs#L4711-L4736
+[flush-test]: ../../../../crates/storage/src/lib.rs#L4738-L4780
+[cached-test]: ../../../../crates/storage/src/lib.rs#L4418-L4460
