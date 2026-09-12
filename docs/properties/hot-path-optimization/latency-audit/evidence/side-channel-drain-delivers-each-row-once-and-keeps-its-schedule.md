@@ -34,7 +34,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
   [`mark_historian_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
   call per kind; the mark updates under `delivered_at_ms IS NULL` and returns
   `QueryReturnedNoRows` when `changed != 1`, which rolls the transaction back.
-  A test-only `fail_once` seam at [`:10922-10933`][fail-once] injects a
+  A test-only `fail_once` seam at [`:11234-11245`][fail-once] injects a
   failure per kind.
 - [`record_historian_side_channel_failure`][failure] computes
   `delay = 1000 * 2^min(attempt_count, 6)` capped at
@@ -52,7 +52,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
 - Rows are enqueued by [`publish_historian_chunk`][publish]; the outbox
   [primary key][outbox-sql] is `(session_id, firing_seq, kind, source_start,
   source_end, item_index)`. The publish task also drains after a committed
-  publish ([`:10762-10771`][publish-drain]), so two drainers can overlap on one
+  publish ([`:11074-11083`][publish-drain]), so two drainers can overlap on one
   session.
 - Firing needs a configured [`model_chain`][cfg-models] (the
   [`no_models` gate][no-models]); `user_observation` rows also need
@@ -131,9 +131,9 @@ window, two drainers, ordering across firings, the limit, or the backoff.
 [mark]: ../../../../../crates/memory-store/src/lib.rs#L14051-L14076
 [primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L14078-L14120
 [obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L14122-L14143
-[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L19437
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19640
-[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19800
-[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L21262
+[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L19314
+[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19519
+[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19637
+[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L21099
 [outbox-sql]: ../../../../../crates/memory-store/baseline.sql#L489-L505
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535

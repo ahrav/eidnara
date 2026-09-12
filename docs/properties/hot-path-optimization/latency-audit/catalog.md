@@ -861,7 +861,7 @@ returned after the loop completes. `always` because
 which rows a pass touches.
 Fault/timing angle: Process crash between the mark commit and the
 [per-row delete][delete-one]; the publish task's own drain
-([`:10762-10771`][publish-drain]) overlapping the pass drain on one session;
+([`:11074-11083`][publish-drain]) overlapping the pass drain on one session;
 a target insert failing after the outbox state change in a reordered
 transaction; an empty-drain shortcut that skips the [leftover delete][delete-all];
 a delete-in-place that changes which rows [count as pending][status-sc].
@@ -996,7 +996,7 @@ Check: `sometimes` - Under three constant markers
 from the handler's pass drain ([`:8122-8126`][pass-drain]), the outbox holds
 at entry, for that kind, at least one row with `delivered_at_ms IS NULL` and
 `next_attempt_at_ms <= now_ms` for the `now_ms` the call passes (the due
-predicate at [`:10893-10894`][due-predicate]). Each marker records the
+predicate at [`:11205-11206`][due-predicate]). Each marker records the
 pending rows read from the outbox and the drain's `now_ms` before delivery
 runs, never the delivery result. `sometimes` because the drain lines execute
 on every pass while a due row may never exist, so `reachable` would be
@@ -1005,9 +1005,9 @@ Fault/timing angle: Under default configuration no [`model_chain`][cfg-models]
 is set, so nothing publishes, the outbox is empty on every pass, and C3's
 per-row clauses are never evaluated. With publishing,
 [`publish_historian_chunk`][publish] drains inline right after its commit
-([`:10762-10771`][publish-drain]), so the pass drain finds a due row only when
+([`:11074-11083`][publish-drain]), so the pass drain finds a due row only when
 that inline delivery failed (the next attempt is
-`now + 1000 * 2^min(attempt, 6)` ms, [`:10981-10985`][backoff]) or when the
+`now + 1000 * 2^min(attempt, 6)` ms, [`:11293-11297`][backoff]) or when the
 process ended between the enqueue commit and the inline drain.
 Required faults and enabling state: A published firing with events, primers,
 and user observations (a direct `publish_historian_chunk` call in a unit
@@ -2714,8 +2714,6 @@ evaluation of this area and its disposition are recorded in
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[hostpage]: ../../../../crates/daemon/src/lib.rs#L748-L749
-[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9385-L9391
 
 [agents]: ../../../../crates/shm-transport/AGENTS.md
 [arena-const]: ../../../../crates/shm-transport/src/arena.rs#L4-L7

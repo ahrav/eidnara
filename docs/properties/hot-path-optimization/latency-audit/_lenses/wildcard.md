@@ -204,7 +204,7 @@ only; no test ran and nothing outside this file changed.
   `post_end_revision_inputs_moved`. Direct `tokenizer::estimate_tokens`
   calls in production transform code at HEAD: the SOFT pressure predicate's
   `m0_tokens` and `m1_tokens` at [4298-4309][soft-direct] (finding 10), the
-  tag-mint `token_count` persisted into tag rows at [7160][mint-direct], and
+  tag-mint `token_count` persisted into tag rows at [7163][mint-direct], and
   `ActiveTagForNudge.token_count` at [8558][nudge-direct]. The tokenizer
   crate exposes no call counter ([`estimate_tokens`][tok-fn]), so the only
   runtime oracle is the injected estimator plus the thread-local stats.
@@ -256,7 +256,7 @@ only; no test ran and nothing outside this file changed.
   [comment at rules.rs:382][digest-doc] says evaluator semantics are bound
   by `semantic_digest_version`, pinned by
   [`evaluator_constants_are_pinned`][t-pinned]. The memory store persists
-  the digest per scan batch ([2357-2392][ms-digest]), so an evaluator
+  the digest per scan batch ([2442-2477][ms-digest]), so an evaluator
   change without a bump makes old and new audit rows indistinguishable.
 - Fault/timing angle: none; a data-shape difference.
 - Required faults and enabling state: An input where a rule's match and its
@@ -455,7 +455,7 @@ only; no test ran and nothing outside this file changed.
 - Scanner semantics are versioned. An evaluator change that can alter any
   finding bumps [`REVISION.semantic_digest_version`][revision]
   ([rules.rs:382][digest-doc]); the memory store persists the digest per
-  scan batch ([2357-2392][ms-digest]).
+  scan batch ([2442-2477][ms-digest]).
 - Bench targets stay out of nextest and run in CI only as smoke.
   [`.config/nextest.toml`][nextest]; [`ci.yml:514-518`][ci-bench]. A new
   bench must also compile and pass in test mode.

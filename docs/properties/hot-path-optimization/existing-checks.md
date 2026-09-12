@@ -330,7 +330,7 @@ that no related check exists anywhere in the repository.
 [audit-tx]: ../../../crates/memory-store/src/lib.rs#L2330-L2356
 [receipt-test]: ../../../crates/memory-store/src/lib.rs#L18826-L18867
 [bound-test]: ../../../crates/memory-store/src/lib.rs#L23217-L23248
-[scan-rollback-test]: ../../../crates/memory-store/src/lib.rs#L23254-L23338
+[scan-rollback-test]: ../../../crates/memory-store/src/lib.rs#L23044-L23129
 [identity-test]: ../../../crates/memory-store/src/lib.rs#L16042
 [json-identity-test]: ../../../crates/memory-store/src/lib.rs#L15899
 [trace-identity-test]: ../../../crates/memory-store/src/lib.rs#L16109

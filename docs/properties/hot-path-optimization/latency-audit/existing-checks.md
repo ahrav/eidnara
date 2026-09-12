@@ -547,7 +547,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19314
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36714
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19637
-[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L21262
+[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L21099
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15845
 [t-keydir]: ../../../../crates/memory-store/src/lib.rs#L15762
 [t-container]: ../../../../crates/memory-store/src/lib.rs#L15862

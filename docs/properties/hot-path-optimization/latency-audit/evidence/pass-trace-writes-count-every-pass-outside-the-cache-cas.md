@@ -27,14 +27,14 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   contends with or extends the pass commit. A secret-bearing `session_id` is
   [tolerated only when the row already exists][flagged].
 - [`trace_pass_rejected`][rejected] updates `reject_count + 1`
-  ([`:6738`][reject-bump]); its [doc][rejected-doc] calls it a single plain
+  ([`:7050`][reject-bump]); its [doc][rejected-doc] calls it a single plain
   UPSERT outside the fenced transaction. [`trace_pass_completed`][completed]'s
   [doc][completed-doc] says it cannot alter CAS semantics or hold the commit
   transaction open longer.
 - [`trace_pass_stable`][stable] appends one `scheduler_history` observation
-  with the 256-entry ring ([`:6594-6601`][stable-ring]); the
+  with the 256-entry ring ([`:6906-6913`][stable-ring]); the
   [in-commit upsert][commit-trace] does the same, initializes `receive_count`
-  to `0` on a fresh insert ([`:8441`][commit-init]), and leaves it alone on
+  to `0` on a fresh insert ([`:8753`][commit-init]), and leaves it alone on
   conflict.
 - The [`PassTrace` doc][passtrace-doc] says the counters are stored apart from
   `cache_state` so a rejected pass leaves a trail without advancing

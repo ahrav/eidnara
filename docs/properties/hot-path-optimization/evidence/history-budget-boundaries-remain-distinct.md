@@ -18,10 +18,10 @@ request validation, and replay. These have different implemented boundaries.
 - [m0_compose.rs:178-215][outer] counts the wrapped history slice, retries above
   105% at most three times, and can return a still-over-budget render.
 - [daemon/lib.rs:8155-8159][validation] resolves request budgets separately.
-- [transform.rs:4031-4058][hard] composes on HARD; [4310-4344][refold] also
+- [transform.rs:4034-4061][hard] composes on HARD; [4313-4347][refold] also
   composes on pressure refold. Frozen replay is not all SOFT work indiscriminately.
 - [cache-stability:221-287][core] separates pure Defer/SoftPlus replay from SOFT
-  replacement of rendered delta units. [transform.rs:4455-4507][soft] supplies
+  replacement of rendered delta units. [transform.rs:4458-4510][soft] supplies
   m1 and other rendered units on ordinary SOFT, without replacing existing m0.
 
 ## Failure scenario

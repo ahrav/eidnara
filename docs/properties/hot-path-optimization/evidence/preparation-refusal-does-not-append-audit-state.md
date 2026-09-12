@@ -10,14 +10,14 @@ leave metadata behind even when no output value is returned.
 
 ## Evidence trail
 
-- [memory-store/lib.rs:465][bound] sets the durable text limit to 512 KiB.
-- [2204-2243][prepare] checks input first, refuses detected NewIdentity next,
+- [memory-store/lib.rs:550][bound] sets the durable text limit to 512 KiB.
+- [2289-2328][prepare] checks input first, refuses detected NewIdentity next,
   checks chosen output, and appends a scan only after all three checks.
-- [2245-2271][execute] persists audit only for an applied operation in its
+- [2330-2356][execute] persists audit only for an applied operation in its
   fenced transaction; a callback error propagates rather than applying audit.
-- [8921-8931][refusal] turns transaction preparation failure into an error
+- [9233-9243][refusal] turns transaction preparation failure into an error
   because returning a successful Replay disposition would commit earlier writes.
-- [22694-22725][test] constructs a fitting input whose redacted output exceeds
+- [23217-23248][test] constructs a fitting input whose redacted output exceeds
   the bound, then a replacement-adjusted exactly fitting output.
 
 ## Failure scenario
