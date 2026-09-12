@@ -227,10 +227,15 @@ under the pass owner and is retired by the next pass, so the
 [root test][root-test] shows one retained root receipt and one divergence
 receipt across five passes that repeat both. A `scheduler_full_array_fingerprint`
 is stored only inside a `scheduler_interesting` entry, so its scan
-[joins the retained owner][fingerprint-retained] only when that entry is
-written and is evicted with the interesting ring; the
-[fingerprint test][fingerprint-test] shows five passes with a fingerprint and
-no interesting entry holding no retained fingerprint receipt. The receipts are counts per
+[joins the history owner][fingerprint-retained] only when that entry is
+written. Only `commit_transform` appends interesting entries, so the
+fingerprint receipts and the fingerprint-bearing entries share one order, and
+each append keeps exactly as many fingerprint receipts as the ring still holds
+fingerprint-bearing entries; the [fingerprint test][fingerprint-test] shows
+five passes with a fingerprint and no interesting entry holding no retained
+fingerprint receipt, and the [fingerprint-eviction test][fingerprint-evict-test]
+shows one fingerprint-bearing entry followed by 256 without leaving no
+fingerprint receipt behind. The receipts are counts per
 field, not links to individual ring entries: an entry appended by
 `trace_pass_stable` carries a `pass_trace`-owned receipt, and evicting it
 from the ring removes the oldest retained receipt instead, so the retained
@@ -265,25 +270,26 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2438
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16839-L16881
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16844-L16886
 [receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7046
 [receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7076-L7088
-[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16817-L16834
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16783-L16812
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16822-L16839
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16788-L16817
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2857
 [retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2860
 [retire]: ../../../../../crates/memory-store/src/lib.rs#L9041-L9047
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2638-L2680
 [overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8975-L8980
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16621-L16778
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16948-L17047
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16626-L16783
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16953-L17052
 [history-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9130-L9154
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17260-L17323
-[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9156-L9169
-[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17052-L17097
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9130-L9158
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17319-L17382
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9161-L9174
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17057-L17102
 [fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8957-L8964
-[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17102-L17149
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24569-L24592
+[fingerprint-evict-test]: ../../../../../crates/memory-store/src/lib.rs#L17159-L17208
+[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17107-L17154
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24628-L24651
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
 [receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7055

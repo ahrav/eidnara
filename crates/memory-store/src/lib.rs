@@ -9129,28 +9129,33 @@ impl MemoryStore {
             )?;
             // The UPSERT above dropped the oldest ring entry once the ring was full and
             // replaced `last_divergence`; the receipts for those bytes go with them, before
-            // this pass's receipts are persisted.
-            for (field_id, appended, keep) in [
-                (
-                    "scheduler_observation",
-                    scheduler_observation_json.is_some(),
-                    PASS_TRACE_HISTORY_RING_LEN - 1,
-                ),
-                (
-                    "scheduler_interesting",
-                    scheduler_interesting_json.is_some(),
-                    PASS_TRACE_HISTORY_RING_LEN - 1,
-                ),
-                (
-                    "scheduler_full_array_fingerprint",
-                    scheduler_interesting_json.is_some() && fingerprint_scan.is_some(),
-                    PASS_TRACE_HISTORY_RING_LEN - 1,
-                ),
-                ("first_divergence", first_divergence.is_some(), 0),
-            ] {
-                if appended {
-                    evict_history_receipts_beyond(tx, session_id, field_id, keep)?;
-                }
+            // this pass's receipts are persisted. Only `commit_transform` appends interesting
+            // entries, so fingerprint receipts and fingerprint-bearing entries share one
+            // order: the receipts kept are the entries still stored, less this pass's own,
+            // which is persisted after this block.
+            let mut evictions = Vec::with_capacity(4);
+            if scheduler_observation_json.is_some() {
+                evictions.push(("scheduler_observation", PASS_TRACE_HISTORY_RING_LEN - 1));
+            }
+            if scheduler_interesting_json.is_some() {
+                evictions.push(("scheduler_interesting", PASS_TRACE_HISTORY_RING_LEN - 1));
+                let stored_fingerprints: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history)
+                      WHERE session_id = ?1
+                        AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
+                    params![session_id],
+                    |row| row.get(0),
+                )?;
+                let keep = usize::try_from(stored_fingerprints)
+                    .unwrap_or(0)
+                    .saturating_sub(usize::from(fingerprint_scan.is_some()));
+                evictions.push(("scheduler_full_array_fingerprint", keep));
+            }
+            if first_divergence.is_some() {
+                evictions.push(("first_divergence", 0));
+            }
+            for (field_id, keep) in evictions {
+                evict_history_receipts_beyond(tx, session_id, field_id, keep)?;
             }
             if let Some(project_root) = canonical_project_root.as_deref() {
                 let stored: bool = tx.query_row(
@@ -17145,6 +17150,60 @@ mod tests {
             field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
             1,
             "a fingerprint stored inside an interesting entry keeps one retained receipt"
+        );
+    }
+
+    /// A fingerprint receipt leaves with the interesting entry that stores it, whether or
+    /// not the entry that evicts it carries a fingerprint of its own.
+    #[test]
+    fn a_fingerprint_receipt_is_evicted_with_its_interesting_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let mut version = None;
+        for pass in 0..=PASS_TRACE_HISTORY_RING_LEN {
+            // Only the first pass stores a fingerprint; the ring then fills with entries
+            // without one until the first entry is evicted.
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            scheduler_observation: Some(&observation),
+                            scheduler_applied_reductions: true,
+                            scheduler_full_array_fingerprint: (pass == 0).then_some("fp-first"),
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+        }
+        let (stored, receipts): (i64, i64) = (
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history) \
+                         WHERE session_id = 'ses' \
+                           AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap(),
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+        );
+        assert_eq!(stored, 0, "the fingerprint-bearing entry left the ring");
+        assert_eq!(
+            receipts, stored,
+            "no receipt outlives the entry that stored its fingerprint"
         );
     }
 
