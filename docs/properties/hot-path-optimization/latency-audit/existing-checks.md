@@ -22,12 +22,15 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | --- | --- | --- |
 | [`request_byte_cap_widens_for_transform_class_only`][t-cap] | `enforce_request_byte_cap` class set, `kind` beside `method`, non-string fallback, unparseable refusal, structured and 2 MiB `method`, a 2 MiB over-deep transform-class body admitted, a body of exactly 32 MiB admitted and one byte more refused. | unaudited |
 | [`entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does`][t-probe] | The probe resolves `method` then `kind` as dispatch does, counts every page key with `null`, keeps the last repeated key, splits an overlong `method` between cap widening and route, and refuses non-object, malformed, and over-deep bodies. | unaudited |
-| [`direct_and_tree_transform_decodes_agree_on_the_corpus`][t-decode-diff] | A probe implies the tree parses the body; both decodes give one request where both accept (thirteen bodies pinned); only repeated keys are tree-only; only derive-lenient shapes under an ignored field are direct-only, each refused by the probe; a two-page assembly decodes to the one-slice request. | unaudited |
-| [`unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths`][t-entry-diff] | Every corpus body gives the same response or the same code and message through `dispatch_body` and through the tree dispatch; the nine direct-lane bodies are pinned and the valid body is served. | unaudited |
-| [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The footprint bound covers the tree decode's peak, and the direct decode peaks at or below it. | unaudited |
-| [`value_footprint_counts_nodes_outside_strings_only`][t-fp] | Separators inside strings and escaped quotes do not count as nodes. | unaudited |
-| [`value_footprint_charges_every_retained_copy_of_string_bytes`][t-fp] | The bound is at least three copies of a 1 MiB text block. | unaudited |
-| [`scalar_dense_bodies_bound_far_above_their_wire_size`][t-fp] | Node cost dominates for `[1,1,...]`; string bytes are not charged as nodes. | unaudited |
+| [`direct_and_tree_transform_decodes_agree_on_the_corpus`][t-decode-diff] | A probe implies the tree parses the body; both decodes give one request where both accept (fourteen bodies pinned); only repeated keys are tree-only; only derive-lenient shapes under an ignored field are direct-only, each refused by the probe; a two-page assembly decodes to the one-slice request. | unaudited |
+| [`unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths`][t-entry-diff] | Every corpus body gives the same response or the same code and message through `dispatch_body` and through the tree dispatch; the ten direct-lane bodies are pinned and the valid body is served. | unaudited |
+| [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The metered footprint covers the tree decode's heap peak, the direct decode peaks at or below it, and the direct lane's own metered count covers its peak with the values under an ignored field. | unaudited |
+| [`decode_footprint_counts_values_and_retained_string_copies`][t-footprint] | Separators inside strings are not values; a 1 MiB text block is charged three times; a scalar-dense body's footprint is far above its wire size and string bytes are not charged as values; a cut body counts its decoded part. | unaudited |
+| [`metered_decode_charges_incrementally_and_refuses_above_capacity`][t-meter] | A fitting decode holds at least its footprint and under two steps more; a footprint above the capacity is refused as permanent with every byte released; a restarted meter reuses held bytes. | unaudited |
+| [`both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies`][t-lanes] | Every corpus body, one with twenty thousand values under an ignored field among them, gives one outcome and one counted footprint through both lanes with a pool one byte short and a pool that just fits; the short pool refuses as too large. | unaudited |
+| [`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`][t-drain] | A held charge makes a fitting body's decode a transient refusal that releases its bytes, records the meter's shortfall marker, and returns `queue_full`; the body decodes once the holder releases; a transient refusal of a body the pool could never hold is too large. | unaudited |
+| [`a_refused_decode_has_no_dispatch_side_effect`][t-effect] | A permanent and a transient refusal through `dispatch_body` return the prior codes and leave the dispatch health counters, the route channel, and the store row untouched; the body is served with room. | unaudited |
+| [`refused_bodies_emit_one_terminal_and_leave_no_dispatch_state`][t-ring] | Through the direct-host fixture, a body over the facade cap, one over the transform cap, and two whose footprint exceeds the scratch pool (one carrying a page key so the tree decode refuses it, one complete unpaged request refused by the direct decode) each end in one `host.invalid_params` terminal; the session shows no pass trace or row; a transform is then served and counted once. | unaudited |
 | [`dispatch_routes_each_envelope_class_to_a_distinct_arm`][t-dispatch] | `kind` routing, `facade_envelope_not_supported`, `unrecognized_request_shape` for object and non-object bodies. | unaudited |
 | [`management_drop_alias_routes_are_rejected`][t-shape] | Retired aliases return `unrecognized_request_shape`. | unaudited |
 | [`indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape`][t-shape2] | Internal names are not routable by `method`, `kind`, or facade. | unaudited |
@@ -39,11 +42,10 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | [`try_charge_is_exact_and_all_or_none`][t-budget] | Over-capacity acquisition leaves the budget unchanged; `u32` overflow refuses. | unaudited |
 | [`the_resident_cap_splits_into_three_non_overlapping_pools`][t-pools] | Ingress, egress, and scratch pools sum to the floor. | unaudited |
 
-None found: a handler-level test that drives `Handler::handle` with an
-over-cap or over-footprint body and asserts `invalid_params`, or drains the
-scratch pool and asserts `queue_full` (`RequestCtx` is transport-private, so
-tests enter at [`dispatch_value`][testentry] or [`dispatch_body`][bodyentry]);
-a test that counts string copies retained by the typed decode. The `request_too_large` assertion in
+None found: a ring-level test that drains the scratch pool and asserts
+`queue_full` (the fixture's pool is the fixed `SCRATCH_RESERVED_BYTES` and the
+handler exposes no barrier); a test that counts string copies retained by the
+typed decode. The `request_too_large` assertion in
 [direct_host.rs][fixture] tests the fixture's line-based control channel,
 not the handler.
 
@@ -442,21 +444,26 @@ Production guards go to
 categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12484-L12499
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12579-L12586
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L19262-L19341
-[t-probe]: ../../../../crates/daemon/src/lib.rs#L19344-L19389
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19544-L19662
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19685-L19723
-[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
-[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12649-L12669
-[t-fp]: ../../../../crates/daemon/src/lib.rs#L18636-L18697
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L26853-L26908
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L19163-L19242
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L19245-L19290
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19450-L19569
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19592-L19633
+[t-footprint]: ../../../../crates/daemon/src/lib.rs#L19725-L19759
+[t-meter]: ../../../../crates/daemon/src/lib.rs#L19765-L19798
+[t-drain]: ../../../../crates/daemon/src/lib.rs#L19804-L19852
+[t-effect]: ../../../../crates/daemon/src/lib.rs#L19857-L19908
+[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19639-L19685
+[t-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L563
+[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
+[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12653-L12687
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L28562-L28617
 [t-shape]: ../../../../crates/daemon/src/lib.rs#L32704-L32721
 [t-shape2]: ../../../../crates/daemon/src/lib.rs#L32724-L32764
 [t-envelope]: ../../../../crates/daemon/src/transform.rs#L16201-L16227
 [t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
-[directhost]: ../../../../crates/daemon/tests/direct_host.rs#L48-L128
+[directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49-L128
 [t-prep]: ../../../../crates/daemon/tests/prepared_output.rs#L103-L115
 [t-budget]: ../../../../crates/host-runtime/src/wire.rs#L825-L865
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503

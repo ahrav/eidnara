@@ -1,12 +1,25 @@
-//! The parse charge must cover the typed decode's heap peak, not only the retained request.
+//! The decode's footprint must cover the typed decode's heap peak, not only the retained request.
 
 #![cfg(feature = "test-support")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use daemon::metered_decode::{ResidentMeter, ResidentReserve, decode_metered, footprint_of};
+
+/// A reserve with room for anything; the test reads what the meter counted, not what it held.
+struct Unmetered;
+
+impl ResidentReserve for Unmetered {
+    fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        Some(host_runtime::wire::ByteCharge::none())
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
 use daemon::transform::TransformRequest;
-use daemon::value_footprint_bound_for_test;
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -82,7 +95,7 @@ fn parse_charge_covers_dense_native_typed_decode_peak() {
     // Element counts on both sides of a power of two exercise both vector capacity states.
     for element_count in [1usize << 16, (1 << 16) + 1, 1 << 18] {
         let body = dense_native_body(element_count);
-        let charge = value_footprint_bound_for_test(&body).expect("bound fits usize");
+        let charge = footprint_of(&body);
 
         let base = reset_peak();
         let tree: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
@@ -114,5 +127,27 @@ fn parse_charge_covers_dense_native_typed_decode_peak() {
             "{element_count} native elements peaked at {direct_peak} bytes during the direct \
              decode, above the tree decode's {peak}"
         );
+
+        // The charge the direct lane takes covers its own peak, with the dense values under
+        // an ignored field the derive skips.
+        let mut ignored = Vec::from(
+            br#"{"kind":"transform","session_id":"s","render_config":"r","junk":[0"#.as_slice(),
+        );
+        for _ in 1..element_count {
+            ignored.extend_from_slice(b",0");
+        }
+        ignored.extend_from_slice(b"]}");
+        let meter = ResidentMeter::new(&Unmetered);
+        let base = reset_peak();
+        let request: TransformRequest = decode_metered(&ignored, &meter).expect("metered decode");
+        let metered_peak = peak_since(base);
+        drop(request);
+        assert!(
+            meter.needed() >= metered_peak,
+            "{element_count} ignored elements peaked at {metered_peak} bytes but the direct lane \
+             counted only {}",
+            meter.needed()
+        );
+        assert_eq!(meter.needed(), footprint_of(&ignored));
     }
 }

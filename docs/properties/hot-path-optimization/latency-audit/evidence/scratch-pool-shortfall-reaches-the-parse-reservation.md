@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The implementation evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -84,15 +86,58 @@ are the only existing coverage and none is a handler-level witness.
 - Conclusion: unresolved, needs a production observation; the record stays
   `test-only` as the catalog states.
 
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11805-L11827
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15427-L15455
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15458-L15463
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15465-L15470
-[reserve]: ../../../../../crates/host-runtime/src/handler.rs#L474-L484
-[capacity]: ../../../../../crates/host-runtime/src/handler.rs#L486-L491
-[pools]: ../../../../../crates/host-runtime/src/runtime.rs#L814-L822
-[scratchconst]: ../../../../../crates/host-runtime/src/config.rs#L21-L31
-[try-charge]: ../../../../../crates/host-runtime/src/wire.rs#L430-L442
-[t-budget]: ../../../../../crates/host-runtime/src/wire.rs#L825-L865
-[t-pools]: ../../../../../crates/host-runtime/src/config.rs#L480-L503
+
+## Shortfall-witness evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/436)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+The reservation is no longer one call before the parse; the
+[`ResidentMeter`][meter] charges the scratch reserve as the decode visits
+values. The shortfall path is the meter's transient refusal: the footprint the
+decode has reached fits the capacity, the pool does not have the bytes, so
+another holder has them. At that point the meter [records][need] its
+[`ShortfallMarker`][marker] with the footprint reached, the bytes already held,
+and the capacity, readable through [`shortfall`][shortfall]; under
+`test-support` a process-wide [count][count] of transient refusals grows too.
+The marker records the preconditions (`needed <= capacity`,
+`charged < needed`), not the handler's outcome.
+
+The [drained-pool test][t-drain] constructs the situation with a real byte
+budget: another charge holds half the pool, a body that fits the capacity is
+decoded, the meter refuses it as transient and releases its bytes, the count
+rises, the meter's marker satisfies both preconditions, `resident_refusal`
+maps it to `queue_full`, and once the holder releases the same body decodes. It
+also shows a transient refusal of a body the pool could never hold classed as
+too large. The [effect test][t-effect] drives the same transient refusal
+through `dispatch_body` and shows no dispatch-side effect. A shortfall through
+the ring is not constructed: the fixture's scratch pool is the fixed
+`SCRATCH_RESERVED_BYTES`, and holding a first request's charge while a second
+arrives needs a barrier inside the handler that the fixture does not expose.
+
+### Focused execution, 2026-09-12
+
+`cargo test -p daemon --locked` passed 1018 tests including the two above.
+
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L131-L138
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L269
+[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L110-L117
+[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L180-L185
+[count]: ../../../../../crates/daemon/src/metered_decode.rs#L124-L126
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19804-L19852
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19857-L19908
+
+[handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
+[footprint]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15427-L15455
+[toolarge]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15458-L15463
+[queuefull]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15465-L15470
+[reserve]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/handler.rs#L474-L484
+[capacity]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/handler.rs#L486-L491
+[pools]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/runtime.rs#L814-L822
+[scratchconst]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/config.rs#L21-L31
+[try-charge]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/wire.rs#L430-L442
+[t-budget]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/wire.rs#L825-L865
+[t-pools]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/config.rs#L480-L503
 [paging]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640

@@ -139,33 +139,41 @@ restate bounds the code already fixes.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No handler-level refusal or charge-versus-decode
-comparison runs; existing tests enter at `dispatch_value`. The real-host
-fixture in `crates/daemon/tests/support/direct_host.rs` (`FixtureProcess`,
-used by `direct_host.rs:48-70`) reaches `Handler::handle` over the ring and is
-the seam for a handler-level test.
-Guarantee: The pre-dispatch admission chain charges resident bytes before any
-typed decode, never waits, and refuses without a dispatch-side effect.
+Exercised: partial - the
+[ring test](evidence/admission-chain-charges-before-decode-and-refuses-effect-free.md#metered-decode-evidence)
+drives `Handler::handle` through the direct-host fixture with a body over
+each cap and one whose footprint exceeds the scratch pool, asserts one
+`invalid_params` terminal each and no pass trace or store row for the session;
+the effect test drives a permanent and a transient refusal through
+`dispatch_body` and asserts no ticket, route channel, or store row; the lane
+test shows both lanes counting one footprint and refusing the same bodies; the
+meter and footprint tests cover the charge magnitude and the peak test covers
+the decode's heap on both lanes; no ring-level `queue_full` runs.
+Guarantee: The admission chain charges resident bytes for every value before
+that value is built, never waits, and refuses without a dispatch-side effect.
 Check: `always` - For every request entering [`Handler::handle`][handle]: the
-[byte cap][bytecap] and [footprint scan][footprint] precede the parse charge,
-which is a non-awaiting `try_charge` on the host [scratch pool][pools] and
-never on the ingress pool; the terminal is `invalid_params` exactly when the
-body exceeds its cap or `footprint > resident_capacity()`
-([`request_too_large_error`][toolarge]) and `queue_full` exactly when the
-footprint fits but the pool is short ([`resident_capacity_error`][queuefull]);
-a refused request creates no [`TransformDispatchTicket`][ticket], changes no
-`transform_route_channels`, prompt freeze, page staging, or store state, and
-releases any taken charge when the future ends; and for every admitted
-request `charge >= nodes * size_of::<Value>() * VALUE_NODE_SLACK *
-RETAINED_NODE_COPIES + string_bytes * RETAINED_STRING_COPIES +
-VALUE_ENVELOPE_BYTES`, with at most
-[`RETAINED_STRING_COPIES`][copies] owned copies of each string block
-retained by the typed decode, observed structurally (the `Value` node, the
-`WireMessage` `original`, and the `WireBlock` `original` for one known
-block) or through a counting allocator, since the decoded type exposes no
-copy count. `always` because every request evaluates this
-chain and the refusal set is defined by code position, not an observed
-defect.
+[byte cap][bytecap] precedes every decode; every decode that builds values
+from the body runs through the resident meter (the entry probe builds none),
+which charges the host [scratch pool][pools] and never the ingress pool with a
+non-awaiting `try_charge` as the footprint grows, before the value that grew it
+is handed to the decode's visitor, serde_json's scratch buffer for one escaped
+string excepted; the
+terminal is `invalid_params` exactly when the body exceeds its cap or its
+footprint exceeds `resident_capacity()` ([`request_too_large_error`][toolarge])
+and `queue_full` exactly when the footprint fits but the pool is short
+([`resident_capacity_error`][queuefull]), a transient refusal being classed by
+the whole body's footprint counted without charging; a refused request creates
+no [`TransformDispatchTicket`][ticket], changes no `transform_route_channels`,
+prompt freeze, page staging, or store state, and releases every held charge
+when the future ends; and for every admitted request the held charge is at
+least `nodes * size_of::<Value>() * VALUE_NODE_SLACK * RETAINED_NODE_COPIES +
+string_bytes * RETAINED_STRING_COPIES + VALUE_ENVELOPE_BYTES` over the parsed
+values, with at most [`RETAINED_STRING_COPIES`][copies] owned copies of each
+string block retained by the typed decode, observed structurally or through a
+counting allocator. A malformed body is refused by the decode that fails on
+it unless the footprint of its well-formed prefix crosses the capacity first.
+`always` because every request evaluates this chain and the refusal set is
+defined by code position, not an observed defect.
 Fault/timing angle: A fused decode-and-charge design starts the typed decode
 before the admission decision and reaches the post-parse side effects at
 [`transform_route_channels`][routechan] and
@@ -185,8 +193,9 @@ arithmetic are source-verified. The audit's `request_too_large` code exists
 only in the [direct-host fixture control channel][fixture]; the handler
 emits `invalid_params`, which matches [§6.3][wire63].
 Existing check: [Ingress checks](existing-checks.md#ingress-admission-and-decode)
-cover the cap, the footprint arithmetic, and pool splitting as pure
-functions; no handler-level refusal check is found; all unaudited.
+cover the cap, the footprint arithmetic, the meter, both lanes under a short
+pool, and pool splitting; the ring test covers the handler-level refusals
+through the direct-host fixture; all unaudited.
 Impact: A refused body can leave route or staging state behind, or an
 admitted body can hold more resident bytes than it charged.
 Open questions:
@@ -207,7 +216,7 @@ Reachability: default-production
 Status: active
 Exercised: partial - the
 [entry differential](evidence/route-and-typed-decode-are-independent-of-entry-path.md#direct-decode-evidence)
-runs a corpus of 33 body shapes through the body entry and the tree dispatch,
+runs a corpus of 34 body shapes through the body entry and the tree dispatch,
 asserts one outcome, and pins which bodies took the direct lane; the decode
 differential pins the acceptance differences to repeated keys and to
 derive-lenient shapes under an ignored field, both kept off the direct lane,
@@ -282,13 +291,19 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: not yet - No pool-pressure witness is recorded.
+Exercised: partial - the
+[drained-pool test](evidence/scratch-pool-shortfall-reaches-the-parse-reservation.md#shortfall-witness-evidence)
+holds half of a real byte budget while a fitting body decodes, reads the
+meter's `ShortfallMarker` with both preconditions, maps it to `queue_full`, and
+serves the body once the holder releases; the witness is a `reachable` one for the
+meter, constructed with a held charge rather than a concurrent request, and no
+ring-level shortfall runs.
 Guarantee: An ingress-preservation campaign constructs the transient
 shortfall that separates `queue_full` from `invalid_params` at least once.
-Check: `sometimes` - At entry to [`try_reserve_resident`][reserve] for some
-request, `footprint <= resident_capacity()` and the scratch pool's available
-bytes are below `footprint` because concurrent admitted parses hold them;
-the marker records both preconditions and the concurrent holders, not the
+Check: `sometimes` - At some charge the resident meter makes for some
+request, the footprint reached `<= resident_capacity()` and the scratch pool
+does not have the bytes because other holders have them; the marker records
+both preconditions, the footprint reached, and the bytes held, not the
 handler's outcome.
 Fault/timing angle: With one request at a time the pool is never short, so
 the `queue_full` arm and its release path are never evaluated.
@@ -2530,16 +2545,16 @@ evaluation of this area and its disposition are recorded in
 [wire751]: ../../../host-wire-protocol.md#L440
 [wire77]: ../../../host-wire-protocol.md#L666
 
-[handle]: ../../../../crates/daemon/src/lib.rs#L11805-L11827
-[bytecap]: ../../../../crates/daemon/src/lib.rs#L15472-L15488
-[footprint]: ../../../../crates/daemon/src/lib.rs#L15427-L15455
-[copies]: ../../../../crates/daemon/src/lib.rs#L15408-L15417
-[toolarge]: ../../../../crates/daemon/src/lib.rs#L15458-L15463
-[queuefull]: ../../../../crates/daemon/src/lib.rs#L15465-L15470
-[probe]: ../../../../crates/daemon/src/lib.rs#L15311-L15323
-[class]: ../../../../crates/daemon/src/lib.rs#L15395-L15406
-[dispatch]: ../../../../crates/daemon/src/lib.rs#L12558-L12652
-[pagefields]: ../../../../crates/daemon/src/lib.rs#L12654-L12658
+[handle]: ../../../../crates/daemon/src/lib.rs#L11898-L11913
+[bytecap]: ../../../../crates/daemon/src/lib.rs#L15735-L15756
+[footprint]: ../../../../crates/daemon/src/metered_decode.rs#L212-L269
+[copies]: ../../../../crates/daemon/src/metered_decode.rs#L57
+[toolarge]: ../../../../crates/daemon/src/lib.rs#L15718-L15723
+[queuefull]: ../../../../crates/daemon/src/lib.rs#L15725-L15730
+[probe]: ../../../../crates/daemon/src/lib.rs#L15460-L15464
+[class]: ../../../../crates/daemon/src/lib.rs#L15568-L15575
+[dispatch]: ../../../../crates/daemon/src/lib.rs#L12689-L12782
+[pagefields]: ../../../../crates/daemon/src/lib.rs#L12785-L12789
 [unrecognized]: ../../../../crates/daemon/src/lib.rs#L12674-L12698
 [pageconst]: ../../../../crates/daemon/src/lib.rs#L745-L752
 [freeze]: ../../../../crates/daemon/src/lib.rs#L8036-L8037
@@ -2547,7 +2562,7 @@ evaluation of this area and its disposition are recorded in
 [accept]: ../../../../crates/daemon/src/lib.rs#L8066
 [ticket]: ../../../../crates/daemon/src/lib.rs#L574-L631
 [pageapply]: ../../../../crates/daemon/src/lib.rs#L9425-L9433
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12484-L12499
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12579-L12586
 [wirestruct]: ../../../../crates/daemon/src/transform.rs#L801-L972
 [wiremsg]: ../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../crates/memory-store/src/lib.rs#L250-L264

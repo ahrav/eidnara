@@ -428,3 +428,136 @@ fn cargo_metadata_has_only_the_eidnara_host_binary() {
         .collect();
     assert_eq!(bins, ["eidnara-host"]);
 }
+
+/// A body the handler refuses at the byte cap or at the resident charge ends in one error
+/// terminal with the code the refusal always carried, and the session it named shows no
+/// trace of it: no pass was received and no row was written. The same route then serves a
+/// transform.
+#[tokio::test]
+async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
+    let fixture = FixtureProcess::start();
+    let client = fixture.client().await;
+    let session = "direct-refusals";
+    let primary = fixture
+        .open_route(&client, "context", TargetKind::ToolProvider, session)
+        .await;
+    wait_for_store(&client, primary, session).await;
+
+    let refuse = |body: Vec<u8>| {
+        let client = &client;
+        async move {
+            let error = client
+                .request(
+                    primary,
+                    body,
+                    host_runtime::RequestOptions {
+                        timeout: BUDGET,
+                        ..host_runtime::RequestOptions::default()
+                    },
+                )
+                .await
+                .expect_err("the body is refused");
+            (error.code().to_owned(), error.message().to_owned())
+        }
+    };
+
+    // Over the facade cap on a facade route.
+    let padded = format!(
+        r#"{{"kind":"status","session_id":"{session}","pad":"{}"}}"#,
+        "x".repeat(1024 * 1024)
+    );
+    let (code, message) = refuse(padded.into_bytes()).await;
+    assert_eq!(code, "host.invalid_params", "{message}");
+
+    // Over the transform cap on the transform route.
+    let padded = format!(
+        r#"{{"kind":"transform","session_id":"{session}","pad":"{}"}}"#,
+        "x".repeat(32 * 1024 * 1024)
+    );
+    let (code, message) = refuse(padded.into_bytes()).await;
+    assert_eq!(code, "host.invalid_params", "{message}");
+
+    // Under both caps, so only the resident charge can refuse them: two million values at
+    // the node charge is far above the scratch pool's capacity. The first body carries a page
+    // key, so it takes the tree lane and the `Value` decode refuses it; the second is a
+    // complete unpaged transform request whose values sit under an ignored field, so the
+    // direct decode refuses it. A shape refusal would be `host.bad_request`.
+    let dense_values = || {
+        let mut values = b"[0".to_vec();
+        for _ in 1..2_000_000 {
+            values.extend_from_slice(b",0");
+        }
+        values.push(b']');
+        values
+    };
+    let mut dense = format!(
+        r#"{{"kind":"transform","session_id":"{session}","transform_page_id":"pages","x":"#
+    )
+    .into_bytes();
+    dense.extend_from_slice(&dense_values());
+    dense.push(b'}');
+    let (code, message) = refuse(dense).await;
+    assert_eq!(code, "host.invalid_params", "{message}");
+    let mut complete = format!(
+        r#"{{"kind":"transform","v":2,"session_id":"{session}","serializer_profile":"owned-llmrunner","render_config":"direct-host-config","messages":[],"junk":"#
+    )
+    .into_bytes();
+    complete.extend_from_slice(&dense_values());
+    complete.push(b'}');
+    let (code, message) = refuse(complete).await;
+    assert_eq!(code, "host.invalid_params", "{message}");
+
+    let status = request_json(
+        &client,
+        primary,
+        json!({"kind": "status", "session_id": session}),
+    )
+    .await;
+    assert!(
+        status["pass_trace"].is_null(),
+        "a refused body received no pass: {}",
+        status["pass_trace"]
+    );
+    assert!(status["row_version"].is_null(), "{}", status["row_version"]);
+
+    let response = request_json(
+        &client,
+        primary,
+        json!({
+            "kind": "transform",
+            "v": 2,
+            "session_id": session,
+            "serializer_profile": "owned-llmrunner",
+            "render_config": "direct-host-config",
+            "messages": [{
+                "mid": "m1",
+                "ordinal": 1,
+                "ck": {
+                    "role": "user",
+                    "content": [{"kind": {"type": "text", "text": "after the refusals"}}],
+                    "meta": {"harness_id": "m1"}
+                }
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(response["status"], "ok", "{response}");
+    let status = request_json(
+        &client,
+        primary,
+        json!({"kind": "status", "session_id": session}),
+    )
+    .await;
+    assert_eq!(
+        status["pass_trace"]["receive_count"], 1,
+        "{}",
+        status["pass_trace"]
+    );
+
+    client
+        .close_route(primary)
+        .await
+        .expect("primary route closes");
+    client.close().await.expect("managed client closes");
+    fixture.shutdown();
+}

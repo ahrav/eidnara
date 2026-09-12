@@ -173,13 +173,14 @@ which decodes to the same value wherever the typed decode succeeds. The
 `handler_total` timing starts before the typed decode on both lanes; on the
 direct lane that decode reads the body bytes, so the direct lane's
 `handler_total` includes the byte parse that the tree lane's `Value` parse
-precedes. The [byte-scan bound][copies-live] is retained; the direct decode
-retains at most what the tree lane retains, and the [peak test][t-peak]
-measures it below the tree decode's peak on the dense native corpus.
+precedes. The direct decode retains at most what the tree lane retains
+([one node-copy count][copies-live] covers both lanes), and the
+[peak test][t-peak] measures it below the tree decode's peak on the dense
+native corpus.
 [`handle_transform_for_test`][test-entry] serializes its request and enters at
 the body branch, so the crate's transform tests run the direct lane.
 
-The [corpus][t-corpus] holds 33 bodies: a valid body under `kind` and under
+The [corpus][t-corpus] holds 34 bodies: a valid body under `kind` and under
 `method`, an unknown top-level field, `null` on an `Option` and on a defaulted
 field, a wrong type, a float, an exponent, a negative and an above-`u64`
 integer on integer fields, `-0` on a float field, a repeated top-level key, a
@@ -187,15 +188,15 @@ repeated discriminator, a repeated nested key, a missing required field, a
 missing and an unknown serializer profile, a `null` and a lone page field, a
 non-string and an overlong `method` beside `kind`, another route, trailing
 bytes, malformed JSON, array, string and empty bodies, `messages` as an object,
-an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
+twenty thousand values under an ignored field, an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
 field, and nesting at and one past the tree's depth limit. The
 [entry differential][t-entry-diff] runs every body through `dispatch_body` and
 through the tree dispatch on two identical handlers and asserts the same
 response with the timing block removed, or the same code and message; it pins
-the nine bodies that took the direct lane and asserts the valid body was
+the ten bodies that took the direct lane and asserts the valid body was
 served. The [decode differential][t-decode-diff] asserts for every body that a
 probe implies the tree parses it, that where both decodes accept a body they
-produce the same request (pinning the thirteen such bodies, with `-0` compared
+produce the same request (pinning the fourteen such bodies, with `-0` compared
 by bit pattern), pins the bodies only the tree accepts to the three
 repeated-key shapes (the derive refuses a repeated field; the handler's
 fallback carries them), pins the bodies only the direct decode accepts to the
@@ -229,28 +230,28 @@ generated the 19-case serialized corpus and passed
 the direct-host fixture, which compares the paged final `messages` bytes to the
 one-slice control.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11892-L11913
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12649-L12669
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15442-L15446
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15461-L15495
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15506-L15531
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11898-L11913
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12653-L12687
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15460-L15464
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15479-L15513
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15524-L15549
 [skipped]: ../../../../../crates/daemon/src/lib.rs#L15540-L15590
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15594-L15599
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15609-L15616
-[class-probe]: ../../../../../crates/daemon/src/lib.rs#L15727-L15732
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15835-L15856
-[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7964-L7976
-[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7980-L8000
-[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8005
-[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9513
-[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15753
-[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8588-L8598
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19344-L19389
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19392-L19524
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19544-L19662
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19685-L19723
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19262-L19341
-[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15553-L15558
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15568-L15575
+[class-probe]: ../../../../../crates/daemon/src/lib.rs#L15686-L15691
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15735-L15756
+[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7968-L7980
+[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7984-L8004
+[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8009
+[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9519
+[copies-live]: ../../../../../crates/daemon/src/metered_decode.rs#L38
+[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8592-L8604
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19245-L19290
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19293-L19430
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19450-L19569
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19592-L19633
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19163-L19242
+[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

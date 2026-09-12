@@ -26,6 +26,7 @@ pub mod m0_compose;
 pub(crate) mod m1_compose;
 pub(crate) mod memory_render;
 pub mod memory_tool;
+pub mod metered_decode;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;
@@ -97,6 +98,9 @@ use storage::{Isolation, StorageBackend, StorageDescriptor, sqlite_store_path};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
+use crate::metered_decode::{
+    DecodeFailure, Refusal, ResidentMeter, SkippedValue, decode_metered, footprint_of,
+};
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
 use classify::{
@@ -8591,8 +8595,10 @@ impl Handler {
         request: Value,
     ) -> PreparedOutcome {
         let body = serde_json::to_vec(&request).unwrap();
+        let pool = tests::TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
         let (_, outcome) = self
-            .dispatch_body(route, &body, probe_request(&body).as_ref())
+            .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
             .await;
         outcome
     }
@@ -11897,18 +11903,12 @@ impl CompositeComponent for Handler {
         if let Err(outcome) = enforce_request_byte_cap(body, probe.as_ref()) {
             return settle_prepared(&ctx, outcome).await;
         }
-        let Some(footprint) = value_footprint_bound(body) else {
-            return settle_prepared(&ctx, request_too_large_error()).await;
-        };
-        let _parse_charge = match ctx.try_reserve_resident(footprint) {
-            Some(charge) => charge,
-            None if footprint > ctx.resident_capacity() => {
-                // A footprint above `resident_capacity()` cannot be admitted by draining.
-                return settle_prepared(&ctx, request_too_large_error()).await;
-            }
-            None => return settle_prepared(&ctx, resident_capacity_error()).await,
-        };
-        let (_, outcome) = self.dispatch_body(ctx.route, body, probe.as_ref()).await;
+        // The decode charges the scratch pool as it builds values; the meter holds the charges
+        // until the response has settled.
+        let meter = ResidentMeter::new(&ctx);
+        let (_, outcome) = self
+            .dispatch_body(ctx.route, body, probe.as_ref(), &meter)
+            .await;
         settle_prepared(&ctx, outcome).await
     }
 
@@ -12642,26 +12642,44 @@ impl Handler {
         *self.store.lock().expect("store slot mutex") = Some(store);
     }
 
-    /// Routes one admitted body and reports the lane it took. An unpaged transform body
-    /// decodes typed straight from its bytes. Every other body, and a transform body the
-    /// typed decode refuses, decodes through the `Value` tree, so a refusal is always the
-    /// one the tree decode produces and the two lanes cannot disagree on it.
+    /// Routes one body whose byte cap has passed and reports the lane it took. Every decode
+    /// is charged against `meter`, and a refused charge ends the request in the lane that saw
+    /// it, before any dispatch runs, so a refusal has no dispatch-side effect; both lanes count
+    /// the same footprint for the same bytes, so they refuse the same bodies. An unpaged
+    /// transform body decodes typed straight from its bytes. Every other body, and a transform
+    /// body the typed decode cannot decode, decodes through the `Value` tree, so a decode
+    /// error is always the one the tree decode produces and the two lanes cannot disagree on
+    /// it.
     async fn dispatch_body(
         &self,
         channel: RouteHandle,
         body: &[u8],
         probe: Option<&RequestEntryProbe>,
+        meter: &ResidentMeter<'_>,
     ) -> (BodyLane, PreparedOutcome) {
         if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
             let decode_started_at = Instant::now();
-            if let Ok(parsed) = serde_json::from_slice::<TransformRequest>(body) {
-                let outcome = self
-                    .handle_transform_direct(channel, parsed, decode_started_at)
-                    .await;
-                return (BodyLane::Direct, outcome);
+            match decode_metered::<TransformRequest>(body, meter) {
+                Ok(parsed) => {
+                    let outcome = self
+                        .handle_transform_direct(channel, parsed, decode_started_at)
+                        .await;
+                    return (BodyLane::Direct, outcome);
+                }
+                Err(DecodeFailure::Refused(refusal)) => {
+                    return (BodyLane::Direct, resident_refusal(refusal, body, meter));
+                }
+                // The tree decode reuses the bytes the failed decode holds.
+                Err(DecodeFailure::Invalid(_)) => meter.restart(),
             }
         }
-        let request = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+        let request = match decode_metered::<Value>(body, meter) {
+            Ok(request) => request,
+            Err(DecodeFailure::Refused(refusal)) => {
+                return (BodyLane::Tree, resident_refusal(refusal, body, meter));
+            }
+            Err(DecodeFailure::Invalid(_)) => Value::Null,
+        };
         let outcome = self
             .dispatch_value_with_inbound_bytes(channel, request, Some(body.len()))
             .await;
@@ -15530,65 +15548,6 @@ impl<'de> Deserialize<'de> for ProbeKey {
     }
 }
 
-/// Skips one value through `deserialize_any`, so every check the deserializer applies to a
-/// `Value` parse applies here: the nesting limit, number range, string escapes, and UTF-8.
-/// `IgnoredAny` is not used because serde_json skips it without those checks, and a body
-/// the tree decode refuses would then probe and reach the direct lane. The cost is the
-/// deserializer's scratch buffer for one escaped string at a time, released with the probe.
-struct SkippedValue;
-
-impl<'de> Deserialize<'de> for SkippedValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::{MapAccess, SeqAccess, Visitor};
-
-        struct SkipVisitor;
-
-        impl<'de> Visitor<'de> for SkipVisitor {
-            type Value = SkippedValue;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("any JSON value")
-            }
-
-            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
-            }
-
-            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
-            }
-
-            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
-            }
-
-            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
-            }
-
-            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(SkippedValue)
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                while seq.next_element::<SkippedValue>()?.is_some() {}
-                Ok(SkippedValue)
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                while map.next_entry::<SkippedValue, SkippedValue>()?.is_some() {}
-                Ok(SkippedValue)
-            }
-        }
-
-        deserializer.deserialize_any(SkipVisitor)
-    }
-}
-
 impl RequestEntryProbe {
     /// The discriminator dispatch resolves: `method` when it is a string, else `kind`.
     fn route(&self) -> &RouteName {
@@ -15744,77 +15703,18 @@ impl RequestClassProbe {
     }
 }
 
-/// The estimate doubles counted node storage for `Vec` and map growth.
-const VALUE_NODE_SLACK: usize = 2;
-
-/// The decoded `Value` tree and the typed request coexist during `serde_json::from_value` on
-/// the tree-decode lane; the direct decode of an unpaged transform body retains at most as
-/// much, so one bound covers both lanes.
-const RETAINED_NODE_COPIES: usize = 2;
-
-const VALUE_NODE_CHARGE_BYTES: usize = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
-
-/// `native_messages` stores `Arc<Value>` handles; their slack charge plus the `Arc` allocation
-/// must not exceed the typed-request node charge.
-const _: () = assert!(
-    std::mem::size_of::<Arc<Value>>() * VALUE_NODE_SLACK
-        + retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-        + std::mem::size_of::<Value>()
-        <= VALUE_NODE_CHARGE_BYTES
-);
-
-/// The fixed headroom covers allocations that do not scale with the body.
-const VALUE_ENVELOPE_BYTES: usize = 4096;
-
-/// Each string byte is charged this many times: the decoded `Value`, plus the `original`
-/// JSON that `WireMessage` retains for lossless pass-through, plus the `original` that each
-/// `WireBlock` retains, all hold their own copy of a block's text at the same time.
-const RETAINED_STRING_COPIES: usize = 3;
-
-/// The function returns an upper bound on heap used by a `serde_json::Value` tree decoded from `body`.
-/// The function returns `None` on arithmetic overflow; callers treat that result as unsatisfiable.
-///
-/// A document has at most one root node plus one node per outside-string comma.
-/// Each outside-string colon adds at most one object-member value node.
-/// Those counts bound the node count without building the tree.
-/// String bytes are added separately because each string becomes an owned `String`, and are
-/// multiplied by [`RETAINED_STRING_COPIES`] for the pass-through copies typed decoding keeps.
-fn value_footprint_bound(body: &[u8]) -> Option<usize> {
-    let mut nodes: usize = 1;
-    let mut string_bytes: usize = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    for &byte in body {
-        if in_string {
-            string_bytes += 1;
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b',' | b':' => nodes += 1,
-            _ => {}
-        }
+/// The outcome for a decode the meter refused. A footprint the pool can never hold is too
+/// large. A transient refusal is classed by the body's whole footprint, counted without
+/// charging: a body that would exceed the capacity anyway is too large, one that fits found
+/// the pool held by other requests.
+fn resident_refusal(refusal: Refusal, body: &[u8], meter: &ResidentMeter<'_>) -> PreparedOutcome {
+    match refusal {
+        Refusal::Permanent => request_too_large_error(),
+        Refusal::Transient if footprint_of(body) > meter.capacity() => request_too_large_error(),
+        Refusal::Transient => resident_capacity_error(),
     }
-    nodes
-        .checked_mul(VALUE_NODE_CHARGE_BYTES)?
-        .checked_mul(RETAINED_NODE_COPIES)?
-        .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
-        .checked_add(VALUE_ENVELOPE_BYTES)
 }
 
-#[cfg(feature = "test-support")]
-pub fn value_footprint_bound_for_test(body: &[u8]) -> Option<usize> {
-    value_footprint_bound(body)
-}
-
-/// The failure is permanent when the tree cannot fit the host's resident ceiling at any load.
 fn request_too_large_error() -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "invalid_params".to_string(),
@@ -17417,6 +17317,7 @@ fn test_route(channel_id: u16) -> RouteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metered_decode::{ResidentReserve, shortfall_count};
     use std::collections::{HashMap, VecDeque};
 
     use std::sync::{
@@ -19490,6 +19391,11 @@ mod tests {
             ("string body", b"\"transform\"".to_vec()),
             ("empty body", Vec::new()),
             ("messages as an object", valid(r#","messages":{}"#)),
+            // Many values under an ignored field: the derive skips them, the tree builds them.
+            (
+                "dense unknown field",
+                valid(&format!(r#","junk":[{}]"#, "0,".repeat(20_000) + "0")),
+            ),
             // Shapes the derive skips without checking under an ignored field; the tree refuses each.
             (
                 "number out of range under an ignored field",
@@ -19590,6 +19496,7 @@ mod tests {
                 "non-string discriminator with kind",
                 "overlong method beside kind",
                 "other route",
+                "dense unknown field",
                 "nesting at the tree limit",
             ],
             "the bodies both decodes accept"
@@ -19689,8 +19596,10 @@ mod tests {
                 handler_with_store(Arc::new(ProducerState::default()), default_test_config());
             let (tree, _store, _dir, _project) =
                 handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
             let (lane, through_body) = direct
-                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref())
+                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
                 .await;
             let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let through_tree = tree
@@ -19716,76 +19625,286 @@ mod tests {
                 "missing serializer profile",
                 "unknown serializer profile",
                 "non-string discriminator with kind",
+                "dense unknown field",
                 "nesting at the tree limit",
             ],
             "the bodies that decode typed from their bytes; the rest take the tree lane"
         );
     }
 
-    #[test]
-    fn value_footprint_counts_nodes_outside_strings_only() {
-        let quoted = br#"{"a":"x,y,z:w,,,::"}"#;
-        let bare = br#"{"a":1,"b":2,"c":3}"#;
-        assert!(
-            value_footprint_bound(quoted).unwrap() < value_footprint_bound(bare).unwrap(),
-            "commas and colons inside a string must not count as value separators"
-        );
+    /// Both lanes count the same footprint for the same bytes, so a pool that is one byte
+    /// short of a body refuses it on either lane with one code, and a pool that just fits
+    /// admits it on either lane.
+    #[tokio::test(flavor = "current_thread")]
+    async fn both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies() {
+        for (name, body) in transform_decode_corpus() {
+            let footprint = footprint_of(&body);
+            if footprint == 0 {
+                continue;
+            }
+            for capacity in [footprint - 1, footprint] {
+                let (direct, _store, _dir, _project) =
+                    handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+                let (tree, _store, _dir, _project) =
+                    handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+                let direct_pool = TestPool::with_capacity(capacity);
+                let direct_meter = ResidentMeter::new(&direct_pool);
+                let (_, through_body) = direct
+                    .dispatch_body(
+                        test_route(7),
+                        &body,
+                        probe_request(&body).as_ref(),
+                        &direct_meter,
+                    )
+                    .await;
+                let tree_pool = TestPool::with_capacity(capacity);
+                let tree_meter = ResidentMeter::new(&tree_pool);
+                let (_, through_tree) = tree
+                    .dispatch_body(test_route(7), &body, None, &tree_meter)
+                    .await;
+                let through_body = comparable_outcome(through_body);
+                assert_eq!(
+                    through_body,
+                    comparable_outcome(through_tree),
+                    "{name} at capacity {capacity}"
+                );
+                assert_eq!(
+                    direct_meter.needed(),
+                    tree_meter.needed(),
+                    "{name}: the lanes count one footprint"
+                );
+                if capacity < footprint {
+                    assert_eq!(
+                        through_body,
+                        comparable_outcome(request_too_large_error()),
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
 
-        // An escaped quote does not end the string, so the rest stays inside it.
-        let escaped = br#"{"a":"he said \"x,y,z\" ok"}"#;
-        let node_cost = VALUE_NODE_CHARGE_BYTES * RETAINED_NODE_COPIES;
-        assert!(
-            value_footprint_bound(escaped).unwrap()
-                < VALUE_ENVELOPE_BYTES + RETAINED_STRING_COPIES * escaped.len() + 4 * node_cost,
-            "an escaped quote must not drop the scan out of the string"
-        );
+    /// A scratch pool for tests: a real byte budget with a known capacity.
+    pub(crate) struct TestPool {
+        budget: host_runtime::wire::ByteBudget,
+        capacity: usize,
+    }
+
+    impl TestPool {
+        pub(crate) fn with_capacity(capacity: usize) -> Self {
+            Self {
+                budget: host_runtime::wire::ByteBudget::new(capacity as u64),
+                capacity,
+            }
+        }
+
+        /// Room for any body a test sends.
+        pub(crate) fn unbounded() -> Self {
+            Self::with_capacity(1 << 30)
+        }
+
+        /// Holds `bytes` as another request would, until the charge drops.
+        fn hold(&self, bytes: usize) -> host_runtime::wire::ByteCharge {
+            self.budget
+                .try_charge(bytes)
+                .expect("the pool has the bytes")
+        }
+    }
+
+    impl ResidentReserve for TestPool {
+        fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+            self.budget.try_charge(bytes)
+        }
+
+        fn capacity(&self) -> usize {
+            self.capacity
+        }
     }
 
     #[test]
-    fn value_footprint_charges_every_retained_copy_of_string_bytes() {
-        // A wire message keeps its original JSON and each block keeps its own, so a large text
-        // block occupies several copies after typed decoding; admission must reserve for all.
+    fn decode_footprint_counts_values_and_retained_string_copies() {
+        // Separators inside a string are text, not values.
+        let quoted = br#"{"a":"x,y,z:w,,,::"}"#;
+        let bare = br#"{"a":1,"b":2,"c":3}"#;
+        assert!(
+            footprint_of(quoted) < footprint_of(bare),
+            "commas and colons inside a string must not count as values"
+        );
+        // A large text block is charged for every copy the typed decode retains.
         let text = "t".repeat(1 << 20);
         let body = format!(
             r#"{{"kind":"transform","messages":[{{"role":"user","content":[{{"kind":{{"type":"text","text":"{text}"}}}}]}}]}}"#
         );
-        let bound = value_footprint_bound(body.as_bytes()).unwrap();
         assert!(
-            bound >= RETAINED_STRING_COPIES * text.len(),
-            "bound {bound} must cover {RETAINED_STRING_COPIES} copies of {} string bytes",
+            footprint_of(body.as_bytes()) >= 3 * text.len(),
+            "the footprint must cover three copies of {} string bytes",
             text.len()
         );
-    }
-
-    #[test]
-    fn scalar_dense_bodies_bound_far_above_their_wire_size() {
-        // Each two wire bytes can produce one `Value` node, so node-count limits must not derive from ingress body size.
-        // charge covered.
-        let dense: Vec<u8> = {
-            let mut body = Vec::from(b"[1".as_slice());
-            for _ in 0..10_000 {
-                body.extend_from_slice(b",1");
-            }
-            body.push(b']');
-            body
-        };
-        let bound = value_footprint_bound(&dense).expect("bound fits usize");
-        assert!(
-            bound > dense.len() * 8,
-            "a scalar-dense body must bound far above its wire size, got {bound} for {} bytes",
-            dense.len()
-        );
-
-        // Bytes inside strings do not add Value-node cost; they are charged only as the
-        // retained string copies.
+        // Each two wire bytes can produce one value, so the footprint of a scalar-dense body
+        // is far above its wire size, and string bytes are not charged as values.
+        let mut dense = Vec::from(b"[1".as_slice());
+        for _ in 0..10_000 {
+            dense.extend_from_slice(b",1");
+        }
+        dense.push(b']');
+        assert!(footprint_of(&dense) > dense.len() * 8);
         let mut stringy = Vec::from(b"[\"".as_slice());
         stringy.extend(std::iter::repeat_n(b'x', dense.len()));
         stringy.extend_from_slice(b"\"]");
-        let stringy_bound = value_footprint_bound(&stringy).expect("bound fits usize");
-        assert!(
-            stringy_bound < stringy.len() * (RETAINED_STRING_COPIES + 1),
-            "string bytes must not be charged as nodes, got {stringy_bound}"
+        assert!(footprint_of(&stringy) < stringy.len() * 4);
+        // A body that stops decoding partway counts the part that decoded.
+        let cut = &dense[..dense.len() / 2];
+        assert!(footprint_of(cut) > cut.len() * 8);
+        assert!(footprint_of(cut) < footprint_of(&dense));
+    }
+
+    /// The meter charges as values are visited: a decode that fits holds at least its footprint
+    /// and at most one step more; a footprint above the capacity is refused before the pool is
+    /// asked, and the decode stops there.
+    #[test]
+    fn metered_decode_charges_incrementally_and_refuses_above_capacity() {
+        let body = serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap();
+        let footprint = footprint_of(&body);
+
+        let pool = TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
+        let decoded: Value = decode_metered(&body, &meter).unwrap();
+        assert_eq!(decoded["kind"], "transform");
+        assert_eq!(meter.needed(), footprint);
+        assert!(meter.charged() >= footprint);
+        assert!(meter.charged() < footprint + 2 * 1024 * 1024);
+        assert_eq!(meter.refusal(), None);
+
+        let small = TestPool::with_capacity(footprint - 1);
+        let meter = ResidentMeter::new(&small);
+        let failure = decode_metered::<Value>(&body, &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Permanent)
+        ));
+        assert_eq!(meter.charged(), 0, "a refused decode releases at once");
+        assert!(meter.needed() > small.capacity());
+        assert!(meter.needed() <= footprint);
+        assert_eq!(meter.shortfall(), None);
+
+        // A second decode of the same body reuses the held bytes.
+        let meter = ResidentMeter::new(&pool);
+        assert!(decode_metered::<TransformRequest>(b"{\"kind\":\"transform\"}", &meter).is_err());
+        let held = meter.charged();
+        meter.restart();
+        let decoded: Value = decode_metered(b"{\"kind\":\"transform\"}", &meter).unwrap();
+        assert_eq!(decoded["kind"], "transform");
+        assert_eq!(meter.charged(), held);
+    }
+
+    /// The pool-drain witness for the shortfall path: a body that fits the capacity finds the
+    /// pool held by another request, is refused as transient, and is served once the holder
+    /// releases.
+    #[test]
+    fn a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall() {
+        let body = serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap();
+        let footprint = footprint_of(&body);
+        let pool = TestPool::with_capacity(footprint + 4096);
+        let before = shortfall_count();
+
+        let holder = pool.hold(footprint / 2);
+        let meter = ResidentMeter::new(&pool);
+        let failure = decode_metered::<Value>(&body, &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Transient)
+        ));
+        assert!(meter.needed() <= pool.capacity());
+        assert_eq!(meter.charged(), 0, "a refused decode releases at once");
+        assert!(shortfall_count() > before);
+        let marker = meter.shortfall().unwrap();
+        assert!(marker.needed <= marker.capacity);
+        assert!(marker.charged < marker.needed);
+        assert_eq!(marker.capacity, pool.capacity());
+        assert_eq!(
+            comparable_outcome(resident_refusal(Refusal::Transient, &body, &meter)),
+            comparable_outcome(resident_capacity_error())
         );
+        drop(meter);
+
+        drop(holder);
+        let meter = ResidentMeter::new(&pool);
+        let decoded: Value = decode_metered(&body, &meter).unwrap();
+        assert_eq!(decoded["kind"], "transform");
+
+        // A transient refusal of a body the pool could never hold is classed as too large.
+        let oversized = format!(
+            r#"{{"kind":"transform","x":[{}]}}"#,
+            "1,".repeat(200_000) + "1"
+        );
+        let pool = TestPool::with_capacity(footprint_of(oversized.as_bytes()) - 1);
+        let holder = pool.hold(1);
+        let meter = ResidentMeter::new(&pool);
+        assert_eq!(
+            comparable_outcome(resident_refusal(
+                Refusal::Transient,
+                oversized.as_bytes(),
+                &meter
+            )),
+            comparable_outcome(request_too_large_error())
+        );
+        drop(holder);
+    }
+
+    /// A refused decode ends the request with the prior code and touches nothing the dispatch
+    /// would: no ticket, no route channel, no store row.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refused_decode_has_no_dispatch_side_effect() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let body = serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap();
+        let footprint = footprint_of(&body);
+        let in_flight_before = DISPATCH_HEALTH.in_flight_count.load(Ordering::Relaxed);
+        let started_before = DISPATCH_HEALTH
+            .last_dispatch_started_at_ms
+            .load(Ordering::Relaxed);
+
+        for (pool, expected) in [
+            (
+                TestPool::with_capacity(footprint / 2),
+                request_too_large_error(),
+            ),
+            (
+                TestPool::with_capacity(footprint + 4096),
+                resident_capacity_error(),
+            ),
+        ] {
+            let holder = pool.hold(pool.capacity() / 2);
+            let meter = ResidentMeter::new(&pool);
+            let (_, outcome) = handler
+                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+                .await;
+            assert_eq!(comparable_outcome(outcome), comparable_outcome(expected));
+            drop(meter);
+            drop(holder);
+        }
+        assert_eq!(
+            DISPATCH_HEALTH.in_flight_count.load(Ordering::Relaxed),
+            in_flight_before
+        );
+        assert_eq!(
+            DISPATCH_HEALTH
+                .last_dispatch_started_at_ms
+                .load(Ordering::Relaxed),
+            started_before,
+            "no transform ticket was opened"
+        );
+        assert!(!handler.module_knows_transform_session("ses", &project));
+        assert!(store.load("ses").unwrap().row_version.is_none());
+
+        // The same body with room is served.
+        let pool = TestPool::unbounded();
+        let meter = ResidentMeter::new(&pool);
+        let (lane, outcome) = handler
+            .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+            .await;
+        assert_eq!(lane, BodyLane::Direct);
+        assert_eq!(comparable_outcome(outcome).0, "response");
     }
 
     #[test]
