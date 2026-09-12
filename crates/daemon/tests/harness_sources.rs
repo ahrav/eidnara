@@ -932,6 +932,33 @@ fn unfinished_assistant_text_is_deferred_but_settled_tools_publish() {
     publisher.publish(&user[0], 6000).unwrap();
 }
 
+/// The request digest is persisted in the descriptor receipt under a key that does not change with it, so a stored receipt replays only while the digest's byte layout is the one that wrote it. The pinned value fails this test whenever the layout moves.
+#[test]
+fn publication_receipt_digest_layout_is_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let unit = pi_units(&pi_session(), &pi_user("pi-u1", "hello", 100))
+        .unwrap()
+        .remove(0);
+    corpus.publisher().publish(&unit, NOW).unwrap();
+    let digest: String =
+        Connection::open_with_flags(&corpus.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT request_digest FROM operation_receipts
+             WHERE producer='eidnara-daemon/harness-sources'
+               AND operation_key LIKE 'source-descriptor:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(
+        digest,
+        "9ff69ac08200498a7b8827c97faabbcdfaf323061593dccce0e6ea31668f3723"
+    );
+}
+
 #[test]
 fn publication_receipt_conflicts_on_provider_egress_change() {
     let dir = tempfile::tempdir().unwrap();
@@ -1064,6 +1091,35 @@ fn publication_refuses_another_projects_scope_before_retention() {
             "no artifact or descriptor receipt commits"
         );
         assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
+        assert!(inventory(&corpus).is_empty());
+    }
+}
+
+#[test]
+fn publication_refuses_a_project_unit_without_a_scope_before_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let unscoped = SourcePublisher {
+        scope_id: None,
+        ..corpus.publisher()
+    };
+    let mut units = pi_units(&pi_session(), &pi_user("pi-u1", "no scope", 100)).unwrap();
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200)).unwrap());
+    let tip = corpus.tip();
+    for unit in units {
+        let result = unscoped.publish(&unit, NOW);
+        assert!(
+            matches!(
+                result,
+                Err(PublishError::Kernel {
+                    error: kernel::KernelError::InvalidInput,
+                    evidence: None,
+                })
+            ),
+            "a project-bound unit has no route without a scope: {result:?}"
+        );
+        assert_eq!(corpus.tip(), tip, "nothing committed");
         assert!(inventory(&corpus).is_empty());
     }
 }

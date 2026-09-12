@@ -546,7 +546,7 @@ Current:
 
 ```
 Check: `always` - For every SOFT pass, `pressure_refold` equals the reference
-predicate at [`:4298-4316`][soft-predicate] evaluated with the uncached
+predicate at [`:4309-4327`][soft-predicate] evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
 ```
 
@@ -554,7 +554,7 @@ Replacement:
 
 ```
 Check: `always` - For every SOFT pass, `pressure_refold` equals a frozen copy
-of the predicate at [`:4298-4316`][soft-predicate], kept as a test-only
+of the predicate at [`:4309-4327`][soft-predicate], kept as a test-only
 reference function, evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
 ```
@@ -1077,20 +1077,20 @@ None.
 exceeds the 60 to 120 line target (173 lines including 34 link definitions)
 to keep every verified anchor; the C6 and W13 files are within it.
 
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L11794
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5057
-[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1940-L1979
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L11846
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5100
+[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1951-L1990
 [cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[copies]: ../../../../crates/daemon/src/lib.rs#L15414-L15423
+[copies]: ../../../../crates/daemon/src/lib.rs#L15511-L15514
 [diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
-[fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
+[fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360
 [from-writer]: ../../../../crates/host-runtime/src/handler.rs#L465-L472
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2083-L2100
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4298-L4316
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2094-L2111
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4309-L4327
 [stepper]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L163-L192
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
 [ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
-[tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
+[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
 [walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288

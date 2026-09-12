@@ -49,11 +49,11 @@ follows from it.
   at [`rules.rs:382`][digest-doc] says evaluator semantics are bound by that
   version, and [`evaluator_constants_are_pinned`][t-pinned] trips when a
   hashed table changes. The memory store persists `semantic_digest` and
-  `detector_revision` per scan batch at [`:2357-2392`][ms-digest], and every
+  `detector_revision` per scan batch at [`:2442-2477`][ms-digest], and every
   committing pass prepares `meta` and `core_state` through
   [`content`][ms-content] (C4).
 - Contract versus code: [`default_rules.yaml:12`][rules-radius-doc] describes
-  `radius` as fed to the regex; [`:112`][captures] feeds the whole input.
+  `radius` as fed to the regex; [`:112-128`][captures] feeds the whole input.
 
 ## Failure scenario
 
@@ -144,5 +144,5 @@ has no second side.
 [airtable]: ../../../../../crates/secret-scanner/default_rules.yaml#L297-L309
 [overlap]: ../../../../../crates/context-core/src/redaction.rs#L365-L377
 [edge-margin]: ../../../../../crates/context-core/src/redaction.rs#L380-L385
-[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2070-L2078
-[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2357-L2392
+[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2155-L2163
+[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2442-L2477

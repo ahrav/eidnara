@@ -867,12 +867,7 @@ pub(crate) fn fingerprint(bytes: &str) -> String {
     fingerprint_digest(&content_hash)
 }
 
-/// Returns the projected SHA-256 fingerprint and serialized byte length when
-/// `served` equals the projected wire block.
-///
-/// Projection and divergence attribution both hash
-/// `serde_json::to_string(WireBlock)`. A missing or unequal projected block
-/// returns `None` rather than reusing an unrelated digest.
+/// Reuses a positional receipt only when the projected and served blocks are structurally equal.
 pub(crate) fn fingerprint_from_projected_wire(
     served: &WireBlock,
     projected: Option<&FlatBlock>,
@@ -882,6 +877,29 @@ pub(crate) fn fingerprint_from_projected_wire(
         return None;
     }
     Some((fingerprint_digest(&flat.content_hash), flat.bytes.len()))
+}
+
+/// Hashes block equality identity for request-local fallback candidate selection, not served
+/// bytes. The field list mirrors `WireBlock`'s derived `PartialEq` by hand, so callers
+/// re-check equality on the selected candidate.
+pub(crate) fn block_identity_digest(block: &WireBlock) -> [u8; 32] {
+    use serde_json::ser::{CompactFormatter, Formatter};
+    use std::io::{self, Write};
+
+    struct IdentityFormatter;
+    impl Formatter for IdentityFormatter {
+        fn write_f64<W: ?Sized + Write>(&mut self, writer: &mut W, value: f64) -> io::Result<()> {
+            // Normalize -0.0 to 0.0 because `f64` equality treats both values as equal.
+            CompactFormatter.write_f64(writer, if value == 0.0 { 0.0 } else { value })
+        }
+    }
+
+    let mut writer = Sha256::new();
+    let mut serializer = serde_json::Serializer::with_formatter(&mut writer, IdentityFormatter);
+    (block.kind(), &block.provider_extras, block.original())
+        .serialize(&mut serializer)
+        .expect("CK wire block identity must serialize");
+    writer.finalize().into()
 }
 
 pub fn duplicate_ids(blocks: &[FlatBlock]) -> Option<String> {

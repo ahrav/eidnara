@@ -32,7 +32,7 @@ that keeps uninitialized process memory out of a payload.
 - [`to_vec`][to-vec] allocates `vec![0u8; self.body_len]` at
   [`:331`][to-vec-fill], then for each span takes `bytes.get_mut(cursor..end)`
   and calls `copy_to`; a span that overruns returns `LengthMismatch`, and a sum
-  short of `body_len` returns `LengthMismatch` at [`:344-346`][to-vec]. Every
+  short of `body_len` returns `LengthMismatch` at [`:328-348`][to-vec]. Every
   early `Err` leaves the `Vec` unobservable; the zero-fill makes every byte
   initialized before the first copy.
 - The ring forms spans through [`LeaseSpan::new`][ring-span] with a `SAFETY`

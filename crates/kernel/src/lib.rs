@@ -94,11 +94,12 @@ pub use scope::{
     coerce_version, scope_equivalent, scope_matches, scope_overlaps, scope_subsumes,
 };
 pub use slice::{
-    ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot,
-    DECISION_CHANGE_KINDS, DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec,
-    DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec,
-    ObservationPayload, ObservationRow, ObservationSpec, ObservationWriteOutcome,
-    RetirementOutcome, SliceSnapshot,
+    ALIGNMENT_DEPENDENCY_KIND, APPROVAL_REVOKE_KIND, AlignmentRebuild, AlignmentRow,
+    AlignmentSnapshot, DECISION_CHANGE_KINDS, DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND,
+    DECISION_INSERT_KIND, DECISION_RETIRE_KIND, DecisionEventOutcome, DecisionEventPayload,
+    DecisionEventSpec, DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome,
+    ObservationDependencySpec, ObservationPayload, ObservationRow, ObservationSpec,
+    ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
 };
 pub use source_descriptor::{
     LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,

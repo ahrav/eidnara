@@ -85,6 +85,59 @@ fn signature(seconds: i64) -> gix::actor::Signature {
     }
 }
 
+fn sha1(bytes: &[u8]) -> gix::ObjectId {
+    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+    hasher.update(bytes);
+    hasher.try_finalize().unwrap()
+}
+
+fn zlib(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut writer =
+        gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::DEFAULT);
+    writer.write_all(bytes).unwrap();
+    writer.flush().unwrap();
+    writer.into_inner()
+}
+
+/// The little-endian base-128 integer the delta format uses for its base and result sizes.
+fn leb128(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value & 0x7f) as u8 | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// A pack entry header: three type bits and the low four size bits, then seven size bits per continuation byte.
+fn entry_header(kind: u8, mut size: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut byte = (kind << 4) | (size & 0x0f) as u8;
+    size >>= 4;
+    while size > 0 {
+        out.push(byte | 0x80);
+        byte = (size & 0x7f) as u8;
+        size >>= 7;
+    }
+    out.push(byte);
+    out
+}
+
+/// The big-endian offset-encoding an ofs-delta entry carries: every continuation byte after the first stands for one more than its seven bits.
+fn ofs_delta_distance(mut distance: u64) -> Vec<u8> {
+    let mut bytes = vec![(distance & 0x7f) as u8];
+    loop {
+        distance >>= 7;
+        if distance == 0 {
+            break;
+        }
+        distance -= 1;
+        bytes.push(0x80 | (distance & 0x7f) as u8);
+    }
+    bytes.reverse();
+    bytes
+}
+
 /// A repository built with gix write APIs; no git CLI.
 struct Repo {
     root: PathBuf,
@@ -111,30 +164,144 @@ impl Repo {
 
     /// A commit with `message`, its id determined by the message and `seconds`. Written as an object, not through a ref, since identity here is the object id alone.
     fn commit(&self, message: &str, seconds: i64) -> String {
-        self.write(message.as_bytes(), None, seconds)
+        self.write(message.as_bytes(), None, seconds, Vec::new())
     }
 
     /// A commit object written raw, so its message bytes and encoding header are exactly `message` and `encoding`.
     fn raw_commit(&self, message: &[u8], encoding: Option<&str>) -> String {
-        self.write(message, encoding, 1)
+        self.write(message, encoding, 1, Vec::new())
     }
 
-    fn write(&self, message: &[u8], encoding: Option<&str>, seconds: i64) -> String {
+    /// A commit whose `encoding` header follows a `gpgsig` header, the order JGit writes signed commits in. Git honors the header wherever it stands.
+    fn late_encoding_commit(&self, message: &[u8], encoding: &str) -> String {
+        self.write(
+            message,
+            None,
+            1,
+            vec![
+                (
+                    BString::from("gpgsig"),
+                    BString::from("-----BEGIN PGP SIGNATURE-----"),
+                ),
+                (BString::from("encoding"), BString::from(encoding)),
+            ],
+        )
+    }
+
+    fn write(
+        &self,
+        message: &[u8],
+        encoding: Option<&str>,
+        seconds: i64,
+        extra_headers: Vec<(BString, BString)>,
+    ) -> String {
+        let commit = self.object(message, encoding, seconds, extra_headers);
+        self.repo
+            .write_object(&commit)
+            .unwrap()
+            .detach()
+            .to_string()
+    }
+
+    fn object(
+        &self,
+        message: &[u8],
+        encoding: Option<&str>,
+        seconds: i64,
+        extra_headers: Vec<(BString, BString)>,
+    ) -> gix::objs::Commit {
         let signature = signature(seconds);
-        let commit = gix::objs::Commit {
+        gix::objs::Commit {
             tree: self.tree(),
             parents: Default::default(),
             author: signature.clone(),
             committer: signature,
             encoding: encoding.map(BString::from),
             message: BString::from(message),
-            extra_headers: Vec::new(),
+            extra_headers,
+        }
+    }
+
+    /// Writes one pack holding `base_message`'s commit whole and `delta_message`'s commit as an ofs-delta against it, with the pack's index. Neither commit exists loose, so the delta commit reads back only through its base. Returns `(base id, delta id)`.
+    fn pack_delta_commit(&self, base_message: &str, delta_message: &str) -> (String, String) {
+        use gix::objs::WriteTo as _;
+        let serialize = |commit: gix::objs::Commit| {
+            let mut bytes = Vec::new();
+            commit.write_to(&mut bytes).unwrap();
+            let id =
+                gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Commit, &bytes)
+                    .unwrap();
+            (bytes, id)
         };
-        self.repo
-            .write_object(&commit)
-            .unwrap()
-            .detach()
-            .to_string()
+        let (base, base_id) = serialize(self.object(base_message.as_bytes(), None, 1, Vec::new()));
+        let (result, delta_id) =
+            serialize(self.object(delta_message.as_bytes(), None, 2, Vec::new()));
+
+        // The delta reproduces `result` from `base` by inserting every result byte; the base contributes only its declared size.
+        let mut delta = Vec::new();
+        leb128(&mut delta, base.len() as u64);
+        leb128(&mut delta, result.len() as u64);
+        for chunk in result.chunks(127) {
+            delta.push(chunk.len() as u8);
+            delta.extend_from_slice(chunk);
+        }
+
+        let mut pack = Vec::new();
+        pack.extend_from_slice(b"PACK");
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        pack.extend_from_slice(&2u32.to_be_bytes());
+        let base_offset = pack.len();
+        pack.extend_from_slice(&entry_header(1, base.len() as u64));
+        pack.extend_from_slice(&zlib(&base));
+        let delta_offset = pack.len();
+        pack.extend_from_slice(&entry_header(6, delta.len() as u64));
+        pack.extend_from_slice(&ofs_delta_distance((delta_offset - base_offset) as u64));
+        pack.extend_from_slice(&zlib(&delta));
+        let entries_end = pack.len();
+        let pack_checksum = sha1(&pack);
+        pack.extend_from_slice(pack_checksum.as_slice());
+
+        let mut entries = [
+            (
+                base_id,
+                base_offset,
+                gix::features::hash::crc32(&pack[base_offset..delta_offset]),
+            ),
+            (
+                delta_id,
+                delta_offset,
+                gix::features::hash::crc32(&pack[delta_offset..entries_end]),
+            ),
+        ];
+        entries.sort_by_key(|entry| entry.0);
+        let mut idx = vec![0xff, b't', b'O', b'c'];
+        idx.extend_from_slice(&2u32.to_be_bytes());
+        for first in 0..=255u8 {
+            let count = entries
+                .iter()
+                .filter(|(id, _, _)| id.as_slice()[0] <= first)
+                .count() as u32;
+            idx.extend_from_slice(&count.to_be_bytes());
+        }
+        for (id, _, _) in &entries {
+            idx.extend_from_slice(id.as_slice());
+        }
+        for (_, _, crc) in &entries {
+            idx.extend_from_slice(&crc.to_be_bytes());
+        }
+        for (_, offset, _) in &entries {
+            idx.extend_from_slice(&(*offset as u32).to_be_bytes());
+        }
+        idx.extend_from_slice(pack_checksum.as_slice());
+        let idx_checksum = sha1(&idx);
+        idx.extend_from_slice(idx_checksum.as_slice());
+
+        let pack_dir = self.root.join(".git/objects/pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        let stem = format!("pack-{pack_checksum}");
+        std::fs::write(pack_dir.join(format!("{stem}.pack")), &pack).unwrap();
+        std::fs::write(pack_dir.join(format!("{stem}.idx")), &idx).unwrap();
+        (base_id.to_string(), delta_id.to_string())
     }
 
     fn binding(&self, repository_id: &str) -> RepositoryBinding {
@@ -597,7 +764,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
             &support::projection_gate::open_gate(),
             &RepositoryBinding {
                 repository_id: "repo-alpha".into(),
-                path: dir.path().join("alpha")
+                path: dir.path().join("alpha-moved")
             },
             std::slice::from_ref(&a1),
             bounds()
@@ -635,12 +802,12 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         (
             vec!["ABC".to_string()],
             bounds(),
-            GitRefusal::MalformedOid("ABC".to_string()),
+            GitRefusal::MalformedOid(0),
         ),
         (
-            vec![good.to_uppercase()],
+            vec![good.clone(), good.to_uppercase()],
             bounds(),
-            GitRefusal::MalformedOid(good.to_uppercase()),
+            GitRefusal::MalformedOid(1),
         ),
         (
             vec![good.clone(), tree.clone()],
@@ -719,6 +886,38 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         ),
         Err(GitRefusal::Open)
     );
+    // A repository declaring an object format this build does not read is refused by its format, not as unopenable; a SHA-256 id is the same shape the caller supplies for any repository.
+    let sha256 = Repo::init(&dir.path().join("sha256"));
+    std::fs::write(
+        sha256.root.join(".git/config"),
+        "[core]\n\trepositoryformatversion = 1\n\tbare = false\n[extensions]\n\tobjectformat = sha256\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &sha256.binding("repo-sha256"),
+            &["0".repeat(64)],
+            bounds()
+        ),
+        Err(GitRefusal::UnsupportedObjectFormat)
+    );
+    // A malformed entry is named by its position; the refusal never repeats the caller's bytes.
+    let junk = format!("{}\n\u{1b}[31m{}", "j".repeat(200), "k".repeat(200));
+    let malformed = read_selection(
+        &support::projection_gate::open_gate(),
+        &binding,
+        &[good.clone(), junk.clone()],
+        bounds(),
+    )
+    .unwrap_err();
+    assert_eq!(malformed, GitRefusal::MalformedOid(1));
+    for rendered in [malformed.to_string(), format!("{malformed:?}")] {
+        assert!(
+            !rendered.contains("jjj") && !rendered.contains('\u{1b}'),
+            "{rendered}"
+        );
+    }
     // A garbled loose object is unreadable, not missing, and refuses the selection whole.
     let garbled = repo.commit("Soon garbled\n", 9);
     let loose = repo
@@ -737,10 +936,39 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         ),
         Err(GitRefusal::Unreadable(garbled))
     );
+    // A well-formed commit stored under another id is a substitution, not that id's object: the store's index is not trusted over the hash of the bytes it returns.
+    let mislabeled = repo
+        .root
+        .join(".git/objects")
+        .join(&missing[..2])
+        .join(&missing[2..]);
+    std::fs::create_dir_all(mislabeled.parent().unwrap()).unwrap();
+    std::fs::copy(
+        repo.root
+            .join(".git/objects")
+            .join(&good[..2])
+            .join(&good[2..]),
+        &mislabeled,
+    )
+    .unwrap();
+    assert_eq!(
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            &[good.clone(), missing.clone()],
+            bounds()
+        ),
+        Err(GitRefusal::HashMismatch(missing.clone()))
+    );
 
     let latin = repo.raw_commit(b"Caf\xe9 au lait\n", Some("ISO-8859-1"));
     let undeclared = repo.raw_commit(b"broken \xff byte\n", None);
     let declared_utf8 = repo.raw_commit("Declared UTF-8\n".as_bytes(), Some("UTF-8"));
+    // An `encoding` header after `gpgsig` is the header git honors, whether the bytes happen to be UTF-8 or not.
+    let late_latin_ascii =
+        repo.late_encoding_commit(b"Plain ASCII, declared Latin-1\n", "ISO-8859-1");
+    let late_latin_bytes = repo.late_encoding_commit(b"Caf\xe9 late\n", "ISO-8859-1");
+    let late_utf8 = repo.late_encoding_commit("Late UTF-8\n".as_bytes(), "utf-8");
     let selection = read_selection(
         &support::projection_gate::open_gate(),
         &binding,
@@ -749,6 +977,9 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
             latin.clone(),
             undeclared.clone(),
             declared_utf8.clone(),
+            late_latin_ascii.clone(),
+            late_latin_bytes.clone(),
+            late_utf8.clone(),
         ],
         bounds(),
     )
@@ -759,7 +990,11 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
             .iter()
             .map(|unit| unit.text.clone())
             .collect::<Vec<_>>(),
-        vec!["Good subject\n".to_string(), "Declared UTF-8\n".to_string()]
+        vec![
+            "Good subject\n".to_string(),
+            "Declared UTF-8\n".to_string(),
+            "Late UTF-8\n".to_string(),
+        ]
     );
     assert_eq!(
         selection.dispositions,
@@ -771,6 +1006,14 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
             GitDisposition::UnsupportedEncoding {
                 oid: undeclared,
                 declared: None,
+            },
+            GitDisposition::UnsupportedEncoding {
+                oid: late_latin_ascii,
+                declared: Some("ISO-8859-1".to_string()),
+            },
+            GitDisposition::UnsupportedEncoding {
+                oid: late_latin_bytes,
+                declared: Some("ISO-8859-1".to_string()),
             },
         ]
     );
@@ -809,4 +1052,48 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         )
         .unwrap();
     assert_eq!(evidence, 0);
+}
+
+/// A delta's base must satisfy `max_object_bytes` before materialization, even when the packed commit's own header and decoded size fit the bound. The same delta decodes to its exact message under a bound the base fits.
+#[test]
+fn delta_packed_commit_against_an_oversized_base_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let (base, small) = repo.pack_delta_commit(&"x".repeat(6000), "Small subject\n");
+    let binding = repo.binding("repo");
+    assert!(matches!(
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            std::slice::from_ref(&base),
+            bounds()
+        ),
+        Err(GitRefusal::ObjectTooLarge { max: 4096, .. })
+    ));
+    assert_eq!(
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            std::slice::from_ref(&small),
+            bounds()
+        ),
+        Err(GitRefusal::DecodeTooLarge {
+            oid: small.clone(),
+            max: 4096,
+        })
+    );
+    let roomy = GitReadBounds {
+        max_object_bytes: NonZeroU64::new(1 << 16).unwrap(),
+        ..bounds()
+    };
+    let selection = read_selection(
+        &support::projection_gate::open_gate(),
+        &binding,
+        std::slice::from_ref(&small),
+        roomy,
+    )
+    .unwrap();
+    assert_eq!(selection.units.len(), 1);
+    assert_eq!(selection.units[0].text, "Small subject\n");
+    assert_eq!(selection.units[0].identity[2].1, small);
 }

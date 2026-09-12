@@ -636,7 +636,12 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
         .unwrap();
     assert_eq!(engine.calls(), 0);
 
-    let mut cleanup = MessageCleanup::new(&projection, i64::MAX);
+    let kernel_incarnation_id = projection
+        .read(retrieval::read_identity)
+        .unwrap()
+        .expect("the bootstrap installed an identity")
+        .kernel_incarnation_id;
+    let mut cleanup = MessageCleanup::new(&projection, kernel_incarnation_id, i64::MAX);
     let report = cleanup
         .run_slice(
             &gate,
@@ -676,8 +681,10 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
             },
             InventoryBounds {
                 page_rows: NonZeroUsize::new(2).unwrap(),
+                max_scanned: NonZeroUsize::new(64).unwrap(),
                 max_retained: NonZeroUsize::new(16).unwrap(),
                 max_commits: NonZeroUsize::new(16).unwrap(),
+                max_object_bytes: NonZeroU64::new(4096).unwrap(),
             },
             &unbounded(),
         )

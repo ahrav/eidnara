@@ -12,13 +12,14 @@ use retrieval::batch::{
 };
 use retrieval::message_cleanup::{Candidate, candidates, reclaim};
 use retrieval::{
-    OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, Tombstone, TombstoneReason,
-    install_identity,
+    OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
+    TombstoneReason, install_identity,
 };
 use rusqlite::params;
 use storage::{Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite};
 
 const HOLD: &str = "hold-1";
+const KERNEL: &str = "kernel-1";
 const GENERATION: &str = "gen-1";
 
 fn open(dir: &Path) -> SqliteStore {
@@ -55,7 +56,7 @@ fn bounds() -> BatchBounds {
 
 fn mutation(through: i64) -> MutationIdentity {
     MutationIdentity {
-        kernel_incarnation_id: "kernel-1".to_string(),
+        kernel_incarnation_id: KERNEL.to_string(),
         hold_id: HOLD.to_string(),
         snapshot_commit_seq: 1,
         through_commit_seq: through,
@@ -117,7 +118,7 @@ fn seed(store: &SqliteStore, sources: &[Source], tombstoned: &[&Source], through
                 conn,
                 &ProjectionIdentity {
                     schema_version: retrieval::SCHEMA_VERSION,
-                    kernel_incarnation_id: "kernel-1".to_string(),
+                    kernel_incarnation_id: KERNEL.to_string(),
                     projection_policy_version: "source-policy.v1".to_string(),
                     identity_contract_version: "search-projection-identity-v3".to_string(),
                     limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -269,20 +270,47 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
     let mut expected: Vec<String> = vec![occurrence_id(a), occurrence_id(c)];
     expected.sort();
 
+    // A projection installed under another kernel incarnation fails closed on both observations: its sequences are not comparable to the caller's prefix.
+    let (mismatched_selection, mismatched_reclaim) = store
+        .with_conn_fenced(|conn| {
+            Ok((
+                candidates(conn, "kernel-2", 1_000, None, NonZeroUsize::new(8).unwrap()),
+                reclaim(
+                    conn,
+                    "kernel-2",
+                    &[Candidate {
+                        occurrence_id: occurrence_id(a),
+                        invalidated_commit_seq: 5,
+                    }],
+                    1_000,
+                ),
+            ))
+        })
+        .unwrap();
+    assert!(
+        matches!(mismatched_selection, Err(ProjectionError::IdentityMismatch)),
+        "{mismatched_selection:?}"
+    );
+    assert!(
+        matches!(mismatched_reclaim, Err(ProjectionError::IdentityMismatch)),
+        "{mismatched_reclaim:?}"
+    );
+    assert_eq!(present(&store).len(), 5);
+
     // A prefix below the tombstones names nothing; the checkpoint caps a prefix above it.
     let (none, all, capped) = store
         .with_conn(|conn| {
             Ok((
-                candidates(conn, 4, None, NonZeroUsize::new(8).unwrap()).unwrap(),
-                candidates(conn, 5, None, NonZeroUsize::new(8).unwrap()).unwrap(),
-                candidates(conn, 1_000, None, NonZeroUsize::new(8).unwrap()).unwrap(),
+                candidates(conn, KERNEL, 4, None, NonZeroUsize::new(8).unwrap()).unwrap(),
+                candidates(conn, KERNEL, 5, None, NonZeroUsize::new(8).unwrap()).unwrap(),
+                candidates(conn, KERNEL, 1_000, None, NonZeroUsize::new(8).unwrap()).unwrap(),
             ))
         })
         .unwrap();
     assert!(none.candidates.is_empty());
     assert_eq!(
-        none.inspected, 3,
-        "the three tombstoned message rows were visited"
+        none.inspected, 4,
+        "the three tombstoned message rows and the claim's tombstone were visited"
     );
     let ids = |page: &retrieval::message_cleanup::CandidatePage| {
         page.candidates
@@ -308,7 +336,14 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
     loop {
         let page = store
             .with_conn(|conn| {
-                Ok(candidates(conn, 5, after.as_deref(), NonZeroUsize::new(1).unwrap()).unwrap())
+                Ok(candidates(
+                    conn,
+                    KERNEL,
+                    5,
+                    after.as_deref(),
+                    NonZeroUsize::new(1).unwrap(),
+                )
+                .unwrap())
             })
             .unwrap();
         walked.extend(ids(&page));
@@ -337,7 +372,7 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
                  VALUES ('late',?1,?2,'pending',0,1,1)",
                 params![occurrence_id(a), GENERATION],
             )?;
-            Ok(reclaim(conn, &stale, 5).unwrap())
+            Ok(reclaim(conn, KERNEL, &stale, 5).unwrap())
         })
         .unwrap();
     assert_eq!(
@@ -351,7 +386,7 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
         invalidated_commit_seq: 5,
     }];
     let reclaimed = store
-        .with_conn_fenced(|conn| Ok(reclaim(conn, &fresh, 5).unwrap()))
+        .with_conn_fenced(|conn| Ok(reclaim(conn, KERNEL, &fresh, 5).unwrap()))
         .unwrap();
     assert_eq!(
         (
@@ -373,6 +408,7 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
             )?;
             Ok(reclaim(
                 conn,
+                KERNEL,
                 &[Candidate {
                     occurrence_id: occurrence_id(a),
                     invalidated_commit_seq: 5,

@@ -242,6 +242,64 @@ fn the_connection_is_verified_owner_only_and_rows_survive_close_and_reopen() {
         .unwrap();
 }
 
+/// Every `storage::open_sqlite` call site in the daemon process retains one schema snapshot
+/// within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the declared retained-resident
+/// total multiplies that bound by `daemon::STORAGE_CONNECTIONS`, so the two must agree.
+/// Excluding `crates/storage` prevents `open_sqlite`'s definition from counting as a call site.
+#[test]
+fn the_declared_storage_connection_count_matches_the_open_sqlite_call_sites() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace: toml_members::Members =
+        toml_members::parse(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap());
+    let mut call_sites: Vec<(String, usize)> = Vec::new();
+    for member in workspace
+        .members
+        .iter()
+        .filter(|member| *member != "crates/storage")
+    {
+        let src = root.join(member).join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        let mut pending = vec![src];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let count = std::fs::read_to_string(&path)
+                        .unwrap()
+                        .matches("open_sqlite(")
+                        .count();
+                    if count > 0 {
+                        let relative = path.strip_prefix(&root).unwrap().display().to_string();
+                        call_sites.push((relative, count));
+                    }
+                }
+            }
+        }
+    }
+    call_sites.sort();
+    let total: usize = call_sites.iter().map(|(_, count)| count).sum();
+    assert_eq!(
+        total as u64,
+        daemon::STORAGE_CONNECTIONS,
+        "open_sqlite call sites: {call_sites:?}"
+    );
+    assert_eq!(
+        call_sites
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "crates/daemon/src/search_projection.rs",
+            "crates/memory-store/src/lib.rs",
+        ],
+        "the files that open a storage connection must match the STORAGE_CONNECTIONS doc"
+    );
+}
+
 #[test]
 fn retrieval_depends_on_no_product_crate_but_the_kernel() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
