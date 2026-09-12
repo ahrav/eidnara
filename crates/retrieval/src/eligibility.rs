@@ -51,21 +51,22 @@ fn live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveRow> {
 ///
 /// # Errors
 ///
-/// Returns [`ProjectionError::TooManyRecords`] when more than `max` live occurrences match, [`ProjectionError::CorruptRow`] for a stored class outside the contract, and the SQLite error otherwise.
+/// Returns [`ProjectionError::TooManyRecords`] when more than `max` live occurrences match, [`ProjectionError::CorruptRow`] for a stored class outside the contract, and the SQLite error otherwise. A `max` at or past `i64::MAX` reads every live row: no set can exceed it.
 pub fn live_candidates(
     conn: &GuardedConn<'_>,
     class: Option<OccurrenceClass>,
     max: NonZeroUsize,
 ) -> Result<Vec<OccurrenceCandidate>, ProjectionError> {
-    let limit = i64::try_from(max.get()).map_err(|_| ProjectionError::CorruptRow)?;
+    // One row past `max` proves the set is too large; the probe saturates rather than overflowing.
+    let probe = i64::try_from(max.get().saturating_add(1)).unwrap_or(i64::MAX);
     let rows: Vec<LiveRow> = match class {
         Some(class) => conn
             .prepare_cached(LIVE_CANDIDATES_BY_CLASS_SQL)?
-            .query_map(params![class.code(), limit + 1], live_row)?
+            .query_map(params![class.code(), probe], live_row)?
             .collect::<rusqlite::Result<_>>()?,
         None => conn
             .prepare_cached(LIVE_CANDIDATES_SQL)?
-            .query_map(params![limit + 1], live_row)?
+            .query_map(params![probe], live_row)?
             .collect::<rusqlite::Result<_>>()?,
     };
     if rows.len() > max.get() {
