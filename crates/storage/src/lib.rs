@@ -4897,13 +4897,16 @@ mod tests {
                 let mut statement = tx.prepare_cached(CACHED_INSERT)?;
                 statement.execute(["b", "2"])?;
                 let reprepared = reprepare_count(&statement);
-                // Warmed while `late` is not a main-schema name, so the guarded policy
-                // allows it; dropped so the connection carries no temp object out. Temp
-                // DDL expires every statement on the connection, so the insert's next run
-                // re-prepares once here and the count after the foreign DDL must exceed it.
-                tx.prepare_cached(CACHED_TEMP_SHADOW)?.execute([])?;
-                tx.execute("DROP TABLE temp.late", [])?;
+                // Temp DDL expires every statement on the connection, so the insert's next
+                // run re-prepares once here and the count after the foreign DDL must exceed
+                // it.
+                tx.execute("CREATE TEMP TABLE scratch (x)", [])?;
+                tx.execute("DROP TABLE temp.scratch", [])?;
                 statement.execute(["b2", "2"])?;
+                // Prepared after that DDL and never run, so the cached program is valid,
+                // and `late` is not yet a main-schema name, so the guarded policy allows it.
+                // Only the foreign DDL below can stale it.
+                tx.prepare_cached(CACHED_TEMP_SHADOW)?;
                 Ok((reprepared, reprepare_count(&statement)))
             })
             .expect("the second fenced call");
@@ -4952,6 +4955,16 @@ mod tests {
             "the cached temp-shadow statement is re-authorized against the new main-schema \
              names and denied, got {shadow:?}"
         );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("temp schema count");
+        assert_eq!(temp_late, 0, "the denied statement created no temp shadow");
         let rows: i64 = store
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
             .expect("count");

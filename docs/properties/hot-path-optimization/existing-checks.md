@@ -139,7 +139,7 @@ Checks added with the mode-gated authorizer (implementation base
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [Statement reuse probe][reuse-probe] | A warm fenced statement reports zero re-prepares across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, the callback reads the new table, and a temp-shadow statement cached before the DDL is refused. | unaudited |
+| [Statement reuse probe][reuse-probe] | A warm fenced statement reports zero re-prepares across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, the callback reads the new table, and a temp-shadow statement cached valid before the DDL is refused and creates no temp object. | unaudited |
 | [Read-path expiry witness][read-witness] | The `query_only` toggle expires cached statements on each read callback; two fenced callbacks in a row re-prepare nothing. | unaudited |
 | [Temp-database write barrier][temp-write-test] | Temp DDL and temp DML are refused in a read callback and allowed in a fenced one. | unaudited |
 | [Mode restoration after panic][mode-restore-test] | Maintenance regains pragma writes after a panicking read and a panicking fenced callback; `query_only` is restored, the partial write is rolled back, and the next fenced write re-pins `synchronous=FULL`. | unaudited |
@@ -153,13 +153,13 @@ Checks added with the mode-gated authorizer (implementation base
 | [Rescan flushes cached statements][rescan-flush-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a second connection creates main `late` and writes the old schema version back; no temp `late` is created. Failed with `Ok(())` before the rescan flushed the cache. | unaudited |
 | [Foreign journal-mode switch refused][foreign-wal-test] | A second connection's `PRAGMA journal_mode = DELETE` fails with `database is locked` while the store is open and idle; the store's next fenced write still runs in WAL without re-running the pin. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4876-L4960
-[read-witness]: ../../../crates/storage/src/lib.rs#L5014-L5043
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L5050-L5073
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L5079-L5131
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L5137-L5167
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L5174-L5194
-[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L5196-L5238
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4876-L4973
+[read-witness]: ../../../crates/storage/src/lib.rs#L5027-L5056
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L5063-L5086
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L5092-L5144
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L5150-L5180
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L5187-L5207
+[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L5209-L5251
 [gate-tests]: ../../../crates/storage/src/lib.rs#L2158-L2497
 
 ## History render
@@ -417,6 +417,6 @@ that no related check exists anywhere in the repository.
 [memory-catalog]: ../memory-store/catalog.md
 [snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2254-L2388
 [pin-test]: ../../../crates/storage/src/lib.rs#L2396-L2488
-[rename-test]: ../../../crates/storage/src/lib.rs#L4967-L5007
-[rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5282-L5321
-[foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5245-L5275
+[rename-test]: ../../../crates/storage/src/lib.rs#L4980-L5020
+[rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5295-L5334
+[foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5258-L5288

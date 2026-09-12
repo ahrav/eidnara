@@ -92,5 +92,5 @@ flush, and the foreign-WAL check; the live anchors below are to that state.
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
 [live-read]: ../../../../crates/storage/src/lib.rs#L305-L321
 [live-write]: ../../../../crates/storage/src/lib.rs#L370-L434
-[live-test]: ../../../../crates/storage/src/lib.rs#L5324-L5361
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L5494-L5520
+[live-test]: ../../../../crates/storage/src/lib.rs#L5337-L5374
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L5507-L5533

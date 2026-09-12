@@ -154,12 +154,13 @@ the cache is not re-authorized. The gate keeps that safe by construction:
 - The only verdict that depends on the entry snapshot is the temp-shadow
   denial. A temp object can shadow a main name only after main gained that
   name; any temp DDL on the connection expires every prepared statement, and a
-  foreign main-schema change stales each cached statement's schema cookie so
-  its next run re-prepares under the current callback's snapshot. The
-  [statement-reuse probe][probe] warms `CREATE TEMP TABLE late (x)` before a
-  second connection creates main `late`, then shows the cached statement is
-  refused `not authorized` in the next callback, which also reads the new
-  table.
+  foreign main-schema change is seen by the next callback's entry snapshot,
+  whose stale main cookie resets the temp schema as well, so every cached
+  statement re-prepares under that callback's snapshot. The
+  [statement-reuse probe][probe] prepares `CREATE TEMP TABLE late (x)` after
+  its own temp DDL and never runs it, so the cached program is valid when a
+  second connection creates main `late`; the next callback refuses it
+  `not authorized`, creates no temp `late`, and reads the new table.
 - Main DDL on the store's own connection is the case the cookie does not
   cover. `sqlite3EndTable` emits `ChangeCookie` and `ParseSchema` but no
   `OP_Expire`, and it keeps the in-memory main cookie equal to the file's, so
@@ -232,19 +233,19 @@ passes 82 tests. The anchors below are to the live tree at that state.
 [mode-hold]: ../../../../crates/storage/src/lib.rs#L936-L938
 [apply]: ../../../../crates/storage/src/lib.rs#L1997-L2035
 [gate-tests]: ../../../../crates/storage/src/lib.rs#L2158-L2497
-[probe]: ../../../../crates/storage/src/lib.rs#L4876-L4960
-[read-witness]: ../../../../crates/storage/src/lib.rs#L5014-L5043
-[temp-write]: ../../../../crates/storage/src/lib.rs#L5050-L5073
-[restore-test]: ../../../../crates/storage/src/lib.rs#L5079-L5131
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L5137-L5167
-[surface-test]: ../../../../crates/storage/src/lib.rs#L5174-L5194
-[flush-test]: ../../../../crates/storage/src/lib.rs#L5196-L5238
+[probe]: ../../../../crates/storage/src/lib.rs#L4876-L4973
+[read-witness]: ../../../../crates/storage/src/lib.rs#L5027-L5056
+[temp-write]: ../../../../crates/storage/src/lib.rs#L5063-L5086
+[restore-test]: ../../../../crates/storage/src/lib.rs#L5092-L5144
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L5150-L5180
+[surface-test]: ../../../../crates/storage/src/lib.rs#L5187-L5207
+[flush-test]: ../../../../crates/storage/src/lib.rs#L5209-L5251
 [cached-test]: ../../../../crates/storage/src/lib.rs#L4829
 [snapshot]: ../../../../crates/storage/src/lib.rs#L737-L747
 [snapshot-cache]: ../../../../crates/storage/src/lib.rs#L884-L902
 [infra-check]: ../../../../crates/storage/src/lib.rs#L1108-L1123
 [bound]: ../../../../crates/storage/src/lib.rs#L771
-[rename-test]: ../../../../crates/storage/src/lib.rs#L4967-L5007
+[rename-test]: ../../../../crates/storage/src/lib.rs#L4980-L5020
 [pin-test]: ../../../../crates/storage/src/lib.rs#L2396-L2434
 [bound-test]: ../../../../crates/storage/src/lib.rs#L2345-L2366
 [durability-test]: ../../../../crates/storage/src/lib.rs#L4127-L4192
@@ -255,5 +256,5 @@ passes 82 tests. The anchors below are to the live tree at that state.
 [pin]: ../../../../crates/storage/src/lib.rs#L908-L924
 [maintenance-exit]: ../../../../crates/storage/src/lib.rs#L526-L535
 [unwind-test]: ../../../../crates/storage/src/lib.rs#L2439-L2488
-[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5282-L5321
-[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5245-L5275
+[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5295-L5334
+[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5258-L5288
