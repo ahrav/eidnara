@@ -267,6 +267,6 @@ Execution provenance: 2026-09-12, working tree merging `0cf2fb3a` into
 [live-interleave]: ../../../../../crates/daemon/src/transform.rs#L22629
 [live-sharing]: ../../../../../crates/daemon/src/transform.rs#L22676
 [live-rollback]: ../../../../../crates/daemon/src/transform.rs#L22713
-[live-prepared]: ../../../../../crates/memory-store/src/lib.rs#L8815-L8830
+[live-prepared]: ../../../../../crates/memory-store/src/lib.rs#L8825-L8840
 [live-bytes]: ../../../../../crates/memory-store/src/lib.rs#L2214-L2221
 [live-policy]: ../../../../../crates/memory-store/src/lib.rs#L2339-L2368

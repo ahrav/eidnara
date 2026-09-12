@@ -36,7 +36,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
   [`mark_historian_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
   call per kind; the mark updates under `delivered_at_ms IS NULL` and returns
   `QueryReturnedNoRows` when `changed != 1`, which rolls the transaction back.
-  A test-only `fail_once` seam at [`:10922-10933`][fail-once] injects a
+  A test-only `fail_once` seam at [`:11234-11245`][fail-once] injects a
   failure per kind.
 - [`record_historian_side_channel_failure`][failure] computes
   `delay = 1000 * 2^min(attempt_count, 6)` capped at
@@ -54,7 +54,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
 - Rows are enqueued by [`publish_historian_chunk`][publish]; the outbox
   [primary key][outbox-sql] is `(session_id, firing_seq, kind, source_start,
   source_end, item_index)`. The publish task also drains after a committed
-  publish ([`:10762-10771`][publish-drain]), so two drainers can overlap on one
+  publish ([`:11074-11083`][publish-drain]), so two drainers can overlap on one
   session.
 - Firing needs a configured [`model_chain`][cfg-models] (the
   [`no_models` gate][no-models]); `user_observation` rows also need
@@ -129,8 +129,8 @@ window, two drainers, ordering across firings, the limit, or the backoff.
 [failure]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10975-L11014
 [delete-all]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L11016-L11029
 [delete-one]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L11031-L11053
-[events-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13580-L13601
 [mark]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13739-L13764
+[events-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13580-L13601
 [primer-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13766-L13808
 [obs-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13810-L13831
 [t-faults]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L18704
@@ -184,8 +184,8 @@ and the outbox holds none.
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11572-L11650
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14415-L14440
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11696-L11720
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20586-L20725
-[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17068-L17135
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11582-L11660
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14425-L14450
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11706-L11730
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20599-L20738
+[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17081-L17148

@@ -29,14 +29,14 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   contends with or extends the pass commit. A secret-bearing `session_id` is
   [tolerated only when the row already exists][flagged].
 - [`trace_pass_rejected`][rejected] updates `reject_count + 1`
-  ([`:6738`][reject-bump]); its [doc][rejected-doc] calls it a single plain
+  ([`:7050`][reject-bump]); its [doc][rejected-doc] calls it a single plain
   UPSERT outside the fenced transaction. [`trace_pass_completed`][completed]'s
   [doc][completed-doc] says it cannot alter CAS semantics or hold the commit
   transaction open longer.
 - [`trace_pass_stable`][stable] appends one `scheduler_history` observation
-  with the 256-entry ring ([`:6594-6601`][stable-ring]); the
+  with the 256-entry ring ([`:6906-6913`][stable-ring]); the
   [in-commit upsert][commit-trace] does the same, initializes `receive_count`
-  to `0` on a fresh insert ([`:8441`][commit-init]), and leaves it alone on
+  to `0` on a fresh insert ([`:8753`][commit-init]), and leaves it alone on
   conflict.
 - The [`PassTrace` doc][passtrace-doc] says the counters are stored apart from
   `cache_state` so a rejected pass leaves a trail without advancing
@@ -263,24 +263,24 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2438
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16781-L16823
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7030
-[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7060-L7072
-[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16759-L16776
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16725-L16754
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16794-L16836
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7040
+[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7070-L7082
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16772-L16789
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16738-L16767
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2857
 [retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2860
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L9005-L9011
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L9015-L9021
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2638-L2680
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8956-L8958
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16582-L16720
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16862-L16961
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9094-L9118
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17174-L17237
-[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9120-L9133
-[root-test]: ../../../../../crates/memory-store/src/lib.rs#L16966-L17011
-[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8938-L8945
-[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17016-L17063
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24462-L24485
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8966-L8968
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16595-L16733
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16875-L16974
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9104-L9128
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17187-L17250
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9130-L9143
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L16979-L17024
+[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8948-L8955
+[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17029-L17076
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24475-L24498
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7039
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7049

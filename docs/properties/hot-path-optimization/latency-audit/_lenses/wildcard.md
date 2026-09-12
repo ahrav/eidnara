@@ -204,7 +204,7 @@ only; no test ran and nothing outside this file changed.
   `post_end_revision_inputs_moved`. Direct `tokenizer::estimate_tokens`
   calls in production transform code at HEAD: the SOFT pressure predicate's
   `m0_tokens` and `m1_tokens` at [4298-4309][soft-direct] (finding 10), the
-  tag-mint `token_count` persisted into tag rows at [7160][mint-direct], and
+  tag-mint `token_count` persisted into tag rows at [7163][mint-direct], and
   `ActiveTagForNudge.token_count` at [8558][nudge-direct]. The tokenizer
   crate exposes no call counter ([`estimate_tokens`][tok-fn]), so the only
   runtime oracle is the injected estimator plus the thread-local stats.
@@ -256,7 +256,7 @@ only; no test ran and nothing outside this file changed.
   [comment at rules.rs:382][digest-doc] says evaluator semantics are bound
   by `semantic_digest_version`, pinned by
   [`evaluator_constants_are_pinned`][t-pinned]. The memory store persists
-  the digest per scan batch ([2357-2392][ms-digest]), so an evaluator
+  the digest per scan batch ([2442-2477][ms-digest]), so an evaluator
   change without a bump makes old and new audit rows indistinguishable.
 - Fault/timing angle: none; a data-shape difference.
 - Required faults and enabling state: An input where a rule's match and its
@@ -455,7 +455,7 @@ only; no test ran and nothing outside this file changed.
 - Scanner semantics are versioned. An evaluator change that can alter any
   finding bumps [`REVISION.semantic_digest_version`][revision]
   ([rules.rs:382][digest-doc]); the memory store persists the digest per
-  scan batch ([2357-2392][ms-digest]).
+  scan batch ([2442-2477][ms-digest]).
 - Bench targets stay out of nextest and run in CI only as smoke.
   [`.config/nextest.toml`][nextest]; [`ci.yml:514-518`][ci-bench]. A new
   bench must also compile and pass in test mode.
@@ -596,13 +596,13 @@ call site.
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12392-L12397
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27683-L27688
 
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8166-L8183
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8189-L8252
-[h-call]: ../../../../../crates/daemon/src/lib.rs#L8245-L8251
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8515-L8540
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14457
-[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14516-L14534
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14538-L14560
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8171-L8188
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8194-L8261
+[h-call]: ../../../../../crates/daemon/src/lib.rs#L8250-L8256
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8520-L8546
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14462
+[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14521-L14539
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14543-L14565
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
 [rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
 [fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
@@ -633,7 +633,7 @@ call site.
 [th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
 [tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
 [declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2250-L2264
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2256-L2286
 [ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2851
 [floor]: ../../../../../crates/daemon/src/transform.rs#L5849
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
@@ -698,12 +698,12 @@ call site.
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4581-L4590
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4586-L4595
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4834
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5095
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5412
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11841
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4839
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5100
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5417
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11846
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288
