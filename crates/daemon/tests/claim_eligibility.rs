@@ -181,6 +181,8 @@ fn wire_verdict(disposition: Disposition) -> String {
 async fn retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot() {
     let daemon = KernelDaemon::start().await;
     let store = daemon.store();
+    // Register the consumer before committing decisions so its checkpoint does not skip them.
+    ClaimMaterializer::register(&store, NOW).unwrap();
     let spec = |object: &str, lineage: &str, revision: i64, summary: &str| {
         json!({
             "decision_id": format!("{object}-decision"),
@@ -213,7 +215,6 @@ async fn retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot() {
             Ok(String::new())
         })
         .unwrap();
-    ClaimMaterializer::register(&store, NOW).unwrap();
     let mut materializer = ClaimMaterializer::new(&store, ProviderEgress::LocalOnly);
     let report = materializer.run_episode(bounds(), NOW).unwrap();
     assert!(
