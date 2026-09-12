@@ -1,8 +1,10 @@
 //! Runs one bounded slice of message-index cleanup against the projection: candidate pages are read under the acknowledged kernel prefix, each page is reclaimed in one fenced write transaction that re-checks eligibility, and the cursor is carried across slices so an interrupted slice resumes where it stopped. One `EvalBudget` gates every admission, and its deadline bounds the wait for the projection connection before selection and for the write lock; cancellation leaves whatever committed, since each committed page is complete on its own.
 
 use std::num::NonZeroUsize;
+use std::time::Instant;
 
 use kernel::applicability::EvalBudget;
+use retrieval::ProjectionError;
 use retrieval::message_cleanup::{Candidate, Reclaimed, candidates, present, reclaim};
 use storage::{GuardedConn, StoreError};
 
@@ -23,7 +25,7 @@ pub enum CleanupStop {
     Cancelled,
     /// The slice reached its page or row bound with rows left to inspect.
     BoundReached,
-    /// The store's reply to the page's write was lost at or before COMMIT. `reclaimed.occurrences` counts the admitted rows that are gone; vectors and payloads count only acknowledged writes. The cursor stays where the page began, so rows still present are selected again next slice.
+    /// The store's reply to the page's write was lost at or before COMMIT. `reclaimed.occurrences` counts the admitted rows confirmed gone before the deadline; vectors and payloads count only acknowledged writes. The cursor stays where the page began, so rows still present are selected again next slice.
     Unresolved(String),
 }
 
@@ -70,7 +72,7 @@ impl<'a> MessageCleanup<'a> {
         self.cursor.as_deref()
     }
 
-    /// Makes the next page's write return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.
+    /// Makes the next page's write return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised. The loss is noticed only once the budget's deadline, when it has one, has passed.
     #[cfg(feature = "test-support")]
     pub fn lose_next_write_reply_for_test(&mut self) {
         self.lose_write_reply = true;
@@ -103,7 +105,7 @@ impl<'a> MessageCleanup<'a> {
             let acknowledged = self.acknowledged_through;
             let kernel = self.kernel_incarnation_id.as_str();
             let after = self.cursor.clone();
-            let select = |conn: &GuardedConn<'_>| {
+            let page = match read(self.projection, budget, |conn| {
                 candidates(
                     conn,
                     kernel,
@@ -111,12 +113,7 @@ impl<'a> MessageCleanup<'a> {
                     after.as_deref(),
                     bounds.page_rows,
                 )
-            };
-            let page = match budget.deadline() {
-                Some(deadline) => self.projection.read_within(deadline, select),
-                None => self.projection.read(select),
-            };
-            let page = match page {
+            }) {
                 Ok(page) => page,
                 Err(SearchProjectionError::Store(StoreError::Deadline)) => {
                     report.stop = Some(CleanupStop::Cancelled);
@@ -145,6 +142,9 @@ impl<'a> MessageCleanup<'a> {
                     None => self.projection.write(write),
                 };
                 let outcome = if std::mem::take(&mut self.lose_write_reply) && outcome.is_ok() {
+                    if let Some(deadline) = budget.deadline() {
+                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    }
                     Err(SearchProjectionError::Store(StoreError::Backend(
                         "database is locked".to_owned(),
                     )))
@@ -162,11 +162,14 @@ impl<'a> MessageCleanup<'a> {
                         report.stop = Some(CleanupStop::Cancelled);
                         return Ok(report);
                     }
-                    // `Backend` covers a failed COMMIT, whose outcome is unknown; the rows decide what to count.
+                    // `Backend` covers a failed COMMIT, whose outcome is unknown; the rows decide what to count, under the same deadline.
                     Err(SearchProjectionError::Store(StoreError::Backend(text))) => {
                         for candidate in &admitted {
-                            if !self.projection.read(|conn| present(conn, candidate))? {
-                                report.reclaimed.occurrences += 1;
+                            match read(self.projection, budget, |conn| present(conn, candidate)) {
+                                Ok(true) => {}
+                                Ok(false) => report.reclaimed.occurrences += 1,
+                                Err(SearchProjectionError::Store(StoreError::Deadline)) => break,
+                                Err(error) => return Err(error),
                             }
                         }
                         report.stop = Some(CleanupStop::Unresolved(text));
@@ -198,5 +201,17 @@ impl<'a> MessageCleanup<'a> {
         }
         report.stop = Some(CleanupStop::BoundReached);
         Ok(report)
+    }
+}
+
+/// One read whose wait for the connection ends at the budget's deadline, when it has one.
+fn read<T>(
+    projection: &SearchProjection,
+    budget: &EvalBudget,
+    f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+) -> Result<T, SearchProjectionError> {
+    match budget.deadline() {
+        Some(deadline) => projection.read_within(deadline, f),
+        None => projection.read(f),
     }
 }

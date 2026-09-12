@@ -688,6 +688,36 @@ fn a_quarantined_projection_refuses_a_slice_before_it_reads() {
     );
 }
 
+/// When a write's reply is lost and the deadline has passed by the time the loss is noticed, reconciling the page from its rows honors the deadline too: the slice reports the write unresolved without another wait on the connection, counts only what it confirmed, keeps the page-start cursor, and the next slice counts nothing twice.
+#[test]
+fn lost_write_reconciliation_stops_at_the_deadline() {
+    let fixture = Fixture::build();
+    let whole = CleanupBounds {
+        page_rows: NonZeroUsize::new(16).unwrap(),
+        ..bounds()
+    };
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
+    cleanup.lose_next_write_reply_for_test();
+    let budget = EvalBudget::new(
+        Some(Instant::now() + std::time::Duration::from_millis(200)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let report = cleanup.run_slice(whole, &budget).unwrap();
+    assert!(
+        matches!(report.stop, Some(CleanupStop::Unresolved(_))),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.reclaimed.occurrences, 0,
+        "no row was confirmed gone inside the deadline: {report:?}"
+    );
+    assert_eq!(report.cursor, None, "the page is re-selected next slice");
+
+    let again = cleanup.run_slice(whole, &unbounded()).unwrap();
+    assert_eq!(again.stop, None, "{again:?}");
+    assert_eq!(again.reclaimed.occurrences, 0, "nothing is counted twice");
+}
+
 /// The budget's deadline bounds the wait for the projection connection before selection as it bounds the wait before the write: a slice that starts while another operation holds the connection returns `Cancelled` at its deadline, before the holder releases, and removes nothing.
 #[test]
 fn a_slice_stops_at_its_deadline_while_another_operation_holds_the_connection() {
