@@ -254,6 +254,8 @@ pub enum EpisodeFault {
     LoseAcknowledgementReply,
     /// The page is published but never acknowledged, as a crash between the two would leave it.
     SkipAcknowledgement,
+    /// The acknowledgement fails with an outcome-unknown error before it commits.
+    FailAcknowledgement,
 }
 
 pub struct ClaimMaterializer<'a> {
@@ -583,7 +585,10 @@ impl<'a> ClaimMaterializer<'a> {
 
     /// A reply lost after the kernel may have committed is reconciled from the durable checkpoint.
     fn acknowledge(&self, through: i64, now: i64) -> Result<(), Stop> {
-        let mut acknowledged = self.kernel.acknowledge_outbox(CLAIM_CONSUMER, through, now);
+        let mut acknowledged = match self.fault {
+            Some(EpisodeFault::FailAcknowledgement) => Err(KernelError::Io),
+            _ => self.kernel.acknowledge_outbox(CLAIM_CONSUMER, through, now),
+        };
         if self.fault == Some(EpisodeFault::LoseAcknowledgementReply) && acknowledged.is_ok() {
             acknowledged = Err(KernelError::Io);
         }

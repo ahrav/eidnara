@@ -1051,6 +1051,54 @@ fn lost_and_skipped_acknowledgements_replay_from_receipts() {
     );
 }
 
+/// AC3: an acknowledgement whose outcome is unknown and whose durable checkpoint still sits below the page blocks the episode; the published page stays, and the next episode re-drives it from receipts and acknowledges.
+#[test]
+fn unresolved_acknowledgement_blocks_and_the_next_episode_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    let before = corpus.checkpoint();
+    let failed = corpus
+        .materializer()
+        .run_episode_with_fault_for_test(bounds(), NOW, EpisodeFault::FailAcknowledgement)
+        .unwrap();
+    assert!(
+        matches!(
+            failed.end,
+            MaterializationEnd::Blocked(ClaimBlocked::AcknowledgementUnresolved { through, checkpoint })
+                if through == failed.target && checkpoint == before
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(failed.published, 3);
+    assert_eq!(corpus.checkpoint(), before, "the checkpoint did not move");
+    let inventory = corpus.inventory();
+    assert_eq!(inventory.len(), 3);
+
+    let tip = corpus.kernel.tip().unwrap();
+    let recovered = corpus.materialize();
+    assert_eq!(
+        (recovered.published, recovered.replayed),
+        (0, 3),
+        "{recovered:?}"
+    );
+    assert_eq!(corpus.checkpoint(), Some(recovered.target));
+    assert_eq!(
+        corpus.kernel.tip().unwrap(),
+        tip,
+        "a replayed page commits nothing"
+    );
+    assert_eq!(corpus.inventory(), inventory);
+}
+
 /// AC2: a decision with no admission decision authorizes nothing: its descriptors are refused before any byte is retained and the checkpoint does not pass it.
 #[test]
 fn unadmitted_decision_publishes_nothing_and_blocks_the_episode() {
