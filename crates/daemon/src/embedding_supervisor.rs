@@ -435,7 +435,8 @@ impl EmbeddingSupervisor {
             SliceKind::Sweep => {
                 // The cursor outlives the sweeper: each sweep resumes where the last one ended, so identities held at the head of the table do not consume every sweep.
                 let cursor = self.lock_sweep_cursor().take();
-                let mut sweeper = IdentitySweeper::resuming(&m.projection, &m.synapse, cursor);
+                let mut sweeper = IdentitySweeper::resuming(&m.projection, &m.synapse, cursor)
+                    .cancelled_by(invalidated.clone());
                 let swept = sweeper.run_sweep(self.bounds.sweep_candidates, budget);
                 *self.lock_sweep_cursor() = sweeper.cursor().map(str::to_owned);
                 match swept {
