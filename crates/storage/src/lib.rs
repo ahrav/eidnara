@@ -898,7 +898,8 @@ mod sqlite_backend {
     #[cfg(any(test, feature = "test-support"))]
     #[derive(Clone, Copy, Default)]
     struct StatementReuse {
-        max_runs: i32,
+        /// `last_runs` records the run count a handle reported when it last returned to the cache.
+        last_runs: i32,
         evictions: u32,
     }
 
@@ -1020,7 +1021,7 @@ mod sqlite_backend {
             let probe = state.statement_probe.as_mut()?;
             let key = sql.trim().to_string();
             let reuse = probe.entry(key.clone()).or_default();
-            if runs == 0 && reuse.max_runs > 0 {
+            if runs == 0 && reuse.last_runs > 0 {
                 reuse.evictions += 1;
             }
             Some((self, key))
@@ -1035,7 +1036,7 @@ mod sqlite_backend {
                 .as_mut()
                 .and_then(|probe| probe.get_mut(key))
             {
-                reuse.max_runs = reuse.max_runs.max(runs);
+                reuse.last_runs = runs;
             }
         }
 
@@ -5228,6 +5229,32 @@ mod tests {
         assert!(
             fitted.values().all(|evictions| *evictions == 0),
             "a fitted cache re-creates no handle, got {fitted:?}"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A replacement handle returned without running carries no run evidence, so
+        // handing the same handle out again is reuse, not another re-creation.
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 1);
+        store.start_statement_reuse_probe();
+        store
+            .with_conn_fenced(|tx| {
+                for text in ["SELECT 1", "SELECT 2"] {
+                    tx.prepare_cached(text)?
+                        .query_row([], |r| r.get::<_, i64>(0))?;
+                }
+                for _ in 0..2 {
+                    drop(tx.prepare_cached("SELECT 1")?);
+                }
+                Ok(())
+            })
+            .expect("run the unstepped reuse");
+        assert_eq!(
+            store.statement_evictions().get("SELECT 1"),
+            Some(&1),
+            "the unstepped reuse of the re-created handle is not an eviction"
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
