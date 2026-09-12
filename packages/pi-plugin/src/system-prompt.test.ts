@@ -127,6 +127,7 @@ describe("Pi prompt-surface guidance epochs", () => {
     });
 
     it("freezes a date-only change on a cache-stable pass and advances it on a cache-busting pass", () => {
+        // The sticky date lives in the bounded session entry and leaves with the session.
         const sessionId = "ses-date-freeze";
         try {
             const first = processSystemPromptForCache({
@@ -135,6 +136,9 @@ describe("Pi prompt-surface guidance epochs", () => {
                 isCacheBusting: false,
             });
             expect(first.hashChanged).toBe(false);
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
+                "Today's date: Mon Jan 01 2024",
+            );
 
             const frozen = processSystemPromptForCache({
                 sessionId,
@@ -153,8 +157,12 @@ describe("Pi prompt-surface guidance epochs", () => {
             expect(advanced.hashChanged).toBe(true);
             expect(advanced.systemPrompt).toContain("Today's date: Tue Jan 02 2024");
             expect(piSystemPromptStateFor(sessionId)?.systemPromptHash).toBe(advanced.currentHash);
+            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
+                "Today's date: Tue Jan 02 2024",
+            );
         } finally {
             clearPiSystemPromptSession(sessionId);
+            expect(piSystemPromptStateFor(sessionId)).toBeUndefined();
         }
     });
 
@@ -222,32 +230,6 @@ describe("Pi prompt-surface guidance epochs", () => {
             expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(dayTwo);
         } finally {
             clearPiSystemPromptSession(sessionId);
-        }
-    });
-
-    it("stores the sticky date in the bounded session entry and clears it with the session", () => {
-        const sessionId = "ses-date-entry";
-        try {
-            processSystemPromptForCache({
-                sessionId,
-                systemPrompt: "Base prompt\nToday's date: Mon Jan 01 2024",
-                isCacheBusting: false,
-            });
-            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
-                "Today's date: Mon Jan 01 2024",
-            );
-
-            processSystemPromptForCache({
-                sessionId,
-                systemPrompt: "Base prompt\nToday's date: Tue Jan 02 2024",
-                isCacheBusting: true,
-            });
-            expect(piSystemPromptStateFor(sessionId)?.stickyDate).toBe(
-                "Today's date: Tue Jan 02 2024",
-            );
-        } finally {
-            clearPiSystemPromptSession(sessionId);
-            expect(piSystemPromptStateFor(sessionId)).toBeUndefined();
         }
     });
 });

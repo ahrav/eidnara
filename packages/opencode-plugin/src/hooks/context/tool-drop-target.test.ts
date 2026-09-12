@@ -94,109 +94,95 @@ describe("tool-drop-target", () => {
     });
 
     describe("partHasCompletedResult", () => {
-        it("counts a completed OpenCode tool part (output string) as closed", () => {
-            expect(
-                partHasCompletedResult({ type: "tool", callID: "c", state: { output: "done" } }),
-            ).toBe(true);
-        });
+        it("closes completed, errored, flat-terminal, and Anthropic result parts; keeps running, pending, invocation, and non-record parts open", () => {
+            const closed: Array<[string, unknown]> = [
+                ["output string", { type: "tool", callID: "c", state: { output: "done" } }],
+                [
+                    "status error without output",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        state: {
+                            status: "error",
+                            error: "boom",
+                            input: { content: "x".repeat(600) },
+                        },
+                    },
+                ],
+                [
+                    "completed with null output",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        state: { status: "completed", output: null, input: {} },
+                    },
+                ],
+                [
+                    "completed without output",
+                    { type: "tool", callID: "c", state: { status: "completed" } },
+                ],
+                [
+                    "flat top-level terminal fields",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        status: "completed",
+                        input: { q: "a" },
+                        output: "done",
+                    },
+                ],
+                [
+                    "top-level status when nested status is not a string",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        status: "completed",
+                        state: { status: null, attachments: [{ type: "file", mime: "image/png" }] },
+                    },
+                ],
+                [
+                    "nested completed status over a running top-level status",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        status: "running",
+                        state: { status: "completed" },
+                    },
+                ],
+                ["Anthropic tool_result", { type: "tool_result", tool_use_id: "c" }],
+            ];
+            const open: Array<[string, unknown]> = [
+                ["flat running", { type: "tool", callID: "c", status: "running", input: {} }],
+                ["tool part without state", { type: "tool", callID: "c" }],
+                [
+                    "running without output",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        state: { status: "running", input: { prompt: "p" } },
+                    },
+                ],
+                [
+                    "running with partial streamed output",
+                    {
+                        type: "tool",
+                        callID: "c",
+                        state: { status: "running", output: "partial…", input: {} },
+                    },
+                ],
+                ["pending", { type: "tool", callID: "c", state: { status: "pending" } }],
+                ["tool-invocation", { type: "tool-invocation", callID: "c" }],
+                ["tool_use", { type: "tool_use", id: "c" }],
+                ["null", null],
+                ["tool part without call id", { type: "tool" }],
+            ];
 
-        it("counts an errored OpenCode tool part (status error, no output) as closed", () => {
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    state: { status: "error", error: "boom", input: { content: "x".repeat(600) } },
-                }),
-            ).toBe(true);
-        });
-
-        it("counts a completed OpenCode tool part with non-string output as closed", () => {
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    state: { status: "completed", output: null, input: {} },
-                }),
-            ).toBe(true);
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    state: { status: "completed" },
-                }),
-            ).toBe(true);
-        });
-
-        it("counts a flat OpenCode tool part with top-level terminal fields as closed", () => {
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    status: "completed",
-                    input: { q: "a" },
-                    output: "done",
-                }),
-            ).toBe(true);
-            expect(
-                partHasCompletedResult({ type: "tool", callID: "c", status: "running", input: {} }),
-            ).toBe(false);
-            expect(partHasCompletedResult({ type: "tool", callID: "c" })).toBe(false);
-        });
-
-        it("falls back to the top-level status when the nested status is not a string", () => {
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    status: "completed",
-                    state: { status: null, attachments: [{ type: "file", mime: "image/png" }] },
-                }),
-            ).toBe(true);
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    status: "running",
-                    state: { status: "completed" },
-                }),
-            ).toBe(true);
-        });
-
-        it("keeps a running OpenCode tool part (no output, no error) open", () => {
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    state: { status: "running", input: { prompt: "p" } },
-                }),
-            ).toBe(false);
-        });
-
-        it("keeps a running OpenCode tool part open even with partial streamed output", () => {
-            expect(
-                partHasCompletedResult({
-                    type: "tool",
-                    callID: "c",
-                    state: { status: "running", output: "partial…", input: {} },
-                }),
-            ).toBe(false);
-        });
-
-        it("keeps a pending OpenCode tool part open", () => {
-            expect(
-                partHasCompletedResult({ type: "tool", callID: "c", state: { status: "pending" } }),
-            ).toBe(false);
-        });
-
-        it("counts an Anthropic tool_result part as closed", () => {
-            expect(partHasCompletedResult({ type: "tool_result", tool_use_id: "c" })).toBe(true);
-        });
-
-        it("excludes invocation-shaped parts and non-records", () => {
-            expect(partHasCompletedResult({ type: "tool-invocation", callID: "c" })).toBe(false);
-            expect(partHasCompletedResult({ type: "tool_use", id: "c" })).toBe(false);
-            expect(partHasCompletedResult(null)).toBe(false);
-            expect(partHasCompletedResult({ type: "tool" })).toBe(false);
+            for (const [label, part] of closed) {
+                expect(partHasCompletedResult(part), label).toBe(true);
+            }
+            for (const [label, part] of open) {
+                expect(partHasCompletedResult(part), label).toBe(false);
+            }
         });
     });
 
@@ -1123,8 +1109,8 @@ describe("tool-drop-target", () => {
                     expect(JSON.stringify(toolPart)).toBe(pristine);
                 });
 
-                it("#then setContent removes attachments and reports the change", () => {
-                    const toolPart = {
+                it("#then setContent removes attachments for same or different text and reports only the first change", () => {
+                    const sameText = {
                         type: "tool",
                         callID: "call-att-2",
                         state: {
@@ -1132,19 +1118,7 @@ describe("tool-drop-target", () => {
                             output: "same text",
                         },
                     };
-                    const messages: MessageLike[] = [message("m-att-2", "assistant", [toolPart])];
-                    const index = buildIndex(messages);
-                    const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-att-2", [], index, batch, 21);
-
-                    // Same text, but the attachment removal is itself a change.
-                    expect(target.setContent("same text")).toBe(true);
-                    expect("attachments" in toolPart.state).toBe(false);
-                    expect(target.setContent("same text")).toBe(false);
-                });
-
-                it("#then setContent with different text also removes attachments", () => {
-                    const toolPart = {
+                    const differentText = {
                         type: "tool",
                         callID: "call-att-3",
                         state: {
@@ -1152,14 +1126,23 @@ describe("tool-drop-target", () => {
                             output: "old text",
                         },
                     };
-                    const messages: MessageLike[] = [message("m-att-3", "assistant", [toolPart])];
+                    const messages: MessageLike[] = [
+                        message("m-att-2", "assistant", [sameText]),
+                        message("m-att-3", "assistant", [differentText]),
+                    ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-att-3", [], index, batch, 22);
 
-                    expect(target.setContent("new text")).toBe(true);
-                    expect(toolPart.state.output).toBe("new text");
-                    expect("attachments" in toolPart.state).toBe(false);
+                    // Same text, but the attachment removal is itself a change.
+                    const same = createToolDropTarget("call-att-2", [], index, batch, 21);
+                    expect(same.setContent("same text")).toBe(true);
+                    expect("attachments" in sameText.state).toBe(false);
+                    expect(same.setContent("same text")).toBe(false);
+
+                    const different = createToolDropTarget("call-att-3", [], index, batch, 22);
+                    expect(different.setContent("new text")).toBe(true);
+                    expect(differentText.state.output).toBe("new text");
+                    expect("attachments" in differentText.state).toBe(false);
                 });
             });
         });
@@ -1214,59 +1197,48 @@ describe("tool-drop-target", () => {
     });
 
     describe("hasMeaningfulPart", () => {
-        it("returns false for empty text", () => {
-            expect(hasMeaningfulPart({ type: "text", text: "" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: "   " })).toBe(false);
-        });
+        it("keeps text with content, tools, and populated meta parts; drops blank or tag-only text, ignored text, ignored part types, and non-records", () => {
+            const meaningful: unknown[] = [
+                { type: "text", text: "hello" },
+                { type: "text", text: "§424§ hello" },
+                { type: "text", text: '§15298">§15298§ hello' },
+                { type: "text", text: "shown", ignored: false },
+                { type: "tool" },
+                { type: "tool_result" },
+                { type: "meta", provider: "x", usage: { in: 1 } },
+            ];
+            const meaningless: unknown[] = [
+                { type: "text", text: "" },
+                { type: "text", text: "   " },
+                { type: "text", text: "§424§ " },
+                { type: "text", text: "§424§" },
+                { type: "text", text: "§424§   " },
+                { type: "text", text: "§1§ §2§ " },
+                { type: "text", text: '§15298">§15298§ ' },
+                { type: "text", text: '§15298">§ ' },
+                { type: "text", text: "hidden", ignored: true },
+                null,
+                undefined,
+                "string",
+                123,
+                { type: "step-start" },
+                { type: "step-finish" },
+                { type: "thinking" },
+                { type: "reasoning" },
+                { type: "redacted_thinking" },
+                { type: "meta" },
+                { type: "snapshot" },
+                { type: "patch" },
+                { type: "agent" },
+                { type: "retry" },
+            ];
 
-        it("returns false for text containing only tag prefixes", () => {
-            expect(hasMeaningfulPart({ type: "text", text: "§424§ " })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: "§424§" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: "§424§   " })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: "§1§ §2§ " })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: '§15298">§15298§ ' })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: '§15298">§ ' })).toBe(false);
-        });
-
-        it("returns true for text with actual content", () => {
-            expect(hasMeaningfulPart({ type: "text", text: "hello" })).toBe(true);
-            expect(hasMeaningfulPart({ type: "text", text: "§424§ hello" })).toBe(true);
-            expect(hasMeaningfulPart({ type: "text", text: '§15298">§15298§ hello' })).toBe(true);
-        });
-
-        it("returns false for ignored text even when it has content", () => {
-            expect(hasMeaningfulPart({ type: "text", text: "hidden", ignored: true })).toBe(false);
-            expect(hasMeaningfulPart({ type: "text", text: "shown", ignored: false })).toBe(true);
-        });
-
-        it("returns true for tools", () => {
-            expect(hasMeaningfulPart({ type: "tool" })).toBe(true);
-            expect(hasMeaningfulPart({ type: "tool_result" })).toBe(true);
-        });
-
-        it("returns false for non-record types", () => {
-            expect(hasMeaningfulPart(null)).toBe(false);
-            expect(hasMeaningfulPart(undefined)).toBe(false);
-            expect(hasMeaningfulPart("string")).toBe(false);
-            expect(hasMeaningfulPart(123)).toBe(false);
-        });
-
-        it("returns false for ignored part types", () => {
-            expect(hasMeaningfulPart({ type: "step-start" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "step-finish" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "thinking" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "reasoning" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "redacted_thinking" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "meta" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "snapshot" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "patch" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "agent" })).toBe(false);
-            expect(hasMeaningfulPart({ type: "retry" })).toBe(false);
-        });
-
-        it("keeps a meta part that carries fields, since it decodes as opaque content", () => {
-            expect(hasMeaningfulPart({ type: "meta", provider: "x", usage: { in: 1 } })).toBe(true);
-            expect(hasMeaningfulPart({ type: "meta" })).toBe(false);
+            for (const part of meaningful) {
+                expect(hasMeaningfulPart(part), JSON.stringify(part)).toBe(true);
+            }
+            for (const part of meaningless) {
+                expect(hasMeaningfulPart(part), JSON.stringify(part)).toBe(false);
+            }
         });
     });
 });

@@ -8,40 +8,12 @@ import {
 } from "./permissions";
 
 describe("buildAllowOnlyPermission", () => {
-    it("starts with wildcard deny so nothing is allowed by default", () => {
-        const perm = buildAllowOnlyPermission([]);
-        expect(perm["*"]).toBe("deny");
-    });
-
-    it("layers the allow-list on top of the wildcard deny", () => {
-        const perm = buildAllowOnlyPermission(["read", "ctx_search"]);
-        expect(perm["*"]).toBe("deny");
-        expect(perm.read).toBe("allow");
-        expect(perm.ctx_search).toBe("allow");
-    });
-
-    it("places named allows AFTER the wildcard deny so findLast-semantics make them win", () => {
+    it("places only the named allows after the wildcard deny so findLast-semantics make them win", () => {
         // Permission.evaluate uses insertion-order rules with `findLast`; a wildcard after a named tool denies that tool.
-        const perm = buildAllowOnlyPermission(["read"]);
-        const keys = Object.keys(perm);
-        const wildcardIdx = keys.indexOf("*");
-        const readIdx = keys.indexOf("read");
-        expect(wildcardIdx).toBeLessThan(readIdx);
-    });
-
-    it("never accidentally allows `task`, `bash`, or `edit` unless explicitly listed", () => {
-        const perm = buildAllowOnlyPermission(["read"]);
-        expect(perm.task).toBeUndefined();
-        expect(perm.bash).toBeUndefined();
-        expect(perm.edit).toBeUndefined();
-        expect(perm.webfetch).toBeUndefined();
-        expect(perm.websearch).toBeUndefined();
-        // The wildcard deny covers omitted tools through `findLast`.
-    });
-
-    it("returns an empty allow-list as just the wildcard deny", () => {
-        const perm = buildAllowOnlyPermission([]);
-        expect(Object.keys(perm)).toEqual(["*"]);
+        // Exact key equality also proves that unlisted tools (task, bash, edit, web) get no entry of their own.
+        const perm = buildAllowOnlyPermission(["read", "ctx_search"]);
+        expect(perm).toEqual({ "*": "deny", read: "allow", ctx_search: "allow" });
+        expect(Object.keys(perm)).toEqual(["*", "read", "ctx_search"]);
     });
 
     it("returns deny-all when the allow-list is undefined", () => {
@@ -142,24 +114,8 @@ describe("SMART_NOTE_COMPILER_ALLOWED_TOOLS", () => {
 });
 
 describe("SIDEKICK_ALLOWED_TOOLS", () => {
-    it("includes ctx_search but not ctx_memory for retrieval", () => {
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("ctx_search");
-        expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("ctx_memory");
-    });
-
-    it("includes `aft_outline` and `aft_zoom` for lightweight structural context", () => {
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("aft_outline");
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("aft_zoom");
-    });
-
-    it("does NOT include `read` (use aft_outline/aft_zoom for navigation instead)", () => {
-        expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("read");
-    });
-
-    it("does NOT include `task` or any edit / bash / web tool", () => {
-        for (const denied of ["task", "bash", "edit", "write", "webfetch", "websearch"]) {
-            expect(SIDEKICK_ALLOWED_TOOLS).not.toContain(denied);
-        }
+    it("is exactly ctx_search plus aft_outline/aft_zoom for navigation: no ctx_memory, read, write, task, or web tools", () => {
+        expect([...SIDEKICK_ALLOWED_TOOLS]).toEqual(["ctx_search", "aft_outline", "aft_zoom"]);
     });
 });
 

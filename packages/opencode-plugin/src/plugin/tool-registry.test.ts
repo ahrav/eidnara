@@ -118,7 +118,7 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
     // Assert the complete removed-ID set so newly gated reduce tools require an explicit expectation.
     const COMPACTION_OFF_REMOVED_TOOL_IDS = getCompactionOffRemovedToolIds();
 
-    it("compaction-off tool set = mode-on tool set minus exactly the reduce factory's IDs", () => {
+    it("compaction-off tool set = mode-on tool set minus exactly the reduce factory's IDs, with the other tools' fields intact", () => {
         const modeOn = buildRegistry({});
         const modeOff = buildRegistry({ compaction: { enabled: false } as never });
 
@@ -131,14 +131,14 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
         expect(added).toEqual([]);
 
         // Every other ctx_* tool stays registered (subject to its own gates).
-        for (const id of ["ctx_search", "ctx_note", "ctx_memory"]) {
-            expect(offIds.has(id)).toBe(true);
-        }
-    });
-
-    it("compaction-on (default) registers ctx_reduce", () => {
-        const tools = buildRegistry({});
-        expect(Object.keys(tools)).toContain("ctx_reduce");
+        expect(modeOff.ctx_reduce).toBeUndefined();
+        expect(Object.keys(modeOff).sort()).toEqual(["ctx_memory", "ctx_note", "ctx_search"]);
+        // ctx_search still advertises its fields — the reduce factory was
+        // skipped, not the search factory.
+        const searchSchema = tool.schema.toJSONSchema(
+            tool.schema.object(modeOff.ctx_search?.args ?? {}),
+        ) as { properties?: Record<string, unknown> };
+        expect(Object.keys(searchSchema.properties ?? {})).toContain("query");
     });
 
     it("compaction { enabled: true } is identical to default (back-compat)", () => {
@@ -146,18 +146,6 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
         const explicit = buildRegistry({ compaction: { enabled: true } as never });
         expect(Object.keys(explicit).sort()).toEqual(Object.keys(implicit).sort());
         expect(Object.keys(explicit)).toContain("ctx_reduce");
-    });
-
-    it("compaction-off omits exactly ctx_reduce and keeps the other tools' fields", () => {
-        const tools = buildRegistry({ compaction: { enabled: false } as never });
-        expect(tools.ctx_reduce).toBeUndefined();
-        expect(Object.keys(tools).sort()).toEqual(["ctx_memory", "ctx_note", "ctx_search"]);
-        // ctx_search still advertises its fields — the reduce factory was
-        // skipped, not the search factory.
-        const searchSchema = tool.schema.toJSONSchema(
-            tool.schema.object(tools.ctx_search?.args ?? {}),
-        ) as { properties?: Record<string, unknown> };
-        expect(Object.keys(searchSchema.properties ?? {})).toContain("query");
     });
 });
 

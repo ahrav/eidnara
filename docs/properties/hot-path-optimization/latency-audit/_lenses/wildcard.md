@@ -593,8 +593,8 @@ call site.
 [pm-body]: ../../../../../crates/host-runtime/tests/support/perf_measurement.rs#L16-L19
 [ring-body]: ../../../../../crates/host-runtime/benches/support/ring.rs#L77
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12378-L12383
-[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27395-L27400
+[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12381-L12386
+[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27398-L27403
 
 [h-pre]: ../../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-run]: ../../../../../crates/daemon/src/lib.rs#L8138-L8193
@@ -608,8 +608,8 @@ call site.
 [fmt]: ../../../../../crates/daemon/src/transform.rs#L1216-L1349
 [snap-add]: ../../../../../crates/daemon/src/transform.rs#L2373
 [snap-once]: ../../../../../crates/daemon/src/transform.rs#L2852
-[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12228
-[t-line]: ../../../../../crates/daemon/src/transform.rs#L12278
+[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12231
+[t-line]: ../../../../../crates/daemon/src/transform.rs#L12281
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
@@ -638,8 +638,8 @@ call site.
 [floor]: ../../../../../crates/daemon/src/transform.rs#L5838
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
 [mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8558
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24170-L24181
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8561
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24173-L24184
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148
 
 [eval]: ../../../../../crates/secret-scanner/src/evaluator.rs#L35-L157

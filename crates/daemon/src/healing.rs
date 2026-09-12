@@ -169,91 +169,67 @@ mod tests {
     }
 
     #[test]
-    fn owned_broca_is_semantically_identical_to_owned_llmrunner() {
-        // OwnedBroca must have the same coverage as OwnedLlmRunner.
-        assert_eq!(
-            coverage(SerializerProfile::OwnedBroca),
-            coverage(SerializerProfile::OwnedLlmRunner)
-        );
-        assert_eq!(
-            quirk_residual(SerializerProfile::OwnedBroca),
-            quirk_residual(SerializerProfile::OwnedLlmRunner)
-        );
-        assert_eq!(
-            tail_reclaim(SerializerProfile::OwnedBroca),
-            tail_reclaim(SerializerProfile::OwnedLlmRunner)
-        );
-        assert_eq!(
-            SerializerProfile::parse("owned-broca"),
-            Some(SerializerProfile::OwnedBroca)
-        );
-        assert_eq!(SerializerProfile::OwnedBroca.wire_id(), "owned-broca");
-    }
-
-    #[test]
-    fn tail_reclaim_is_full_array_for_every_shipping_profile() {
-        for profile in SerializerProfile::all() {
-            assert!(tail_reclaim(*profile), "{profile:?} must reclaim the tail");
-        }
-        assert!(tail_reclaim(SerializerProfile::ClaudeCodeAnthropic));
-        assert!(tail_reclaim(SerializerProfile::OwnedBroca));
-        assert_eq!(
-            tail_reclaim(SerializerProfile::OwnedBroca),
-            tail_reclaim(SerializerProfile::OwnedLlmRunner),
-            "broca stays full-array, identical to llmrunner"
-        );
-    }
-
-    #[test]
-    fn coverage_table_is_pinned_per_serializer_profile() {
-        assert_eq!(
-            coverage(SerializerProfile::OwnedLlmRunner),
-            HealingCoverage {
-                drops_empty_content: true,
-                autofills_reasoning: true,
-                merges_consecutive_assistants: false,
-            }
-        );
-        assert_eq!(
-            coverage(SerializerProfile::Pi),
-            coverage(SerializerProfile::OwnedLlmRunner)
-        );
-        assert_eq!(
-            coverage(SerializerProfile::ClaudeCodeAnthropic),
-            HealingCoverage {
-                drops_empty_content: false,
-                autofills_reasoning: false,
-                merges_consecutive_assistants: false,
-            }
-        );
-        assert_eq!(
-            coverage(SerializerProfile::OpencodeAiSdk),
-            HealingCoverage {
-                drops_empty_content: false,
-                autofills_reasoning: false,
-                merges_consecutive_assistants: true,
-            }
-        );
-    }
-
-    #[test]
-    fn residual_table_is_pinned_per_serializer_profile() {
-        let empty = QuirkResidual {
+    fn wire_ids_coverage_and_residual_are_pinned_per_profile_and_every_profile_reclaims_the_tail() {
+        let drops_and_autofills = HealingCoverage {
+            drops_empty_content: true,
+            autofills_reasoning: true,
+            merges_consecutive_assistants: false,
+        };
+        let no_coverage = HealingCoverage {
+            drops_empty_content: false,
+            autofills_reasoning: false,
+            merges_consecutive_assistants: false,
+        };
+        let no_residual = QuirkResidual {
             requires_non_anthropic_empty_sentinels: false,
             strips_reasoning_from_merged_assistants: false,
         };
-        assert_eq!(quirk_residual(SerializerProfile::OwnedLlmRunner), empty);
-        assert_eq!(quirk_residual(SerializerProfile::Pi), empty);
-        assert_eq!(
-            quirk_residual(SerializerProfile::ClaudeCodeAnthropic),
-            empty
-        );
-        assert_eq!(
-            quirk_residual(SerializerProfile::OpencodeAiSdk),
-            QuirkResidual {
-                requires_non_anthropic_empty_sentinels: true,
-                strips_reasoning_from_merged_assistants: true,
-            }
-        );
+        let expected = [
+            (
+                SerializerProfile::OwnedLlmRunner,
+                "owned-llmrunner",
+                drops_and_autofills,
+                no_residual,
+            ),
+            (
+                SerializerProfile::OwnedBroca,
+                "owned-broca",
+                drops_and_autofills,
+                no_residual,
+            ),
+            (
+                SerializerProfile::ClaudeCodeAnthropic,
+                "claude-code-anthropic",
+                no_coverage,
+                no_residual,
+            ),
+            (
+                SerializerProfile::OpencodeAiSdk,
+                "opencode-aisdk",
+                HealingCoverage {
+                    drops_empty_content: false,
+                    autofills_reasoning: false,
+                    merges_consecutive_assistants: true,
+                },
+                QuirkResidual {
+                    requires_non_anthropic_empty_sentinels: true,
+                    strips_reasoning_from_merged_assistants: true,
+                },
+            ),
+            (
+                SerializerProfile::Pi,
+                "pi",
+                drops_and_autofills,
+                no_residual,
+            ),
+        ];
+        assert_eq!(expected.len(), SerializerProfile::all().len());
+        for (profile, wire_id, expected_coverage, expected_residual) in expected {
+            assert!(SerializerProfile::all().contains(&profile), "{profile:?}");
+            assert_eq!(profile.wire_id(), wire_id);
+            assert_eq!(coverage(profile), expected_coverage, "{profile:?}");
+            assert_eq!(quirk_residual(profile), expected_residual, "{profile:?}");
+            assert!(tail_reclaim(profile), "{profile:?} must reclaim the tail");
+        }
     }
 }

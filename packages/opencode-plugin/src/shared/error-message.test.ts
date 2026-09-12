@@ -84,9 +84,11 @@ describe("describeError", () => {
         expect(desc.brief.length).toBeLessThan(500);
     });
 
-    it("getErrorMessage still works as before", () => {
+    it("getErrorMessage returns the message for Errors and strings and stringifies a non-string message field", () => {
         expect(getErrorMessage(new Error("foo"))).toBe("foo");
         expect(getErrorMessage("bar")).toBe("bar");
+        const err = Object.assign(new Error(), { message: 42 as unknown as string });
+        expect(getErrorMessage(err)).toBe("42");
     });
 
     it("getErrorMessage does not throw on values that cannot be stringified", () => {
@@ -151,11 +153,6 @@ describe("describeError", () => {
         });
         expect(getErrorMessage(proxied)).toBe("<unstringifiable>");
         expect(describeError(proxied).brief).toBeTruthy();
-    });
-
-    it("getErrorMessage stringifies a non-string message field", () => {
-        const err = Object.assign(new Error(), { message: 42 as unknown as string });
-        expect(getErrorMessage(err)).toBe("42");
     });
 
     it("survives a proxy whose getPrototypeOf trap throws during the instanceof check", () => {

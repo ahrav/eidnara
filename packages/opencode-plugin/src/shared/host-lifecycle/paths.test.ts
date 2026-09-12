@@ -31,20 +31,13 @@ describe("data-root resolution (U3 scenario 1, Rust parity)", () => {
         ).toEqual({ ok: true, root: "/xdg-root" });
     });
 
-    test("empty or relative XDG_DATA_HOME falls back to absolute HOME", () => {
-        for (const xdg of ["", "relative/xdg", "./xdg"]) {
+    test("unset, empty, or relative XDG_DATA_HOME falls back to absolute HOME/.local/share", () => {
+        for (const xdg of [undefined, "", "relative/xdg", "./xdg"]) {
             expect(resolveLifecycleDataRoot({ XDG_DATA_HOME: xdg, HOME: "/home-root" })).toEqual({
                 ok: true,
-                root: path.join("/home-root", ".local", "share"),
+                root: "/home-root/.local/share",
             });
         }
-    });
-
-    test("unset XDG_DATA_HOME uses absolute HOME/.local/share", () => {
-        expect(resolveLifecycleDataRoot({ HOME: "/home-root" })).toEqual({
-            ok: true,
-            root: "/home-root/.local/share",
-        });
     });
 
     test("relative HOME is ignored: neither root resolves means no_data_dir", () => {
@@ -205,9 +198,13 @@ describe("filesystem admission (KTD11)", () => {
         if (!verdict.ok) expect(verdict.reason).toBe("unsupported_filesystem");
     });
 
-    test("distributed and passthrough filesystems are rejected, not treated as local", () => {
+    test("remote, distributed, and passthrough filesystems are unsupported_filesystem / set_data_directory", () => {
         // The locality check fails open for filesystem types absent from the deny-list.
         for (const fsType of [
+            "nfs4",
+            "cifs",
+            "fuse.sshfs",
+            "9p",
             "ceph",
             "cephfs",
             "fuse.ceph",
@@ -240,7 +237,10 @@ describe("filesystem admission (KTD11)", () => {
                 mounts(`/dev/root / ext4 rw 0 0\nremote:/x /home ${fsType} rw 0 0\n`),
             );
             expect(verdict.ok).toBe(false);
-            if (!verdict.ok) expect(verdict.reason).toBe("unsupported_filesystem");
+            if (!verdict.ok) {
+                expect(verdict.reason).toBe("unsupported_filesystem");
+                expect(verdict.remediation).toBe("set_data_directory");
+            }
         }
         for (const fsType of ["ext4", "xfs", "btrfs", "zfs", "f2fs"]) {
             expect(
@@ -249,20 +249,6 @@ describe("filesystem admission (KTD11)", () => {
                     mounts(`/dev/root / ext4 rw 0 0\n/dev/sdb1 /home ${fsType} rw 0 0\n`),
                 ),
             ).toEqual({ ok: true });
-        }
-    });
-
-    test("remote filesystem types are unsupported_filesystem / set_data_directory", () => {
-        for (const fsType of ["nfs4", "cifs", "fuse.sshfs", "fuse.rclone", "9p"]) {
-            const verdict = admitLifecycleFilesystem(
-                "/home/user/.local/share",
-                mounts(`/dev/root / ext4 rw 0 0\nremote:/x /home ${fsType} rw 0 0\n`),
-            );
-            expect(verdict.ok).toBe(false);
-            if (!verdict.ok) {
-                expect(verdict.reason).toBe("unsupported_filesystem");
-                expect(verdict.remediation).toBe("set_data_directory");
-            }
         }
     });
 

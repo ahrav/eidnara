@@ -620,15 +620,50 @@ fn failed_restore_after_displacement_recovers_live_family() {
     insert_domain(&store, 1, Sensitivity::Normal);
     let backup = store.backup(request(destination.path())).unwrap();
     insert_domain(&store, 2, Sensitivity::Normal);
+    let live_oracle = digest(root.path(), Profile::SameRoot);
+
+    // `AfterDisplace` faults after moving the live family to the recovery
+    // directory, so the handle moves it back before returning the fault.
     assert_eq!(
         store
-            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::AfterDisplace,)
+            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::AfterDisplace)
             .unwrap_err(),
         KernelError::Fault
     );
+    digest(root.path(), Profile::SameRoot).assert_same(&live_oracle, "live state");
     assert_eq!(store.known_as_of(2).unwrap().tip, 2);
-    assert_eq!(insert_domain(&store, 3, Sensitivity::Normal), 3);
+    assert!(
+        store
+            .egress_snapshot()
+            .unwrap()
+            .classification_generation
+            .is_some(),
+        "a recovered restore left the classification window open"
+    );
     assert!(!root.path().join("kernel.sqlite.restore").exists());
+    assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".restore-")
+    }));
+    assert_eq!(insert_domain(&store, 3, Sensitivity::Normal), 3);
+
+    let recovered_oracle = digest(root.path(), Profile::SameRoot);
+    drop(store);
+    let reopened = KernelStore::open(root.path()).unwrap();
+    digest(root.path(), Profile::SameRoot).assert_same(&recovered_oracle, "reopened state");
+    assert_eq!(reopened.facts(1).unwrap().commit_seq, 3);
+    assert!(!root.path().join("kernel.sqlite.restore").exists());
+    assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".restore-")
+    }));
+    assert_eq!(insert_domain(&reopened, 4, Sensitivity::Normal), 4);
 }
 
 #[test]
@@ -866,37 +901,6 @@ fn published_artifact_is_self_contained_and_restores_from_read_only_media() {
             "restore created {suffix} beside the source"
         );
     }
-}
-
-#[test]
-fn restore_interrupted_before_the_swap_rolls_back_on_the_next_open() {
-    let root = private_dir();
-    let destination = private_dir();
-    let store = KernelStore::open(root.path()).unwrap();
-    insert_domain(&store, 1, Sensitivity::Normal);
-    let backup = store.backup(request(destination.path())).unwrap();
-    insert_domain(&store, 2, Sensitivity::Normal);
-    let live_oracle = digest(root.path(), Profile::SameRoot);
-
-    // `AfterDisplace` abandons the family in the recovery directory with the
-    // marker still published, matching a process killed mid-replacement.
-    assert_eq!(
-        store
-            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::AfterDisplace)
-            .unwrap_err(),
-        KernelError::Fault
-    );
-    drop(store);
-
-    let reopened = KernelStore::open(root.path()).unwrap();
-    digest(root.path(), Profile::SameRoot).assert_same(&live_oracle, "live state");
-    assert_eq!(reopened.facts(1).unwrap().commit_seq, 2);
-    assert!(!root.path().join("kernel.sqlite.restore").exists());
-    assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        name.contains(".restore-")
-    }));
-    assert_eq!(insert_domain(&reopened, 3, Sensitivity::Normal), 3);
 }
 
 #[test]
@@ -1373,30 +1377,6 @@ fn a_restore_advances_the_egress_generation_even_when_the_tip_is_unchanged() {
     assert_ne!(
         generation_after, generation_before,
         "a restore that kept the tip left the egress generation unchanged"
-    );
-}
-
-#[test]
-fn a_failed_restore_still_leaves_an_even_egress_generation() {
-    let root = private_dir();
-    let destination = private_dir();
-    let store = KernelStore::open(root.path()).unwrap();
-    insert_domain(&store, 1, Sensitivity::Normal);
-    let backup = store.backup(request(destination.path())).unwrap();
-    insert_domain(&store, 2, Sensitivity::Normal);
-    assert_eq!(
-        store
-            .restore_with_fault_for_test(&backup.destination_path, RestoreFault::AfterDisplace)
-            .unwrap_err(),
-        KernelError::Fault
-    );
-    assert!(
-        store
-            .egress_snapshot()
-            .unwrap()
-            .classification_generation
-            .is_some(),
-        "a recovered restore left the classification window open"
     );
 }
 

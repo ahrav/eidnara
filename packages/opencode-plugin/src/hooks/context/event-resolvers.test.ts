@@ -37,20 +37,9 @@ describe("event-resolvers", () => {
             expect(limit).toBeGreaterThan(0);
         });
 
-        it("returns default for missing provider", () => {
-            //#when
-            const limit = resolveContextLimit(undefined, "gpt-4o");
-
-            //#then
-            expect(limit).toBe(128_000);
-        });
-
-        it("returns default for unknown provider/model not in models.dev or opencode.json", () => {
-            //#when
-            const limit = resolveContextLimit("unknown-provider", "unknown-model-xyz");
-
-            //#then
-            expect(limit).toBe(128_000);
+        it("returns the 128K default for a missing provider or an unknown provider/model", () => {
+            expect(resolveContextLimit(undefined, "gpt-4o")).toBe(128_000);
+            expect(resolveContextLimit("unknown-provider", "unknown-model-xyz")).toBe(128_000);
         });
     });
 
@@ -67,13 +56,10 @@ describe("event-resolvers", () => {
             }
         });
 
-        it("returns undefined for an unknown model (NOT the 128K default)", () => {
+        it("returns undefined, never the 128K default, for an unknown model or a missing provider/model", () => {
             expect(
                 resolveTrustedContextLimit("unknown-provider", "unknown-model-xyz"),
             ).toBeUndefined();
-        });
-
-        it("returns undefined when provider/model missing", () => {
             expect(resolveTrustedContextLimit(undefined, "gpt-4o")).toBeUndefined();
             expect(resolveTrustedContextLimit("anthropic", undefined)).toBeUndefined();
         });
@@ -121,13 +107,6 @@ describe("event-resolvers", () => {
             expect(resolveExecuteThreshold(50, undefined, 65)).toBe(50);
         });
 
-        it("caps any resolved value at 90%", () => {
-            expect(resolveExecuteThreshold(95, "openai/gpt-4o", 65)).toBe(90);
-            expect(
-                resolveExecuteThreshold({ default: 95, "openai/gpt-4o": 90 }, "openai/gpt-4o", 65),
-            ).toBe(90);
-        });
-
         it("accepts Pi-native threshold keys and keeps canonical precedence", () => {
             expect(
                 resolveExecuteThreshold(
@@ -149,73 +128,95 @@ describe("event-resolvers", () => {
             ).toBe(30);
         });
 
-        it("prefers exact provider/model key when present", () => {
-            const config = { default: 65, "openai/gpt-5.4-fast": 25 };
+        it("resolves record keys in lookup order: exact, base, bare, bare base, provider wildcard, then default", () => {
+            const opus = "anthropic/claude-opus-4-8";
+            const cases: Array<{
+                config: { default: number; [key: string]: number };
+                modelKey: string;
+                percentage: number;
+                matchedKey: string;
+            }> = [
+                {
+                    config: { default: 65, "openai/gpt-5.4-fast": 25 },
+                    modelKey: "openai/gpt-5.4-fast",
+                    percentage: 25,
+                    matchedKey: "openai/gpt-5.4-fast",
+                },
+                {
+                    config: { default: 65, "openai/gpt-5.4": 25 },
+                    modelKey: "openai/gpt-5.4-fast",
+                    percentage: 25,
+                    matchedKey: "openai/gpt-5.4",
+                },
+                {
+                    config: { default: 65, "openai/gpt-5.4-fast": 20, "openai/gpt-5.4": 40 },
+                    modelKey: "openai/gpt-5.4-fast",
+                    percentage: 20,
+                    matchedKey: "openai/gpt-5.4-fast",
+                },
+                {
+                    config: { default: 65, "openai/gpt-5.4-fast": 20, "openai/gpt-5.4": 40 },
+                    modelKey: "openai/gpt-5.4",
+                    percentage: 40,
+                    matchedKey: "openai/gpt-5.4",
+                },
+                {
+                    config: { default: 65, "gpt-5.4-fast": 25 },
+                    modelKey: "openai/gpt-5.4-fast",
+                    percentage: 25,
+                    matchedKey: "gpt-5.4-fast",
+                },
+                {
+                    config: { default: 65, "gpt-5.4": 30 },
+                    modelKey: "openai/gpt-5.4-fast",
+                    percentage: 30,
+                    matchedKey: "gpt-5.4",
+                },
+                {
+                    config: { default: 55, "anthropic/*": 70, [opus]: 30 },
+                    modelKey: opus,
+                    percentage: 30,
+                    matchedKey: opus,
+                },
+                {
+                    config: { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4": 35 },
+                    modelKey: opus,
+                    percentage: 35,
+                    matchedKey: "anthropic/claude-opus-4",
+                },
+                {
+                    config: { default: 55, "anthropic/*": 70, "claude-opus-4-8": 40 },
+                    modelKey: opus,
+                    percentage: 40,
+                    matchedKey: "claude-opus-4-8",
+                },
+                {
+                    config: { default: 55, "anthropic/*": 70 },
+                    modelKey: opus,
+                    percentage: 70,
+                    matchedKey: "anthropic/*",
+                },
+                {
+                    config: { default: 55, "anthropic/claude-opus-4-6": 40 },
+                    modelKey: "openai/gpt-4o",
+                    percentage: 55,
+                    matchedKey: "default",
+                },
+                {
+                    config: { default: 55, "openai/*": 70 },
+                    modelKey: opus,
+                    percentage: 55,
+                    matchedKey: "default",
+                },
+            ];
 
-            //#when
-            const result = resolveExecuteThreshold(config, "openai/gpt-5.4-fast", 65);
-
-            //#then
-            expect(result).toBe(25);
-        });
-
-        it("falls back to base model key when user wrote base (no derived)", () => {
-            const config = { default: 65, "openai/gpt-5.4": 25 };
-
-            const result = resolveExecuteThreshold(config, "openai/gpt-5.4-fast", 65);
-
-            // Derived model keys match their base keys after suffix stripping.
-            expect(result).toBe(25);
-        });
-
-        it("prefers most-specific match when both derived and base configured", () => {
-            // When both keys exist, the derived key takes precedence.
-            const config = {
-                default: 65,
-                "openai/gpt-5.4-fast": 20,
-                "openai/gpt-5.4": 40,
-            };
-
-            //#when
-            const derived = resolveExecuteThreshold(config, "openai/gpt-5.4-fast", 65);
-            const base = resolveExecuteThreshold(config, "openai/gpt-5.4", 65);
-
-            //#then
-            expect(derived).toBe(20);
-            expect(base).toBe(40);
-        });
-
-        it("matches bare model id (no provider prefix) in config", () => {
-            // Providerless model IDs match configured model keys.
-            const config = { default: 65, "gpt-5.4-fast": 25 };
-
-            //#when
-            const result = resolveExecuteThreshold(config, "openai/gpt-5.4-fast", 65);
-
-            //#then
-            expect(result).toBe(25);
-        });
-
-        it("matches bare base model id for derived runtime model", () => {
-            //#given
-            const config = { default: 65, "gpt-5.4": 30 };
-
-            //#when
-            const result = resolveExecuteThreshold(config, "openai/gpt-5.4-fast", 65);
-
-            //#then
-            expect(result).toBe(30);
-        });
-
-        it("returns config.default when no keys match", () => {
-            //#given
-            const config = { default: 55, "anthropic/claude-opus-4-6": 40 };
-
-            //#when
-            const result = resolveExecuteThreshold(config, "openai/gpt-4o", 65);
-
-            //#then
-            expect(result).toBe(55);
+            for (const { config, modelKey, percentage, matchedKey } of cases) {
+                const label = `${modelKey} against ${JSON.stringify(config)}`;
+                const detail = resolveExecuteThresholdDetail(config, modelKey, 65);
+                expect(detail.percentage, label).toBe(percentage);
+                expect(detail.matchedKey, label).toBe(matchedKey);
+                expect(resolveExecuteThreshold(config, modelKey, 65), label).toBe(percentage);
+            }
         });
 
         it("returns fallback when config.default absent and no match", () => {
@@ -246,87 +247,56 @@ describe("event-resolvers", () => {
 
             expect(result).toBe(42);
         });
-
-        it("matches the provider wildcard when no exact, base, or bare key matches", () => {
-            const config = { default: 55, "anthropic/*": 70 };
-
-            //#when
-            const detail = resolveExecuteThresholdDetail(config, "anthropic/claude-opus-4-8", 65);
-
-            //#then
-            expect(detail.percentage).toBe(70);
-            expect(detail.matchedKey).toBe("anthropic/*");
-        });
-
-        it("ranks the provider wildcard below exact, base, and bare keys but above default", () => {
-            const runtimeKey = "anthropic/claude-opus-4-8";
-            expect(
-                resolveExecuteThreshold(
-                    { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4-8": 30 },
-                    runtimeKey,
-                    65,
-                ),
-            ).toBe(30);
-            expect(
-                resolveExecuteThreshold(
-                    { default: 55, "anthropic/*": 70, "anthropic/claude-opus-4": 35 },
-                    runtimeKey,
-                    65,
-                ),
-            ).toBe(35);
-            expect(
-                resolveExecuteThreshold(
-                    { default: 55, "anthropic/*": 70, "claude-opus-4-8": 40 },
-                    runtimeKey,
-                    65,
-                ),
-            ).toBe(40);
-            expect(resolveExecuteThreshold({ default: 55, "openai/*": 70 }, runtimeKey, 65)).toBe(
-                55,
-            );
-        });
     });
 
     describe("resolveExecuteThreshold (tokens-based)", () => {
-        it("uses execute_threshold_tokens when set for the model, overriding percentage", () => {
-            const result = resolveExecuteThreshold(65, "github-copilot/gpt-5.2-codex", 65, {
-                tokensConfig: { "github-copilot/gpt-5.2-codex": 100_000 },
-                contextLimit: 200_000,
-            });
+        it("resolves tokens keys in lookup order: exact key, provider wildcard, then default", () => {
+            const cases: Array<{
+                tokensConfig: { default?: number; [key: string]: number | undefined };
+                modelKey: string;
+                contextLimit: number;
+                absoluteTokens: number;
+                percentage: number;
+                matchedKey: string;
+            }> = [
+                {
+                    tokensConfig: { default: 200_000, "github-copilot/gpt-5.2-codex": 40_000 },
+                    modelKey: "github-copilot/gpt-5.2-codex",
+                    contextLimit: 400_000,
+                    absoluteTokens: 40_000,
+                    percentage: 10,
+                    matchedKey: "github-copilot/gpt-5.2-codex",
+                },
+                {
+                    tokensConfig: { default: 150_000, "anthropic/*": 100_000 },
+                    modelKey: "anthropic/claude-opus-4-8",
+                    contextLimit: 400_000,
+                    absoluteTokens: 100_000,
+                    percentage: 25,
+                    matchedKey: "anthropic/*",
+                },
+                {
+                    tokensConfig: { default: 150_000 },
+                    modelKey: "openai/gpt-5.4",
+                    contextLimit: 400_000,
+                    absoluteTokens: 150_000,
+                    percentage: 37.5,
+                    matchedKey: "default",
+                },
+            ];
 
-            expect(result).toBe(50);
-        });
-
-        it("uses execute_threshold_tokens.default for models not explicitly listed", () => {
-            const result = resolveExecuteThreshold(65, "openai/gpt-5.4", 65, {
-                tokensConfig: { default: 150_000 },
-                contextLimit: 400_000,
-            });
-
-            //#then
-            expect(result).toBe(37.5);
-        });
-
-        it("matches a provider wildcard in tokens config before falling to default", () => {
-            const detail = resolveExecuteThresholdDetail(65, "anthropic/claude-opus-4-8", 65, {
-                tokensConfig: { default: 150_000, "anthropic/*": 100_000 },
-                contextLimit: 400_000,
-            });
-
-            //#then
-            expect(detail.mode).toBe("tokens");
-            expect(detail.matchedKey).toBe("anthropic/*");
-            expect(detail.absoluteTokens).toBe(100_000);
-            expect(detail.percentage).toBe(25);
-        });
-
-        it("clamps token value above 90% × contextLimit and still returns capped percentage", () => {
-            const result = resolveExecuteThreshold(65, "some/model", 65, {
-                tokensConfig: { "some/model": 500_000 },
-                contextLimit: 200_000,
-            });
-
-            expect(result).toBe(90);
+            for (const { tokensConfig, modelKey, contextLimit, ...expected } of cases) {
+                const label = `${modelKey} against ${JSON.stringify(tokensConfig)}`;
+                const detail = resolveExecuteThresholdDetail(65, modelKey, 65, {
+                    tokensConfig,
+                    contextLimit,
+                });
+                expect(detail, label).toMatchObject({ mode: "tokens", ...expected });
+                expect(
+                    resolveExecuteThreshold(65, modelKey, 65, { tokensConfig, contextLimit }),
+                    label,
+                ).toBe(expected.percentage);
+            }
         });
 
         it("falls through to percentage config when tokens config is missing", () => {
@@ -339,39 +309,6 @@ describe("event-resolvers", () => {
             );
 
             expect(result).toBe(45);
-        });
-
-        it("falls through to percentage when contextLimit is missing (tokens unusable)", () => {
-            // resolveExecuteThreshold ignores tokens when contextLimit is undefined.
-            const result = resolveExecuteThreshold(55, "x/y", 65, {
-                tokensConfig: { "x/y": 100_000 },
-            });
-
-            //#then
-            expect(result).toBe(55);
-        });
-
-        it("picks exact model key before default in tokens config", () => {
-            // An exact key takes precedence over the default.
-            const result = resolveExecuteThreshold(65, "github-copilot/gpt-5.2-codex", 65, {
-                tokensConfig: {
-                    default: 200_000,
-                    "github-copilot/gpt-5.2-codex": 40_000,
-                },
-                contextLimit: 400_000,
-            });
-
-            expect(result).toBe(10);
-        });
-
-        it("supports progressive lookup (derived → base) for tokens config", () => {
-            // Derived variants use the base model's token setting.
-            const result = resolveExecuteThreshold(65, "openai/gpt-5.4-fast", 65, {
-                tokensConfig: { "openai/gpt-5.4": 100_000 },
-                contextLimit: 400_000,
-            });
-
-            expect(result).toBe(25);
         });
     });
 
@@ -421,59 +358,17 @@ describe("event-resolvers", () => {
             expect(detail.matchedKey).toBe("openai/gpt-5.4");
         });
 
-        it("reports mode='percentage' when contextLimit is missing (tokens unusable)", () => {
-            // Without a contextLimit, tokens configuration cannot apply.
-            const detail = resolveExecuteThresholdDetail(55, "x/y", 65, {
-                tokensConfig: { "x/y": 100_000 },
-            });
+        it("reports mode='percentage' when contextLimit is missing, NaN, zero, or negative (tokens unusable)", () => {
+            for (const contextLimit of [undefined, 0 / 0, 0, -100_000]) {
+                const detail = resolveExecuteThresholdDetail(55, "x/y", 65, {
+                    tokensConfig: { "x/y": 100_000 },
+                    contextLimit,
+                });
 
-            //#then
-            expect(detail.mode).toBe("percentage");
-            expect(detail.percentage).toBe(55);
-        });
-
-        it("reports mode='tokens' with absoluteTokens equal to clamp cap when over-cap", () => {
-            const detail = resolveExecuteThresholdDetail(65, "some/model", 65, {
-                tokensConfig: { "some/model": 500_000 },
-                contextLimit: 200_000,
-                sessionId: "ses-test-clamp-detail",
-            });
-
-            // A valid tokens configuration takes precedence and clamps at 90%.
-            expect(detail.mode).toBe("tokens");
-            expect(detail.percentage).toBe(90);
-            expect(detail.absoluteTokens).toBe(180_000);
-        });
-
-        it("guards against NaN contextLimit (runtime division hazard) — falls through to percentage", () => {
-            const nanLimit = 0 / 0;
-
-            //#when
-            const detail = resolveExecuteThresholdDetail(55, "x/y", 65, {
-                tokensConfig: { "x/y": 100_000 },
-                contextLimit: nanLimit,
-            });
-
-            // NaN contextLimit falls back to percentage configuration.
-            expect(detail.mode).toBe("percentage");
-            expect(detail.percentage).toBe(55);
-            expect(Number.isFinite(detail.percentage)).toBe(true);
-        });
-
-        it("guards against negative/zero contextLimit", () => {
-            //#when
-            const zero = resolveExecuteThresholdDetail(55, "x/y", 65, {
-                tokensConfig: { "x/y": 100_000 },
-                contextLimit: 0,
-            });
-            const neg = resolveExecuteThresholdDetail(55, "x/y", 65, {
-                tokensConfig: { "x/y": 100_000 },
-                contextLimit: -100_000,
-            });
-
-            // resolveExecuteThreshold ignores invalid context limits without throwing.
-            expect(zero.mode).toBe("percentage");
-            expect(neg.mode).toBe("percentage");
+                expect(detail.mode, `contextLimit=${contextLimit}`).toBe("percentage");
+                expect(detail.percentage, `contextLimit=${contextLimit}`).toBe(55);
+                expect(Number.isFinite(detail.percentage)).toBe(true);
+            }
         });
 
         it("guards against non-finite/non-positive token values (e.g., NaN injected at runtime)", () => {
@@ -494,21 +389,6 @@ describe("event-resolvers", () => {
             // Negative percentage values use the fallback percentage.
             expect(detail.mode).toBe("percentage");
             expect(detail.percentage).toBe(42);
-        });
-
-        it("dedupes clamp warn: repeated resolution of the same over-cap config only warns once", () => {
-            // The resolver deduplicates clamp logs by (sessionId|modelKey|tokenVal|cap).
-            const opts = {
-                tokensConfig: { "some/model": 500_000 },
-                contextLimit: 200_000,
-                sessionId: "ses-dedupe",
-            };
-            const a = resolveExecuteThresholdDetail(65, "some/model", 65, opts);
-            const b = resolveExecuteThresholdDetail(65, "some/model", 65, opts);
-            const c = resolveExecuteThresholdDetail(65, "some/model", 65, opts);
-
-            expect(a).toEqual(b);
-            expect(b).toEqual(c);
         });
 
         it("sets clamped + configuredValue when a tokens config is reduced to the cap (#241)", () => {

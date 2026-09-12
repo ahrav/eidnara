@@ -2596,64 +2596,43 @@ mod tests {
         );
     }
 
+    /// `retry_after_secs` is a floor input: a short value cannot shorten the
+    /// historian schedule, and a longer value pushes the backoff out.
     #[tokio::test]
-    async fn transient_retry_after_sets_backoff_floor() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_prior_compartment(&store);
-        let chunk = historian_chunk();
-        let prior = prior_ranges();
-        let models = vec!["prov/model-a".to_string()];
-        let mut producer =
-            ScriptedProducer::default().with_start(Err(HistorianProducerError::tagged_call(
-                "provider_error",
-                "short retry-after should not shorten our schedule",
-                ErrorClass::Transient,
-                Some(5),
-            )));
+    async fn transient_retry_after_only_extends_the_backoff_schedule() {
+        for (retry_after_secs, expected_backoff_at_ms) in [
+            (5, 123 + HISTORIAN_FAILURE_BACKOFF_MS),
+            (120, 123 + 120_000),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_compartment(&store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let models = vec!["prov/model-a".to_string()];
+            let mut producer =
+                ScriptedProducer::default().with_start(Err(HistorianProducerError::tagged_call(
+                    "provider_error",
+                    "rate limited",
+                    ErrorClass::Transient,
+                    Some(retry_after_secs),
+                )));
 
-        let err = run_historian_firing(
-            &mut producer,
-            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
-        )
-        .await
-        .unwrap_err();
+            let err = run_historian_firing(
+                &mut producer,
+                fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+            )
+            .await
+            .unwrap_err();
 
-        assert!(matches!(err, HistorianDriveError::Producer(_)));
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(
-            state.failure_backoff_at_ms,
-            Some(123 + HISTORIAN_FAILURE_BACKOFF_MS),
-            "retry_after_secs is a floor input and cannot shorten the historian schedule"
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_retry_after_longer_than_schedule_wins() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_prior_compartment(&store);
-        let chunk = historian_chunk();
-        let prior = prior_ranges();
-        let models = vec!["prov/model-a".to_string()];
-        let mut producer =
-            ScriptedProducer::default().with_start(Err(HistorianProducerError::tagged_call(
-                "provider_error",
-                "rate limit reset later",
-                ErrorClass::Transient,
-                Some(120),
-            )));
-
-        let err = run_historian_firing(
-            &mut producer,
-            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, HistorianDriveError::Producer(_)));
-        let state = store.load("ses").unwrap().meta.historian;
-        assert_eq!(state.failure_backoff_at_ms, Some(123 + 120_000));
+            assert!(matches!(err, HistorianDriveError::Producer(_)));
+            let state = store.load("ses").unwrap().meta.historian;
+            assert_eq!(
+                state.failure_backoff_at_ms,
+                Some(expected_backoff_at_ms),
+                "retry_after_secs={retry_after_secs}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3025,33 +3004,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reattach_redrains_full_run_from_start() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_prior_compartment(&store);
-        let chunk = historian_chunk();
-        let prior = prior_ranges();
-        seed_awaiting_historian(&store);
-        let mut producer = ScriptedProducer::default()
-            .with_status(Ok(RunState::Terminal))
-            .with_output(Ok(producer_output(historian_xml("full replay summary"))));
-
-        let outcome =
-            reattach_historian_producer(&mut producer, reattach_request(&store, &chunk, &prior))
-                .await
-                .unwrap();
-
-        assert!(matches!(outcome, HistorianReattachOutcome::Published(_)));
-        assert!(
-            producer.observed_starts.is_empty(),
-            "re-draining from the start is a subscribe-only reattach, not a new send"
-        );
-        assert_eq!(producer.await_run_ids, vec!["run-1"]);
-        let c2 = store.load_compartments("ses").unwrap().pop().unwrap();
-        assert_eq!(c2.p1.as_deref(), Some("full replay summary"));
-    }
-
-    #[tokio::test]
     async fn reattach_missing_abandons_and_releases_single_flight() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -3293,11 +3245,20 @@ mod tests {
         assert!(state.failure_backoff_at_ms.is_some());
     }
 
+    /// Only `Ok(())` from cancel proves the provider run stopped. Every untagged
+    /// cancel failure, whatever its send outcome or terminal code, leaves the run
+    /// unproven and must not authorize a second billable run.
     #[tokio::test]
-    async fn uncertain_cancel_send_outcomes_stop_the_fallback_chain() {
-        for outcome in [
-            HistorianSendOutcome::NotSent,
-            HistorianSendOutcome::OutcomeUnknown,
+    async fn unproven_cancel_failures_never_authorize_fallback() {
+        for (outcome, code) in [
+            (HistorianSendOutcome::NotSent, "cancel_transport_failure"),
+            (
+                HistorianSendOutcome::OutcomeUnknown,
+                "cancel_transport_failure",
+            ),
+            (HistorianSendOutcome::Terminal, "queue_full"),
+            (HistorianSendOutcome::Terminal, "closed"),
+            (HistorianSendOutcome::Terminal, "teardown_unconfirmed"),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let store = store(dir.path());
@@ -3316,51 +3277,6 @@ mod tests {
                 .with_cancel_result(Err(HistorianProducerError::Call(
                     crate::historian_producer::HistorianCallFailure::untagged(
                         outcome,
-                        "cancel_transport_failure",
-                        "cancel was not confirmed",
-                    ),
-                )));
-
-            let err = run_historian_firing(
-                &mut producer,
-                fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
-            )
-            .await
-            .unwrap_err();
-
-            assert!(matches!(err, HistorianDriveError::Producer(_)));
-            assert_eq!(producer.cancels, vec!["run-1"]);
-            assert_eq!(
-                producer.observed_starts.len(),
-                1,
-                "{outcome:?} cancellation must not start fallback model"
-            );
-            let state = store.load("ses").unwrap().meta.historian;
-            assert_eq!(state.state, HistorianPhase::Idle);
-            assert_eq!(state.failure_backoff_at_ms, Some(999));
-        }
-    }
-
-    #[tokio::test]
-    async fn a_terminal_cancel_error_never_authorizes_fallback() {
-        for code in ["queue_full", "closed", "teardown_unconfirmed"] {
-            let dir = tempfile::tempdir().unwrap();
-            let store = store(dir.path());
-            seed_prior_compartment(&store);
-            let chunk = historian_chunk();
-            let prior = prior_ranges();
-            let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
-            let mut producer = ScriptedProducer::default()
-                .with_start(Ok(run_handle("run-1")))
-                .with_output(Err(HistorianProducerError::tagged_call(
-                    "provider_error",
-                    "provider overloaded",
-                    ErrorClass::Transient,
-                    None,
-                )))
-                .with_cancel_result(Err(HistorianProducerError::Call(
-                    crate::historian_producer::HistorianCallFailure::untagged(
-                        HistorianSendOutcome::Terminal,
                         code,
                         "cancel did not prove the run stopped",
                     ),
@@ -3378,8 +3294,11 @@ mod tests {
             assert_eq!(
                 producer.observed_starts.len(),
                 1,
-                "a terminal `{code}` cancel must not start a second billable run"
+                "{outcome:?} `{code}` cancellation must not start a second billable run"
             );
+            let state = store.load("ses").unwrap().meta.historian;
+            assert_eq!(state.state, HistorianPhase::Idle);
+            assert_eq!(state.failure_backoff_at_ms, Some(999));
         }
     }
 

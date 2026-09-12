@@ -2,12 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { validateModelId } from "./model-picker";
 
 describe("validateModelId", () => {
-    it("accepts canonical provider/model ids", () => {
+    it("accepts canonical provider/model ids, including ids that carry additional slashes", () => {
         expect(validateModelId("anthropic/claude-haiku-4-5")).toBeUndefined();
         expect(validateModelId("  openai/gpt-4o-mini  ")).toBeUndefined();
-    });
-
-    it("accepts model ids that carry additional slashes", () => {
         expect(validateModelId("openrouter/anthropic/claude-3.5-haiku")).toBeUndefined();
     });
 

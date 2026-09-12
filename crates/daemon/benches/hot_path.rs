@@ -20,7 +20,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use daemon::bench_internals::{self, CacheTtlProvenance, transform_cached};
 use daemon::canonical_memory::{CanonicalMemory, CanonicalMemoryRead, CanonicalMemorySnapshot};
 use daemon::transform::{ProducerContext, TransformRequest};
-use daemon::wire::{IngressMessage, project_messages};
+use daemon::wire::{IngressMessage, IngressMessages, project_messages};
 use memory_store::MemoryStore;
 use std::hint::black_box;
 
@@ -65,13 +65,60 @@ fn bench_tokenizer(c: &mut Criterion) {
     group.finish();
 }
 
+/// Retained message JSON makes the benchmark input match decoded requests.
+fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressMessages {
+    let typed = corpus::messages(class, count, bytes, CORPUS_SEED);
+    let messages: IngressMessages =
+        serde_json::from_value(serde_json::to_value(&typed).expect("bench corpus serializes"))
+            .expect("bench corpus decodes as a wire message array");
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.ck.original().is_some()),
+        "bench ingress must carry retained message JSON like a request over the wire"
+    );
+    messages
+}
+
 fn bench_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("projection/full");
     for &count in MESSAGE_COUNTS {
-        let messages: daemon::wire::IngressMessages =
+        let messages = ingress_messages(ContentClass::Mixed, count, 2_048);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
+            &messages,
+            |b, messages| {
+                b.iter_batched(
+                    || (),
+                    |()| project_messages(black_box(messages)).expect("projection"),
+                    criterion::BatchSize::PerIteration,
+                )
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_projection_reattached(c: &mut Criterion) {
+    let mut group = c.benchmark_group("projection/reattached_prefix");
+    for &count in MESSAGE_COUNTS {
+        let messages: IngressMessages =
             corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED)
                 .into_iter()
                 .collect();
+        let projection = project_messages(&messages).expect("projection");
+        assert!(
+            projection
+                .blocks
+                .iter()
+                .all(|block| messages.iter().any(|message| {
+                    std::ptr::eq(
+                        block.wire.as_ref(),
+                        &message.ck.content()[block.block_index],
+                    )
+                })),
+            "canonical bench shells must be shared into the projection, not copied"
+        );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
             &messages,
@@ -94,10 +141,7 @@ fn bench_tail_hygiene(c: &mut Criterion) {
     let core = CoreState::empty();
     let protected: HashSet<String> = HashSet::new();
     for &count in MESSAGE_COUNTS {
-        let messages: daemon::wire::IngressMessages =
-            corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED)
-                .into_iter()
-                .collect();
+        let messages = ingress_messages(ContentClass::Mixed, count, 2_048);
         let projection = project_messages(&messages).expect("projection");
         let memo = bench_internals::HygieneMemo::default();
         black_box(bench_internals::measure_tail_hygiene(
@@ -350,6 +394,7 @@ criterion_group!(
     benches,
     bench_tokenizer,
     bench_projection,
+    bench_projection_reattached,
     bench_tail_hygiene,
     bench_m0_trim_memories,
     bench_e2e_first_hard,

@@ -55,7 +55,7 @@ fn valid_descriptor() -> FrameDescriptor {
 }
 
 #[test]
-fn descriptor_rejects_every_untrusted_identity_and_span_failure() {
+fn descriptor_rejects_every_untrusted_identity_span_and_allocation_failure() {
     assert!(
         valid_descriptor()
             .validate(identity(), MAX_FRAME_BYTES)
@@ -191,6 +191,76 @@ fn descriptor_rejects_every_untrusted_identity_and_span_failure() {
             ),
             DescriptorError::Overflow,
         ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                8,
+                0,
+                8,
+                0,
+                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+            ),
+            DescriptorError::InvalidSpanCount,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                8,
+                0,
+                8,
+                3,
+                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+            ),
+            DescriptorError::InvalidSpanCount,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(8),
+                identity(),
+                8,
+                0,
+                MAX_FRAME_BYTES as u64 + 1,
+                1,
+                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+            ),
+            DescriptorError::InvalidAllocation,
+        ),
+        // An allocation overrun takes precedence over a conflicting wire header.
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                header(7),
+                identity(),
+                8,
+                0,
+                MAX_FRAME_BYTES as u64 + 1,
+                1,
+                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+            ),
+            DescriptorError::InvalidAllocation,
+        ),
+        (
+            FrameDescriptor::from_untrusted(
+                DESCRIPTOR_SCHEMA_VERSION,
+                {
+                    let mut stale_version = header(8);
+                    stale_version[4] = WIRE_V2_VERSION - 1;
+                    stale_version
+                },
+                identity(),
+                8,
+                0,
+                8,
+                1,
+                [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
+            ),
+            DescriptorError::WireHeaderMismatch,
+        ),
     ];
     for (descriptor, expected) in cases {
         assert_eq!(
@@ -198,6 +268,10 @@ fn descriptor_rejects_every_untrusted_identity_and_span_failure() {
             Err(expected)
         );
     }
+    assert_eq!(
+        valid_descriptor().validate(identity(), 0),
+        Err(DescriptorError::InvalidAllocation)
+    );
 
     let wrong_incarnation = ReleaseIdentity::new(Incarnation::from_bytes([8; 16]), 3, 9);
     assert_eq!(
@@ -471,23 +545,19 @@ fn debug_and_errors_redact_every_sentinel() {
     }
 }
 
-fn sample_identity() -> ReleaseIdentity {
-    ReleaseIdentity::new(Incarnation::from_bytes([7; 16]), 3, 9)
-}
-
 #[test]
 fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
     let body = [1u8, 2, 3, 4];
     let payload = sample_payload(
         DESCRIPTOR_SCHEMA_VERSION,
         header(body.len()),
-        sample_identity(),
+        identity(),
         body.len() as u64,
         &body,
     );
     let validated = SamplePrefix::snapshot(&payload)
         .unwrap()
-        .validate(payload.len(), sample_identity())
+        .validate(payload.len(), identity())
         .unwrap();
     assert_eq!(validated.body_range(), SAMPLE_PREFIX_BYTES..payload.len());
     assert_eq!(&payload[validated.body_range()], &body);
@@ -503,7 +573,7 @@ fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
         assert_eq!(
             SamplePrefix::snapshot(&payload[..cut])
                 .unwrap()
-                .validate(cut, sample_identity()),
+                .validate(cut, identity()),
             Err(DescriptorError::InvalidAllocation),
             "body truncated at byte {cut} must be rejected"
         );
@@ -514,7 +584,7 @@ fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
     slack.extend_from_slice(&[0xEE; 7]);
     let validated = SamplePrefix::snapshot(&slack)
         .unwrap()
-        .validate(slack.len(), sample_identity())
+        .validate(slack.len(), identity())
         .unwrap();
     assert_eq!(validated.body_len(), body.len());
     assert_eq!(
@@ -527,7 +597,7 @@ fn sample_prefix_rejects_every_truncation_point_and_bounds_the_body() {
 #[test]
 fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
     let body = [9u8; 4];
-    let expected = sample_identity();
+    let expected = identity();
     let base = |schema: u16, wire: [u8; WIRE_V2_HEADER_BYTES], id: ReleaseIdentity, len: u64| {
         sample_payload(schema, wire, id, len, &body)
     };
@@ -641,88 +711,16 @@ fn sample_prefix_rejects_identity_schema_length_and_wire_failures() {
 }
 
 #[test]
-fn frame_descriptor_rejects_span_count_and_allocation_extremes() {
-    let arena = MAX_FRAME_BYTES;
-    let identity = identity();
-    for span_count in [0u8, 3] {
-        let descriptor = FrameDescriptor::from_untrusted(
-            DESCRIPTOR_SCHEMA_VERSION,
-            header(8),
-            identity,
-            8,
-            0,
-            8,
-            span_count,
-            [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-        );
-        assert_eq!(
-            descriptor.validate(identity, arena),
-            Err(DescriptorError::InvalidSpanCount)
-        );
-    }
-    let oversized_allocation = FrameDescriptor::from_untrusted(
-        DESCRIPTOR_SCHEMA_VERSION,
-        header(8),
-        identity,
-        8,
-        0,
-        arena as u64 + 1,
-        1,
-        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-    );
-    assert_eq!(
-        oversized_allocation.validate(identity, arena),
-        Err(DescriptorError::InvalidAllocation)
-    );
-    assert_eq!(
-        valid_descriptor().validate(identity, 0),
-        Err(DescriptorError::InvalidAllocation)
-    );
-    // An allocation overrun takes precedence over a conflicting wire header.
-    let overrun_and_mismatch = FrameDescriptor::from_untrusted(
-        DESCRIPTOR_SCHEMA_VERSION,
-        header(7),
-        identity,
-        8,
-        0,
-        arena as u64 + 1,
-        1,
-        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-    );
-    assert_eq!(
-        overrun_and_mismatch.validate(identity, arena),
-        Err(DescriptorError::InvalidAllocation)
-    );
-    let mut stale_version = header(8);
-    stale_version[4] = WIRE_V2_VERSION - 1;
-    let wrong_version = FrameDescriptor::from_untrusted(
-        DESCRIPTOR_SCHEMA_VERSION,
-        stale_version,
-        identity,
-        8,
-        0,
-        8,
-        1,
-        [ArenaSpan::from_untrusted(0, 8), ArenaSpan::default()],
-    );
-    assert_eq!(
-        wrong_version.validate(identity, arena),
-        Err(DescriptorError::WireHeaderMismatch)
-    );
-}
-#[test]
 fn sample_errors_redact_every_sentinel() {
     let sentinel = b"SENTINEL";
     let mut wire = [0u8; WIRE_V2_HEADER_BYTES];
     wire[..sentinel.len()].copy_from_slice(sentinel);
     let incarnation = Incarnation::from_bytes(*b"SENTINEL-SECRET!");
-    let identity = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);
-    let payload = sample_payload(0x4553, wire, identity, u64::MAX, b"SENTINEL-BODY");
+    let sentinel_identity = ReleaseIdentity::new(incarnation, 0x5345_4e54, 0x494e_454c);
+    let payload = sample_payload(0x4553, wire, sentinel_identity, u64::MAX, b"SENTINEL-BODY");
 
     let prefix = SamplePrefix::snapshot(&payload).unwrap();
-    let error = prefix
-        .validate(payload.len(), sample_identity())
-        .unwrap_err();
+    let error = prefix.validate(payload.len(), identity()).unwrap_err();
     for formatted in [
         format!("{prefix:?}"),
         format!("{error}"),

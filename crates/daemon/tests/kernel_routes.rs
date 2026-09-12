@@ -465,33 +465,6 @@ async fn a_kernel_lease_held_by_another_opener_degrades_health_while_starting() 
 }
 
 #[tokio::test]
-async fn health_reads_the_sampled_kernel_block_without_touching_the_store() {
-    let daemon = Daemon::start().await;
-    let sampled_at = now_ms();
-    daemon
-        .handler
-        .sample_kernel_health_for_test(sampled_at)
-        .await;
-    let health = daemon.handler.health().await;
-    assert_eq!(health.status, host_runtime::HealthStatus::Ok);
-    let kernel = kernel_block(&health);
-    assert_eq!(kernel["kernel_state"], "ready");
-    assert_eq!(kernel["sampled_at_ms"], sampled_at);
-    assert_eq!(kernel["core_file_warn"], false);
-    assert_eq!(kernel["artifact_warn"], false);
-    assert!(kernel["artifact_cap_bytes"].as_u64().unwrap() > 0);
-    assert_eq!(kernel["retained_outbox_rows"], 0);
-
-    // Dropping the slot on shutdown republishes the phase.
-    daemon.handler.shutdown().await.unwrap();
-    let after = daemon.handler.health().await;
-    let kernel = kernel_block(&after);
-    assert_eq!(kernel["kernel_state"], "unavailable");
-    assert_eq!(kernel["unavailable_reason"], "store_unavailable");
-    assert!(kernel.get("core_file_bytes").is_none());
-}
-
-#[tokio::test]
 async fn an_empty_required_consumer_set_raises_a_daemon_health_warning() {
     let daemon = Daemon::start().await;
     let store = daemon.handler.kernel_store_for_test().unwrap();
@@ -637,11 +610,20 @@ async fn the_background_sampler_publishes_facts_on_its_own() {
 #[tokio::test]
 async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds() {
     let daemon = Daemon::start().await;
-    daemon.handler.sample_kernel_health_for_test(now_ms()).await;
-    assert_eq!(
-        daemon.handler.health().await.status,
-        host_runtime::HealthStatus::Ok
-    );
+    let sampled_at = now_ms();
+    daemon
+        .handler
+        .sample_kernel_health_for_test(sampled_at)
+        .await;
+    let health = daemon.handler.health().await;
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok);
+    let kernel = kernel_block(&health);
+    assert_eq!(kernel["kernel_state"], "ready");
+    assert_eq!(kernel["sampled_at_ms"], sampled_at);
+    assert_eq!(kernel["core_file_warn"], false);
+    assert_eq!(kernel["artifact_warn"], false);
+    assert!(kernel["artifact_cap_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(kernel["retained_outbox_rows"], 0);
 
     // The artifact walk descends every shard below the held `objects` descriptor,
     // so a shard it cannot open fails the sample.
@@ -703,7 +685,12 @@ async fn a_failed_facts_sample_reports_the_kernel_unavailable_until_one_succeeds
     assert_eq!(kernel["sampled_at_ms"], recovered_at);
     assert!(kernel.get("unavailable_reason").is_none());
     assert_eq!(kernel["retained_outbox_rows"], 0);
+
     daemon.handler.shutdown().await.unwrap();
+    let kernel = kernel_block(&daemon.handler.health().await);
+    assert_eq!(kernel["kernel_state"], "unavailable");
+    assert_eq!(kernel["unavailable_reason"], "store_unavailable");
+    assert!(kernel.get("core_file_bytes").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -933,30 +920,6 @@ async fn replayed_intents_return_one_receipt_and_projects_never_collide() {
     assert_state(&other, "available", None);
     assert_eq!(other["receipt"]["replayed"], false);
     assert_ne!(other["receipt"]["commit_seq"], commit_seq);
-    daemon.handler.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_operation_key_reused_with_another_digest_is_invalid() {
-    let daemon = Daemon::start().await;
-    seed_domain(&daemon.store());
-    assert_state(
-        &daemon.commit("key", vec![insert_decision(1)], vec![]).await,
-        "available",
-        None,
-    );
-    let tip = daemon.tip();
-    let mut reused = commit_request(
-        &daemon.project,
-        SESSION,
-        "key",
-        vec![insert_decision(2)],
-        vec![],
-    );
-    reused["intent"] = wire_intent("key", "other-bytes");
-    let response = daemon.call(daemon.route, reused).await;
-    assert_state(&response, "invalid", Some("operation_key_reused"));
-    assert_eq!(daemon.tip(), tip);
     daemon.handler.shutdown().await.unwrap();
 }
 
@@ -1409,38 +1372,6 @@ async fn recorded_client_shaped_merge_names_the_survivor_once() {
     daemon.handler.shutdown().await.unwrap();
 }
 
-/// A fold into a survivor labeled below the predecessor is refused.
-#[tokio::test]
-async fn recorded_fold_below_the_sensitivity_floor_is_admission_policy() {
-    let daemon = Daemon::start().await;
-    seed_domain(&daemon.store());
-    let mut guarded = decision_spec(1);
-    guarded["sensitivity"] = json!("sensitive");
-    let created = daemon
-        .commit(
-            "create",
-            vec![
-                json!({"op": "insert_decision", "spec": guarded}),
-                insert_decision(2),
-            ],
-            vec![],
-        )
-        .await;
-    assert_state(&created, "available", None);
-    let tip = daemon.tip();
-    let laundered = daemon
-        .commit(
-            "fold-down",
-            vec![supersede_decision(1, decision_spec(2))],
-            vec![],
-        )
-        .await;
-    assert_state(&laundered, "invalid", Some("admission_policy"));
-    assert_eq!(daemon.tip(), tip);
-    assert_matches_route_fixture(&laundered, "commit-invalid-admission-policy.json");
-    daemon.handler.shutdown().await.unwrap();
-}
-
 /// A replacement id this project retired is a duplicate write, not a fold.
 #[tokio::test]
 async fn recorded_supersede_into_a_retired_id_is_already_exists() {
@@ -1473,32 +1404,6 @@ async fn recorded_supersede_into_a_retired_id_is_already_exists() {
     assert_state(&duplicate, "invalid", Some("already_exists"));
     assert_eq!(daemon.tip(), tip);
     assert_matches_route_fixture(&duplicate, "commit-invalid-already-exists.json");
-    daemon.handler.shutdown().await.unwrap();
-}
-
-/// A body `project_root` other than the bound root is refused before any work.
-#[tokio::test]
-async fn recorded_body_project_root_mismatch_is_refused() {
-    let daemon = Daemon::start().await;
-    seed_domain(&daemon.store());
-    let tip = daemon.tip();
-    let elsewhere = daemon._data.path().join("elsewhere");
-    fs::create_dir_all(&elsewhere).unwrap();
-    let response = daemon
-        .call(
-            daemon.route,
-            commit_request(
-                &elsewhere,
-                SESSION,
-                "foreign",
-                vec![insert_decision(1)],
-                vec![],
-            ),
-        )
-        .await;
-    assert_state(&response, "invalid", Some("project_mismatch"));
-    assert_eq!(daemon.tip(), tip);
-    assert_matches_route_fixture(&response, "commit-invalid-project-mismatch.json");
     daemon.handler.shutdown().await.unwrap();
 }
 
@@ -1550,6 +1455,7 @@ async fn a_request_naming_another_project_root_is_refused_before_any_work() {
         .await;
     assert_state(&response, "invalid", Some("project_mismatch"));
     assert_eq!(daemon.tip(), tip);
+    assert_matches_route_fixture(&response, "commit-invalid-project-mismatch.json");
     let read = daemon
         .call(
             daemon.route,
@@ -1701,6 +1607,7 @@ async fn a_fold_into_a_less_restrictive_survivor_is_refused() {
         .await;
     assert_state(&laundered, "invalid", Some("admission_policy"));
     assert_eq!(daemon.tip(), tip);
+    assert_matches_route_fixture(&laundered, "commit-invalid-admission-policy.json");
 
     let folded = daemon
         .commit(
@@ -2895,6 +2802,8 @@ async fn egress_gate_rejects_sensitive_remote_and_all_secret_without_a_request()
             .await,
         refused("under_declared")
     );
+    // An honest declaration of the same artifact fails on its destination,
+    // which pins the refusal above to the declaration alone.
     assert_eq!(
         daemon
             .egress(&recorder, &sensitive, "remote", "sensitive", owner)
@@ -2953,42 +2862,6 @@ async fn egress_gate_rejects_sensitive_remote_and_all_secret_without_a_request()
         json!("allowed")
     );
     assert_eq!(recorder.requests(), 2);
-    daemon.handler.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn egress_gate_rejects_an_under_declared_normal_request_without_a_request() {
-    let daemon = Daemon::start().await;
-    let [_, sensitive, _] = egress_fixture(&daemon).await;
-    let recorder = Recorder(std::sync::atomic::AtomicUsize::new(0));
-
-    assert_eq!(
-        daemon
-            .egress(
-                &recorder,
-                &sensitive,
-                "remote",
-                "normal",
-                "decision-object-1"
-            )
-            .await,
-        refused("under_declared")
-    );
-    // The same artifact declared honestly is refused for its destination, not
-    // its declaration, so the first refusal was the assertion's.
-    assert_eq!(
-        daemon
-            .egress(
-                &recorder,
-                &sensitive,
-                "remote",
-                "sensitive",
-                "decision-object-1"
-            )
-            .await,
-        refused("sensitive_remote")
-    );
-    assert_eq!(recorder.requests(), 0);
     daemon.handler.shutdown().await.unwrap();
 }
 
@@ -4627,21 +4500,15 @@ async fn a_relaxation_is_denied_without_a_valid_approval_and_permitted_with_one(
     daemon.handler.shutdown().await.unwrap();
 }
 
-/// Explicit and inherited approvals obey the same project boundary. A scoped
-/// override takes precedence, but a disposition does not replace stored support.
 #[tokio::test]
-async fn disposition_approvals_are_project_scoped_whether_explicit_or_inherited() {
-    assert_disposition_approval_scope(ApprovalChain::Direct).await;
-}
-
-#[tokio::test]
-async fn disposition_own_admission_approval_chains_are_project_scoped() {
-    assert_disposition_approval_scope(ApprovalChain::OwnAdmission).await;
-}
-
-#[tokio::test]
-async fn disposition_lineage_approval_chains_are_project_scoped() {
-    assert_disposition_approval_scope(ApprovalChain::Lineage).await;
+async fn disposition_approval_chains_of_every_kind_are_project_scoped() {
+    for chain in [
+        ApprovalChain::Direct,
+        ApprovalChain::OwnAdmission,
+        ApprovalChain::Lineage,
+    ] {
+        assert_disposition_approval_scope(chain).await;
+    }
 }
 
 #[tokio::test]

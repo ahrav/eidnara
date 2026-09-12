@@ -48,7 +48,7 @@ three direct `tokenizer::estimate_tokens` calls in production transform code.
   the SOFT predicate's `m0_tokens` and `m1_tokens` at
   [`:4298-4309`][soft-direct] (W9); the tag-mint `token_count` persisted into
   `TagMintInput` at [`:7160`][mint-direct]; `ActiveTagForNudge.token_count`
-  at [`:8558`][nudge-direct]. The tokenizer crate's
+  at [`:8561`][nudge-direct]. The tokenizer crate's
   [`estimate_tokens`][tok-fn] exposes no call counter.
 - The existing source scan
   [`protected_floor_has_no_global_estimator_bypass`][t-bypass] slices the
@@ -100,7 +100,7 @@ declared sum, measures contention, or scans the whole `apply_once` body.
 ### Q: Should `:7160` and `:8558` stay direct or route through the interface?
 
 - Sources examined: [`:7160`][mint-direct] in the tag-mint loop,
-  [`:8558`][nudge-direct] in the nudge derivation.
+  [`:8561`][nudge-direct] in the nudge derivation.
 - Findings: Both count `taggable_source` text of tail blocks and store the
   result in a durable or served `token_count`; neither is counted in
   `tokenize_calls`, and neither is reachable by an injected estimator.
@@ -153,6 +153,6 @@ declaration sum remain outside this change.
 [ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2836-L2845
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
 [mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8558
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24170-L24181
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8561
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24173-L24184
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148

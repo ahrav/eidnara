@@ -163,7 +163,7 @@ describe("OpenCodeAdapter config safety", () => {
 });
 
 describe("isLocalPathPluginEntry", () => {
-    it("recognizes file URLs, absolute paths, and relative paths with either separator", () => {
+    it("recognizes file URLs, absolute, relative, and home-relative paths with either separator", () => {
         expect(isLocalPathPluginEntry("file:///opt/eidnara/opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("FILE:///opt/eidnara/opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("/opt/eidnara/opencode-plugin")).toBe(true);
@@ -171,20 +171,17 @@ describe("isLocalPathPluginEntry", () => {
         expect(isLocalPathPluginEntry("../opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry(".\\packages\\opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry("..\\opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("~/src/eidnara/packages/opencode-plugin")).toBe(true);
+        expect(isLocalPathPluginEntry("~\\src\\opencode-plugin")).toBe(true);
         expect(isLocalPathPluginEntry([".\\packages\\opencode-plugin", {}])).toBe(true);
     });
 
-    it("recognizes a home-relative dev path", () => {
-        expect(isLocalPathPluginEntry("~/src/eidnara/packages/opencode-plugin")).toBe(true);
-        expect(isLocalPathPluginEntry("~\\src\\opencode-plugin")).toBe(true);
-        expect(isLocalPathPluginEntry("~eidnara")).toBe(false);
-    });
-
-    it("does not treat package names or dot-prefixed names as paths", () => {
+    it("does not treat package names or dot- or tilde-prefixed names as paths", () => {
         expect(isLocalPathPluginEntry("@eidnara/opencode")).toBe(false);
         expect(isLocalPathPluginEntry("@eidnara/opencode@0.1.0")).toBe(false);
         expect(isLocalPathPluginEntry(".eidnara")).toBe(false);
         expect(isLocalPathPluginEntry("..eidnara")).toBe(false);
+        expect(isLocalPathPluginEntry("~eidnara")).toBe(false);
         expect(isLocalPathPluginEntry(42)).toBe(false);
     });
 });

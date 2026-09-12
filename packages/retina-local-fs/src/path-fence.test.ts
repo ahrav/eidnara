@@ -184,8 +184,9 @@ describe("resolveAndFenceProviderPath", () => {
         }
     });
 
-    test("treats an empty explicit data directory as absent", async () => {
+    test("treats an empty explicit home or data directory as absent", async () => {
         const home = await makeHome();
+        process.env.HOME = home;
         const fenced = join(home, ".local", "share", "eidnara", "run", "connection.json");
         await writeFileAt(fenced, "{}");
         await expect(
@@ -195,13 +196,6 @@ describe("resolveAndFenceProviderPath", () => {
                 dataDirectory: "",
             }),
         ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("treats an empty explicit home directory as absent", async () => {
-        const home = await makeHome();
-        process.env.HOME = home;
-        const fenced = join(home, ".local", "share", "eidnara", "run", "connection.json");
-        await writeFileAt(fenced, "{}");
         await expect(
             resolveAndFenceProviderPath(fenced, { allowMissing: false, homeDirectory: "" }),
         ).rejects.toMatchObject({ code: "fenced_path" });

@@ -2930,7 +2930,7 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         family: DurableWriteFamily::ChunkTranscripts,
         policy: DurableFieldPolicy::Redact,
         preparation: "prepare_content / prepare_json_content before compression",
-        test: "lib::publish_historian_chunk_persists_transcript_inside_cas",
+        test: "lib::publish_historian_chunk_scans_transcript_and_raw_chunk_messages_before_storing",
     },
     DurableWriteRegistration {
         family: DurableWriteFamily::Tags,
@@ -16666,11 +16666,26 @@ mod tests {
         assert!(command_ledger_ids(&store, "ses").is_empty());
     }
 
+    /// The command ledger, not the pending queue, carries replay identity: a retry of the
+    /// same command id is a duplicate whether its drops are still queued or already
+    /// consumed, while a new command id requeues the same targets.
     #[test]
-    fn command_id_duplicate_is_recognized_while_drops_are_pending() {
+    fn command_id_dedup_is_keyed_by_command_id_across_consumption() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let target_ids = vec!["a#0".to_string()];
+        let queued = AppendOutcome {
+            queued: 1,
+            duplicate: false,
+            disposition: None,
+            inserted_target_ids: vec!["a#0".to_string()],
+        };
+        let duplicate = AppendOutcome {
+            queued: 0,
+            duplicate: true,
+            disposition: None,
+            inserted_target_ids: Vec::new(),
+        };
 
         let first = store
             .append_pending_agent_drops_with_command(
@@ -16681,18 +16696,10 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(
-            first,
-            AppendOutcome {
-                queued: 1,
-                duplicate: false,
-                disposition: None,
-                inserted_target_ids: vec!["a#0".to_string()],
-            }
-        );
+        assert_eq!(first, queued);
         let pending = store.load_pending_agent_drops("ses").unwrap();
 
-        let retry = store
+        let retry_while_pending = store
             .append_pending_agent_drops_with_command(
                 "ses",
                 Some("tool-use-1"),
@@ -16701,17 +16708,44 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(
-            retry,
-            AppendOutcome {
-                queued: 0,
-                duplicate: true,
-                disposition: None,
-                inserted_target_ids: Vec::new(),
-            }
-        );
+        assert_eq!(retry_while_pending, duplicate);
         assert_eq!(store.load_pending_agent_drops("ses").unwrap(), pending);
         assert_eq!(command_ledger_ids(&store, "ses"), vec!["tool-use-1"]);
+
+        store
+            .commit_with_consumed_drops(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+                &[pending[0].id],
+            )
+            .unwrap();
+        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
+
+        let retry_after_consumption = store
+            .append_pending_agent_drops_with_command(
+                "ses",
+                Some("tool-use-1"),
+                &target_ids,
+                3,
+                false,
+            )
+            .unwrap();
+        assert_eq!(retry_after_consumption, duplicate);
+        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
+
+        let next = store
+            .append_pending_agent_drops_with_command(
+                "ses",
+                Some("tool-use-2"),
+                &target_ids,
+                4,
+                false,
+            )
+            .unwrap();
+        assert_eq!(next, queued);
+        assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
     #[test]
@@ -16745,97 +16779,6 @@ mod tests {
         let reopened = MemoryStore::open(&descriptor).unwrap();
         let persisted = reopened.load_pending_agent_drops("ses").unwrap();
         assert_eq!(persisted, remaining);
-    }
-
-    #[test]
-    fn command_id_duplicate_survives_consumption() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let target_ids = vec!["a#0".to_string()];
-        store
-            .append_pending_agent_drops_with_command(
-                "ses",
-                Some("tool-use-1"),
-                &target_ids,
-                1,
-                false,
-            )
-            .unwrap();
-        let pending = store.load_pending_agent_drops("ses").unwrap();
-        store
-            .commit_with_consumed_drops(
-                "ses",
-                None,
-                &CoreState::empty(),
-                &ModuleMeta::default(),
-                &[pending[0].id],
-            )
-            .unwrap();
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-
-        let retry = store
-            .append_pending_agent_drops_with_command(
-                "ses",
-                Some("tool-use-1"),
-                &target_ids,
-                2,
-                false,
-            )
-            .unwrap();
-        assert_eq!(
-            retry,
-            AppendOutcome {
-                queued: 0,
-                duplicate: true,
-                disposition: None,
-                inserted_target_ids: Vec::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn different_command_id_requeues_after_consumption() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let target_ids = vec!["a#0".to_string()];
-        store
-            .append_pending_agent_drops_with_command(
-                "ses",
-                Some("tool-use-1"),
-                &target_ids,
-                1,
-                false,
-            )
-            .unwrap();
-        let pending = store.load_pending_agent_drops("ses").unwrap();
-        store
-            .commit_with_consumed_drops(
-                "ses",
-                None,
-                &CoreState::empty(),
-                &ModuleMeta::default(),
-                &[pending[0].id],
-            )
-            .unwrap();
-
-        let next = store
-            .append_pending_agent_drops_with_command(
-                "ses",
-                Some("tool-use-2"),
-                &target_ids,
-                2,
-                false,
-            )
-            .unwrap();
-        assert_eq!(
-            next,
-            AppendOutcome {
-                queued: 1,
-                duplicate: false,
-                disposition: None,
-                inserted_target_ids: vec!["a#0".to_string()],
-            }
-        );
     }
 
     #[test]
@@ -17003,52 +16946,20 @@ mod tests {
         );
     }
 
-    /// A legacy row can carry a block id the scanner now flags.
-    /// Re-minting an existing flagged block ID preserves its identity and returns its row.
+    /// A block id the scanner flags is refused while it is new, so a first mint stores
+    /// nothing. A legacy row can already carry such an id; re-minting it preserves the
+    /// identity and returns its row instead of failing closed.
     #[test]
-    fn a_flagged_block_id_that_already_has_a_row_still_replays() {
+    fn a_flagged_block_id_is_refused_when_new_and_replayed_when_a_row_exists() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        store
-            .execute_tag_sql_for_test(
-                "INSERT INTO tags
-                     (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
-                 VALUES ('ses', 1, 'api_key=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q', 'message', 4, 100, X'')",
-            )
-            .unwrap();
-        let rows = store
-            .mint_or_get_tags(
-                "ses",
-                &[TagMintInput {
-                    block_id: "api_key=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q".to_string(),
-                    kind: "message".to_string(),
-                    token_count: 4,
-                    source_bytes: b"body".to_vec(),
-                }],
-                200,
-            )
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].tag_number, 1);
-    }
-
-    /// Without a durable row, a flagged block ID is new and must not be minted.
-    #[test]
-    fn a_flagged_block_id_without_a_row_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let error = store
-            .mint_or_get_tags(
-                "ses",
-                &[TagMintInput {
-                    block_id: "api_key=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q".to_string(),
-                    kind: "message".to_string(),
-                    token_count: 4,
-                    source_bytes: b"body".to_vec(),
-                }],
-                200,
-            )
-            .unwrap_err();
+        let flagged = [TagMintInput {
+            block_id: "api_key=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q".to_string(),
+            kind: "message".to_string(),
+            token_count: 4,
+            source_bytes: b"body".to_vec(),
+        }];
+        let error = store.mint_or_get_tags("ses", &flagged, 200).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -17057,6 +16968,17 @@ mod tests {
             "{error:?}"
         );
         assert!(store.load_tags_for_session("ses").unwrap().is_empty());
+
+        store
+            .execute_tag_sql_for_test(
+                "INSERT INTO tags
+                     (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
+                 VALUES ('ses', 1, 'api_key=Ab3fGh1jKlMnOpQrStUvWxYz79PqRs24Tv68Wt-Q', 'message', 4, 100, X'')",
+            )
+            .unwrap();
+        let rows = store.mint_or_get_tags("ses", &flagged, 200).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tag_number, 1);
     }
 
     #[test]
@@ -18368,51 +18290,6 @@ mod tests {
     }
 
     #[test]
-    fn append_compartments_preserves_existing_rows_and_assigns_tail_sequences() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let c1 = StoredCompartment {
-            sequence: 1,
-            start_message: 1,
-            end_message: 2,
-            end_message_id: "m2".into(),
-            title: "old-1".into(),
-            content: "old one".into(),
-            ..Default::default()
-        };
-        let c2 = StoredCompartment {
-            sequence: 2,
-            start_message: 3,
-            end_message: 4,
-            end_message_id: "m4".into(),
-            title: "old-2".into(),
-            content: "old two".into(),
-            ..Default::default()
-        };
-        store
-            .replace_compartments("ses", &[c1.clone(), c2.clone()])
-            .unwrap();
-
-        let appended = StoredCompartment {
-            sequence: 99,
-            start_message: 5,
-            end_message: 6,
-            end_message_id: "m6".into(),
-            title: "new".into(),
-            content: "new tail".into(),
-            ..Default::default()
-        };
-        store.append_compartments("ses", &[appended]).unwrap();
-
-        let rows = store.load_compartments("ses").unwrap();
-        let seqs: Vec<i64> = rows.iter().map(|c| c.sequence).collect();
-        assert_eq!(seqs, vec![1, 2, 3]);
-        assert_eq!(rows[0].title, c1.title);
-        assert_eq!(rows[1].title, c2.title);
-        assert_eq!(rows[2].title, "new");
-    }
-
-    #[test]
     fn append_compartments_rejects_overlapping_ranges_without_partial_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -18800,8 +18677,11 @@ mod tests {
         }
     }
 
+    /// Side-channel candidates are validated before any publish write: one scoped to
+    /// another project or session, or carrying an ordinal outside `i64`, fails the whole
+    /// request as a serialization error and leaves no compartment or outbox row behind.
     #[test]
-    fn historian_publish_rejects_side_channel_candidates_scoped_to_another_session() {
+    fn historian_publish_rejects_malformed_side_channel_candidates_without_publishing() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         store
@@ -18826,50 +18706,7 @@ mod tests {
             source_compartment_end: Some(20),
             created_at: 123,
         };
-        for (primers, observations) in [
-            (std::slice::from_ref(&foreign_primer), &[][..]),
-            (&[][..], std::slice::from_ref(&foreign_observation)),
-        ] {
-            let error = store
-                .publish_historian_chunk(HistorianPublishRequest {
-                    session_id: "ses",
-                    expected_row_version: expected,
-                    expected_revert_epoch: 0,
-                    predicate: &publish_predicate(),
-                    project_path: "git:proj",
-                    compartments: &[publish_compartment()],
-                    events: &[],
-                    primer_candidates: primers,
-                    user_memory_candidates: observations,
-                    publication_floor_ordinal: 21,
-                    chunk_transcript: None,
-                    raw_chunk_messages: None,
-                })
-                .unwrap_err();
-            assert!(
-                matches!(error, HistorianPublishError::Serde(_)),
-                "{error:?}"
-            );
-        }
-        assert!(store.load_compartments("ses").unwrap().is_empty());
-        assert_eq!(
-            store
-                .historian_side_channel_status("ses")
-                .unwrap()
-                .pending_count,
-            0
-        );
-    }
-
-    #[test]
-    fn historian_publish_rejects_side_channel_identifiers_outside_i64() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
-            .unwrap();
-        let expected = store.load("ses").unwrap().row_version;
-        let primer = HistorianPrimerCandidate {
+        let overflowing_primer = HistorianPrimerCandidate {
             project_path: "git:proj".into(),
             session_id: "ses".into(),
             question: "Where does this ordinal fit?".into(),
@@ -18880,7 +18717,7 @@ mod tests {
             source_message_time: 123,
             created_at: 123,
         };
-        let event = HistorianEventCandidate {
+        let overflowing_event = HistorianEventCandidate {
             kind: "trajectory_correction".into(),
             at_compartment: Some(u64::MAX),
             compartment_id: None,
@@ -18888,9 +18725,31 @@ mod tests {
             created_at: 123,
             harness: "module".into(),
         };
-        for (events, primers) in [
-            (&[][..], std::slice::from_ref(&primer)),
-            (std::slice::from_ref(&event), &[][..]),
+        for (label, events, primers, observations) in [
+            (
+                "primer scoped to another project",
+                &[][..],
+                std::slice::from_ref(&foreign_primer),
+                &[][..],
+            ),
+            (
+                "observation scoped to another session",
+                &[][..],
+                &[][..],
+                std::slice::from_ref(&foreign_observation),
+            ),
+            (
+                "primer ordinal outside i64",
+                &[][..],
+                std::slice::from_ref(&overflowing_primer),
+                &[][..],
+            ),
+            (
+                "event ordinal outside i64",
+                std::slice::from_ref(&overflowing_event),
+                &[][..],
+                &[][..],
+            ),
         ] {
             let error = store
                 .publish_historian_chunk(HistorianPublishRequest {
@@ -18902,7 +18761,7 @@ mod tests {
                     compartments: &[publish_compartment()],
                     events,
                     primer_candidates: primers,
-                    user_memory_candidates: &[],
+                    user_memory_candidates: observations,
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
                     raw_chunk_messages: None,
@@ -18910,10 +18769,17 @@ mod tests {
                 .unwrap_err();
             assert!(
                 matches!(error, HistorianPublishError::Serde(_)),
-                "{error:?}"
+                "{label}: {error:?}"
             );
         }
         assert!(store.load_compartments("ses").unwrap().is_empty());
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            0
+        );
     }
 
     #[test]
@@ -18973,44 +18839,11 @@ mod tests {
         );
     }
 
+    /// The transcript and the raw chunk messages are both scanned before the publish
+    /// transaction writes: a detected secret in the transcript is substituted, a protected
+    /// key in the raw messages refuses the whole publish, and a clean payload lands as-is.
     #[test]
-    fn publish_historian_chunk_persists_transcript_inside_cas() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        store
-            .commit("ses", None, &CoreState::empty(), &publishing_meta())
-            .unwrap();
-        let expected = store.load("ses").unwrap().row_version;
-        store
-            .publish_historian_chunk(HistorianPublishRequest {
-                session_id: "ses",
-                expected_row_version: expected,
-                expected_revert_epoch: 0,
-                predicate: &publish_predicate(),
-                project_path: "git:proj",
-                compartments: &[publish_compartment()],
-                events: &[],
-                primer_candidates: &[],
-                user_memory_candidates: &[],
-                publication_floor_ordinal: 21,
-                chunk_transcript: Some("U: password=transcript-secret"),
-                raw_chunk_messages: None,
-            })
-            .unwrap();
-
-        let rows = store
-            .load_chunk_transcripts_for_range("ses", 10, 21)
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].compartment_seq, 1);
-        assert_eq!(
-            rows[0].transcript.as_deref(),
-            Some("U: password=<REDACTED:password>")
-        );
-    }
-
-    #[test]
-    fn publish_historian_chunk_scans_raw_chunk_messages_and_stores_a_clean_payload() {
+    fn publish_historian_chunk_scans_transcript_and_raw_chunk_messages_before_storing() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let publish = |session_id: &str, raw_chunk_messages: &str| {
@@ -19029,7 +18862,7 @@ mod tests {
                 primer_candidates: &[],
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
-                chunk_transcript: Some("U: hello"),
+                chunk_transcript: Some("U: password=transcript-secret"),
                 raw_chunk_messages: Some(raw_chunk_messages),
             })
         };
@@ -19059,7 +18892,11 @@ mod tests {
             .load_chunk_transcripts_for_range("ses-clean", 10, 21)
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].transcript.as_deref(), Some("U: hello"));
+        assert_eq!(rows[0].compartment_seq, 1);
+        assert_eq!(
+            rows[0].transcript.as_deref(),
+            Some("U: password=<REDACTED:password>")
+        );
         assert_eq!(rows[0].raw_messages_json.as_deref(), Some(clean));
     }
 
@@ -20874,91 +20711,72 @@ mod tests {
         }
     }
 
+    /// A `no_work` decision is durable under its acquisition id and replays with the
+    /// exhaustion cause the caller recorded, even after work appears: a response-loss retry
+    /// that mistook a spent cursor for a drained queue would strand the work the cursor hid.
+    /// Only a fresh acquisition id sees the new work.
     #[test]
-    fn note_eval_no_work_decision_replays_after_work_appears() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = note_eval_store(dir.path());
-        let outcome = store
-            .acquire_note_evaluation(
-                EVAL_PROJECT,
-                "acq-1",
-                "eval-a",
-                0,
-                1,
-                |notes| {
-                    assert!(notes.is_empty());
-                    pick_none(notes)
+    fn note_eval_no_work_decisions_replay_with_their_exhaustion_cause_after_work_appears() {
+        for cycle_exhausted in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = note_eval_store(dir.path());
+            if cycle_exhausted {
+                // The caller classifies this pass as cursor-spent, not queue-empty.
+                eval_note(&store, "hidden by a spent cursor");
+            }
+            let outcome = store
+                .acquire_note_evaluation(
+                    EVAL_PROJECT,
+                    "acq-1",
+                    "eval-a",
+                    0,
+                    1,
+                    |notes| {
+                        assert_eq!(notes.is_empty(), !cycle_exhausted, "{cycle_exhausted}");
+                        NoteEvalSelection::NoWork { cycle_exhausted }
+                    },
+                    100,
+                )
+                .unwrap();
+            assert_eq!(
+                outcome,
+                NoteEvalAcquireOutcome::NoWork {
+                    replayed: false,
+                    cycle_exhausted
+                }
+            );
+            eval_note(&store, "new work");
+            assert_eq!(
+                store
+                    .acquire_note_evaluation(EVAL_PROJECT, "acq-1", "eval-a", 0, 1, pick_first, 200)
+                    .unwrap(),
+                NoteEvalAcquireOutcome::NoWork {
+                    replayed: true,
+                    cycle_exhausted
                 },
-                100,
-            )
-            .unwrap();
-        assert_eq!(
-            outcome,
-            NoteEvalAcquireOutcome::NoWork {
-                replayed: false,
-                cycle_exhausted: false
-            }
-        );
-        eval_note(&store, "new work");
-        assert_eq!(
-            store
-                .acquire_note_evaluation(EVAL_PROJECT, "acq-1", "eval-a", 0, 1, pick_first, 200)
-                .unwrap(),
-            NoteEvalAcquireOutcome::NoWork {
-                replayed: true,
-                cycle_exhausted: false
-            },
-            "the durable decision wins over newly available work"
-        );
-        assert!(matches!(
-            store
-                .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-a", 0, 1, pick_first, 300)
-                .unwrap(),
-            NoteEvalAcquireOutcome::Claim {
-                replayed: false,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn note_eval_exhausted_no_work_decision_survives_replay() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = note_eval_store(dir.path());
-        eval_note(&store, "hidden by a spent cursor");
-        // The caller classifies this pass as cursor-spent, not queue-empty.
-        let outcome = store
-            .acquire_note_evaluation(
-                EVAL_PROJECT,
-                "acq-1",
-                "eval-a",
-                0,
-                1,
-                |_| NoteEvalSelection::NoWork {
-                    cycle_exhausted: true,
-                },
-                100,
-            )
-            .unwrap();
-        assert_eq!(
-            outcome,
-            NoteEvalAcquireOutcome::NoWork {
-                replayed: false,
-                cycle_exhausted: true
-            }
-        );
-        // A response-loss retry must reproduce the exhaustion cause, or the
-        // worker mistakes the reset cursor for a drained queue and strands the
-        // work the spent cursor hid.
-        assert_eq!(
-            store
-                .acquire_note_evaluation(EVAL_PROJECT, "acq-1", "eval-a", 0, 1, pick_first, 200)
-                .unwrap(),
-            NoteEvalAcquireOutcome::NoWork {
-                replayed: true,
-                cycle_exhausted: true
-            }
-        );
+                "{cycle_exhausted}: the durable decision wins over newly available work"
+            );
+            assert!(
+                matches!(
+                    store
+                        .acquire_note_evaluation(
+                            EVAL_PROJECT,
+                            "acq-2",
+                            "eval-a",
+                            0,
+                            1,
+                            pick_first,
+                            300
+                        )
+                        .unwrap(),
+                    NoteEvalAcquireOutcome::Claim {
+                        replayed: false,
+                        ..
+                    }
+                ),
+                "{cycle_exhausted}"
+            );
+        }
     }
 
     #[test]
@@ -21686,15 +21504,17 @@ mod tests {
         );
     }
 
+    /// Slot recovery rebinds a claim to the newer registration generation; the superseded
+    /// generation can neither renew it nor take it back through a fresh or replayed
+    /// acquisition, and the row keeps the rebound generation and lease.
     #[test]
-    fn note_eval_renew_rejects_a_stale_registration_generation() {
+    fn a_superseded_registration_generation_cannot_renew_or_rebind_a_claim() {
         let dir = tempfile::tempdir().unwrap();
         let store = note_eval_store(dir.path());
         eval_note(&store, "watch the build");
         let claim = eval_claim(&store, "acq-1", 0, 0);
         assert_eq!(claim.registration_generation, 1);
 
-        // Slot recovery rebinds the claim to registration generation 2.
         let rebound = match store
             .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-a", 0, 2, pick_first, 10)
             .unwrap()
@@ -21712,42 +21532,6 @@ mod tests {
             NoteEvalRenewOutcome::Invalid,
             "a renewal from the superseded registration must not extend or rebind the claim"
         );
-        let current = store
-            .inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT registration_generation, expires_at FROM note_eval_claims WHERE claim_id = ?1",
-                    params![&claim.claim_id],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                )
-            })
-            .unwrap();
-        assert_eq!(current, (2, rebound.expires_at));
-        assert!(matches!(
-            store
-                .renew_note_evaluation_claim(EVAL_PROJECT, &claim.claim_id, "eval-a", 0, 2, 20)
-                .unwrap(),
-            NoteEvalRenewOutcome::Renewed { .. }
-        ));
-    }
-
-    #[test]
-    fn note_eval_acquire_rejects_a_rebind_from_an_older_registration_generation() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = note_eval_store(dir.path());
-        eval_note(&store, "watch the build");
-        let claim = eval_claim(&store, "acq-1", 0, 0);
-        let rebound = match store
-            .acquire_note_evaluation(EVAL_PROJECT, "acq-2", "eval-a", 0, 2, pick_first, 10)
-            .unwrap()
-        {
-            NoteEvalAcquireOutcome::Claim { claim, .. } => claim,
-            other => panic!("expected the slot to rebind, got {other:?}"),
-        };
-        assert_eq!(rebound.registration_generation, 2);
-
-        // Neither a fresh acquisition id nor a replay of the superseded one may hand the
-        // claim back to generation 1.
         for acquisition_id in ["acq-3", "acq-1"] {
             assert!(
                 matches!(
@@ -21778,6 +21562,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(current, (2, rebound.expires_at));
+        assert!(matches!(
+            store
+                .renew_note_evaluation_claim(EVAL_PROJECT, &claim.claim_id, "eval-a", 0, 2, 20)
+                .unwrap(),
+            NoteEvalRenewOutcome::Renewed { .. }
+        ));
     }
 
     #[test]
@@ -23203,35 +22993,6 @@ mod shadow_tests {
     }
 
     #[test]
-    fn authority_drain_resume_without_late_append_keeps_completed_steps() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let preparing = store
-            .authority_begin_prepare("store-uuid", "project", "notes")
-            .unwrap();
-        store
-            .authority_finish_prepare(
-                "store-uuid",
-                "project",
-                "notes",
-                preparing.generation,
-                "hash",
-                "hash",
-                true,
-            )
-            .unwrap();
-        let draining = store
-            .authority_begin_drain("store-uuid", "project", "notes", "coordinator", 100, 0)
-            .unwrap();
-        mark_every_drain_step(&store, &draining, 0);
-        let resumed = store
-            .authority_begin_drain("store-uuid", "project", "notes", "coordinator", 200, 2)
-            .unwrap();
-        assert_eq!(resumed.captured_upper_bound, draining.captured_upper_bound);
-        assert!(resumed.step_seed && resumed.step_verify);
-    }
-
-    #[test]
     fn authority_abort_prepare_keeps_the_recorded_checksum_verdict() {
         for (actual, verdict) in [("actual-hash", false), ("expected-hash", true)] {
             let dir = tempfile::tempdir().unwrap();
@@ -23313,8 +23074,11 @@ mod shadow_tests {
             .unwrap()
     }
 
+    /// A project's workspace replacement touches only that project's membership: clearing
+    /// or moving one member leaves its former peers in place, and the workspace row itself
+    /// goes away only when its last member leaves.
     #[test]
-    fn clearing_one_projects_workspace_keeps_the_other_members() {
+    fn replacing_one_projects_workspace_keeps_its_former_peers() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let member = |project_path: &str| ModuleWorkspaceMemberRow {
@@ -23327,65 +23091,49 @@ mod shadow_tests {
             share_categories: vec!["CONSTRAINTS".to_string()],
             members: vec![member("git:a"), member("git:b")],
         };
-        store
-            .inner
-            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", Some(&shared)))
-            .unwrap();
+        let replace = |project: &str, workspace: Option<&ModuleWorkspaceRow>| {
+            store
+                .inner
+                .with_conn_fenced(|tx| replace_workspace_tx(tx, project, workspace))
+                .unwrap()
+        };
+        let workspace_rows = || -> i64 {
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
+                })
+                .unwrap()
+        };
+
+        replace("git:a", Some(&shared));
         assert_eq!(workspace_members_of(&store, "shared"), ["git:a", "git:b"]);
 
-        store
-            .inner
-            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", None))
-            .unwrap();
+        replace("git:a", None);
         assert_eq!(workspace_members_of(&store, "shared"), ["git:b"]);
 
-        store
-            .inner
-            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:b", None))
-            .unwrap();
-        assert!(workspace_members_of(&store, "shared").is_empty());
-        let workspaces: i64 = store
-            .inner
-            .with_conn(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
-            })
-            .unwrap();
-        assert_eq!(
-            workspaces, 0,
-            "the last member leaving drops the workspace row"
-        );
-    }
-
-    #[test]
-    fn moving_a_project_to_another_workspace_keeps_its_former_peers() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let member = |project_path: &str| ModuleWorkspaceMemberRow {
-            project_path: project_path.to_string(),
-            display_name: project_path.to_string(),
-            display_path: project_path.to_string(),
-        };
-        let shared = ModuleWorkspaceRow {
-            name: "shared".to_string(),
-            share_categories: vec!["CONSTRAINTS".to_string()],
-            members: vec![member("git:a"), member("git:b")],
-        };
-        store
-            .inner
-            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", Some(&shared)))
-            .unwrap();
-
+        replace("git:a", Some(&shared));
+        assert_eq!(workspace_members_of(&store, "shared"), ["git:a", "git:b"]);
         let solo = ModuleWorkspaceRow {
             name: "solo".to_string(),
             share_categories: vec![],
             members: vec![member("git:a")],
         };
-        store
-            .inner
-            .with_conn_fenced(|tx| replace_workspace_tx(tx, "git:a", Some(&solo)))
-            .unwrap();
+        replace("git:a", Some(&solo));
         assert_eq!(workspace_members_of(&store, "shared"), ["git:b"]);
         assert_eq!(workspace_members_of(&store, "solo"), ["git:a"]);
+        assert_eq!(workspace_rows(), 2);
+
+        replace("git:b", None);
+        assert!(workspace_members_of(&store, "shared").is_empty());
+        assert_eq!(
+            workspace_rows(),
+            1,
+            "the last member leaving drops the workspace row"
+        );
+        replace("git:a", None);
+        assert!(workspace_members_of(&store, "solo").is_empty());
+        assert_eq!(workspace_rows(), 0);
     }
 
     #[test]
@@ -24089,6 +23837,18 @@ mod lineage_descent_tests {
                 now_ms: 1,
             })
             .unwrap();
+        // A second project's session note under the same key must be inherited too.
+        store
+            .insert_note(NoteInput {
+                project_path: "git:other",
+                route_project_root: None,
+                session_id: "A",
+                content: "inherited by the other project",
+                surface_condition: None,
+                anchor_block_id: Some("m2#0"),
+                now_ms: 1,
+            })
+            .unwrap();
         store
             .inner
             .with_conn_unfenced(|conn| {
@@ -24211,6 +23971,11 @@ mod lineage_descent_tests {
             inherited_notes[0].anchor_block_id.as_deref(),
             source_note.anchor_block_id.as_deref()
         );
+        assert_eq!(
+            store.read_notes("git:other", "B", 10, 0).unwrap().len(),
+            1,
+            "session notes of every project under the prior key are inherited"
+        );
         let transcript = store.load_chunk_transcripts_for_range("B", 1, 3).unwrap();
         assert_eq!(transcript.len(), 1);
         assert_eq!(
@@ -24242,11 +24007,13 @@ mod lineage_descent_tests {
             before_epoch + 1,
             "write-free replay must not re-bump the prior publish fence"
         );
-        assert_eq!(
-            store.read_notes("git:project", "B", 10, 0).unwrap().len(),
-            1,
-            "a replay must not duplicate inherited session notes"
-        );
+        for project in ["git:project", "git:other"] {
+            assert_eq!(
+                store.read_notes(project, "B", 10, 0).unwrap().len(),
+                1,
+                "{project}: a replay must not duplicate inherited session notes"
+            );
+        }
     }
 
     fn seed_raw_messages(store: &MemoryStore, session_id: &str, raw_messages: &str) {
@@ -24340,74 +24107,6 @@ mod lineage_descent_tests {
             prior_before.meta.revert_epoch,
             "a refused descent must not arm the prior fence"
         );
-    }
-
-    #[test]
-    fn descent_copies_session_notes_of_every_project_without_replay_duplicates() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_lineage(&store, "A", 10);
-        for project in ["git:project", "git:other"] {
-            store
-                .insert_note(NoteInput {
-                    project_path: project,
-                    route_project_root: None,
-                    session_id: "A",
-                    content: "inherited",
-                    surface_condition: None,
-                    anchor_block_id: Some("m2#0"),
-                    now_ms: 1,
-                })
-                .unwrap();
-        }
-        let distinct_projects: i64 = store
-            .inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(DISTINCT project_path) FROM notes
-                      WHERE session_id = 'A' AND type = 'session'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .unwrap();
-        assert_eq!(distinct_projects, 2);
-
-        let outcome = descend_a_to_b(&store).unwrap();
-        assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
-        for project in ["git:project", "git:other"] {
-            assert_eq!(
-                store.read_notes(project, "B", 10, 0).unwrap().len(),
-                1,
-                "{project}"
-            );
-        }
-
-        let target = store.load("B").unwrap();
-        let hops = direct_hop("A", "B", 2);
-        let anchor = anchor();
-        let replay = store
-            .descend_lineage(LineageDescentRequest {
-                target_key: "B",
-                expected_target_row_version: target.row_version,
-                edge_id: 44,
-                prior_key: "A",
-                prior_epoch: 1,
-                new_epoch: 2,
-                constituents: &hops,
-                compaction_observed: true,
-                anchor: Some(&anchor),
-                now_ms: 11,
-            })
-            .unwrap();
-        assert_eq!(replay.disposition, LineageDescentDisposition::Replay);
-        for project in ["git:project", "git:other"] {
-            assert_eq!(
-                store.read_notes(project, "B", 10, 0).unwrap().len(),
-                1,
-                "{project}: a replay must not duplicate inherited notes"
-            );
-        }
     }
 
     #[test]

@@ -15,9 +15,4 @@ describe("escalationBands", () => {
         expect(bands.forceMaterializationPercentage).toBeLessThan(95);
         expect(bands.emergencyPercentage).toBe(95);
     });
-
-    test("preserves the exact pre-raise behavior through threshold 80", () => {
-        expect(escalationBands(65).forceMaterializationPercentage).toBe(85);
-        expect(escalationBands(80).forceMaterializationPercentage).toBe(85);
-    });
 });

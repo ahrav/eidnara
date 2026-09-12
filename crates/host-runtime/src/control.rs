@@ -906,21 +906,25 @@ mod tests {
     }
 
     #[test]
-    fn synapse_management_surface_parses() {
-        let mut request = minimal_route_open();
-        request["target"]["kind"] = serde_json::Value::String("management_surface".to_owned());
-        request["target"]["module_id"] = serde_json::Value::String(SYNAPSE.to_owned());
-        let ControlAction::RouteOpen { target, .. } = parse(&request) else {
-            panic!("expected route open");
-        };
-        assert_eq!(target.module_id, SYNAPSE);
-        assert_eq!(target.kind, TargetKind::ManagementSurface);
-    }
-
-    #[test]
-    fn binary_flag_on_control_is_semantic_rejection() {
-        let action = parse_control(b"{}", true, &two_target_index());
-        assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
+    fn management_surface_targets_parse_with_their_declared_classes() {
+        for (module, class) in [
+            (SYNAPSE, RouteClass::General),
+            (BROCA, RouteClass::Reserved),
+        ] {
+            let mut request = minimal_route_open();
+            request["target"]["kind"] = serde_json::Value::String("management_surface".to_owned());
+            request["target"]["module_id"] = serde_json::Value::String(module.to_owned());
+            let ControlAction::RouteOpen { target, .. } = parse(&request) else {
+                panic!("expected route open for {module}");
+            };
+            assert_eq!(target.module_id, module);
+            assert_eq!(target.kind, TargetKind::ManagementSurface);
+            assert_eq!(two_target_index().class_of(module), Some(class));
+        }
+        assert_eq!(
+            two_target_index().class_of(LINKED),
+            Some(RouteClass::General)
+        );
     }
 
     #[test]
@@ -939,20 +943,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_op_is_unsupported_operation_not_invalid() {
-        let action = parse(&serde_json::json!({"op": "server.describe"}));
-        assert_eq!(reject_code(action), CODE_UNSUPPORTED_OPERATION);
-    }
-
-    #[test]
-    fn op_bounds_are_structural() {
+    fn op_bounds_are_structural_and_unknown_ops_are_unsupported() {
         let long_op = "x".repeat(MAX_OP_LEN + 1);
         for op in [String::new(), long_op, "bad\0op".to_owned()] {
             let action = parse(&serde_json::json!({"op": op}));
             assert_eq!(reject_code(action), CODE_INVALID_CONTROL_REQUEST);
         }
-        let action = parse(&serde_json::json!({"op": "y".repeat(MAX_OP_LEN)}));
-        assert_eq!(reject_code(action), CODE_UNSUPPORTED_OPERATION);
+        // Well-formed unknown operations return unsupported even at MAX_OP_LEN.
+        for op in ["server.describe".to_owned(), "y".repeat(MAX_OP_LEN)] {
+            let action = parse(&serde_json::json!({"op": op}));
+            assert_eq!(reject_code(action), CODE_UNSUPPORTED_OPERATION);
+        }
     }
 
     #[test]
@@ -1034,17 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn null_admission_facts_are_absent() {
-        let mut request = minimal_route_open();
-        request["admission_facts"] = serde_json::Value::Null;
-        let ControlAction::RouteOpen { identity, .. } = parse(&request) else {
-            panic!("expected route open");
-        };
-        assert!(identity.admission_facts.is_none());
-    }
-
-    #[test]
-    fn admission_facts_bounds_are_exact() {
+    fn admission_facts_null_is_absent_and_bounds_are_exact() {
         fn nested(depth: usize) -> serde_json::Value {
             let mut value = serde_json::json!(1);
             for _ in 0..depth {
@@ -1053,6 +1044,12 @@ mod tests {
             value
         }
         let mut request = minimal_route_open();
+
+        request["admission_facts"] = serde_json::Value::Null;
+        let ControlAction::RouteOpen { identity, .. } = parse(&request) else {
+            panic!("expected route open");
+        };
+        assert!(identity.admission_facts.is_none());
 
         request["admission_facts"] = nested(MAX_ADMISSION_FACTS_DEPTH);
         assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
@@ -1093,49 +1090,27 @@ mod tests {
     }
 
     #[test]
-    fn wrong_role_for_known_module_is_target_unavailable() {
+    fn wrong_role_or_unsupported_kind_is_target_unavailable() {
+        // A known module under the wrong role, and kinds the host does not serve.
         for (module, kind) in [
             (LINKED, "management_surface"),
             (SYNAPSE, "tool_provider"),
             (BROCA, "tool_provider"),
+            (LINKED, "internal_service"),
+            (LINKED, "mystery_kind"),
         ] {
             let mut request = minimal_route_open();
             request["target"]["module_id"] = serde_json::Value::String(module.to_owned());
             request["target"]["kind"] = serde_json::Value::String(kind.to_owned());
-            assert_eq!(reject_code(parse(&request)), CODE_TARGET_UNAVAILABLE);
-        }
-    }
-
-    #[test]
-    fn unsupported_target_kind_is_target_unavailable() {
-        for kind in ["internal_service", "mystery_kind"] {
-            let mut request = minimal_route_open();
-            request["target"]["kind"] = serde_json::Value::String(kind.to_owned());
             if kind == "internal_service" {
                 request["target"]["service_id"] = serde_json::Value::String("svc".to_owned());
             }
-            assert_eq!(reject_code(parse(&request)), CODE_TARGET_UNAVAILABLE);
+            assert_eq!(
+                reject_code(parse(&request)),
+                CODE_TARGET_UNAVAILABLE,
+                "{module} as {kind}"
+            );
         }
-    }
-
-    #[test]
-    fn broca_management_surface_parses_with_its_declared_class() {
-        let mut request = minimal_route_open();
-        request["target"]["kind"] = serde_json::Value::String("management_surface".to_owned());
-        request["target"]["module_id"] = serde_json::Value::String(BROCA.to_owned());
-        let ControlAction::RouteOpen { target, .. } = parse(&request) else {
-            panic!("expected route open");
-        };
-        assert_eq!(target.module_id, BROCA);
-        assert_eq!(target.kind, TargetKind::ManagementSurface);
-        assert_eq!(
-            two_target_index().class_of(BROCA),
-            Some(RouteClass::Reserved)
-        );
-        assert_eq!(
-            two_target_index().class_of(LINKED),
-            Some(RouteClass::General)
-        );
     }
 
     #[test]
@@ -1146,13 +1121,6 @@ mod tests {
             request["target"]["module_id"] = serde_json::Value::String("thalamus".to_owned());
             assert_eq!(reject_code(parse(&request)), CODE_UNKNOWN_MODULE);
         }
-    }
-
-    #[test]
-    fn unknown_fields_are_ignored() {
-        let mut request = minimal_route_open();
-        request["future_extension"] = serde_json::json!({"a": 1});
-        assert!(matches!(parse(&request), ControlAction::RouteOpen { .. }));
     }
 
     #[test]

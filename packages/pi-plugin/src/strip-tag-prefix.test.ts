@@ -62,108 +62,37 @@ describe("stripTagPrefixFromAssistantMessage", () => {
         });
     });
 
-    describe("scope guards", () => {
-        it("does NOT strip prefix on user messages", () => {
-            const msg = {
-                role: "user",
-                content: [{ type: "text", text: "§4§ Hello from user" }],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-            expect((msg.content[0] as { type: string; text: string }).text).toBe(
-                "§4§ Hello from user",
-            );
-        });
-
-        it("does NOT strip prefix on tool result messages", () => {
-            const msg = {
-                role: "toolResult",
-                content: [{ type: "text", text: "§7§ tool output" }],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-        });
-
-        it("strips across multiple text parts in a single message", () => {
-            const msg = {
-                role: "assistant",
-                content: [
-                    { type: "text", text: "§4§ First chunk" },
-                    { type: "text", text: "§4§ Second chunk" },
-                ],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-            expect((msg.content[0] as { type: string; text: string }).text).toBe("First chunk");
-            expect((msg.content[1] as { type: string; text: string }).text).toBe(" Second chunk");
-        });
-
-        it("keeps the separator that follows a tag at the start of a later part", () => {
+    describe("multi-part messages", () => {
+        // Each row is one assistant message spread over several text parts: the scrub must
+        // report a mutation, strip a well-formed leading tag only from the first part, and
+        // keep the whitespace around removed interior tags so joined words stay separated.
+        it.each([
+            [
+                "keeps the separator that follows a tag at the start of a later part",
+                ["§4§ Hello", "§5§ world"],
+                ["Hello", " world"],
+            ],
+            [
+                "keeps interior boundary whitespace while scrubbing tags from a middle part",
+                ["§4§ Hello ", " §5§ big ", " world §6§ "],
+                ["Hello ", "  big ", " world"],
+            ],
+            ["empties an edge part that held only tag notation", ["§4§ ", "Hello"], ["", "Hello"]],
+            [
+                "keeps the separator when an interior part held only tag notation",
+                ["Hello", " §4§ ", "world"],
+                ["Hello", "  ", "world"],
+            ],
+        ] as Array<[string, string[], string[]]>)("%s", (_title, inputs, expected) => {
             const msg = {
                 role: "assistant",
-                content: [
-                    { type: "text", text: "§4§ Hello" },
-                    { type: "text", text: "§5§ world" },
-                ],
+                content: inputs.map((text) => ({ type: "text", text })),
             };
             expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
             const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
-            expect(texts).toEqual(["Hello", " world"]);
-            expect(texts.join("")).toBe("Hello world");
-        });
-
-        it("leaves boundary whitespace between untagged text parts alone", () => {
-            const msg = {
-                role: "assistant",
-                content: [
-                    { type: "text", text: "Hello " },
-                    { type: "text", text: "world" },
-                ],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-            expect((msg.content[0] as { type: string; text: string }).text).toBe("Hello ");
-            expect((msg.content[1] as { type: string; text: string }).text).toBe("world");
-        });
-
-        it("keeps interior boundary whitespace while scrubbing tags from a middle part", () => {
-            const msg = {
-                role: "assistant",
-                content: [
-                    { type: "text", text: "§4§ Hello " },
-                    { type: "text", text: " §5§ big " },
-                    { type: "text", text: " world §6§ " },
-                ],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-            const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
-            // Mid-text scrubs leave whitespace on both sides of the removed tag.
-            expect(texts).toEqual(["Hello ", "  big ", " world"]);
-            expect(texts.join("")).toMatch(/^Hello\s+big\s+world$/);
-        });
-
-        it("empties an edge part that held only tag notation", () => {
-            const msg = {
-                role: "assistant",
-                content: [
-                    { type: "text", text: "§4§ " },
-                    { type: "text", text: "Hello" },
-                ],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-            expect((msg.content[0] as { type: string; text: string }).text).toBe("");
-            expect((msg.content[1] as { type: string; text: string }).text).toBe("Hello");
-        });
-
-        it("keeps the separator when an interior part held only tag notation", () => {
-            const msg = {
-                role: "assistant",
-                content: [
-                    { type: "text", text: "Hello" },
-                    { type: "text", text: " §4§ " },
-                    { type: "text", text: "world" },
-                ],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-            const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
-            expect(texts).toEqual(["Hello", "  ", "world"]);
-            expect(texts.join("")).toMatch(/^Hello\s+world$/);
+            expect(texts).toEqual(expected);
+            expect(texts.join("")).toMatch(/^\S.*\S$/);
+            expect(texts.join("")).not.toContain("§");
         });
 
         it("ignores non-text parts (thinking, toolCall, image)", () => {
@@ -194,24 +123,30 @@ describe("stripTagPrefixFromAssistantMessage", () => {
         });
     });
 
-    describe("no-op cases", () => {
-        it("returns false when no text parts have any §", () => {
-            const msg = {
+    it("returns false and leaves the message untouched when nothing is in scope", () => {
+        // Non-assistant roles, non-array or empty content, and text without any `§` are
+        // all outside the scrub's scope: no mutation, and the message is byte-identical.
+        const messages: Array<{ role: string; content: unknown }> = [
+            { role: "user", content: [{ type: "text", text: "§4§ Hello from user" }] },
+            { role: "toolResult", content: [{ type: "text", text: "§7§ tool output" }] },
+            { role: "assistant", content: "§4§ legacy string" },
+            { role: "assistant", content: [] },
+            {
                 role: "assistant",
                 content: [{ type: "text", text: "Plain response without any prefix" }],
-            };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-        });
-
-        it("handles empty content array gracefully", () => {
-            const msg = { role: "assistant", content: [] };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-        });
-
-        it("handles non-array content gracefully", () => {
-            const msg = { role: "assistant", content: "§4§ legacy string" };
-            expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-            expect(msg.content).toBe("§4§ legacy string");
-        });
+            },
+            {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "Hello " },
+                    { type: "text", text: "world" },
+                ],
+            },
+        ];
+        for (const msg of messages) {
+            const original = structuredClone(msg);
+            expect(stripTagPrefixFromAssistantMessage(msg), JSON.stringify(original)).toBe(false);
+            expect(msg, JSON.stringify(original)).toEqual(original);
+        }
     });
 });

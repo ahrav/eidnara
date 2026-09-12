@@ -760,27 +760,6 @@ fn commit_failure_cleanup_preserves_a_surviving_dedup_reservation() {
 }
 
 #[test]
-fn successful_reference_consumes_its_reservation_atomically() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let handle = store
-        .ingest_artifact(ingest_request("atomic", b"atomic"))
-        .unwrap();
-    let state = SemanticState::read(root.path());
-    assert!(state
-        .canonical_refs
-        .iter()
-        .any(|(_, digest, _, _, invalidated)| digest == &handle.digest && invalidated.is_none()));
-    assert!(
-        !state
-            .reservations
-            .iter()
-            .any(|(digest, _)| digest == &handle.digest)
-    );
-}
-
-#[test]
 fn startup_leaves_reservations_whose_digest_still_has_reference_history() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();

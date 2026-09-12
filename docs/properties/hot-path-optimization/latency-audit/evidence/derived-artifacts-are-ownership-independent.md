@@ -27,7 +27,7 @@ never of the allocation or the lane that produced them.
   from the same block for their consumers to agree.
 - The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2919-2921`][prefix-call] when a reusable projection exists and
+  [`:2910-2912`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
@@ -130,7 +130,10 @@ accounting](shared-selection-and-pressure-accounting.md).
 Both production selection constructors borrow the projected wire input.
 The pointer-identity test fails on the clone-based baseline and passes on
 the borrowed representation, including a selection clone and historian input.
-The unchanged selection reference passes all 18 differential tests.
+The unchanged selection reference passes all 18 differential tests. The
+`tool_input` versus `wire.kind()` question from the discovery snapshot is
+resolved by removal: `FlatBlock` no longer carries a separate input copy, so
+there is one projected input and no pair of fields to drift apart.
 
 The sidecar test compares full and incremental order, metadata, and pins over
 three generations with repeated IDs. It also checks sparse prefixes: map
@@ -149,10 +152,12 @@ native implementation.
   ingress chunks or the full request snapshot. The request wire decoder also
   owns `Arc<Value>` values. JSON fields and serialization remain unchanged.
 - [Shared decode][shared-decode] borrows parts and retains each envelope in
-  `HarnessMessageMeta::raw` through an `Arc` clone. The value-slice decoder
-  keeps its entry interface and delegates to that same decoder. Full-native
-  encoding reads the shared request values without materializing a value
-  array. Pi adapts to the common sidecar field without changing its output.
+  `HarnessMessageMeta::raw` through an `Arc` clone. It is the only compiled
+  production decoder; the value-slice adapters that wrap owned fixtures in
+  fresh `Arc`s are test-only, so no shipped path can reintroduce that copy.
+  Full-native encoding reads the shared request values without materializing
+  a value array. Pi adapts to the common sidecar field without changing its
+  output.
 - [Ingress accounting][shared-ingress] retains the value-equality test when
   sharing an encoded chunk. An unequal encoded output cannot become the raw
   ingress prefix. Request accounting uses request allocation sizes, not the
@@ -302,6 +307,18 @@ measurement gate for this work. Full workspace tests, cross-process campaigns,
 and independent reviews remain controller work. Historical execution evidence
 above is retained; this file exceeds the method's length target to preserve it.
 
+The projection bench corpus is built from typed parts, so its shells carry no
+retained message JSON. Under shared shells that input takes the `Arc::clone`
+branch on every message, a path a decoded request never takes because
+`WireMessage::deserialize` always retains its JSON. A guard added to the
+[bench corpus helper][bench-ingress] first failed on that shape, then passed
+once the helper round-trips the corpus through `serde_json`. `projection/full`
+measures the canonical-shell rebuild that a cold request pays. A separate
+[`projection/reattached_prefix`][bench-reattached] cell keeps the typed corpus
+and asserts every projected block points into a corpus shell, so it measures the
+share path a reattached prefix takes. `cargo test --bench hot_path` passes with
+both cells. These are shape corrections to the bench input, not measurements.
+
 ### Shell metadata preservation and review disposition
 
 The [reattachment test][shell-metadata] includes nonempty `origin` and
@@ -340,17 +357,19 @@ All-target/all-feature daemon Clippy with `-D warnings` and the scoped formatter
 also pass. The extension changes tests and documentation, not served behavior;
 the historical evidence and bound golden remain intact.
 
+[bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
+[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L102-L135
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
-[shell-build]: ../../../../../crates/daemon/src/wire.rs#L546-L565
+[shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
-[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L214-L243
+[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L212-L241
 [shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L243-L253
-[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1745
-[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L950
-[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1704
+[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1731
+[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L940
+[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1690
 
 [shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4157
-[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L56
+[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
 [shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
 [shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20654
 [shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20873

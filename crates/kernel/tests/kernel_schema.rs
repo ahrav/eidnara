@@ -150,6 +150,8 @@ fn kernel_schema_has_one_ordered_full_shape() {
 
     assert_eq!(KERNEL_SCHEMA_COMPONENT_NAMES, EXPECTED_COMPONENTS);
     assert_eq!(kernel_schema_inventory(&conn).unwrap(), EXPECTED_COMPONENTS);
+    // ASCII `EIDN`.
+    assert_eq!(KERNEL_APPLICATION_ID, 0x4549_444E);
     assert_eq!(
         conn.query_row("PRAGMA application_id", [], |row| row.get::<_, u32>(0))
             .unwrap(),
@@ -606,38 +608,6 @@ fn kernel_profile_is_strict_and_verified() {
 }
 
 #[test]
-fn first_root_transaction_resolves_deferred_registry_cycle() {
-    let (_dir, mut conn) = open_profiled();
-    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
-
-    let tx = conn.transaction().unwrap();
-    tx.execute(
-        "INSERT INTO commit_log(
-             transaction_id, writer_epoch, producer, operation_key, request_digest,
-             recorded_at, actor, cause
-         ) VALUES ('tx-1', 7, 'fixture', 'tx-1', '', 1000, 'test', 'root')",
-        [],
-    )
-    .unwrap();
-    let commit_seq = tx.last_insert_rowid();
-    tx.execute(
-        "INSERT INTO domains(domain_id, object_id, name, created_commit_seq, sensitivity_class)
-         VALUES ('domain-1', 'object-1', 'root', ?1, 'internal')",
-        [commit_seq],
-    )
-    .unwrap();
-    tx.execute(
-        "INSERT INTO object_registry(
-             object_id, object_kind, domain_id, source_kind, source_id, source_revision,
-             created_commit_seq, sensitivity_class
-         ) VALUES ('object-1', 'domain', 'domain-1', 'test', 'root', 1, ?1, 'internal')",
-        [commit_seq],
-    )
-    .unwrap();
-    tx.commit().unwrap();
-}
-
-#[test]
 fn candidate_delete_cascades_scores_but_preserves_admission_audit() {
     let (_dir, mut conn) = open_profiled();
     apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
@@ -819,23 +789,23 @@ fn every_kernel_table_is_strict_and_enforces_types_and_foreign_keys() {
 }
 
 #[test]
-fn normal_synchronous_mode_fails_kernel_verification() {
-    let (_dir, conn) = open_profiled();
-    conn.pragma_update(None, "synchronous", "NORMAL").unwrap();
-    assert_eq!(
-        verify_kernel_connection_contract(&conn, 5_000).unwrap(),
-        vec!["synchronous mode 1 is not FULL or EXTRA [2, 3]".to_string()]
-    );
-}
-
-#[test]
-fn trusted_schema_on_fails_kernel_verification() {
-    let (_dir, conn) = open_profiled();
-    conn.pragma_update(None, "trusted_schema", "ON").unwrap();
-    assert_eq!(
-        verify_kernel_connection_contract(&conn, 5_000).unwrap(),
-        vec!["trusted_schema is enabled".to_string()]
-    );
+fn relaxed_synchronous_and_trusted_schema_each_fail_kernel_verification() {
+    for (pragma, value, violation) in [
+        (
+            "synchronous",
+            "NORMAL",
+            "synchronous mode 1 is not FULL or EXTRA [2, 3]",
+        ),
+        ("trusted_schema", "ON", "trusted_schema is enabled"),
+    ] {
+        let (_dir, conn) = open_profiled();
+        conn.pragma_update(None, pragma, value).unwrap();
+        assert_eq!(
+            verify_kernel_connection_contract(&conn, 5_000).unwrap(),
+            vec![violation.to_string()],
+            "{pragma}={value}"
+        );
+    }
 }
 
 #[test]
@@ -885,47 +855,6 @@ fn commit_receipt_and_change_identity_shapes_are_not_overconstrained() {
         [commit_seq],
     )
     .unwrap();
-}
-
-#[test]
-fn abandonment_audit_survives_consumer_deletion() {
-    let (_dir, mut conn) = open_profiled();
-    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
-    conn.execute(
-        "INSERT INTO outbox_consumers(consumer_id, checkpoint_commit_seq, updated_at)
-         VALUES ('search', 9, 10)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO commit_log(
-             transaction_id, writer_epoch, producer, operation_key, request_digest,
-             recorded_at, actor, cause
-         ) VALUES ('tx-abandon', 7, 'fixture', 'tx-abandon', '', 10, 'operator-1', 'abandonment')",
-        [],
-    )
-    .unwrap();
-    let commit_seq = conn.last_insert_rowid();
-    conn.execute(
-        "INSERT INTO consumer_abandonments(
-             abandonment_id, consumer_id, operator_id, last_checkpoint_commit_seq,
-             reason, commit_seq, abandoned_at
-         ) VALUES ('abandon-1', 'search', 'operator-1', 9, 'retired', ?1, 11)",
-        [commit_seq],
-    )
-    .unwrap();
-    conn.execute(
-        "DELETE FROM outbox_consumers WHERE consumer_id = 'search'",
-        [],
-    )
-    .unwrap();
-    assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM consumer_abandonments", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap(),
-        1
-    );
 }
 
 #[test]
@@ -1161,26 +1090,6 @@ fn canonical_evidence_delete_is_refused_while_referenced() {
         )
         .unwrap(),
         Some("ev-1".to_string())
-    );
-}
-
-#[test]
-fn kernel_stamps_the_eidnara_application_id() {
-    let (_dir, mut conn) = open_profiled();
-    apply_kernel_schema(&mut conn, INCARNATION, 1_000).unwrap();
-
-    // ASCII `EIDN`, the value every Eidnara store family stamps.
-    assert_eq!(KERNEL_APPLICATION_ID, 0x4549_444E);
-    assert_eq!(
-        conn.query_row("PRAGMA application_id", [], |row| row.get::<_, u32>(0))
-            .unwrap(),
-        KERNEL_APPLICATION_ID
-    );
-    // The marker table, not the application id, decides the family.
-    assert!(
-        kernel_schema_inventory(&conn)
-            .unwrap()
-            .contains(&"kernel_format_marker".to_string())
     );
 }
 

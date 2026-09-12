@@ -253,46 +253,41 @@ describe("Pi ctx_memory reads and action gates", () => {
         expect(read.missingObjectIds).toEqual(["mem_missing"]);
     });
 
-    it("rejects actions outside the agent set", async () => {
+    it("rejects disallowed actions and malformed writes before any kernel call", async () => {
         const tool = harness();
-        const denied = await tool.execute({ action: "list" }, "call-list");
-        expect(denied.isError).toBe(true);
-        expect(textOf(denied)).toBe("Error: Action 'list' is not allowed in this context.");
-        expect(tool.transport.calls).toHaveLength(0);
-    });
-
-    it("rejects agent approve and enforce", async () => {
-        const tool = harness();
-        for (const action of ["approve", "enforce"]) {
-            const result = await tool.execute({ action }, `call-${action}`);
+        const humanHostOwned =
+            "Error: approve and enforce are human-host-owned commands, not agent actions.";
+        const cases: Array<{ args: Record<string, unknown>; text: string }> = [
+            {
+                args: { action: "list" },
+                text: "Error: Action 'list' is not allowed in this context.",
+            },
+            { args: { action: "approve" }, text: humanHostOwned },
+            { args: { action: "enforce" }, text: humanHostOwned },
+            {
+                args: { action: "create", category: "ARCHITECTURE" },
+                text: "Error: create requires non-empty content and category",
+            },
+        ];
+        for (const { args, text } of cases) {
+            const result = await tool.execute(args, `call-${String(args.action)}`);
             expect(result.isError).toBe(true);
-            expect(textOf(result)).toBe(
-                "Error: approve and enforce are human-host-owned commands, not agent actions.",
-            );
+            expect(textOf(result)).toBe(text);
         }
-        expect(tool.transport.calls).toHaveLength(0);
-    });
-
-    it("maps a write-shape input error to the Error prefix", async () => {
-        const tool = harness();
-        const result = await tool.execute(
-            { action: "create", category: "ARCHITECTURE" },
-            "call-shape",
-        );
-        expect(result.isError).toBe(true);
-        expect(textOf(result)).toBe("Error: create requires non-empty content and category");
         expect(tool.transport.calls).toHaveLength(0);
     });
 });
 
 describe("Pi ctx_memory imitated reduced arguments", () => {
-    it("decodes a reduced revise that names its object id", async () => {
+    it("decodes reduced revise and merge arguments that name their object ids", async () => {
         const kernel = new FakeKernel();
         kernel.seedDecision({
             object_id: "mem_reduced",
             decision_kind: "NAMING",
             summary: "Before.",
         });
+        kernel.seedDecision({ object_id: "mem_x", decision_kind: "NAMING", summary: "X." });
+        kernel.seedDecision({ object_id: "mem_y", decision_kind: "NAMING", summary: "Y." });
         const tool = harness(kernel);
         const revised = parseResult<CommitJson>(
             await tool.execute(
@@ -306,13 +301,7 @@ describe("Pi ctx_memory imitated reduced arguments", () => {
         );
         expect(revised.outcome).toBe("applied");
         expect(tool.kernel.objects.get("mem_reduced")?.superseded_by).toBeString();
-    });
 
-    it("decodes a reduced merge that names its object ids", async () => {
-        const kernel = new FakeKernel();
-        kernel.seedDecision({ object_id: "mem_x", decision_kind: "NAMING", summary: "X." });
-        kernel.seedDecision({ object_id: "mem_y", decision_kind: "NAMING", summary: "Y." });
-        const tool = harness(kernel);
         const merged = parseResult<CommitJson>(
             await tool.execute(
                 reduced({

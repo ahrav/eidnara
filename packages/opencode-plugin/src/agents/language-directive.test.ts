@@ -49,16 +49,17 @@ const EXHAUSTIVE_STRUCTURAL_TOKENS = [
 ] as const;
 
 describe("resolveLanguageName", () => {
-    it("maps a 2-letter ISO 639-1 code to 'English (Endonym)'", () => {
-        expect(resolveLanguageName("tr")).toBe("Turkish (Türkçe)");
-        expect(resolveLanguageName("es")).toBe("Spanish (Español)");
-        expect(resolveLanguageName("ja")).toBe("Japanese (日本語)");
-    });
-    it("normalizes case and surrounding whitespace", () => {
-        expect(resolveLanguageName("  TR ")).toBe("Turkish (Türkçe)");
-    });
-    it("returns the bare English name when the endonym matches it", () => {
-        expect(resolveLanguageName("en")).toBe("English");
+    it("maps a 2-letter ISO 639-1 code to 'English (Endonym)', bare English when they match, ignoring case and whitespace", () => {
+        const cases: Array<[string, string]> = [
+            ["tr", "Turkish (Türkçe)"],
+            ["es", "Spanish (Español)"],
+            ["ja", "Japanese (日本語)"],
+            ["  TR ", "Turkish (Türkçe)"],
+            ["en", "English"],
+        ];
+        for (const [code, name] of cases) {
+            expect(resolveLanguageName(code), code).toBe(name);
+        }
     });
     it("returns '' for unset, blank, non-codes, and unknown codes", () => {
         expect(resolveLanguageName()).toBe("");

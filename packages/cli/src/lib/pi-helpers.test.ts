@@ -52,14 +52,16 @@ describe("parseModelListOutput", () => {
         ]);
     });
 
-    it("allows provider-qualified model ids in the model column", () => {
-        const output = [HEADER, "openrouter anthropic/claude-sonnet-4 200K 64K yes no"].join("\n");
-        expect(parseModelListOutput(output)).toEqual(["openrouter/anthropic/claude-sonnet-4"]);
-    });
-
-    it("allows scoped model ids that begin with @", () => {
-        const output = [HEADER, "modal @modal/qwen/model-v1 128K 32K no no"].join("\n");
-        expect(parseModelListOutput(output)).toEqual(["modal/@modal/qwen/model-v1"]);
+    it("allows provider-qualified and scoped model ids in the model column", () => {
+        const output = [
+            HEADER,
+            "openrouter anthropic/claude-sonnet-4 200K 64K yes no",
+            "modal @modal/qwen/model-v1 128K 32K no no",
+        ].join("\n");
+        expect(parseModelListOutput(output)).toEqual([
+            "openrouter/anthropic/claude-sonnet-4",
+            "modal/@modal/qwen/model-v1",
+        ]);
     });
 
     it("ignores headings, prose, and rows before a recognized header", () => {
@@ -105,14 +107,6 @@ describe("Pi fallback discovery", () => {
         ]);
     });
 
-    it("emits only system launchers when no absolute home is known", () => {
-        expect(getPiFallbackCandidates("linux", undefined)).toEqual([
-            "/usr/local/bin/pi",
-            "/opt/homebrew/bin/pi",
-        ]);
-        expect(getPiFallbackCandidates("win32", undefined)).toEqual([]);
-    });
-
     it("probes the installer directory, then npm and Bun launchers on Windows", () => {
         const home = "C:\\Users\\fox";
         const appData = "C:\\Users\\fox\\AppData\\Roaming";
@@ -130,6 +124,7 @@ describe("Pi fallback discovery", () => {
             "/usr/local/bin/pi",
             "/opt/homebrew/bin/pi",
         ]);
+        expect(getPiFallbackCandidates("win32", undefined)).toEqual([]);
         const appData = "C:\\Users\\fox\\AppData\\Roaming";
         expect(getPiFallbackCandidates("win32", undefined, appData)).toEqual([
             join(appData, "npm", "pi.cmd"),

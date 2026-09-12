@@ -80,7 +80,7 @@ Clone sites in scope, what reads the copy, and whether the copy is mutated:
 | [`native-deep`][native-deep] | `Value` per native prefix message | none | sidecar decode (which [copies each raw message again][raw-clone] into [`HarnessMessageMeta.raw`][decode-sidecar]), `native_ingress_chunks` equality, retained-bytes accounting |
 | [`prefix-copy`][prefix-copy] | `FlatBlock` per cached prefix block | none | the incremental `FlatProjection` |
 | [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323][sel-consume], [boundary.rs:1729][boundary-consume], [injection.rs:403][injection-consume]) | reductions, historian tool summaries, todo capture |
-| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7350`][active-match], caveman source at [`:5691-5694`][caveman-source] |
+| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7353`][active-match], caveman source at [`:5691-5694`][caveman-source] |
 | [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4924-4934`][commit-inputs] |
 | [`part-measure`][part-measure] | content `String` per part | none | hygiene `content_hash`, token cache key, `T`/`U` |
 | [`served-reusing`][served-reusing] | `Value` tree plus bytes per served message | none | wire bytes, `canonical_hash`, `output_identity`, native message keys |
@@ -298,7 +298,7 @@ and
 assert every committed `TagRow.source_bytes` equals the block's
 [`taggable_source`][taggable] text bytes exactly. `always` because the
 cache entry is read on the next pass of the same session and a stale or
-speculative row changes the active-tag match at [`:7350`][active-match].
+speculative row changes the active-tag match at [`:7353`][active-match].
 Guarantee: Pass-local mint rows never become visible through the tag
 baseline cache, and every visible row's `source_bytes` is byte-equal to the
 projected text it tags.
@@ -487,19 +487,19 @@ both sides and neither resolved here:
 [tag-snapshot]: ../../../../../crates/daemon/src/transform.rs#L6827-L6832
 [load-tags]: ../../../../../crates/daemon/src/transform.rs#L6899-L6957
 [mint-input]: ../../../../../crates/daemon/src/transform.rs#L7156-L7161
-[append-mint]: ../../../../../crates/daemon/src/transform.rs#L7261-L7282
-[taggable]: ../../../../../crates/daemon/src/transform.rs#L7286-L7310
-[active-match]: ../../../../../crates/daemon/src/transform.rs#L7350
-[make-mut]: ../../../../../crates/daemon/src/transform.rs#L7883-L7884
-[output-identity]: ../../../../../crates/daemon/src/transform.rs#L10230-L10312
-[tail-loop]: ../../../../../crates/daemon/src/transform.rs#L10992-L10996
-[t-fpids]: ../../../../../crates/daemon/src/transform.rs#L13577
-[t-parked]: ../../../../../crates/daemon/src/transform.rs#L13707
-[t-pending]: ../../../../../crates/daemon/src/transform.rs#L20079
-[t-tagcold]: ../../../../../crates/daemon/src/transform.rs#L22418
-[t-poison]: ../../../../../crates/daemon/src/transform.rs#L22487
-[t-interleave]: ../../../../../crates/daemon/src/transform.rs#L22520
-[t-collapsed]: ../../../../../crates/daemon/src/transform.rs#L27269
+[append-mint]: ../../../../../crates/daemon/src/transform.rs#L7264-L7285
+[taggable]: ../../../../../crates/daemon/src/transform.rs#L7289-L7313
+[active-match]: ../../../../../crates/daemon/src/transform.rs#L7353
+[make-mut]: ../../../../../crates/daemon/src/transform.rs#L7886-L7887
+[output-identity]: ../../../../../crates/daemon/src/transform.rs#L10233-L10315
+[tail-loop]: ../../../../../crates/daemon/src/transform.rs#L10995-L10999
+[t-fpids]: ../../../../../crates/daemon/src/transform.rs#L13580
+[t-parked]: ../../../../../crates/daemon/src/transform.rs#L13710
+[t-pending]: ../../../../../crates/daemon/src/transform.rs#L20082
+[t-tagcold]: ../../../../../crates/daemon/src/transform.rs#L22421
+[t-poison]: ../../../../../crates/daemon/src/transform.rs#L22490
+[t-interleave]: ../../../../../crates/daemon/src/transform.rs#L22523
+[t-collapsed]: ../../../../../crates/daemon/src/transform.rs#L27272
 [flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
 [flatproj]: ../../../../../crates/daemon/src/wire.rs#L115-L128
 [reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L142-L145

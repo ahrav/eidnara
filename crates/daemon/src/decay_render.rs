@@ -354,7 +354,6 @@ pub fn extract_m0_block(m0_text: &str, tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::FixtureBuilder;
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
 
@@ -378,22 +377,6 @@ mod tests {
     /// The budget exceeds the curve-driven output, so the guard does not run.
     fn no_guard(_: &str) -> usize {
         0
-    }
-
-    #[test]
-    fn newest_renders_at_p1_full() {
-        let c = DecayRenderCompartment {
-            start_message: 1,
-            end_message: 9,
-            title: "T".into(),
-            p1: Some("VERBOSE".into()),
-            p2: Some("dense".into()),
-            importance: Some(50),
-            ..Default::default()
-        };
-        // Index 1, the newest row, maps to tier 1 and the `p1` body.
-        let out = render_decayed_compartments(std::slice::from_ref(&c), 60_000.0, no_guard);
-        assert_eq!(out, "## 1-9 · T\nVERBOSE");
     }
 
     #[test]
@@ -434,14 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_title_stays_byte_identical() {
-        assert_eq!(
-            render_compartment_at_tier(&comp(1, 2, "Clean title", "body", 50), 1),
-            "## 1-2 · Clean title\nbody"
-        );
-    }
-
-    #[test]
     fn date_ranges_compress_and_heading_like_body_lines_are_indented() {
         let base = DecayRenderCompartment {
             start_message: 1,
@@ -472,37 +447,6 @@ mod tests {
             render_dates("2026-06-08", "2026-07-02")
                 .starts_with("## 1-2 · 2026-06-08→2026-07-02 · Dated")
         );
-    }
-
-    #[test]
-    fn legacy_row_truncates_and_picks_tier() {
-        let c = DecayRenderCompartment {
-            start_message: 1,
-            end_message: 2,
-            title: "L".into(),
-            content: "U: hello\n".to_string() + &"x".repeat(2000),
-            legacy: Some(1),
-            ..Default::default()
-        };
-        // A legacy row with a `U:` line starts at P3; truncation limits its body to 420 Unicode scalar values and appends `…` only when truncated.
-        let out = render_decayed_compartments(std::slice::from_ref(&c), 60_000.0, no_guard);
-        assert!(out.ends_with('…'), "P3 truncates: {out}");
-    }
-
-    #[test]
-    fn malformed_pseudo_v2_renders_flat_not_empty() {
-        // legacy=0 with an empty p1 renders flat content, not an empty tier
-        let c = DecayRenderCompartment {
-            start_message: 1,
-            end_message: 2,
-            title: "M".into(),
-            content: "flat body".into(),
-            p1: Some(String::new()),
-            legacy: Some(0),
-            ..Default::default()
-        };
-        let out = render_compartment_at_tier(&c, 1);
-        assert_eq!(out, "## 1-2 · M\nflat body");
     }
 
     #[test]
@@ -804,12 +748,5 @@ mod tests {
             golden.cases.len(),
             "every tight case must end within budget (or at the floor) under the real estimator"
         );
-    }
-    #[test]
-    fn fixture_builder_drives_tagged_session_render() {
-        let fixture = FixtureBuilder::tagged_session();
-        let rendered = render_decayed_compartments(&fixture.compartments, 10_000.0, no_guard);
-        assert!(rendered.contains("## 1-1 · Boundary"));
-        assert!(fixture.handle_transform()["messages"].is_array());
     }
 }

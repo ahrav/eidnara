@@ -129,8 +129,6 @@ pub struct FlatBlock {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_input: Option<Arc<Value>>,
     pub provider_executed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arc_id: Option<String>,
@@ -245,7 +243,7 @@ impl FlatProjection {
     pub(crate) fn retained_bytes(&self) -> usize {
         use crate::retained_size::{
             ARC_ALLOCATION_OVERHEAD_BYTES, btree_map_allocation_bytes,
-            ingress_message_retained_bytes, value_retained_bytes,
+            ingress_message_retained_bytes,
         };
         use std::mem::size_of;
 
@@ -270,10 +268,6 @@ impl FlatProjection {
                             .saturating_add(block.output_kind.as_ref().map_or(0, String::capacity))
                             .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
                             .saturating_add(block.bytes.len())
-                            .saturating_add(block.tool_input.as_ref().map_or(0, |input| {
-                                ARC_ALLOCATION_OVERHEAD_BYTES
-                                    .saturating_add(value_retained_bytes(input))
-                            }))
                     })
                     .sum::<usize>(),
             );
@@ -740,36 +734,33 @@ fn flatten_block(
         kind: block.kind().tag().to_string(),
     })?;
     let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
-    let (name, file_path, tool_input, provider_executed, tool_call_id, output_kind) =
-        match block.kind() {
-            BlockKind::ToolCall {
-                id,
-                name,
-                input,
-                provider_executed,
-            } => (
-                Some(name.clone()),
-                extract_file_path(input),
-                Some(Arc::new(input.clone())),
-                *provider_executed,
-                Some(id.clone()),
-                None,
-            ),
-            BlockKind::ToolResult {
-                id,
-                output,
-                provider_executed,
-                ..
-            } => (
-                None,
-                None,
-                None,
-                *provider_executed,
-                Some(id.clone()),
-                Some(output.kind.tag().to_string()),
-            ),
-            _ => (None, None, None, false, None, None),
-        };
+    let (name, file_path, provider_executed, tool_call_id, output_kind) = match block.kind() {
+        BlockKind::ToolCall {
+            id,
+            name,
+            input,
+            provider_executed,
+        } => (
+            Some(name.clone()),
+            extract_file_path(input),
+            *provider_executed,
+            Some(id.clone()),
+            None,
+        ),
+        BlockKind::ToolResult {
+            id,
+            output,
+            provider_executed,
+            ..
+        } => (
+            None,
+            None,
+            *provider_executed,
+            Some(id.clone()),
+            Some(output.kind.tag().to_string()),
+        ),
+        _ => (None, None, false, None, None),
+    };
 
     Ok(FlatBlock {
         id: block_id(&msg.mid, index),
@@ -780,7 +771,6 @@ fn flatten_block(
         kind_tag: block.kind().tag().to_string(),
         name,
         file_path,
-        tool_input,
         provider_executed,
         arc_id,
         bytes: Arc::from(bytes),
@@ -947,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_retained_bytes_counts_original_tool_input_and_frontier_allocations() {
+    fn projection_retained_bytes_counts_wire_and_frontier_allocations_once() {
         use std::mem::size_of;
 
         fn manual_value_retained_bytes(value: &Value) -> usize {
@@ -1047,11 +1037,7 @@ mod tests {
             .saturating_add(block.tool_call_id.as_ref().map_or(0, String::capacity))
             .saturating_add(block.output_kind.as_ref().map_or(0, String::capacity))
             .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(block.bytes.len())
-            .saturating_add(
-                crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
-                    + manual_value_retained_bytes(block.tool_input.as_ref().unwrap()),
-            );
+            .saturating_add(block.bytes.len());
         let blocks = projection
             .blocks
             .capacity()

@@ -988,36 +988,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tokenizer_ceiling_may_exceed_the_manifest_limit() {
-        let unlimited =
-            br#"{"model_max_length":1000000000000000019884624838656,"pad_token":"[PAD]"}"#;
-        assert!(validate_tokenizer_config(unlimited, 8192).is_ok());
-
-        let lower = br#"{"model_max_length":4096,"pad_token":"[PAD]"}"#;
-        assert_eq!(
-            validate_tokenizer_config(lower, 8192)
-                .expect_err("a lower tokenizer ceiling must fail")
-                .0,
-            "tokenizer_config model_max_length is below manifest max_tokens"
-        );
-    }
-
-    #[test]
-    fn fractional_tokenizer_ceilings_are_rejected() {
-        for body in [
-            br#"{"model_max_length":8192.5,"pad_token":"[PAD]"}"#.as_slice(),
-            br#"{"model_max_length":16384.25,"pad_token":"[PAD]"}"#.as_slice(),
-        ] {
+    fn tokenizer_ceiling_must_be_an_integer_at_or_above_the_manifest_limit() {
+        let cases: [(&[u8], Result<(), &str>); 5] = [
+            (
+                br#"{"model_max_length":1000000000000000019884624838656,"pad_token":"[PAD]"}"#,
+                Ok(()),
+            ),
+            (
+                br#"{"model_max_length":8192.0,"pad_token":"[PAD]"}"#,
+                Ok(()),
+            ),
+            (
+                br#"{"model_max_length":4096,"pad_token":"[PAD]"}"#,
+                Err("tokenizer_config model_max_length is below manifest max_tokens"),
+            ),
+            (
+                br#"{"model_max_length":8192.5,"pad_token":"[PAD]"}"#,
+                Err("tokenizer_config model_max_length is not an integer"),
+            ),
+            (
+                br#"{"model_max_length":16384.25,"pad_token":"[PAD]"}"#,
+                Err("tokenizer_config model_max_length is not an integer"),
+            ),
+        ];
+        for (body, expected) in cases {
             assert_eq!(
-                validate_tokenizer_config(body, 8192)
-                    .expect_err("a fractional ceiling must fail")
-                    .0,
-                "tokenizer_config model_max_length is not an integer"
+                validate_tokenizer_config(body, 8192).map_err(|error| error.0),
+                expected.map_err(str::to_owned),
+                "{}",
+                String::from_utf8_lossy(body)
             );
         }
-
-        let integral = br#"{"model_max_length":8192.0,"pad_token":"[PAD]"}"#;
-        assert!(validate_tokenizer_config(integral, 8192).is_ok());
     }
 
     fn manifest() -> BundleManifest {
@@ -1399,10 +1400,7 @@ mod tests {
         assert!(validate_weights_budget([4, 7], 10).is_err());
         assert!(validate_weights_budget([11], 10).is_err());
         assert!(validate_weights_budget(vec![1u64; 16], 10).is_err());
-    }
-
-    #[test]
-    fn weights_budget_saturates_instead_of_overflowing() {
+        // The sum saturates instead of wrapping, so two maximal sizes stay over the cap.
         assert!(validate_weights_budget([u64::MAX, u64::MAX], u64::MAX - 1).is_err());
     }
 

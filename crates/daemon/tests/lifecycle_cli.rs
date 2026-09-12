@@ -372,9 +372,10 @@ fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
 }
 
 /// Pins concrete check ids per state and holds every emitted id to the contract's `cli.check_ids`.
+/// A held lifetime fence with no runtime dir is the `wedged` state, which `stop` reports while leaving the lock file in place.
 #[cfg(target_os = "linux")]
 #[test]
-fn emitted_check_ids_are_pinned_per_state_and_declared_by_the_contract() {
+fn emitted_check_ids_are_pinned_per_state_and_a_held_lifetime_fence_reports_wedged() {
     use std::os::fd::AsRawFd;
     let contract = release_contract();
     let declared: Vec<&str> = contract["cli"]["check_ids"]
@@ -420,8 +421,13 @@ fn emitted_check_ids_are_pinned_per_state_and_declared_by_the_contract() {
         0,
         "test holds the lifetime fence"
     );
-    let wedged = run(&data, &["stop"]).json();
-    assert_eq!(wedged["state"], "wedged");
+    let wedged_out = run(&data, &["stop"]);
+    assert_eq!(wedged_out.code, 1);
+    let wedged = wedged_out.json();
+    assert_result(&wedged, "stop", false, "wedged", "wedged");
+    assert_eq!(wedged["remediation"], "inspect_daemon_process");
+    // Cleanup must not unlink or signal; the quarantined lock file must survive.
+    assert!(lock_path.exists());
     let wedged_checks = checks(&wedged);
     assert!(wedged_checks.contains(&("lifecycle.fences".to_owned(), "fail".to_owned())));
     assert!(wedged_checks.contains(&("lifecycle.publication".to_owned(), "fail".to_owned())));
@@ -432,37 +438,6 @@ fn emitted_check_ids_are_pinned_per_state_and_declared_by_the_contract() {
             "emitted check id {id} is not declared by the release contract"
         );
     }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn stop_reports_wedged_when_lifetime_fence_is_held_without_a_runtime_dir() {
-    use std::os::fd::AsRawFd;
-    let root = tempfile::tempdir().expect("root");
-    let data = root.path().join("data");
-    let coordination = coordination_dir(&data);
-    std::fs::create_dir_all(&coordination).expect("coordination dir");
-    std::fs::set_permissions(&coordination, std::fs::Permissions::from_mode(0o700))
-        .expect("coordination mode");
-    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).expect("data mode");
-    let lock_path = coordination.join("lifetime.lock");
-    std::fs::write(&lock_path, b"").expect("lifetime lock file");
-    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
-        .expect("lock mode");
-    let holder = std::fs::File::open(&lock_path).expect("lock opens");
-    assert_eq!(
-        unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-        0,
-        "test holds the lifetime fence"
-    );
-
-    let out = run(&data, &["stop"]);
-    assert_eq!(out.code, 1);
-    let value = out.json();
-    assert_result(&value, "stop", false, "wedged", "wedged");
-    assert_eq!(value["remediation"], "inspect_daemon_process");
-    // Cleanup must not unlink or signal; the quarantined lock file must survive.
-    assert!(lock_path.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -1257,23 +1232,6 @@ fn malformed_selector_is_cleared_by_stop_and_replaced_by_a_fresh_start() {
     assert!(
         !selection.exists(),
         "stop must clear an unparseable selection"
-    );
-
-    plant(b"{\"schema\":2}");
-    std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
-        .expect("quarantine mode");
-    let quarantined = run(&data, &["stop"]);
-    assert_eq!(quarantined.code, 1);
-    assert_result(
-        &quarantined.json(),
-        "stop",
-        false,
-        "wedged",
-        "unsupported_state_schema",
-    );
-    assert!(
-        selection.exists(),
-        "stop must preserve an unknown-schema selection"
     );
 }
 
