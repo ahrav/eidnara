@@ -8,6 +8,7 @@ use std::num::NonZeroUsize;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{OccurrenceClass, identity_digest};
 use kernel::{CommitIntent, KernelError, KernelStore, LiveDescriptor, SourceDescriptorPolicy};
+use tokio_util::sync::CancellationToken;
 
 use crate::git_sources::{GitRefusal, RepositoryBinding};
 use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
@@ -36,7 +37,7 @@ pub struct InventoryBounds {
 /// Why an episode retired nothing, or stopped after the pages it had already retired. No variant implies that any unvisited source is absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileBlocked {
-    /// The budget was cancelled or its deadline passed before the phase named ran.
+    /// The budget was cancelled, its deadline passed, or the grant was invalidated before the phase named ran.
     Cancelled(ReconcilePhase),
     /// The gate denied the sweep or its lease before the inventory was read; nothing was retired.
     Denied(Denial),
@@ -164,14 +165,23 @@ impl<'a> GitReconciler<'a> {
             retired: 0,
             end: ReconcileEnd::Complete,
         };
-        if let Err(denial) = gate.admit_all(
+        let admissions = match gate.admit_all(
             &[ProjectionHook::GitSweeps, ProjectionHook::GitLeases],
             EntryPoint::Dispatch,
         ) {
-            report.end = ReconcileEnd::Blocked(ReconcileBlocked::Denied(denial));
-            return Ok(report);
-        }
-        match self.drive(scope, bounds, budget, &mut report) {
+            Ok(admissions) => admissions,
+            Err(denial) => {
+                report.end = ReconcileEnd::Blocked(ReconcileBlocked::Denied(denial));
+                return Ok(report);
+            }
+        };
+        match self.drive(
+            scope,
+            bounds,
+            budget,
+            &admissions[0].invalidated,
+            &mut report,
+        ) {
             Ok(()) => Ok(report),
             Err(Stop::Blocked(blocked)) => {
                 report.end = ReconcileEnd::Blocked(blocked);
@@ -186,12 +196,15 @@ impl<'a> GitReconciler<'a> {
         scope: &ReconcileScope,
         bounds: InventoryBounds,
         budget: &EvalBudget,
+        invalidated: &CancellationToken,
         report: &mut ReconcileReport,
     ) -> Result<(), Stop> {
+        // Every grant of one request carries the same token, so the first one speaks for the sweep and its lease; an invalidated grant ends the phase as a cancelled budget does.
         let check = |phase| {
-            budget
-                .check()
-                .map_err(|_| Stop::Blocked(ReconcileBlocked::Cancelled(phase)))
+            if budget.check().is_err() || invalidated.is_cancelled() {
+                return Err(Stop::Blocked(ReconcileBlocked::Cancelled(phase)));
+            }
+            Ok(())
         };
         check(ReconcilePhase::Inventory)?;
         let retained = self.inventory(scope, bounds, report.snapshot)?;

@@ -796,6 +796,19 @@ fn incomplete_scans_retire_nothing() {
     assert_eq!(cancelled_late.retired, 0);
     assert_eq!(corpus.live_oids(), before);
 
+    // A grant revoked after the walk stops the episode the same way: the gate closed under the slice, so nothing runs on the old evidence.
+    let gate = support::projection_gate::open_gate();
+    let revoked = GitReconciler::new(&corpus.kernel)
+        .with_after_traversal_for_test(|| gate.close())
+        .run_episode(&gate, &repo.scope(&[MAIN]), bounds(), &unbounded())
+        .unwrap();
+    assert_eq!(
+        revoked.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Retirement))
+    );
+    assert_eq!(revoked.retired, 0);
+    assert_eq!(corpus.live_oids(), before);
+
     // An unreadable commit inside the walk is a store failure, never an absent source.
     repo.garble(&c1);
     let unreadable = corpus.reconcile(&repo.scope(&[MAIN]));

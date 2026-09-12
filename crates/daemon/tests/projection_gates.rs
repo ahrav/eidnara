@@ -160,6 +160,13 @@ fn gate_tables_match_the_frozen_construction_contract() {
         str_set(&contracts["hook_defaults"]["both_harness_evidence"]),
         HARNESSES.into_iter().collect::<BTreeSet<_>>()
     );
+    assert_eq!(
+        EntryPoint::ALL
+            .iter()
+            .map(|entry| entry.id())
+            .collect::<BTreeSet<_>>(),
+        str_set(&contracts["hook_defaults"]["entry_points"])
+    );
 
     // The identity struct requires every field the contract lists and refuses every other, so an object of exactly the contract's fields deserializes and nothing else does.
     let fields = str_set(&contracts["hook_defaults"]["invalidation_identity"]);

@@ -97,10 +97,21 @@ pub enum EntryPoint {
     Startup,
     Reload,
     Dispatch,
+    Explicit,
 }
 
 impl EntryPoint {
-    pub const ALL: [EntryPoint; 3] = [Self::Startup, Self::Reload, Self::Dispatch];
+    pub const ALL: [EntryPoint; 4] = [Self::Startup, Self::Reload, Self::Dispatch, Self::Explicit];
+
+    /// The contract's name for the entry point.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Reload => "reload",
+            Self::Dispatch => "dispatch",
+            Self::Explicit => "explicit",
+        }
+    }
 }
 
 /// The gates a denial names. The capability gate denies through [`Denial::Unsupported`], which names the harness and capability instead.

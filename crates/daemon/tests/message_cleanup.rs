@@ -725,6 +725,21 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     assert_eq!(report.cursor, None, "the scan is exhausted");
     assert_eq!(fixture.present(), expected_final);
 
+    // A grant revoked between pages stops the slice at the next admission: the first page stands, nothing later is inspected.
+    let fixture = Fixture::build();
+    let gate = support::projection_gate::open_gate();
+    let closer = Arc::clone(&gate);
+    let mut revoked = MessageCleanup::new(fixture.projection(), fixture.acknowledged)
+        .with_after_page_for_test(move || closer.close());
+    let report = revoked.run_slice(&gate, bounds(), &unbounded()).unwrap();
+    assert_eq!(report.stop, Some(CleanupStop::Cancelled), "{report:?}");
+    assert_eq!(report.inspected, 2, "one page, then the revoked grant");
+    assert_eq!(
+        fixture.present().len(),
+        10 - report.reclaimed.occurrences,
+        "only the committed page's rows are gone"
+    );
+
     // A page bound of one page per slice inspects only one page and resumes.
     let fixture = Fixture::build();
     let page = CleanupBounds {

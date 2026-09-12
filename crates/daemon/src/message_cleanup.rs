@@ -20,7 +20,7 @@ pub struct CleanupBounds {
 /// Why a slice stopped before the scan was exhausted. Every committed page stands; the cursor names where the next slice resumes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupStop {
-    /// The budget was cancelled or its deadline passed before the next page was admitted, or the deadline passed while waiting for the write lock.
+    /// The budget was cancelled, its deadline passed, or the slice's grant was invalidated before the next page was admitted, or the deadline passed while waiting for the write lock.
     Cancelled,
     /// The slice reached its page or row bound with rows left to inspect.
     BoundReached,
@@ -44,6 +44,8 @@ pub struct MessageCleanup<'a> {
     projection: &'a SearchProjection,
     acknowledged_through: i64,
     cursor: Option<String>,
+    #[cfg(feature = "test-support")]
+    after_page: Option<Box<dyn FnMut()>>,
 }
 
 impl<'a> MessageCleanup<'a> {
@@ -53,7 +55,16 @@ impl<'a> MessageCleanup<'a> {
             projection,
             acknowledged_through,
             cursor: None,
+            #[cfg(feature = "test-support")]
+            after_page: None,
         }
+    }
+
+    /// Runs `hook` after each page commits and before the next page is admitted.
+    #[cfg(feature = "test-support")]
+    pub fn with_after_page_for_test(mut self, hook: impl FnMut() + 'static) -> Self {
+        self.after_page = Some(Box::new(hook));
+        self
     }
 
     /// Resumes a scan after `cursor`, as a slice interrupted by cancellation or a bound left it.
@@ -83,12 +94,17 @@ impl<'a> MessageCleanup<'a> {
             cursor: self.cursor.clone(),
             stop: None,
         };
-        if let Err(denial) = gate.admit(ProjectionHook::MessageCleanup, EntryPoint::Dispatch) {
-            report.stop = Some(CleanupStop::Denied(denial));
-            return Ok(report);
-        }
+        let admission = match gate.admit(ProjectionHook::MessageCleanup, EntryPoint::Dispatch) {
+            Ok(admission) => admission,
+            Err(denial) => {
+                report.stop = Some(CleanupStop::Denied(denial));
+                return Ok(report);
+            }
+        };
+        // The grant's token is polled where the budget is: a manifest installed under the slice stops it before the next read or write.
+        let revoked = || budget.check().is_err() || admission.invalidated.is_cancelled();
         for _ in 0..bounds.max_pages.get() {
-            if budget.check().is_err() {
+            if revoked() {
                 report.stop = Some(CleanupStop::Cancelled);
                 return Ok(report);
             }
@@ -107,7 +123,7 @@ impl<'a> MessageCleanup<'a> {
             let found = page.candidates.len();
             let admitted: Vec<Candidate> = page.candidates.into_iter().take(remaining).collect();
             let truncated = admitted.len() < found;
-            if budget.check().is_err() {
+            if revoked() {
                 report.stop = Some(CleanupStop::Cancelled);
                 return Ok(report);
             }
@@ -145,6 +161,10 @@ impl<'a> MessageCleanup<'a> {
             };
             self.cursor = Some(cursor.clone());
             report.cursor = Some(cursor);
+            #[cfg(feature = "test-support")]
+            if let Some(hook) = self.after_page.as_mut() {
+                hook();
+            }
             if report.reclaimed.occurrences >= bounds.max_reclaimed.get() {
                 report.stop = Some(CleanupStop::BoundReached);
                 return Ok(report);
