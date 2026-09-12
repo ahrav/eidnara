@@ -227,7 +227,7 @@ fn identity() -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: "kernel-incarnation-1".to_string(),
         projection_policy_version: "source-policy.v1".to_string(),
-        identity_contract_version: "search-projection-identity-v2".to_string(),
+        identity_contract_version: "search-projection-identity-v3".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),

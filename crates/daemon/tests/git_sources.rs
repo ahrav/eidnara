@@ -5,6 +5,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod support;
+
 use daemon::git_sources::{
     COMMIT_ROLE, GIT_COMMIT_REVISION, GitDisposition, GitReadBounds, GitRefusal, RepositoryBinding,
     read_selection,
@@ -489,7 +491,7 @@ impl Corpus {
                         schema_version: retrieval::SCHEMA_VERSION,
                         kernel_incarnation_id: kernel_incarnation_id.clone(),
                         projection_policy_version: POLICY.to_string(),
-                        identity_contract_version: "search-projection-identity-v2".to_string(),
+                        identity_contract_version: "search-projection-identity-v3".to_string(),
                         limit_manifest_protocol_version: "limits.v1".to_string(),
                         embedding_model: MODEL.to_string(),
                         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -623,12 +625,14 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
     );
 
     let alpha_selection = read_selection(
+        &support::projection_gate::open_gate(),
         &alpha.binding("repo-alpha"),
         &[a1.clone(), a2.clone(), a3.clone()],
         bounds(),
     )
     .unwrap();
     let beta_selection = read_selection(
+        &support::projection_gate::open_gate(),
         &beta.binding("repo-beta"),
         std::slice::from_ref(&b1),
         bounds(),
@@ -647,6 +651,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
     }
     // Binding the same directory under another id names another repository; the path is not an identity.
     let renamed = read_selection(
+        &support::projection_gate::open_gate(),
         &alpha.binding("repo-gamma"),
         std::slice::from_ref(&a1),
         bounds(),
@@ -717,7 +722,13 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
         repository_id: "repo-alpha".to_string(),
         path: dir.path().join("alpha-moved"),
     };
-    let reread = read_selection(&moved, &[a1.clone(), a2.clone(), a3.clone()], bounds()).unwrap();
+    let reread = read_selection(
+        &support::projection_gate::open_gate(),
+        &moved,
+        &[a1.clone(), a2.clone(), a3.clone()],
+        bounds(),
+    )
+    .unwrap();
     assert_eq!(reread.units, alpha_selection.units);
     for unit in &reread.units {
         assert!(publisher.publish(unit, NOW).unwrap().replayed);
@@ -750,6 +761,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
     std::fs::remove_dir_all(dir.path().join("first")).unwrap();
     assert!(
         read_selection(
+            &support::projection_gate::open_gate(),
             &RepositoryBinding {
                 repository_id: "repo-alpha".into(),
                 path: dir.path().join("alpha-moved")
@@ -832,7 +844,13 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         ),
     ];
     for (oids, bounds, expected) in cases {
-        let refusal = read_selection(&binding, &oids, bounds).unwrap_err();
+        let refusal = read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            &oids,
+            bounds,
+        )
+        .unwrap_err();
         match (&refusal, &expected) {
             (
                 GitRefusal::ObjectTooLarge { oid, bytes, max },
@@ -860,7 +878,12 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         path: dir.path().join("nowhere"),
     };
     assert_eq!(
-        read_selection(&unopenable, std::slice::from_ref(&good), bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &unopenable,
+            std::slice::from_ref(&good),
+            bounds()
+        ),
         Err(GitRefusal::Open)
     );
     // A repository declaring an object format this build does not read is refused by its format, not as unopenable; a SHA-256 id is the same shape the caller supplies for any repository.
@@ -871,12 +894,23 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     )
     .unwrap();
     assert_eq!(
-        read_selection(&sha256.binding("repo-sha256"), &["0".repeat(64)], bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &sha256.binding("repo-sha256"),
+            &["0".repeat(64)],
+            bounds()
+        ),
         Err(GitRefusal::UnsupportedObjectFormat)
     );
     // A malformed entry is named by its position; the refusal never repeats the caller's bytes.
     let junk = format!("{}\n\u{1b}[31m{}", "j".repeat(200), "k".repeat(200));
-    let malformed = read_selection(&binding, &[good.clone(), junk.clone()], bounds()).unwrap_err();
+    let malformed = read_selection(
+        &support::projection_gate::open_gate(),
+        &binding,
+        &[good.clone(), junk.clone()],
+        bounds(),
+    )
+    .unwrap_err();
     assert_eq!(malformed, GitRefusal::MalformedOid(1));
     for rendered in [malformed.to_string(), format!("{malformed:?}")] {
         assert!(
@@ -894,7 +928,12 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     std::fs::set_permissions(&loose, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
     std::fs::write(&loose, b"not zlib").unwrap();
     assert_eq!(
-        read_selection(&binding, &[good.clone(), garbled.clone()], bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            &[good.clone(), garbled.clone()],
+            bounds()
+        ),
         Err(GitRefusal::Unreadable(garbled))
     );
     // A well-formed commit stored under another id is a substitution, not that id's object: the store's index is not trusted over the hash of the bytes it returns.
@@ -913,7 +952,12 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     )
     .unwrap();
     assert_eq!(
-        read_selection(&binding, &[good.clone(), missing.clone()], bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            &[good.clone(), missing.clone()],
+            bounds()
+        ),
         Err(GitRefusal::HashMismatch(missing.clone()))
     );
 
@@ -926,6 +970,7 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     let late_latin_bytes = repo.late_encoding_commit(b"Caf\xe9 late\n", "ISO-8859-1");
     let late_utf8 = repo.late_encoding_commit("Late UTF-8\n".as_bytes(), "utf-8");
     let selection = read_selection(
+        &support::projection_gate::open_gate(),
         &binding,
         &[
             good.clone(),
@@ -974,7 +1019,13 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     );
 
     let secret = repo.commit(&format!("Leak\n\ntoken {SECRET}\n"), 5);
-    let leaking = read_selection(&binding, std::slice::from_ref(&secret), bounds()).unwrap();
+    let leaking = read_selection(
+        &support::projection_gate::open_gate(),
+        &binding,
+        std::slice::from_ref(&secret),
+        bounds(),
+    )
+    .unwrap();
     let publisher = corpus.publisher();
     let tip = corpus.kernel.tip().unwrap();
     let error = publisher.publish(&leaking.units[0], NOW).unwrap_err();
@@ -1011,11 +1062,21 @@ fn delta_packed_commit_against_an_oversized_base_is_refused() {
     let (base, small) = repo.pack_delta_commit(&"x".repeat(6000), "Small subject\n");
     let binding = repo.binding("repo");
     assert!(matches!(
-        read_selection(&binding, std::slice::from_ref(&base), bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            std::slice::from_ref(&base),
+            bounds()
+        ),
         Err(GitRefusal::ObjectTooLarge { max: 4096, .. })
     ));
     assert_eq!(
-        read_selection(&binding, std::slice::from_ref(&small), bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            std::slice::from_ref(&small),
+            bounds()
+        ),
         Err(GitRefusal::DecodeTooLarge {
             oid: small.clone(),
             max: 4096,
@@ -1025,7 +1086,13 @@ fn delta_packed_commit_against_an_oversized_base_is_refused() {
         max_object_bytes: NonZeroU64::new(1 << 16).unwrap(),
         ..bounds()
     };
-    let selection = read_selection(&binding, std::slice::from_ref(&small), roomy).unwrap();
+    let selection = read_selection(
+        &support::projection_gate::open_gate(),
+        &binding,
+        std::slice::from_ref(&small),
+        roomy,
+    )
+    .unwrap();
     assert_eq!(selection.units.len(), 1);
     assert_eq!(selection.units[0].text, "Small subject\n");
     assert_eq!(selection.units[0].identity[2].1, small);

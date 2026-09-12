@@ -27,6 +27,7 @@ use support::embedding_fixtures::{
     Corpus, DAY_MS, FINGERPRINT, GENERATION, GateGuard, NOW, PROJECT, TestEngine, bounds, budget,
     component, eligibility, generation, inspect, lane, occurrence_of, search_path, tombstone,
 };
+use tokio_util::sync::CancellationToken;
 
 /// The retired generation the sweep may reclaim from.
 const OLD_GENERATION: &str = "gen-0";
@@ -553,6 +554,24 @@ async fn a_spent_budget_reports_the_sweep_it_cut_short() {
         cut,
         SweepReport::default(),
         "a cut sweep is not an empty one"
+    );
+    assert_eq!(inventory(dir.path()), before);
+
+    // A revoked grant ends the sweep the same way: the token is cancelled, the budget is not, and nothing is selected or reclaimed.
+    let revoked = CancellationToken::new();
+    revoked.cancel();
+    let mut sweeper = IdentitySweeper::new(&projection, &synapse).cancelled_by(revoked);
+    let cut = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
+    assert_eq!(
+        cut,
+        SweepReport {
+            budget_exhausted: true,
+            ..SweepReport::default()
+        }
     );
     assert_eq!(inventory(dir.path()), before);
 

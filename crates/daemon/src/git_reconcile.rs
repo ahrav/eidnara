@@ -10,8 +10,10 @@ use kernel::source_identity::{OccurrenceClass, identity_digest};
 use kernel::{
     CommitIntent, Envelope, KernelError, KernelStore, LiveDescriptor, SourceDescriptorPolicy,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::git_sources::{self, GitRefusal, RepositoryBinding};
+use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 
 const PRODUCER: &str = "eidnara-daemon/git-reconcile";
 
@@ -41,8 +43,10 @@ pub struct InventoryBounds {
 /// Why an episode retired nothing, or stopped after the pages it had already retired. No variant implies that any unvisited source is absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconcileBlocked {
-    /// The budget was cancelled or its deadline passed before the phase named ran.
+    /// The budget was cancelled, its deadline passed, or the grant was invalidated before the phase named ran.
     Cancelled(ReconcilePhase),
+    /// The gate denied the sweep or its lease before the inventory was read; nothing was retired.
+    Denied(Denial),
     Repository(GitRefusal),
     /// A permitted ref is not a full ref name, does not exist, or does not resolve to a commit.
     RefUnresolved(String),
@@ -180,6 +184,7 @@ impl<'a> GitReconciler<'a> {
     /// Returns the kernel's error when a read fails without a durable fact to reconcile against, or when a retained row's identity cannot be read. Every refusal ends the episode in the report.
     pub fn run_episode(
         &mut self,
+        gate: &HookGate,
         scope: &ReconcileScope,
         bounds: InventoryBounds,
         budget: &EvalBudget,
@@ -192,7 +197,23 @@ impl<'a> GitReconciler<'a> {
             retired: 0,
             end: ReconcileEnd::Complete,
         };
-        match self.drive(scope, bounds, budget, &mut report) {
+        let admissions = match gate.admit_all(
+            &[ProjectionHook::GitSweeps, ProjectionHook::GitLeases],
+            EntryPoint::Dispatch,
+        ) {
+            Ok(admissions) => admissions,
+            Err(denial) => {
+                report.end = ReconcileEnd::Blocked(ReconcileBlocked::Denied(denial));
+                return Ok(report);
+            }
+        };
+        match self.drive(
+            scope,
+            bounds,
+            budget,
+            &admissions[0].invalidated,
+            &mut report,
+        ) {
             Ok(()) => Ok(report),
             Err(Stop::Blocked(blocked)) => {
                 report.end = ReconcileEnd::Blocked(blocked);
@@ -207,13 +228,14 @@ impl<'a> GitReconciler<'a> {
         scope: &ReconcileScope,
         bounds: InventoryBounds,
         budget: &EvalBudget,
+        invalidated: &CancellationToken,
         report: &mut ReconcileReport,
     ) -> Result<(), Stop> {
-        let check = |phase| {
-            budget
-                .check()
-                .map_err(|_| Stop::Blocked(ReconcileBlocked::Cancelled(phase)))
+        let cancel = Cancel {
+            budget,
+            invalidated,
         };
+        let check = |phase| cancel.check(phase);
         check(ReconcilePhase::Inventory)?;
         report.snapshot = self
             .kernel
@@ -225,10 +247,10 @@ impl<'a> GitReconciler<'a> {
         if repo.is_shallow() {
             return Err(GitRefusal::Shallow.into());
         }
-        let retained = self.inventory(scope, bounds, budget, format, report.snapshot)?;
+        let retained = self.inventory(scope, bounds, &cancel, format, report.snapshot)?;
         report.retained = retained.len();
         check(ReconcilePhase::Traversal)?;
-        let traversal = traverse(&repo, scope, bounds, budget)?;
+        let traversal = traverse(&repo, scope, bounds, &cancel)?;
         self.probe(Probe::AfterTraversal);
         report.reachable = Some(traversal.reachable.len());
         let (preserved, excluded): (Vec<_>, Vec<_>) = retained
@@ -255,10 +277,11 @@ impl<'a> GitReconciler<'a> {
         &mut self,
         scope: &ReconcileScope,
         bounds: InventoryBounds,
-        budget: &EvalBudget,
+        cancel: &Cancel<'_>,
         format: &str,
         snapshot: i64,
     ) -> Result<Vec<Retained>, Stop> {
+        let budget = cancel.budget;
         let mut retained = Vec::new();
         let mut scanned = 0usize;
         let mut after = None;
@@ -266,9 +289,7 @@ impl<'a> GitReconciler<'a> {
             max: bounds.max_scanned.get(),
         };
         loop {
-            budget
-                .check()
-                .map_err(|_| ReconcileBlocked::Cancelled(ReconcilePhase::Inventory))?;
+            cancel.check(ReconcilePhase::Inventory)?;
             // A page asks for no more rows than the scan bound still allows, so the bound limits what the kernel reads and decodes, not only what is counted afterwards. The loop only continues while `scanned` is below the bound, so the allowance is at least one.
             let allowance = NonZeroUsize::new(bounds.max_scanned.get() - scanned)
                 .ok_or_else(exceeded)?
@@ -368,6 +389,21 @@ impl<'a> GitReconciler<'a> {
 }
 
 /// A kernel read that could not take a pooled connection within the budget ends the episode as a cancellation of `phase`; any other kernel error is the episode's failure.
+/// What ends an episode early: the caller's budget or the grant every hook of the request shares. Every grant of one request carries the same token, so the first one speaks for the sweep and its lease, and a revoked grant ends a phase as a cancelled budget does.
+struct Cancel<'a> {
+    budget: &'a EvalBudget,
+    invalidated: &'a CancellationToken,
+}
+
+impl Cancel<'_> {
+    fn check(&self, phase: ReconcilePhase) -> Result<(), Stop> {
+        if self.budget.check().is_err() || self.invalidated.is_cancelled() {
+            return Err(Stop::Blocked(ReconcileBlocked::Cancelled(phase)));
+        }
+        Ok(())
+    }
+}
+
 fn cancelled_or_failed(error: KernelError, phase: ReconcilePhase) -> Stop {
     match error {
         KernelError::Deadline => Stop::Blocked(ReconcileBlocked::Cancelled(phase)),
@@ -398,7 +434,7 @@ fn traverse(
     repo: &gix::Repository,
     scope: &ReconcileScope,
     bounds: InventoryBounds,
-    budget: &EvalBudget,
+    cancel: &Cancel<'_>,
 ) -> Result<Traversal, Stop> {
     let tips = ref_tips(repo, &scope.permitted_refs)?;
     let mut reachable = BTreeSet::new();
@@ -413,9 +449,7 @@ fn traverse(
         .all()
         .map_err(|_| GitRefusal::Unreadable(tips[0].to_string()))?;
     for info in walk {
-        budget
-            .check()
-            .map_err(|_| ReconcileBlocked::Cancelled(ReconcilePhase::Traversal))?;
+        cancel.check(ReconcilePhase::Traversal)?;
         // The walk reports the commit it could not read only through its error; the parent it was reached from is not recoverable here, so the refusal names the walk.
         let info = info.map_err(|_| GitRefusal::Unreadable("traversal".to_owned()))?;
         if reachable.len() == bounds.max_commits.get() {

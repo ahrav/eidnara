@@ -19,11 +19,14 @@ use crate::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
 };
 use crate::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
+use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 use crate::search_projection::SearchProjection;
 use crate::search_writer::Quarantine;
 
 /// The stores and lane one supervisor works against.
 pub struct Maintained {
+    /// The gate every slice asks before it runs; a denied slice does no work and the loop treats it as idle.
+    pub gate: Arc<HookGate>,
     pub kernel: Arc<KernelStore>,
     pub projection: Arc<SearchProjection>,
     pub synapse: Arc<SynapseComponent>,
@@ -46,6 +49,15 @@ pub enum SliceKind {
     Sweep,
 }
 
+impl SliceKind {
+    fn other(self) -> Self {
+        match self {
+            Self::Backfill => Self::Sweep,
+            Self::Sweep => Self::Backfill,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceOutcome {
     /// The pass ended, drained or blocked. `admitted` and `published` count rows that moved toward a vector; `dispositions` counts rows the pass retried or stopped.
@@ -58,6 +70,8 @@ pub enum SliceOutcome {
     Sweep(SweepReport),
     /// The slice's first read failed before anything was decided; the message is the error's display. The next slice of the same kind runs the work again.
     ReadFailed(String),
+    /// The gate denied the slice's hooks; nothing ran and no durable work was created. The next slice of the same kind asks again.
+    Denied(Denial),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +155,8 @@ pub struct EmbeddingSupervisor {
     dispatch_faults: Mutex<Vec<DispatchFault>>,
     #[cfg(feature = "test-support")]
     dispatch_tap: Mutex<Option<DispatchTap>>,
+    #[cfg(feature = "test-support")]
+    before_pass: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -169,6 +185,8 @@ impl EmbeddingSupervisor {
             dispatch_faults: Mutex::new(Vec::new()),
             #[cfg(feature = "test-support")]
             dispatch_tap: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            before_pass: Mutex::new(None),
         })
     }
 
@@ -176,6 +194,15 @@ impl EmbeddingSupervisor {
     #[cfg(feature = "test-support")]
     pub fn panic_next_slice_for_test(&self) {
         self.panic_next_slice.store(true, Ordering::SeqCst);
+    }
+
+    /// Runs `hook` on the slice thread after the backfill slice is admitted and before its pass begins.
+    #[cfg(feature = "test-support")]
+    pub fn before_pass_for_test(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .before_pass
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(hook));
     }
 
     /// Arms `fault` on the next backfill slice's dispatcher; several faults may be armed for one slice.
@@ -213,19 +240,47 @@ impl EmbeddingSupervisor {
                 kind,
                 deadline: budget.deadline().expect("slice budgets carry a deadline"),
             });
-            let mut slice = {
-                let this = Arc::clone(&self);
-                let budget = budget.clone();
-                self.tracker
-                    .spawn_blocking(move || this.slice(kind, &budget))
+            // The first slice of the run is the startup path; every later one is a dispatch. A backfill pass may embed any dense class, so it asks for the per-class hooks too rather than embed a class whose hook is off.
+            let entry = if self.slices.load(Ordering::SeqCst) == 0 {
+                EntryPoint::Startup
+            } else {
+                EntryPoint::Dispatch
             };
-            // Shutdown cancels the budget and then waits for the slice: the thread is never abandoned, and the slice sees the cancellation at its next job or poll.
-            let joined = tokio::select! {
-                biased;
-                joined = &mut slice => joined,
-                () = self.shutdown.cancelled() => {
-                    budget.cancel();
-                    slice.await
+            let hooks: &[ProjectionHook] = match kind {
+                SliceKind::Backfill => &[
+                    ProjectionHook::EmbeddingBootstrap,
+                    ProjectionHook::EmbeddingRouting,
+                    ProjectionHook::EmbeddingRegistry,
+                    ProjectionHook::EmbeddingBackfill,
+                    ProjectionHook::PromotedMemoryEmbeddings,
+                    ProjectionHook::GitJobs,
+                ],
+                SliceKind::Sweep => &[ProjectionHook::EmbeddingIdentityGc],
+            };
+            // A denied slice never spawns: it ends at once with no work and counts as idle. An admitted slice runs under its grant's token as well as shutdown; either cancels the budget and then waits for the slice, so the thread is never abandoned, admitted native work keeps its owner, and the slice sees the cancellation at its next job or poll.
+            let joined = match self.maintained.gate.admit_all(hooks, entry) {
+                Err(denial) => Ok(Ok(SliceOutcome::Denied(denial))),
+                Ok(admissions) => {
+                    let invalidated = admissions[0].invalidated.clone();
+                    let mut slice = {
+                        let this = Arc::clone(&self);
+                        let budget = budget.clone();
+                        let invalidated = invalidated.clone();
+                        self.tracker
+                            .spawn_blocking(move || this.slice(kind, &budget, &invalidated))
+                    };
+                    tokio::select! {
+                        biased;
+                        joined = &mut slice => joined,
+                        () = self.shutdown.cancelled() => {
+                            budget.cancel();
+                            slice.await
+                        }
+                        () = invalidated.cancelled() => {
+                            budget.cancel();
+                            slice.await
+                        }
+                    }
                 }
             };
             self.slices.fetch_add(1, Ordering::SeqCst);
@@ -255,10 +310,7 @@ impl EmbeddingSupervisor {
                     return;
                 }
             };
-            kind = match kind {
-                SliceKind::Backfill => SliceKind::Sweep,
-                SliceKind::Sweep => SliceKind::Backfill,
-            };
+            kind = kind.other();
             if idle.both() {
                 tokio::select! {
                     biased;
@@ -272,7 +324,12 @@ impl EmbeddingSupervisor {
     }
 
     /// One slice on the blocking thread that owns it: a backfill pass or a sweep, under `budget`.
-    fn slice(&self, kind: SliceKind, budget: &EvalBudget) -> Result<SliceOutcome, Stop> {
+    fn slice(
+        &self,
+        kind: SliceKind,
+        budget: &EvalBudget,
+        invalidated: &CancellationToken,
+    ) -> Result<SliceOutcome, Stop> {
         if self.panic_next_slice.swap(false, Ordering::SeqCst) {
             panic!("maintenance slice panicked for the test");
         }
@@ -292,6 +349,22 @@ impl EmbeddingSupervisor {
                     let _ = fault;
                 }
                 let (mut admitted, mut published, mut dispositions) = (0, 0, 0);
+                #[cfg(feature = "test-support")]
+                if let Some(hook) = self
+                    .before_pass
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+                {
+                    hook();
+                }
+                // The slice thread cancels its own budget on a revoked grant, here before the pass's first write and again at every dispatch event, which the dispatcher raises before each job's admission; a gate closed at any point stops the work here, without waiting for the supervisor task to be scheduled.
+                let revoked = || {
+                    if invalidated.is_cancelled() {
+                        budget.cancel();
+                    }
+                };
+                revoked();
                 let end = dispatcher.run_pass(
                     EligibilityBinding {
                         project: &m.project,
@@ -310,6 +383,7 @@ impl EmbeddingSupervisor {
                         {
                             tap(&event);
                         }
+                        revoked();
                         match event {
                             // The host owns native work from submission, whatever the charge decides.
                             DispatchEvent::Submitted {
@@ -387,7 +461,8 @@ impl EmbeddingSupervisor {
             SliceKind::Sweep => {
                 // The cursor outlives the sweeper: each sweep resumes where the last one ended, so identities held at the head of the table do not consume every sweep.
                 let cursor = self.lock_sweep_cursor().take();
-                let mut sweeper = IdentitySweeper::resuming(&m.projection, &m.synapse, cursor);
+                let mut sweeper = IdentitySweeper::resuming(&m.projection, &m.synapse, cursor)
+                    .cancelled_by(invalidated.clone());
                 let swept = sweeper.run_sweep(self.bounds.sweep_candidates, budget);
                 *self.lock_sweep_cursor() = sweeper.cursor().map(str::to_owned);
                 match swept {
@@ -547,6 +622,6 @@ fn idle_after(outcome: &SliceOutcome) -> bool {
             ..
         } => *admitted == 0 && *published == 0 && *dispositions == 0,
         SliceOutcome::Sweep(report) => report.jobs_reclaimed == 0 && report.vectors_reclaimed == 0,
-        SliceOutcome::ReadFailed(_) => true,
+        SliceOutcome::ReadFailed(_) | SliceOutcome::Denied(_) => true,
     }
 }

@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+mod support;
+
 use daemon::harness_sources::{Representation, SourcePublisher, SourceUnit};
 use daemon::message_cleanup::{CleanupBounds, CleanupStop, MessageCleanup};
 use daemon::search_projection::{SearchProjection, SearchProjectionError};
@@ -240,7 +242,7 @@ impl Corpus {
                         schema_version: retrieval::SCHEMA_VERSION,
                         kernel_incarnation_id: kernel_incarnation_id.clone(),
                         projection_policy_version: POLICY.to_string(),
-                        identity_contract_version: "search-projection-identity-v2".to_string(),
+                        identity_contract_version: "search-projection-identity-v3".to_string(),
                         limit_manifest_protocol_version: "limits.v1".to_string(),
                         embedding_model: MODEL.to_string(),
                         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -546,7 +548,11 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
         "another-kernel".to_string(),
         fixture.acknowledged,
     )
-    .run_slice(bounds(), &unbounded());
+    .run_slice(
+        &support::projection_gate::open_gate(),
+        bounds(),
+        &unbounded(),
+    );
     assert!(refused.is_err(), "{refused:?}");
     assert_eq!(
         fixture.present(),
@@ -554,7 +560,13 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     );
 
     let mut cleanup = fixture.cleanup(fixture.acknowledged);
-    let report = cleanup.run_slice(bounds(), &unbounded()).unwrap();
+    let report = cleanup
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
+        .unwrap();
     assert_eq!(report.stop, None, "{report:?}");
     assert_eq!(report.cursor, None, "the scan was exhausted");
     assert_eq!(
@@ -596,7 +608,11 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
 
     let again = fixture
         .cleanup(fixture.acknowledged)
-        .run_slice(bounds(), &unbounded())
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(
         (again.reclaimed.occurrences, again.reclaimed.payloads),
@@ -621,7 +637,13 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     );
     fixture.reopen();
     let mut cleanup = fixture.cleanup(fixture.acknowledged);
-    let report = cleanup.run_slice(bounds(), &unbounded()).unwrap();
+    let report = cleanup
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
+        .unwrap();
     assert_eq!(report.reclaimed.occurrences, 0);
     assert_eq!(
         rows(fixture.data_home())
@@ -635,7 +657,11 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     let tip = fixture.corpus.kernel.tip().unwrap();
     let report = fixture
         .cleanup(tip + 1_000)
-        .run_slice(bounds(), &unbounded())
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(report.reclaimed.occurrences, 1, "{report:?}");
     assert_eq!(
@@ -660,7 +686,13 @@ fn a_short_final_page_exhausts_the_scan_without_a_further_read() {
         max_reclaimed: NonZeroUsize::new(16).unwrap(),
     };
     let mut cleanup = fixture.cleanup(fixture.acknowledged);
-    let report = cleanup.run_slice(one_wide_page, &unbounded()).unwrap();
+    let report = cleanup
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            one_wide_page,
+            &unbounded(),
+        )
+        .unwrap();
     assert_eq!(report.reclaimed.occurrences, fixture.eligible.len());
     assert!(report.inspected < 16, "{report:?}");
     assert_eq!(
@@ -680,7 +712,11 @@ fn a_quarantined_projection_refuses_a_slice_before_it_reads() {
         .enter_quarantine_for_test(QuarantineKind::Storage, &"disk full");
     let error = fixture
         .cleanup(0)
-        .run_slice(bounds(), &unbounded())
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap_err();
     assert!(
         matches!(&error, SearchProjectionError::Quarantined(found) if *found == quarantine),
@@ -702,7 +738,9 @@ fn lost_write_reconciliation_stops_at_the_deadline() {
         Some(Instant::now() + std::time::Duration::from_millis(200)),
         Arc::new(AtomicBool::new(false)),
     );
-    let report = cleanup.run_slice(whole, &budget).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &budget)
+        .unwrap();
     assert!(
         matches!(report.stop, Some(CleanupStop::Unresolved(_))),
         "{report:?}"
@@ -713,7 +751,9 @@ fn lost_write_reconciliation_stops_at_the_deadline() {
     );
     assert_eq!(report.cursor, None, "the page is re-selected next slice");
 
-    let again = cleanup.run_slice(whole, &unbounded()).unwrap();
+    let again = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &unbounded())
+        .unwrap();
     assert_eq!(again.stop, None, "{again:?}");
     assert_eq!(again.reclaimed.occurrences, 0, "nothing is counted twice");
 }
@@ -743,7 +783,7 @@ fn a_slice_stops_at_its_deadline_while_another_operation_holds_the_connection() 
         );
         let report = fixture
             .cleanup(fixture.acknowledged)
-            .run_slice(bounds(), &budget)
+            .run_slice(&support::projection_gate::open_gate(), bounds(), &budget)
             .unwrap();
         assert!(
             started.elapsed() < hold / 2,
@@ -777,18 +817,26 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     let cancelled = unbounded();
     cancelled.cancel();
     let mut cleanup = fixture.cleanup(fixture.acknowledged);
-    let report = cleanup.run_slice(bounds(), &cancelled).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &cancelled)
+        .unwrap();
     assert_eq!(report.stop, Some(CleanupStop::Cancelled));
     assert_eq!((report.inspected, report.reclaimed.occurrences), (0, 0));
     assert_eq!(fixture.present().len(), 10);
     // Sticky cancellation: the same budget refuses again; a deadline that passed refuses too and is never renewed.
-    let report = cleanup.run_slice(bounds(), &cancelled).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &cancelled)
+        .unwrap();
     assert_eq!(report.stop, Some(CleanupStop::Cancelled));
     let expired = EvalBudget::new(Some(Instant::now()), Arc::new(AtomicBool::new(false)));
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let report = cleanup.run_slice(bounds(), &expired).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &expired)
+        .unwrap();
     assert_eq!(report.stop, Some(CleanupStop::Cancelled));
-    let report = cleanup.run_slice(bounds(), &expired).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &expired)
+        .unwrap();
     assert_eq!(
         report.stop,
         Some(CleanupStop::Cancelled),
@@ -807,7 +855,9 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
         let mut slice = fixture
             .cleanup(fixture.acknowledged)
             .resuming(cursor.clone());
-        let report = slice.run_slice(one, &unbounded()).unwrap();
+        let report = slice
+            .run_slice(&support::projection_gate::open_gate(), one, &unbounded())
+            .unwrap();
         assert_eq!(report.reclaimed.occurrences, 1, "{report:?}");
         if report.cursor.is_some() {
             assert_eq!(report.stop, Some(CleanupStop::BoundReached));
@@ -821,10 +871,28 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
         removed = gone;
     }
     let mut last = fixture.cleanup(fixture.acknowledged).resuming(cursor);
-    let report = last.run_slice(one, &unbounded()).unwrap();
+    let report = last
+        .run_slice(&support::projection_gate::open_gate(), one, &unbounded())
+        .unwrap();
     assert_eq!(report.reclaimed.occurrences, 0);
     assert_eq!(report.cursor, None, "the scan is exhausted");
     assert_eq!(fixture.present(), expected_final);
+
+    // A grant revoked between pages stops the slice at the next admission: the first page stands, nothing later is inspected.
+    let fixture = Fixture::build();
+    let gate = support::projection_gate::open_gate();
+    let closer = Arc::clone(&gate);
+    let mut revoked = fixture
+        .cleanup(fixture.acknowledged)
+        .with_after_page_for_test(move || closer.close());
+    let report = revoked.run_slice(&gate, bounds(), &unbounded()).unwrap();
+    assert_eq!(report.stop, Some(CleanupStop::Cancelled), "{report:?}");
+    assert_eq!(report.inspected, 2, "one page, then the revoked grant");
+    assert_eq!(
+        fixture.present().len(),
+        10 - report.reclaimed.occurrences,
+        "only the committed page's rows are gone"
+    );
 
     // A page bound of one page per slice inspects only one page and resumes.
     let fixture = Fixture::build();
@@ -833,7 +901,9 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
         ..bounds()
     };
     let mut slice = fixture.cleanup(fixture.acknowledged);
-    let report = slice.run_slice(page, &unbounded()).unwrap();
+    let report = slice
+        .run_slice(&support::projection_gate::open_gate(), page, &unbounded())
+        .unwrap();
     assert_eq!(report.inspected, 2);
     assert_eq!(report.stop, Some(CleanupStop::BoundReached));
     assert!(report.cursor.is_some());
@@ -860,7 +930,9 @@ fn a_lost_write_reply_is_reconciled_from_the_rows_not_reported_as_unchanged() {
     };
     let mut cleanup = fixture.cleanup(fixture.acknowledged);
     cleanup.lose_next_write_reply_for_test();
-    let report = cleanup.run_slice(whole, &unbounded()).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &unbounded())
+        .unwrap();
     assert_eq!(
         fixture.present(),
         expected_final,
@@ -878,7 +950,9 @@ fn a_lost_write_reply_is_reconciled_from_the_rows_not_reported_as_unchanged() {
     assert_eq!(report.cursor, None, "the page is re-selected next slice");
     assert_eq!(cleanup.cursor(), None);
 
-    let again = cleanup.run_slice(whole, &unbounded()).unwrap();
+    let again = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &unbounded())
+        .unwrap();
     assert_eq!(again.stop, None, "{again:?}");
     assert_eq!(again.reclaimed.occurrences, 0, "nothing is counted twice");
     assert_eq!(again.cursor, None, "the scan is exhausted");

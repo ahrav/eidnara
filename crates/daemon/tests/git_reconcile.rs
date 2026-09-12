@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+mod support;
+
 use daemon::git_reconcile::{
     GitReconciler, InventoryBounds, Probe, ReconcileBlocked, ReconcileEnd, ReconcilePhase,
     ReconcileReport, ReconcileScope,
@@ -300,7 +302,13 @@ impl Corpus {
             repository_id: repository_id.to_string(),
             path: repo.root.clone(),
         };
-        let selection = read_selection(&binding, oids, read_bounds()).unwrap();
+        let selection = read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            oids,
+            read_bounds(),
+        )
+        .unwrap();
         assert_eq!(selection.units.len(), oids.len());
         selection
             .units
@@ -379,7 +387,12 @@ impl Corpus {
 
     fn reconcile(&self, scope: &ReconcileScope) -> ReconcileReport {
         GitReconciler::new(&self.kernel)
-            .run_episode(scope, bounds(), &unbounded())
+            .run_episode(
+                &support::projection_gate::open_gate(),
+                scope,
+                bounds(),
+                &unbounded(),
+            )
             .unwrap()
     }
 
@@ -513,7 +526,7 @@ impl Corpus {
                         schema_version: retrieval::SCHEMA_VERSION,
                         kernel_incarnation_id: kernel_incarnation_id.clone(),
                         projection_policy_version: POLICY.to_string(),
-                        identity_contract_version: "search-projection-identity-v2".to_string(),
+                        identity_contract_version: "search-projection-identity-v3".to_string(),
                         limit_manifest_protocol_version: "limits.v1".to_string(),
                         embedding_model: MODEL.to_string(),
                         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -781,7 +794,12 @@ fn retirement_does_not_wait_out_its_budget_behind_the_writer() {
         });
         let started = Instant::now();
         let report = GitReconciler::new(&corpus.kernel)
-            .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+            .run_episode(
+                &support::projection_gate::open_gate(),
+                &repo.scope(&[MAIN]),
+                bounds(),
+                &budget,
+            )
             .unwrap();
         (report, started.elapsed())
     });
@@ -828,6 +846,7 @@ fn inventory_refuses_a_payload_bound_to_another_object_id() {
         "{page:?}"
     );
     let episode = GitReconciler::new(&corpus.kernel).run_episode(
+        &support::projection_gate::open_gate(),
         &repo.scope(&[MAIN]),
         bounds(),
         &unbounded(),
@@ -898,7 +917,12 @@ fn retirement_stops_waiting_for_the_writer_when_the_budget_is_cancelled() {
         });
         let started = Instant::now();
         let report = GitReconciler::new(&corpus.kernel)
-            .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+            .run_episode(
+                &support::projection_gate::open_gate(),
+                &repo.scope(&[MAIN]),
+                bounds(),
+                &budget,
+            )
             .unwrap();
         (report, started.elapsed())
     });
@@ -968,7 +992,12 @@ fn inventory_stops_waiting_for_a_reader_when_the_budget_is_cancelled() {
         });
         let started = Instant::now();
         let report = GitReconciler::new(&corpus.kernel)
-            .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+            .run_episode(
+                &support::projection_gate::open_gate(),
+                &repo.scope(&[MAIN]),
+                bounds(),
+                &budget,
+            )
             .unwrap();
         (report, started.elapsed())
     });
@@ -1022,7 +1051,12 @@ fn incomplete_scans_retire_nothing() {
     assert_eq!(opened.retired, 0);
 
     let cancelled = GitReconciler::new(&corpus.kernel)
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &exhausted())
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &exhausted(),
+        )
         .unwrap();
     assert_eq!(
         cancelled.end,
@@ -1032,6 +1066,7 @@ fn incomplete_scans_retire_nothing() {
 
     let too_much_work = GitReconciler::new(&corpus.kernel)
         .run_episode(
+            &support::projection_gate::open_gate(),
             &repo.scope(&[MAIN]),
             InventoryBounds {
                 max_commits: NonZeroUsize::new(1).unwrap(),
@@ -1048,6 +1083,7 @@ fn incomplete_scans_retire_nothing() {
 
     let too_many_retained = GitReconciler::new(&corpus.kernel)
         .run_episode(
+            &support::projection_gate::open_gate(),
             &repo.scope(&[MAIN]),
             InventoryBounds {
                 max_retained: NonZeroUsize::new(2).unwrap(),
@@ -1065,7 +1101,12 @@ fn incomplete_scans_retire_nothing() {
     // A ref that moves after the walk, and a budget cancelled after the walk, both leave the excluded commit alone.
     let moved = GitReconciler::new(&corpus.kernel)
         .with_probe_for_test(Probe::AfterTraversal, || repo.point_ref(MAIN, &c1))
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &unbounded())
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(
         moved.end,
@@ -1076,13 +1117,51 @@ fn incomplete_scans_retire_nothing() {
     let budget = unbounded();
     let cancelled_late = GitReconciler::new(&corpus.kernel)
         .with_probe_for_test(Probe::AfterTraversal, || budget.cancel())
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &budget,
+        )
         .unwrap();
     assert_eq!(
         cancelled_late.end,
         ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Retirement))
     );
     assert_eq!(cancelled_late.retired, 0);
+    assert_eq!(corpus.live_oids(), before);
+
+    // A grant revoked after the walk stops the episode the same way: the gate closed under the slice, so nothing runs on the old evidence.
+    let gate = support::projection_gate::open_gate();
+    let revoked = GitReconciler::new(&corpus.kernel)
+        .with_probe_for_test(Probe::AfterTraversal, || gate.close())
+        .run_episode(&gate, &repo.scope(&[MAIN]), bounds(), &unbounded())
+        .unwrap();
+    assert_eq!(
+        revoked.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Retirement))
+    );
+    assert_eq!(revoked.retired, 0);
+    assert_eq!(corpus.live_oids(), before);
+    // A grant revoked inside the inventory ends that phase at its next page, before the repository is walked.
+    let gate = support::projection_gate::open_gate();
+    let revoked_early = GitReconciler::new(&corpus.kernel)
+        .with_probe_for_test(Probe::AfterInventoryPage, || gate.close())
+        .run_episode(
+            &gate,
+            &repo.scope(&[MAIN]),
+            InventoryBounds {
+                page_rows: NonZeroUsize::new(1).unwrap(),
+                ..bounds()
+            },
+            &unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        revoked_early.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Inventory))
+    );
+    assert_eq!((revoked_early.reachable, revoked_early.retired), (None, 0));
     assert_eq!(corpus.live_oids(), before);
 
     // An unreadable commit inside the walk is a store failure, never an absent source.
@@ -1213,6 +1292,7 @@ fn inventory_is_bounded_and_agrees_with_the_export() {
     // The class holds four live rows across two repositories; a scan bound of three ends the episode before the repository's rows are all found, although its retained bound of sixteen is far away.
     let scanned = GitReconciler::new(&corpus.kernel)
         .run_episode(
+            &support::projection_gate::open_gate(),
             &repo.scope(&[MAIN]),
             InventoryBounds {
                 max_scanned: NonZeroUsize::new(3).unwrap(),
@@ -1233,6 +1313,7 @@ fn inventory_is_bounded_and_agrees_with_the_export() {
     let clamped = GitReconciler::new(&corpus.kernel)
         .with_probe_for_test(Probe::AfterInventoryPage, || pages.set(pages.get() + 1))
         .run_episode(
+            &support::projection_gate::open_gate(),
             &repo.scope(&[MAIN]),
             InventoryBounds {
                 page_rows: NonZeroUsize::new(1).unwrap(),
@@ -1257,7 +1338,12 @@ fn inventory_is_bounded_and_agrees_with_the_export() {
     let budget = unbounded();
     let cancelled = GitReconciler::new(&corpus.kernel)
         .with_probe_for_test(Probe::AfterInventoryPage, || budget.cancel())
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &budget,
+        )
         .unwrap();
     assert_eq!(
         cancelled.end,
@@ -1302,7 +1388,12 @@ fn inventory_is_bounded_and_agrees_with_the_export() {
         .with_probe_for_test(Probe::AfterTraversal, || {
             corpus.retire_descriptor(&c5_object, "retire-c5")
         })
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &unbounded())
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(counted.end, ReconcileEnd::Complete, "{counted:?}");
     assert_eq!(

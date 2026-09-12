@@ -10,6 +10,7 @@ use gix::bstr::ByteSlice;
 use kernel::source_identity::OccurrenceClass;
 
 use crate::harness_sources::{Representation, SourceUnit};
+use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 
 /// The occurrence revision of every commit: a commit object never changes under its id, so its only revision is the first.
 pub const GIT_COMMIT_REVISION: &str = "1";
@@ -71,6 +72,9 @@ pub enum GitRefusal {
     DecodeTooLarge { oid: String, max: u64 },
     #[error("the selection decodes to {bytes} bytes, above the bound of {max}")]
     TotalBytesExceeded { bytes: u64, max: u64 },
+    /// The gate denied git ingest or its durable rows; the repository was not opened.
+    #[error("the projection gate denied the git source hooks: {0}")]
+    Denied(Denial),
 }
 
 /// Why one selected commit yields no unit although the selection was read.
@@ -169,10 +173,16 @@ fn escaped_prefix(bytes: &[u8]) -> String {
 ///
 /// Returns [`GitRefusal`] when the selection is over its bound or names an id twice, the repository cannot be opened or uses an unsupported format, an id is malformed, an object is missing, unreadable, or not a commit, or the object sizes exceed the bounds before, during, or after decoding. No unit is produced from a refused selection.
 pub fn read_selection(
+    gate: &HookGate,
     binding: &RepositoryBinding,
     oids: &[String],
     bounds: GitReadBounds,
 ) -> Result<GitSelection, GitRefusal> {
+    gate.admit_all(
+        &[ProjectionHook::GitIngest, ProjectionHook::GitDurableRows],
+        EntryPoint::Dispatch,
+    )
+    .map_err(GitRefusal::Denied)?;
     if oids.len() > bounds.max_commits.get() {
         return Err(GitRefusal::SelectionTooLarge {
             count: oids.len(),

@@ -217,6 +217,7 @@ fn maintained(
     synapse: Arc<SynapseComponent>,
 ) -> Maintained {
     Maintained {
+        gate: support::projection_gate::open_gate(),
         kernel: Arc::clone(&corpus.kernel),
         projection,
         synapse,
