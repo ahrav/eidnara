@@ -113,6 +113,11 @@ pub(crate) fn to_vec(message: &memory_store::WireMessage) -> serde_json::Result<
     encode(message)
 }
 
+#[cfg(feature = "test-support")]
+pub fn canonical_served_bytes_for_test(message: &memory_store::WireMessage) -> Vec<u8> {
+    to_vec(message).expect("CK wire message values must always serialize")
+}
+
 fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
     let position = Cell::new(0);
     let mut objects = Vec::new();
@@ -129,15 +134,33 @@ fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
     value.serialize(&mut serializer)?;
     let bytes = serializer.into_inner().bytes;
     for object in &mut objects {
-        // Decode keys only: sorting escaped spellings would misorder control characters.
-        object.fields.sort_by_cached_key(|(field, key_end)| {
-            serde_json::from_slice::<String>(&bytes[field.start..*key_end])
-                .expect("serde emits valid string keys")
-        });
+        sort_fields(&bytes, &mut object.fields);
     }
     let mut out = Vec::with_capacity(bytes.len());
     copy_sorted_range(&bytes, &objects, 0..bytes.len(), &mut out);
     Ok(out)
+}
+
+/// Keys without a backslash compare as raw bytes between the quotes: serde writes non-ASCII
+/// unescaped, and UTF-8 byte order equals `str` order. The quotes are excluded because `"`
+/// sorts after space, which would misorder `"a"` against `"a b"`. Escaped keys decode first:
+/// sorting escaped spellings would misorder control characters.
+fn sort_fields(bytes: &[u8], fields: &mut [(Range<usize>, usize)]) {
+    if fields.len() < 2 {
+        return;
+    }
+    let raw_key = |(field, key_end): &(Range<usize>, usize)| &bytes[field.start + 1..key_end - 1];
+    if fields.iter().all(|field| !raw_key(field).contains(&b'\\')) {
+        if !fields.is_sorted_by_key(raw_key) {
+            fields.sort_by_key(raw_key);
+        }
+        return;
+    }
+    let decoded_key = |field: &(Range<usize>, usize)| {
+        serde_json::from_slice::<String>(&bytes[field.0.start..field.1])
+            .expect("serde emits valid string keys")
+    };
+    fields.sort_by_cached_key(decoded_key);
 }
 
 #[cfg(test)]
@@ -188,6 +211,43 @@ mod tests {
             let expected = serde_json::to_vec(&serde_json::to_value(&shell).unwrap()).unwrap();
             assert_eq!(encode(&shell).unwrap(), expected);
             assert_ne!(serde_json::to_vec(&shell).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn canonical_encoding_orders_prefix_and_escaped_keys_like_decoded_strings() {
+        // Quoted spellings misorder each pair: `"a"` sorts after `"a b"` because `"` > ` `,
+        // and `"\n"` sorts after `"!"` because `\` > `!`.
+        let cases = [
+            r#"{"a b":1,"a":2}"#,
+            r#"{"a\"":1,"a":2,"a b":3}"#,
+            r#"{"!":1,"\n":2}"#,
+            r#"{"\u0001":1,"\t":2,"\n":3," ":4}"#,
+            r#"{"é":1,"z":2,"\u00e9x":3}"#,
+            r#"{"b":{"a b":{"y":1,"x":2},"a":[{"k":1,"j":2}]},"a":null}"#,
+        ];
+        for case in cases {
+            let value: serde_json::Value = serde_json::from_str(case).unwrap();
+            let expected = serde_json::to_vec(&value).unwrap();
+            let map = value.as_object().unwrap();
+            let mut reversed: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+            reversed.reverse();
+            struct Reversed<'a>(&'a [(&'a String, &'a serde_json::Value)]);
+            impl Serialize for Reversed<'_> {
+                fn serialize<S: serde::Serializer>(
+                    &self,
+                    serializer: S,
+                ) -> Result<S::Ok, S::Error> {
+                    serializer.collect_map(self.0.iter().map(|(key, value)| (*key, *value)))
+                }
+            }
+            assert_eq!(encode(&value).unwrap(), expected, "{case}");
+            assert_eq!(encode(&Reversed(&reversed)).unwrap(), expected, "{case}");
+            assert_ne!(
+                serde_json::to_vec(&Reversed(&reversed)).unwrap(),
+                expected,
+                "{case}"
+            );
         }
     }
 }

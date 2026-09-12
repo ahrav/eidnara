@@ -10,7 +10,7 @@ The preservation target is the selected result, not a particular SQL shape.
 
 ## Evidence trail
 
-- [daemon/lib.rs:8133-8202][pass] pins one read before the synchronous transform.
+- [daemon/lib.rs:8182-8262][pass] pins one read before the synchronous transform.
   Reruns at [8264, 8291, 8317, and 8372][reruns] reuse that captured result.
 - [canonical_memory.rs:141-174][entry] captures tip before lag sampling and
   passes that tip to the auto-inject read; failures become withheld outcomes.
@@ -57,8 +57,8 @@ lineage restrictions, and both row and payload boundaries. Existing checks are
   Oracle packaging as a test-only adapter or reference executable is a test-design
   choice, not an open semantic acceptance rule; candidate helpers are not oracles.
 
-[pass]: ../../../../crates/daemon/src/lib.rs#L8133-L8202
-[reruns]: ../../../../crates/daemon/src/lib.rs#L8264-L8375
+[pass]: ../../../../crates/daemon/src/lib.rs#L8191-L8271
+[reruns]: ../../../../crates/daemon/src/lib.rs#L8338-L8442
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
 [query]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248

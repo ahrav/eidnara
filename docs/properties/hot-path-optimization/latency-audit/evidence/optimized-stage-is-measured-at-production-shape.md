@@ -25,35 +25,35 @@ must reach before any "faster" claim is checkable.
   (single-threaded, warm-process, warm-tokenizer service time of one stage
   call at a fixed corpus point) and says one process's numbers are not a
   baseline. The bench needs `--features bench-internals`
-  ([Cargo.toml:71-75][cargo-bench]).
+  ([Cargo.toml:62-75][cargo-bench]).
 - Payload sizes: the tokenizer arm sweeps [`PAYLOAD_SIZES`][hp-sizes]
   (256, 2_048, 4_096 bytes); the projection and tail-hygiene arms use
   [`MESSAGE_COUNTS`][hp-counts] (100, 1_400, 2_500 messages) at 2 KiB
   mixed content; the end-to-end arms use [`E2E_MESSAGE_COUNTS`][hp-e2e-counts]
   (100, 1_000) because a 1_400-message first HARD pass is rejected by the
   store's 512 KiB durable-text bound, as the comment at
-  [`:30-33`][hp-e2e-counts] and the note at [`:267-269`][hp-cliff] say.
+  [`:30-33`][hp-e2e-counts] and the note at [`:352-354`][hp-cliff] say.
 - The end-to-end arms ([`bench_e2e_first_hard`][hp-e2e], steady, output
   cache, caveman) call [`transform_cached`][hp-e2e] on a request built by
   [`serde_json::from_value`][hp-req] against a [fresh tempfile store][hp-store]
   with a fixed [`ProducerContext`][hp-ctx]. The production handler wraps that
   call with the projection-cache lookup, side-channel drain, and receive
-  trace at [`:8115-8132`][h-pre], the `run_transform` closure's
+  trace at [`:8181-8198`][h-pre], the `run_transform` closure's
   `project_memory`, `historian_active`, and guidance reads at
-  [`:8138-8193`][h-run], and the response encoding in
+  [`:8195-8261`][h-run], and the response encoding in
   [`respond_transform`][respond]; none of that is in the bench.
 - The 1_400 and 1_000 points are pinned by
   [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound]
   (1_000 commits, 1_400 fails). The test carries
   `#![cfg(feature = "bench-internals")]` and a `required-features` gate in
-  [Cargo.toml:67-69][cargo-bench].
+  [Cargo.toml:62-75][cargo-bench].
 - The two production-sized fixtures are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] (1_400 messages) and
   [`full_module_pass_timing_fixture`][fx-2500] (2_500 messages, 47_075
   frozen units, 4_096-byte payloads).
 - The transport bench uses a fixed payload, [256 bytes in smoke and 4_096 in
   a campaign][he-payload], where a campaign needs `--bench` or `--campaign`
-  ([`:217-221`][he-payload]); it [exits with status 2 on
+  ([`:217-223`][he-payload]); it [exits with status 2 on
   `--designated-host`][he-designated] and writes
   [`designated_host_verdict: BLOCKED`][he-blocked] into its record. Its
   [manifest][he-manifest] declares 24 `byte_size_boundary_probes`, three
@@ -102,7 +102,7 @@ specification enumerates the stages, and no name is built at run time.
 ### Q: Which size class is "production-shaped", 1_400 or 2_500 messages?
 
 - Sources examined: [`MESSAGE_COUNTS`][hp-counts], the two fixtures
-  ([1_400][fx-1400], [2_500][fx-2500]), [`E2E_MESSAGE_COUNTS`][hp-e2e-counts].
+  ([1_12434-12494][fx-1400], [2_28083-28292][fx-2500]), [`E2E_MESSAGE_COUNTS`][hp-e2e-counts].
 - Findings: The bench header treats 1_400 at 2 KiB mixed as the
   production-shaped point; the module fixture uses 2_500 with 4_096-byte
   payloads and 47_075 frozen units. No document reconciles them.
@@ -133,20 +133,20 @@ specification enumerates the stages, and no name is built at run time.
 [hp-counts]: ../../../../../crates/daemon/benches/hot_path.rs#L29
 [hp-e2e-counts]: ../../../../../crates/daemon/benches/hot_path.rs#L30-L33
 [hp-sizes]: ../../../../../crates/daemon/benches/hot_path.rs#L36
-[hp-req]: ../../../../../crates/daemon/benches/hot_path.rs#L148-L161
-[hp-ctx]: ../../../../../crates/daemon/benches/hot_path.rs#L163-L188
-[hp-store]: ../../../../../crates/daemon/benches/hot_path.rs#L190-L195
-[hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L197-L230
-[hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L267-L269
+[hp-req]: ../../../../../crates/daemon/benches/hot_path.rs#L233-L246
+[hp-ctx]: ../../../../../crates/daemon/benches/hot_path.rs#L248-L273
+[hp-store]: ../../../../../crates/daemon/benches/hot_path.rs#L275-L280
+[hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L282-L315
+[hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L352-L354
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
-[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12381-L12386
-[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27398-L27404
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8115-L8132
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8138-L8193
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14404
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14485-L14507
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1018-L1197
+[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
+[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8190-L8207
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8204-L8270
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14516
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14591-L14613
+[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L217-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
 [he-blocked]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286

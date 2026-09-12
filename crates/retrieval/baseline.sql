@@ -111,7 +111,11 @@ CREATE INDEX idx_occurrence_vectors_generation ON occurrence_vectors(generation_
 
 -- Durable embedding work. A pending row is the crash source for the process
 -- local job table; retry accounting lives here so a restart resumes with the
--- same identity and the same attempt history.
+-- same identity and the same attempt history. An episode is one finite grant
+-- of attempts under one deadline; only an explicit authorization reference
+-- opens another, and a stop reason holds the row until one arrives. An
+-- admitted row names the host incarnation holding it; work held by any other
+-- incarnation is unreachable and returns to pending.
 CREATE TABLE embedding_jobs(
     job_id TEXT PRIMARY KEY,
     occurrence_id TEXT NOT NULL REFERENCES occurrences(occurrence_id) ON DELETE RESTRICT,
@@ -121,12 +125,27 @@ CREATE TABLE embedding_jobs(
     last_failure_kind TEXT,
     next_attempt_at INTEGER,
     admitted_epoch INTEGER,
+    episode_id TEXT,
+    episode_allowance INTEGER NOT NULL DEFAULT 0 CHECK(episode_allowance>=0),
+    episode_deadline INTEGER,
+    host_job_id TEXT,
+    host_incarnation TEXT,
+    stop_reason TEXT,
+    authorization_ref TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE(occurrence_id,generation_id)
 ) STRICT;
 CREATE INDEX idx_embedding_jobs_dispatch ON embedding_jobs(state,next_attempt_at,job_id);
 CREATE INDEX idx_embedding_jobs_generation ON embedding_jobs(generation_id,job_id);
+CREATE INDEX idx_embedding_jobs_open_order ON embedding_jobs(created_at,job_id) WHERE state IN ('pending','admitted') AND stop_reason IS NULL;
+
+-- Consumed references prevent earlier authorizations from reopening a job after later episodes.
+CREATE TABLE embedding_recovery_authorizations(
+    job_id TEXT NOT NULL REFERENCES embedding_jobs(job_id) ON DELETE RESTRICT,
+    authorization_ref TEXT NOT NULL,
+    PRIMARY KEY(job_id,authorization_ref)
+) STRICT;
 
 -- Local receipts of a generation's retirement, kept so a retired generation's
 -- files can be reclaimed once and the reclamation can be audited.

@@ -91,6 +91,8 @@ pub struct BatchOutcome {
     /// The checkpoint after the batch; unchanged when the batch was an
     /// already-applied prefix.
     pub checkpoint_commit_seq: i64,
+    /// The batch ends strictly below the stored checkpoint, so none of its statements ran; `batch_status` is the way to interrogate such a window.
+    pub older_prefix: bool,
 }
 
 /// A covering checkpoint alone cannot distinguish batches that request different vector generations.
@@ -102,9 +104,9 @@ pub enum BatchStatus {
     NotApplied,
 }
 
-/// The dense-eligible classes: raw tool spans stay lexical-only.
-fn dense_eligible(class: &str) -> bool {
-    OccurrenceClass::from_code(class).is_some_and(|class| class != OccurrenceClass::RawToolSpans)
+/// The dense-eligible classes: raw tool spans stay lexical-only. The coverage report reads the same predicate, so `R` is exactly the set that queues work.
+pub fn dense_eligible(class: OccurrenceClass) -> bool {
+    class != OccurrenceClass::RawToolSpans
 }
 
 /// The job identity for one occurrence in one generation, so the same work
@@ -251,7 +253,7 @@ pub fn batch_status(
             });
         }
         if let Some(generation) = batch.generation_id
-            && dense_eligible(record.occurrence.class)
+            && OccurrenceClass::from_code(record.occurrence.class).is_some_and(dense_eligible)
             && stored.tombstone.is_none()
             && !has_job(conn, &occurrence_id, generation)?
         {
@@ -395,8 +397,10 @@ macro_rules! phase {
 struct Admission<'a> {
     occurrence_ids: Vec<String>,
     tombstoned: HashSet<&'a str>,
-    /// Whether the projection already reaches the batch's end.
+    /// Whether the stored checkpoint is exactly the batch's end, so the batch re-validates its rows without moving the checkpoint.
     already_applied: bool,
+    /// Whether a later window already moved the checkpoint past the batch's end. Such a batch is an older prefix: its rows may since have been tombstoned by later windows or reclaimed by cleanup, so running its statements again could only contradict state that supersedes it.
+    older_prefix: bool,
     /// The checkpoint after the batch.
     checkpoint_commit_seq: i64,
 }
@@ -409,9 +413,11 @@ fn queues_work(
     occurrence_id: &str,
     tombstoned: &HashSet<&str>,
 ) -> Result<bool, ProjectionError> {
-    Ok(dense_eligible(class)
-        && !tombstoned.contains(occurrence_id)
-        && !has_tombstone(conn, occurrence_id)?)
+    Ok(
+        OccurrenceClass::from_code(class).is_some_and(dense_eligible)
+            && !tombstoned.contains(occurrence_id)
+            && !has_tombstone(conn, occurrence_id)?,
+    )
 }
 
 fn admit<'a>(
@@ -464,6 +470,34 @@ fn admit<'a>(
         .iter()
         .map(|invalidation| invalidation.occurrence_id.as_str())
         .collect();
+    // A checkpoint for kernel_incarnation_id retains hold_id and snapshot_commit_seq; checkpoint_commit_seq never decreases.
+    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
+    if let Some(stored) = &stored
+        && (stored.hold_id != identity.hold_id
+            || stored.snapshot_commit_seq != identity.snapshot_commit_seq)
+    {
+        return Err(ProjectionError::MutationConflict);
+    }
+    let checkpoint_commit_seq = stored
+        .as_ref()
+        .map_or(identity.through_commit_seq, |stored| {
+            stored
+                .checkpoint_commit_seq
+                .max(identity.through_commit_seq)
+        });
+    let admission = Admission {
+        occurrence_ids,
+        tombstoned,
+        already_applied: stored
+            .as_ref()
+            .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
+        older_prefix: checkpoint_commit_seq > identity.through_commit_seq,
+        checkpoint_commit_seq,
+    };
+    // Older prefixes skip queue and generation validation because cleanup can remove their rows, making a replay appear new.
+    if admission.older_prefix {
+        return Ok(admission);
+    }
     if let Some(generation) = batch.generation_id {
         let outstanding: i64 = conn.query_row(
             "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
@@ -473,7 +507,7 @@ fn admit<'a>(
         let outstanding = usize::try_from(outstanding).map_err(|_| ProjectionError::CorruptRow)?;
         // The pending bound excludes queued work invalidated by this batch.
         let mut obsoleting = 0usize;
-        for occurrence_id in &tombstoned {
+        for occurrence_id in &admission.tombstoned {
             let queued: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM embedding_jobs
                  WHERE occurrence_id=?1 AND state IN ('pending','admitted')",
@@ -483,8 +517,13 @@ fn admit<'a>(
             obsoleting += usize::try_from(queued).map_err(|_| ProjectionError::CorruptRow)?;
         }
         let mut new_jobs = HashSet::new();
-        for (record, occurrence_id) in batch.records.iter().zip(&occurrence_ids) {
-            if !queues_work(conn, record.occurrence.class, occurrence_id, &tombstoned)? {
+        for (record, occurrence_id) in batch.records.iter().zip(&admission.occurrence_ids) {
+            if !queues_work(
+                conn,
+                record.occurrence.class,
+                occurrence_id,
+                &admission.tombstoned,
+            )? {
                 continue;
             }
             if !has_job(conn, occurrence_id, generation)? {
@@ -512,31 +551,7 @@ fn admit<'a>(
             });
         }
     }
-    // The projection this batch belongs to: same incarnation, same hold and
-    // snapshot as every earlier batch, never a checkpoint moving backward.
-    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
-    if let Some(stored) = &stored
-        && (stored.hold_id != identity.hold_id
-            || stored.snapshot_commit_seq != identity.snapshot_commit_seq)
-    {
-        return Err(ProjectionError::MutationConflict);
-    }
-    let checkpoint_commit_seq = stored
-        .as_ref()
-        .map_or(identity.through_commit_seq, |stored| {
-            stored
-                .checkpoint_commit_seq
-                .max(identity.through_commit_seq)
-        });
-    Ok(Admission {
-        occurrence_ids,
-        tombstoned,
-        already_applied: checkpoint_commit_seq > identity.through_commit_seq
-            || stored
-                .as_ref()
-                .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
-        checkpoint_commit_seq,
-    })
+    Ok(admission)
 }
 
 fn apply_batch_inner(
@@ -553,6 +568,10 @@ fn apply_batch_inner(
         checkpoint_commit_seq: admission.checkpoint_commit_seq,
         ..BatchOutcome::default()
     };
+    if admission.older_prefix {
+        outcome.older_prefix = true;
+        return Ok(outcome);
+    }
     let persisted = persist_occurrences(conn, &batch.records, bounds.persist, now)?;
     for (row, expected) in persisted.iter().zip(&admission.occurrence_ids) {
         if row.occurrence_id != *expected {
@@ -656,23 +675,11 @@ pub fn register_generation(
     generation: &VectorGeneration,
     now: i64,
 ) -> Result<bool, ProjectionError> {
-    let stored: Option<(String, String, i64, i64)> = conn
-        .query_row(
-            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
-             FROM vector_generations WHERE generation_id=?1",
-            [&generation.generation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    match stored {
-        Some((model, fingerprint, dimension, epoch))
-            if model == generation.embedding_model
-                && fingerprint == generation.tokenizer_fingerprint
-                && dimension == i64::from(generation.vector_dimension)
-                && u64::try_from(epoch).ok() == Some(generation.generation_epoch) =>
-        {
-            Ok(false)
-        }
+    match registered_generation(conn, generation)? {
+        Some(RegisteredGeneration {
+            identity_matches: true,
+            ..
+        }) => Ok(false),
         Some(_) => Err(ProjectionError::IdentityMismatch),
         None => {
             conn.execute(
@@ -693,6 +700,53 @@ pub fn register_generation(
             Ok(true)
         }
     }
+}
+
+/// The stored row for a generation id, judged against the identity a caller presents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegisteredGeneration {
+    /// Every identity field of the stored row agrees with the presented generation.
+    pub(crate) identity_matches: bool,
+    /// The stored lifecycle state: `building`, `verified`, `selected`, or `retired`.
+    pub(crate) state: String,
+}
+
+impl RegisteredGeneration {
+    pub(crate) fn is_retired(&self) -> bool {
+        self.state == "retired"
+    }
+}
+
+/// Reads `generation.generation_id`'s row, if registered, and compares its identity with `generation`.
+pub(crate) fn registered_generation(
+    conn: &GuardedConn<'_>,
+    generation: &VectorGeneration,
+) -> Result<Option<RegisteredGeneration>, ProjectionError> {
+    let stored: Option<(String, String, i64, i64, String)> = conn
+        .query_row(
+            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch,state
+             FROM vector_generations WHERE generation_id=?1",
+            [&generation.generation_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(stored.map(
+        |(model, fingerprint, dimension, epoch, state)| RegisteredGeneration {
+            identity_matches: model == generation.embedding_model
+                && fingerprint == generation.tokenizer_fingerprint
+                && dimension == i64::from(generation.vector_dimension)
+                && u64::try_from(epoch).ok() == Some(generation.generation_epoch),
+            state,
+        },
+    ))
 }
 
 /// The identity of one vector generation.

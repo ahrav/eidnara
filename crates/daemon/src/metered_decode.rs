@@ -56,6 +56,9 @@ const VALUE_ENVELOPE_BYTES: usize = 4096;
 /// `WireBlock` retains, all hold their own copy of a block's text at the same time.
 const RETAINED_STRING_COPIES: usize = 3;
 
+/// The estimate doubles the longest escaped string for the unescape buffer's growth.
+const UNESCAPE_SCRATCH_SLACK: usize = 2;
+
 /// The charge for one visited value; object keys are values too.
 const NODE_BYTES: usize = VALUE_NODE_CHARGE_BYTES * RETAINED_NODE_COPIES;
 
@@ -135,6 +138,7 @@ pub struct ResidentMeter<'r> {
     charges: Mutex<Vec<ByteCharge>>,
     refusal: AtomicU8,
     shortfall: Mutex<Option<ShortfallMarker>>,
+    longest_escaped: AtomicUsize,
 }
 
 const NO_REFUSAL: u8 = 0;
@@ -150,6 +154,7 @@ impl<'r> ResidentMeter<'r> {
             charges: Mutex::new(Vec::new()),
             refusal: AtomicU8::new(NO_REFUSAL),
             shortfall: Mutex::new(None),
+            longest_escaped: AtomicUsize::new(0),
         }
     }
 
@@ -189,6 +194,7 @@ impl<'r> ResidentMeter<'r> {
     pub fn restart(&self) {
         self.needed.store(0, Ordering::Relaxed);
         self.refusal.store(NO_REFUSAL, Ordering::Relaxed);
+        self.longest_escaped.store(0, Ordering::Relaxed);
     }
 
     /// Gives every held byte back. A refused decode releases at once rather than at the end
@@ -207,6 +213,15 @@ impl<'r> ResidentMeter<'r> {
 
     fn text(&self, len: usize) -> Result<(), Refusal> {
         self.need(len.saturating_mul(RETAINED_STRING_COPIES))
+    }
+
+    fn escaped_text(&self, len: usize) -> Result<(), Refusal> {
+        let longest = self.longest_escaped.load(Ordering::Relaxed);
+        if len <= longest {
+            return Ok(());
+        }
+        self.longest_escaped.store(len, Ordering::Relaxed);
+        self.need((len - longest).saturating_mul(UNESCAPE_SCRATCH_SLACK))
     }
 
     fn need(&self, bytes: usize) -> Result<(), Refusal> {
@@ -405,8 +420,69 @@ pub(crate) fn footprint_floor(body: &[u8]) -> usize {
 /// `IgnoredAny` is not used because serde_json skips it without those checks and without
 /// visiting its contents, so a body the tree decode refuses would pass, and through the
 /// meter an ignored subtree would go uncounted.
+/// An object whose first key is [`RAW_VALUE_TOKEN`] is read as a `Value` parse reads it: its
+/// value must be a string and no key may follow it, so the count stops where that parse stops.
 #[derive(Debug)]
 pub(crate) struct SkippedValue;
+
+/// The object key serde_json's `raw_value` feature reserves. A `Value` parse reads an
+/// object whose first key is this token as one boxed JSON document: its value must be a
+/// string holding a document and no key may follow it. A `Value` re-read through
+/// `from_value` sees the object's keys sorted, where the token sorts before any letter, so
+/// a retained `Value` holding the token at any position meets the rule on the tree lane.
+/// serde_json keeps the token private; the `raw_value_token_matches_serde_json` test
+/// detects a change to it.
+pub(crate) const RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
+
+/// A key of a skipped object, and whether it is [`RAW_VALUE_TOKEN`].
+struct SkippedKey {
+    raw_value_token: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for SkippedKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+
+        impl Visitor<'_> for KeyVisitor {
+            type Value = SkippedKey;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an object key")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(SkippedKey {
+                    raw_value_token: value == RAW_VALUE_TOKEN,
+                })
+            }
+        }
+
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
+/// The value under a leading [`RAW_VALUE_TOKEN`] key; a `Value` parse accepts only a string there.
+struct RawDocument;
+
+impl<'de> serde::Deserialize<'de> for RawDocument {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DocumentVisitor;
+
+        impl Visitor<'_> for DocumentVisitor {
+            type Value = RawDocument;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("raw value")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(RawDocument)
+            }
+        }
+
+        deserializer.deserialize_str(DocumentVisitor)
+    }
+}
 
 impl<'de> serde::Deserialize<'de> for SkippedValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -455,7 +531,17 @@ impl<'de> Visitor<'de> for SkipVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<SkippedValue, A::Error> {
-        while map.next_entry::<SkippedValue, SkippedValue>()?.is_some() {}
+        let mut first = true;
+        while let Some(key) = map.next_key::<SkippedKey>()? {
+            if first && key.raw_value_token {
+                // Returning here leaves the deserializer to refuse a following key, as it
+                // does after a `Value` parse reads the document.
+                map.next_value::<RawDocument>()?;
+                return Ok(SkippedValue);
+            }
+            first = false;
+            map.next_value::<SkippedValue>()?;
+        }
         Ok(SkippedValue)
     }
 }
@@ -664,8 +750,12 @@ impl<'de, 'm, V: Visitor<'de>> Visitor<'de> for MeteredVisitor<'m, V> {
         visit_char: char,
     );
 
+    /// serde_json takes this path, not `visit_borrowed_str`, for a string it unescaped.
     fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
         self.count_text::<E>(value.len())?;
+        self.meter
+            .escaped_text(value.len())
+            .map_err(|_| refused::<E>())?;
         self.visitor.visit_str(value)
     }
 
@@ -938,6 +1028,29 @@ mod tests {
         );
     }
 
+    /// The count follows the `Value` parse through the raw-value token: a leading token reads
+    /// one string and ends the object, a later token is an ordinary key, and an escaped
+    /// string carries its unescape charge on both paths.
+    #[test]
+    fn footprint_of_counts_what_the_value_decode_charges() {
+        let unbounded = CountOnly {
+            capacity: usize::MAX,
+        };
+        for body in [
+            format!(r#"{{"x":{{"{RAW_VALUE_TOKEN}":1}}}}"#),
+            format!(r#"{{"x":{{"{RAW_VALUE_TOKEN}":"[1]"}}}}"#),
+            format!(r#"{{"x":{{"{RAW_VALUE_TOKEN}":"[1]","y":2}}}}"#),
+            format!(r#"{{"x":{{"a":1,"{RAW_VALUE_TOKEN}":1}}}}"#),
+            format!(r#"{{"x":[{{"{RAW_VALUE_TOKEN}":1}}]}}"#),
+            format!(r#"{{"{RAW_VALUE_TOKEN}":"\"a\\nb\""}}"#),
+            r#"{"a":"x\ny","b":"longer\tescaped","c":"z"}"#.to_string(),
+        ] {
+            let meter = ResidentMeter::new(&unbounded);
+            let _ = decode_metered::<Value>(body.as_bytes(), &meter);
+            assert_eq!(footprint_of(body.as_bytes()), meter.needed(), "{body}");
+        }
+    }
+
     /// The byte scan counts the values the meter visits; the floor excludes string bytes,
     /// which the meter retains.
     #[test]
@@ -959,8 +1072,11 @@ mod tests {
         }
         let strings = br#"{"a":"x,y:z","b":["\"q\"",""]}"#;
         let decoded_text = "a".len() + "x,y:z".len() + "b".len() + "\"q\"".len();
+        let longest_escaped = "\"q\"".len();
         assert_eq!(
-            footprint_floor(strings) + RETAINED_STRING_COPIES * decoded_text,
+            footprint_floor(strings)
+                + RETAINED_STRING_COPIES * decoded_text
+                + UNESCAPE_SCRATCH_SLACK * longest_escaped,
             footprint_of(strings)
         );
         assert_eq!(footprint_floor(b""), 0);

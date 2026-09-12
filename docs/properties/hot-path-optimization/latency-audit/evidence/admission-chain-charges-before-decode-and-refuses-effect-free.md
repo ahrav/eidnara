@@ -110,7 +110,7 @@ because the decoded type exposes no copy count.
 
 - Sources examined: the [page apply][pageapply] call into
   `handle_transform_unpaged_value`, the [512 KiB page cap][hostpagecheck], and
-  the staging constants at [`:735-736`][hostpage] (128 MiB staged maximum).
+  the staging constants at [`:742-743`][hostpage] (128 MiB staged maximum).
 - Findings: The assembled `Value` reaches the typed decode with the per-page
   reservation history only; no `value_footprint_bound` runs on the whole.
 - Missing evidence: A statement of which budget covers the assembled tree.
@@ -262,6 +262,31 @@ peak on the dense native corpus, the direct decode's peak at or below it, and
 the direct lane's own metered count covering its peak with the values under an
 ignored field.
 
+### Merge with the typed-transform-decode base, 2026-09-12
+
+The base branch closed two review findings against the pre-scan after this
+branch replaced it, and the merge carries both into the meter. The direct
+decode keeps serde_json's unescape scratch buffer beside the retained copies
+until it returns, so a body holding one escaped 4 MiB text block peaked at four
+copies against a three-copy charge; the meter now charges that buffer's
+growth, [`UNESCAPE_SCRATCH_SLACK`][scratch] times the longest escaped string,
+in the [`visit_str` path][escaped] serde_json takes for a string it unescaped,
+so the [escaped peak test][t-peak-escaped] passes against `footprint_of`
+(before the term it failed at `4194304 text bytes (escaped: true) peaked at
+16782827 bytes during the direct decode but the parse charge reserved only
+12590737`). The byte cap now [probes only the bodies it must classify][bytecap-live]
+and returns that probe; a body at or under 1 MiB is probed after the cap, so
+the [allocation test][t-cap-alloc] holds with no reservation to order against.
+The base also gates the direct lane on a [tree-parse walk][witness] that
+refuses the raw-value token at every key; the merged
+[`dispatch_body`][dispatch-body] runs it after the byte-derived floor and
+before the metered typed decode, unmetered, so its scratch buffer is bounded by
+the byte cap like the probe's. The count-only [`SkippedValue`][skipped-live]
+behind `footprint_of` reads a leading token as the `Value` parse does (one
+string, then the object must end) so the oracle stops where the tree decode
+stops; the [oracle test][t-footprint-oracle] pins that on seven shapes, and the
+lane test holds over the nine raw-value corpus bodies.
+
 ### Focused execution, 2026-09-12
 
 `cargo test -p daemon --locked` passed 1024 tests including the eleven above,
@@ -272,35 +297,43 @@ passed 7 including the ring test;
 `cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
 passed.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11899-L11914
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12654-L12692
-[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15713-L15721
-[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15723-L15728
-[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15730-L15735
-[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L131-L138
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L272
-[release]: ../../../../../crates/daemon/src/metered_decode.rs#L196-L202
-[decode]: ../../../../../crates/daemon/src/metered_decode.rs#L295-L315
-[exceeds]: ../../../../../crates/daemon/src/metered_decode.rs#L328-L338
-[floor]: ../../../../../crates/daemon/src/metered_decode.rs#L340-L401
-[visitor]: ../../../../../crates/daemon/src/metered_decode.rs#L643-L748
-[ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L522-L528
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11921-L11936
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12676-L12716
+[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15814-L15822
+[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15830-L15835
+[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15837-L15842
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L134-L142
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L227-L287
+[release]: ../../../../../crates/daemon/src/metered_decode.rs#L202-L208
+[decode]: ../../../../../crates/daemon/src/metered_decode.rs#L310-L330
+[exceeds]: ../../../../../crates/daemon/src/metered_decode.rs#L343-L353
+[floor]: ../../../../../crates/daemon/src/metered_decode.rs#L355-L416
+[visitor]: ../../../../../crates/daemon/src/metered_decode.rs#L729-L838
+[ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L608-L614
 [constants]: ../../../../../crates/daemon/src/metered_decode.rs#L57
-[step]: ../../../../../crates/daemon/src/metered_decode.rs#L62
-[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19744-L19778
-[t-meter]: ../../../../../crates/daemon/src/lib.rs#L19784-L19817
-[t-small]: ../../../../../crates/daemon/src/lib.rs#L19821-L19838
-[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L19843-L19871
-[t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L911-L939
-[t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L941-L976
-[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L19970-L19982
-[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L19930-L19965
-[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19651-L19697
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19877-L19925
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19987-L20035
+[step]: ../../../../../crates/daemon/src/metered_decode.rs#L65
+[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19985-L20020
+[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20026-L20059
+[t-small]: ../../../../../crates/daemon/src/lib.rs#L20063-L20080
+[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20085-L20113
+[t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L1001-L1029
+[t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L1054-L1092
+[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20212-L20224
+[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20172-L20207
+[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19892-L19938
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20119-L20167
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20229-L20277
 [t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L558
-[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
+[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
 [preset]: ../../../../../crates/daemon/src/prompt_surface.rs#L108-L163
+[t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
+[t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222
+[t-footprint-oracle]: ../../../../../crates/daemon/src/metered_decode.rs#L1031-L1052
+[scratch]: ../../../../../crates/daemon/src/metered_decode.rs#L59-L60
+[escaped]: ../../../../../crates/daemon/src/metered_decode.rs#L753-L760
+[skipped-live]: ../../../../../crates/daemon/src/metered_decode.rs#L418-L547
+[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15844-L15867
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15511-L15514
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

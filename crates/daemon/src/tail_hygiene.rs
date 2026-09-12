@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::hash::{BuildHasher, RandomState};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
@@ -68,9 +68,10 @@ pub(crate) struct TailHygieneMeasurement {
 
 const MEMO_SESSION_LIMIT: usize = 16;
 const MEMO_SESSION_BYTES: usize = 1024 * 1024;
-/// Includes session keys, all map allocations, and the process cache container.
-pub(crate) const MEMO_RETAINED_BYTES_BOUND: usize =
-    MEMO_SESSION_LIMIT * MEMO_SESSION_BYTES + std::mem::size_of::<OnceLock<HygieneMemos>>();
+/// Includes session keys, all map allocations, each session's shared memo allocation, and the process cache container.
+pub(crate) const MEMO_RETAINED_BYTES_BOUND: usize = std::mem::size_of::<OnceLock<HygieneMemos>>()
+    + MEMO_SESSION_LIMIT
+        * (std::mem::size_of::<MemoSession>() + SESSION_MEMO_ALLOCATION_BYTES + MEMO_SESSION_BYTES);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MeasuredPart {
@@ -81,7 +82,7 @@ struct MeasuredPart {
 
 struct MemoEntry {
     projection_hash: [u8; 32],
-    caveman: Option<FrozenUnit>,
+    caveman: Option<[u8; 32]>,
     excluded: bool,
     text_role: bool,
     measured: MeasuredPart,
@@ -90,13 +91,30 @@ struct MemoEntry {
 impl MemoEntry {
     fn heap_bytes(&self) -> usize {
         self.measured.content_hash.capacity()
-            + self.caveman.as_ref().map_or(0, |unit| {
-                unit.key.capacity()
-                    + unit.kind.capacity()
-                    + unit.frozen_payload.capacity()
-                    + unit.reset_rule.capacity()
-            })
     }
+}
+
+/// Length prefixes prevent ambiguous concatenation of adjacent fields.
+fn caveman_fingerprint(unit: &FrozenUnit) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for field in [
+        unit.key.as_str(),
+        unit.kind.as_str(),
+        unit.reset_rule.as_str(),
+        unit.frozen_payload.as_str(),
+    ] {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hasher.update([match unit.durability_class {
+        cache_stability::DurabilityClass::Episode => 0u8,
+        cache_stability::DurabilityClass::Lineage => 1u8,
+    }]);
+    hasher.finalize().into()
+}
+
+fn is_text_role(block: &FlatBlock) -> bool {
+    matches!(block.role.as_str(), "user" | "assistant")
 }
 
 /// Per-block facts only; attribution and eligibility are evaluated on every walk.
@@ -105,6 +123,8 @@ pub(crate) struct TailHygieneMemo {
     heap_bytes: usize,
     map_bytes: usize,
     budget: usize,
+    /// Blocks refused admission because they would exceed `budget`.
+    rejected: u64,
 }
 
 #[cfg(test)]
@@ -131,6 +151,7 @@ impl TailHygieneMemo {
             heap_bytes: 0,
             map_bytes: 0,
             budget,
+            rejected: 0,
         }
     }
 
@@ -142,7 +163,7 @@ impl TailHygieneMemo {
         &self,
         key: &str,
         block: &FlatBlock,
-        caveman: Option<&FrozenUnit>,
+        caveman: Option<[u8; 32]>,
         excluded: bool,
     ) -> Option<MeasuredPart> {
         let measured = self
@@ -150,9 +171,9 @@ impl TailHygieneMemo {
             .get(key)
             .filter(|entry| {
                 entry.projection_hash == block.content_hash
-                    && entry.caveman.as_ref() == caveman
+                    && entry.caveman == caveman
                     && entry.excluded == excluded
-                    && entry.text_role == matches!(block.role.as_str(), "user" | "assistant")
+                    && entry.text_role == is_text_role(block)
             })
             .map(|entry| entry.measured.clone());
         #[cfg(test)]
@@ -170,43 +191,42 @@ impl TailHygieneMemo {
         &mut self,
         key: &str,
         block: &FlatBlock,
-        caveman: Option<&FrozenUnit>,
+        caveman: Option<[u8; 32]>,
         excluded: bool,
         measured: &MeasuredPart,
     ) {
         if let Some((old_key, old)) = self.entries.remove_entry(key) {
             self.heap_bytes -= old_key.capacity() + old.heap_bytes();
         }
-        // Reject oversized payloads before copying them into retained storage.
-        let payload_bytes = caveman.map_or(0, |unit| {
-            unit.key.len() + unit.kind.len() + unit.frozen_payload.len() + unit.reset_rule.len()
-        });
-        if key
-            .len()
-            .saturating_add(payload_bytes)
-            .saturating_add(64)
-            .saturating_add(std::mem::size_of::<MemoEntry>())
-            > self.budget
-        {
-            return;
-        }
         let key = key.to_string();
         let entry = MemoEntry {
             projection_hash: block.content_hash,
-            caveman: caveman.cloned(),
+            caveman,
             excluded,
-            text_role: matches!(block.role.as_str(), "user" | "assistant"),
+            text_role: is_text_role(block),
             measured: measured.clone(),
         };
-        self.heap_bytes += key.capacity() + entry.heap_bytes();
-        self.entries.insert(key, entry);
+        let entry_heap = key.capacity() + entry.heap_bytes();
         // Deletions can reduce admission capacity while the bucket allocation stays live.
-        self.map_bytes = self
-            .map_bytes
-            .max(crate::retained_size::hash_map_allocation_bytes(&self.entries).saturating_add(16));
-        if self.retained_bytes() > self.budget {
-            *self = Self::new(self.budget);
+        let map_bytes = self.map_bytes.max(
+            crate::retained_size::hash_map_allocation_bytes_after_insert(&self.entries)
+                .saturating_add(16),
+        );
+        // The cache rejects over-budget entries instead of evicting existing entries.
+        if self
+            .heap_bytes
+            .saturating_add(entry_heap)
+            .saturating_add(map_bytes)
+            > self.budget
+        {
+            self.rejected += 1;
+            return;
         }
+        self.heap_bytes += entry_heap;
+        self.entries.insert(key, entry);
+        self.map_bytes = map_bytes
+            .max(crate::retained_size::hash_map_allocation_bytes(&self.entries).saturating_add(16));
+        debug_assert!(self.retained_bytes() <= self.budget);
     }
 
     fn retain_parts(&mut self, parts: &[TailHygienePartMeasurement]) {
@@ -228,31 +248,109 @@ impl TailHygieneMemo {
     }
 }
 
+/// One session's shared memo allocation: the `Arc` header plus `SessionMemo`.
+const SESSION_MEMO_ALLOCATION_BYTES: usize =
+    crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES + std::mem::size_of::<SessionMemo>();
+
+struct SessionMemo {
+    memo: Mutex<TailHygieneMemo>,
+    /// Retained bytes of `memo` after its last completed walk, readable without taking `memo`.
+    charged_bytes: AtomicUsize,
+}
+
 struct MemoSession {
     namespace: u64,
     id: Box<str>,
-    memo: TailHygieneMemo,
+    last_used: u64,
+    memo: Arc<SessionMemo>,
 }
 
-/// Fixed session slots bound container storage independently of payload budgets.
-#[derive(Default)]
+struct SessionTable {
+    tick: u64,
+    sessions: Vec<MemoSession>,
+}
+
+/// Bounded session table: the table lock covers lookup, insertion, and eviction only,
+/// while each session's memo has its own lock for the duration of a walk.
 pub(crate) struct HygieneMemos {
-    slots: [Mutex<Option<MemoSession>>; MEMO_SESSION_LIMIT],
-    hasher: RandomState,
+    table: Mutex<SessionTable>,
+    rejected_inserts: AtomicU64,
+}
+
+/// Snapshot of the memo table for module status reporting.
+pub(crate) struct MemoMetrics {
+    pub(crate) charged_bytes: usize,
+    pub(crate) session_count: usize,
+    pub(crate) rejected_inserts: u64,
+}
+
+impl Default for HygieneMemos {
+    fn default() -> Self {
+        Self {
+            table: Mutex::new(SessionTable {
+                tick: 0,
+                sessions: Vec::with_capacity(MEMO_SESSION_LIMIT),
+            }),
+            rejected_inserts: AtomicU64::new(0),
+        }
+    }
 }
 
 impl HygieneMemos {
-    fn slot_index(&self, namespace: u64, id: &str) -> usize {
-        (self.hasher.hash_one((namespace, id)) % MEMO_SESSION_LIMIT as u64) as usize
-    }
-
-    fn lock_slot(slot: &Mutex<Option<MemoSession>>) -> MutexGuard<'_, Option<MemoSession>> {
-        slot.lock().unwrap_or_else(|poisoned| {
+    fn lock_table(&self) -> MutexGuard<'_, SessionTable> {
+        self.table.lock().unwrap_or_else(|poisoned| {
             let mut guard = poisoned.into_inner();
-            *guard = None;
-            slot.clear_poison();
+            guard.sessions.clear();
+            self.table.clear_poison();
             guard
         })
+    }
+
+    fn lock_memo(session: &SessionMemo) -> MutexGuard<'_, TailHygieneMemo> {
+        session.memo.lock().unwrap_or_else(|poisoned| {
+            let mut guard = poisoned.into_inner();
+            *guard = TailHygieneMemo::new(guard.budget);
+            session.charged_bytes.store(0, Ordering::Relaxed);
+            session.memo.clear_poison();
+            guard
+        })
+    }
+
+    /// Returns the session's memo, creating it and evicting the least recently used
+    /// session when the table is full.
+    fn session_memo(&self, namespace: u64, id: &str) -> Arc<SessionMemo> {
+        let mut table = self.lock_table();
+        table.tick += 1;
+        let tick = table.tick;
+        if let Some(session) = table
+            .sessions
+            .iter_mut()
+            .find(|session| session.namespace == namespace && session.id.as_ref() == id)
+        {
+            session.last_used = tick;
+            return Arc::clone(&session.memo);
+        }
+        if table.sessions.len() >= MEMO_SESSION_LIMIT
+            && let Some(oldest) = table
+                .sessions
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, session)| session.last_used)
+                .map(|(index, _)| index)
+        {
+            table.sessions.swap_remove(oldest);
+        }
+        let memo = Arc::new(SessionMemo {
+            memo: Mutex::new(TailHygieneMemo::new(MEMO_SESSION_BYTES - id.len())),
+            charged_bytes: AtomicUsize::new(0),
+        });
+        table.sessions.push(MemoSession {
+            namespace,
+            id: id.into(),
+            last_used: tick,
+            memo: Arc::clone(&memo),
+        });
+        memo
     }
 
     pub(crate) fn with_session<R>(
@@ -261,64 +359,60 @@ impl HygieneMemos {
         id: &str,
         measure: impl FnOnce(&mut TailHygieneMemo) -> R,
     ) -> R {
-        let mut slot = Self::lock_slot(&self.slots[self.slot_index(namespace, id)]);
         if id.len() > MEMO_SESSION_BYTES {
             return measure(&mut TailHygieneMemo::new(0));
         }
-        if slot
-            .as_ref()
-            .is_none_or(|session| session.namespace != namespace || session.id.as_ref() != id)
-        {
-            *slot = Some(MemoSession {
-                namespace,
-                id: id.into(),
-                memo: TailHygieneMemo::new(MEMO_SESSION_BYTES - id.len()),
-            });
-        }
-        let session = slot.as_mut().expect("selected hygiene session");
-        let result = measure(&mut session.memo);
-        debug_assert!(session.id.len() + session.memo.retained_bytes() <= MEMO_SESSION_BYTES);
+        let session = self.session_memo(namespace, id);
+        let mut memo = Self::lock_memo(&session);
+        let rejected_before = memo.rejected;
+        let result = measure(&mut memo);
+        debug_assert!(id.len() + memo.retained_bytes() <= MEMO_SESSION_BYTES);
+        session
+            .charged_bytes
+            .store(memo.retained_bytes(), Ordering::Relaxed);
+        self.rejected_inserts
+            .fetch_add(memo.rejected - rejected_before, Ordering::Relaxed);
         result
     }
 
-    #[cfg(test)]
-    fn retained_bytes(&self) -> usize {
-        self.slots
-            .iter()
-            .fold(std::mem::size_of::<OnceLock<Self>>(), |bytes, slot| {
+    /// Sums the table container, each session's key, its shared memo allocation, and the
+    /// memo bytes charged after that session's last completed walk.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let table = self.lock_table();
+        table.sessions.iter().fold(
+            std::mem::size_of::<OnceLock<Self>>()
+                + table.sessions.capacity() * std::mem::size_of::<MemoSession>(),
+            |bytes, session| {
                 bytes
-                    + Self::lock_slot(slot).as_ref().map_or(0, |session| {
-                        session.id.len() + session.memo.retained_bytes()
-                    })
-            })
+                    + SESSION_MEMO_ALLOCATION_BYTES
+                    + session.id.len()
+                    + session.memo.charged_bytes.load(Ordering::Relaxed)
+            },
+        )
+    }
+
+    pub(crate) fn metrics(&self) -> MemoMetrics {
+        MemoMetrics {
+            charged_bytes: self.retained_bytes(),
+            session_count: self.lock_table().sessions.len(),
+            rejected_inserts: self.rejected_inserts.load(Ordering::Relaxed),
+        }
     }
 
     pub(crate) fn remove(&self, namespace: u64, id: &str) {
-        let mut slot = Self::lock_slot(&self.slots[self.slot_index(namespace, id)]);
-        if slot
-            .as_ref()
-            .is_some_and(|session| session.namespace == namespace && session.id.as_ref() == id)
-        {
-            *slot = None;
-        }
+        self.lock_table()
+            .sessions
+            .retain(|session| session.namespace != namespace || session.id.as_ref() != id);
     }
 
     pub(crate) fn remove_session(&self, id: &str) {
-        for slot in &self.slots {
-            let mut occupant = Self::lock_slot(slot);
-            if occupant
-                .as_ref()
-                .is_some_and(|session| session.id.as_ref() == id)
-            {
-                *occupant = None;
-            }
-        }
+        self.lock_table()
+            .sessions
+            .retain(|session| session.id.as_ref() != id);
     }
 
     pub(crate) fn clear(&self) {
-        for slot in &self.slots {
-            *Self::lock_slot(slot) = None;
-        }
+        self.lock_table().sessions.clear();
     }
 }
 
@@ -773,6 +867,7 @@ pub(crate) fn measure_tail_hygiene<'a>(
                 .is_some_and(|arc| reduced_arcs.contains(arc) || sentinel_arcs.contains(arc))
             || red_targets.contains(block.id.as_str());
         let caveman = caveman_units.get(block.id.as_str()).copied();
+        let caveman_fingerprint = caveman.map(caveman_fingerprint);
 
         let tag_number = block_tag_number(block, &tags_by_block, &tags_by_arc);
         let protected = block_is_protected(
@@ -782,16 +877,15 @@ pub(crate) fn measure_tail_hygiene<'a>(
             protected_block_ids,
             &protected_arc_ids,
         );
-        let measured = if let Some(measured) = memo.get(&key, block, caveman, excluded) {
+        let measured = if let Some(measured) = memo.get(&key, block, caveman_fingerprint, excluded)
+        {
             measured
         } else {
             let measured = if excluded {
                 excluded_part(&block.bytes)
             } else {
                 match block.wire.kind() {
-                    memory_store::BlockKind::Text { text }
-                        if block.role == "user" || block.role == "assistant" =>
-                    {
+                    memory_store::BlockKind::Text { text } if is_text_role(block) => {
                         let content =
                             caveman.map_or(text.as_str(), |unit| unit.frozen_payload.as_str());
                         let content = strip_channel1_reminder_spans(content);
@@ -840,7 +934,7 @@ pub(crate) fn measure_tail_hygiene<'a>(
                     memory_store::BlockKind::Text { .. } => excluded_part(&block.bytes),
                 }
             };
-            memo.insert(&key, block, caveman, excluded, &measured);
+            memo.insert(&key, block, caveman_fingerprint, excluded, &measured);
             measured
         };
         let active = measured.kind != TailHygienePartKind::Excluded;
@@ -1103,7 +1197,16 @@ mod tests {
             before,
             "memo hit must skip token lookup"
         );
-        assert_eq!(cold, warm, "warm-cache measurement diverged from cold");
+        assert_eq!(cold, warm, "warm-memo measurement diverged from cold");
+        let warm_tokens = measure(&mut TailHygieneMemo::default());
+        assert_eq!(
+            cold, warm_tokens,
+            "warm-token-cache measurement diverged from cold"
+        );
+        let after = crate::token_cache::local_stats();
+        assert_eq!(after.calls - before.calls, 3);
+        assert_eq!(after.hits - before.hits, 3);
+        assert_eq!(after.tokenized_bytes, before.tokenized_bytes);
         crate::token_cache::clear();
         let recold = measure(&mut TailHygieneMemo::default());
         assert_eq!(cold, recold, "cache clear changed the measurement");
@@ -1400,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn memo_bounds_sessions_bytes_resets_and_oversize_bypass() {
+    fn memo_bounds_sessions_bytes_and_refuses_over_budget_blocks() {
         let projection = project_messages(&[text("m", 1, "measured content")]).unwrap();
         let measure = |memo: &mut TailHygieneMemo| {
             measure_tail_hygiene(
@@ -1414,9 +1517,8 @@ mod tests {
             )
         };
         let memos = HygieneMemos::default();
-        let ids = slot_sessions(&memos);
-        let a = &ids[0][0];
-        let b = &ids[1][0];
+        let a = "session-a";
+        let b = "session-b";
         let expected = memos.with_session(1, a, measure);
         memos.with_session(1, b, measure);
         let before = crate::token_cache::local_stats();
@@ -1442,10 +1544,7 @@ mod tests {
         );
         assert!(memos.retained_bytes() <= MEMO_RETAINED_BYTES_BOUND);
         memos.clear();
-        assert_eq!(
-            memos.retained_bytes(),
-            std::mem::size_of::<OnceLock<HygieneMemos>>()
-        );
+        assert_eq!(memos.retained_bytes(), empty_table_bytes());
         let mut memo = TailHygieneMemo::default();
         measure(&mut memo);
         assert_memo_accounting(&memo);
@@ -1485,23 +1584,7 @@ mod tests {
             0,
             "eviction must release bucket storage"
         );
-        let mut core = CoreState::empty();
-        core.frozen_units.push(FrozenUnit {
-            key: "cav:m#0".into(),
-            kind: "caveman".into(),
-            frozen_payload: "x".repeat(MEMO_SESSION_BYTES + 1),
-            reset_rule: String::new(),
-            durability_class: cache_stability::DurabilityClass::Lineage,
-        });
-        measure_tail_hygiene(&projection, &core, None, &[], 0, &HashSet::new(), &mut memo);
-        assert_eq!(
-            memo.retained_bytes(),
-            0,
-            "oversize caveman payload must bypass"
-        );
-        assert_memo_accounting(&memo);
-        measure(&mut memo);
-        assert_memo_accounting(&memo);
+        assert_eq!(bounded.rejected, 1, "refused blocks are counted");
         measure_tail_hygiene(
             &project_messages(&[]).unwrap(),
             &CoreState::empty(),
@@ -1551,35 +1634,119 @@ mod tests {
         }
     }
 
-    fn slot_sessions(pool: &HygieneMemos) -> [Vec<String>; MEMO_SESSION_LIMIT] {
-        let mut ids: [Vec<String>; MEMO_SESSION_LIMIT] = std::array::from_fn(|_| Vec::new());
-        for i in 0..65_536 {
-            let id = format!("slot-session-{i}");
-            let bucket = &mut ids[pool.slot_index(1, &id)];
-            if bucket.len() < 2 {
-                bucket.push(id);
-            }
-            if ids.iter().all(|bucket| bucket.len() == 2) {
-                return ids;
-            }
+    #[test]
+    fn memo_over_budget_keeps_a_warm_prefix_instead_of_resetting() {
+        let many = project_messages(
+            &(0..64)
+                .map(|i| text(&format!("m{i}"), i, "tail text"))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let measure = |memo: &mut TailHygieneMemo| {
+            measure_tail_hygiene(
+                &many,
+                &CoreState::empty(),
+                None,
+                &[],
+                0,
+                &HashSet::new(),
+                memo,
+            )
+        };
+        let expected = measure(&mut TailHygieneMemo::new(0));
+        const BUDGET: usize = 4096;
+        let mut bounded = TailHygieneMemo::new(BUDGET);
+        assert_eq!(measure(&mut bounded), expected);
+        assert_memo_accounting(&bounded);
+        let warm = bounded.entries.keys().cloned().collect::<BTreeSet<_>>();
+        assert!(!warm.is_empty(), "budget must admit at least one block");
+        assert!(
+            warm.len() < many.blocks.len(),
+            "fixture must exceed the budget"
+        );
+        let prefix = expected
+            .parts
+            .iter()
+            .take(warm.len())
+            .map(|part| part.key.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            warm, prefix,
+            "the admitted working set is the projection prefix"
+        );
+        for _ in 0..3 {
+            let before = local_memo_stats();
+            assert_eq!(measure(&mut bounded), expected);
+            let after = local_memo_stats();
+            assert_eq!(
+                after.0 - before.0,
+                warm.len(),
+                "every admitted block must stay warm on later walks"
+            );
+            assert_eq!(
+                bounded.entries.keys().cloned().collect::<BTreeSet<_>>(),
+                warm
+            );
+            assert_memo_accounting(&bounded);
+            assert!(bounded.retained_bytes() <= BUDGET);
         }
-        panic!("hash fixture did not populate every slot");
+    }
+
+    #[test]
+    fn memo_retention_is_independent_of_caveman_payload_size() {
+        let projection = project_messages(&[text("m", 1, "source")]).unwrap();
+        let retained_with = |payload_len: usize| {
+            let mut core = CoreState::empty();
+            core.frozen_units.push(FrozenUnit {
+                key: "cav:m#0".into(),
+                kind: "caveman".into(),
+                frozen_payload: "x".repeat(payload_len),
+                durability_class: cache_stability::DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            });
+            let mut memo = TailHygieneMemo::default();
+            measure_tail_hygiene(&projection, &core, None, &[], 0, &HashSet::new(), &mut memo);
+            assert_eq!(
+                memo.entries.len(),
+                1,
+                "payload of {payload_len} bytes must memoize"
+            );
+            assert_memo_accounting(&memo);
+            memo.retained_bytes()
+        };
+        assert_eq!(
+            retained_with(16),
+            retained_with(2 * MEMO_SESSION_BYTES),
+            "the memo must not retain caveman payload bytes"
+        );
+    }
+
+    fn empty_table_bytes() -> usize {
+        std::mem::size_of::<OnceLock<HygieneMemos>>()
+            + MEMO_SESSION_LIMIT * std::mem::size_of::<MemoSession>()
+    }
+
+    fn session_ids(pool: &HygieneMemos) -> Vec<(u64, String)> {
+        pool.lock_table()
+            .sessions
+            .iter()
+            .map(|session| (session.namespace, session.id.to_string()))
+            .collect()
+    }
+
+    fn session_is_poisoned(pool: &HygieneMemos, namespace: u64, id: &str) -> bool {
+        pool.lock_table()
+            .sessions
+            .iter()
+            .find(|session| session.namespace == namespace && session.id.as_ref() == id)
+            .is_some_and(|session| session.memo.memo.is_poisoned())
     }
 
     fn assert_memo_accounting(memo: &TailHygieneMemo) -> usize {
         let heap = memo
             .entries
             .iter()
-            .map(|(key, entry)| {
-                key.capacity()
-                    + entry.measured.content_hash.capacity()
-                    + entry.caveman.as_ref().map_or(0, |unit| {
-                        unit.key.capacity()
-                            + unit.kind.capacity()
-                            + unit.frozen_payload.capacity()
-                            + unit.reset_rule.capacity()
-                    })
-            })
+            .map(|(key, entry)| key.capacity() + entry.measured.content_hash.capacity())
             .sum::<usize>();
         let table = if memo.entries.capacity() == 0 {
             0
@@ -1596,22 +1763,18 @@ mod tests {
     }
 
     #[test]
-    fn memo_slot_collisions_namespace_reentry_and_poison_are_cold_misses() {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
+    fn memo_namespaces_are_separate_and_the_least_recently_used_session_is_evicted() {
         let pool = HygieneMemos::default();
-        let ids = slot_sessions(&pool);
-        let a = &ids[0][0];
-        let collision = &ids[0][1];
-        let namespace_b = (2..65_536).find(|&ns| pool.slot_index(ns, a) == 0).unwrap();
+        let projection_for = |content: &str| project_messages(&[text("same", 1, content)]).unwrap();
         let mut last = None;
         for (namespace, id, content) in [
-            (1, a, "alpha"),
-            (1, collision, "foreign beta"),
-            (1, a, "alpha"),
-            (namespace_b, a, "other namespace"),
-            (1, a, "alpha"),
+            (1, "a", "alpha"),
+            (1, "b", "foreign beta"),
+            (1, "a", "alpha"),
+            (2, "a", "other namespace"),
+            (1, "a", "alpha"),
         ] {
-            let projection = project_messages(&[text("same", 1, content)]).unwrap();
+            let projection = projection_for(content);
             let measure = |memo: &mut TailHygieneMemo| {
                 measure_tail_hygiene(
                     &projection,
@@ -1625,10 +1788,6 @@ mod tests {
             };
             let reference = measure(&mut TailHygieneMemo::new(0));
             let measured = pool.with_session(namespace, id, |memo| {
-                assert!(
-                    memo.entries.is_empty(),
-                    "occupant mismatch must discard entries"
-                );
                 let result = measure(memo);
                 assert_memo_accounting(memo);
                 result
@@ -1639,8 +1798,63 @@ mod tests {
             }
             last = Some(measured);
         }
-        pool.remove(namespace_b, a);
-        pool.with_session(1, a, |memo| assert!(!memo.entries.is_empty()));
+        // Three distinct sessions coexist; only the second visit to (1, "a") and the last one were warm.
+        assert_eq!(
+            session_ids(&pool),
+            vec![
+                (1, "a".to_string()),
+                (1, "b".to_string()),
+                (2, "a".to_string())
+            ]
+        );
+        let before = crate::token_cache::local_stats();
+        pool.with_session(1, "a", |memo| {
+            assert!(!memo.entries.is_empty());
+            measure_tail_hygiene(
+                &projection_for("alpha"),
+                &CoreState::empty(),
+                None,
+                &[],
+                0,
+                &HashSet::new(),
+                memo,
+            );
+        });
+        assert_eq!(crate::token_cache::local_stats(), before);
+        pool.remove(2, "a");
+        assert_eq!(
+            session_ids(&pool),
+            vec![(1, "a".to_string()), (1, "b".to_string())]
+        );
+        pool.with_session(1, "a", |memo| assert!(!memo.entries.is_empty()));
+        pool.remove_session("a");
+        assert_eq!(session_ids(&pool), vec![(1, "b".to_string())]);
+
+        // Fill the table; touching "b" keeps it resident while the untouched oldest session is evicted.
+        pool.clear();
+        for i in 0..MEMO_SESSION_LIMIT {
+            pool.with_session(1, &format!("s{i}"), |_| ());
+        }
+        pool.with_session(1, "s0", |_| ());
+        pool.with_session(1, "overflow", |_| ());
+        let ids = session_ids(&pool);
+        assert_eq!(ids.len(), MEMO_SESSION_LIMIT);
+        assert!(
+            ids.contains(&(1, "s0".to_string())),
+            "recently used survives"
+        );
+        assert!(
+            !ids.contains(&(1, "s1".to_string())),
+            "least recently used is evicted"
+        );
+        assert!(ids.contains(&(1, "overflow".to_string())));
+        assert!(pool.retained_bytes() <= MEMO_RETAINED_BYTES_BOUND);
+    }
+
+    #[test]
+    fn poisoned_session_memo_recovers_cold_through_every_path() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let pool = HygieneMemos::default();
         let projection = project_messages(&[text("same", 1, "alpha")]).unwrap();
         let measure = |memo: &mut TailHygieneMemo| {
             measure_tail_hygiene(
@@ -1653,9 +1867,10 @@ mod tests {
                 memo,
             )
         };
+        pool.with_session(2, "a", measure);
         for recovery in ["use", "remove", "remove-session", "clear"] {
             assert!(
-                catch_unwind(AssertUnwindSafe(|| pool.with_session(1, a, |memo| {
+                catch_unwind(AssertUnwindSafe(|| pool.with_session(1, "a", |memo| {
                     measure(memo);
                     memo.heap_bytes = usize::MAX;
                     memo.map_bytes = usize::MAX;
@@ -1663,100 +1878,148 @@ mod tests {
                 })))
                 .is_err()
             );
-            assert!(pool.slots[0].is_poisoned());
+            assert!(session_is_poisoned(&pool, 1, "a"));
             match recovery {
-                "remove" => pool.remove(1, a),
-                "remove-session" => pool.remove_session(a),
+                "remove" => pool.remove(1, "a"),
+                "remove-session" => pool.remove_session("a"),
                 "clear" => pool.clear(),
                 "use" => {}
                 _ => unreachable!(),
             }
-            pool.with_session(1, a, |memo| {
+            pool.with_session(1, "a", |memo| {
                 assert!(memo.entries.is_empty());
                 assert_eq!(memo.retained_bytes(), 0);
                 assert_eq!(measure(memo), measure(&mut TailHygieneMemo::new(0)));
                 assert_memo_accounting(memo);
             });
-            assert!(!pool.slots[0].is_poisoned());
+            assert!(!session_is_poisoned(&pool, 1, "a"));
+            assert!(pool.retained_bytes() <= MEMO_RETAINED_BYTES_BOUND);
         }
-        pool.with_session(namespace_b, a, measure);
-        pool.remove_session(a);
-        pool.with_session(1, a, |memo| assert!(memo.entries.is_empty()));
-        pool.with_session(namespace_b, a, |memo| assert!(memo.entries.is_empty()));
+        pool.with_session(2, "a", measure);
+        pool.remove_session("a");
+        pool.with_session(1, "a", |memo| assert!(memo.entries.is_empty()));
+        pool.with_session(2, "a", |memo| assert!(memo.entries.is_empty()));
     }
 
     #[test]
-    fn noncolliding_memo_sessions_overlap_inside_slot_locks() {
+    fn distinct_sessions_neither_block_nor_evict_each_other_up_to_the_limit() {
         use std::sync::mpsc;
         use std::time::Duration;
         let pool = HygieneMemos::default();
-        let ids = slot_sessions(&pool);
+        let ids = (0..MEMO_SESSION_LIMIT)
+            .map(|i| format!("concurrent-session-{i}"))
+            .collect::<Vec<_>>();
+        let projection = project_messages(&[text("m", 1, "shared text")]).unwrap();
+        let measure = |memo: &mut TailHygieneMemo| {
+            measure_tail_hygiene(
+                &projection,
+                &CoreState::empty(),
+                None,
+                &[],
+                0,
+                &HashSet::new(),
+                memo,
+            )
+        };
         let (entered_tx, entered_rx) = mpsc::channel();
-        let (release_a, wait_a) = mpsc::channel();
-        let (release_b, wait_b) = mpsc::channel();
-        std::thread::scope(|scope| {
-            for (id, wait) in [(&ids[0][0], wait_a), (&ids[1][0], wait_b)] {
+        let releases = std::thread::scope(|scope| {
+            let mut releases = Vec::new();
+            for id in &ids {
+                let (release, wait) = mpsc::channel::<()>();
+                releases.push(release);
                 let entered = &entered_tx;
                 let pool = &pool;
                 scope.spawn(move || {
-                    pool.with_session(1, id, |_| {
+                    pool.with_session(1, id, |memo| {
+                        measure(memo);
                         entered.send(()).unwrap();
                         wait.recv_timeout(Duration::from_secs(10)).unwrap();
                     })
                 });
             }
-            let both_entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok()
-                && entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-            assert!(pool.slots[0].try_lock().is_err());
-            release_a.send(()).unwrap();
-            release_b.send(()).unwrap();
-            assert!(
-                both_entered,
-                "distinct slots must reach the gate before either is released"
+            let entered = (0..ids.len())
+                .filter(|_| entered_rx.recv_timeout(Duration::from_secs(5)).is_ok())
+                .count();
+            for release in &releases {
+                // A session that never reached the gate has already dropped its receiver.
+                let _ = release.send(());
+            }
+            assert_eq!(
+                entered,
+                ids.len(),
+                "every distinct session must reach the gate while the others hold theirs"
             );
+            releases
         });
+        drop(releases);
+        for id in &ids {
+            pool.with_session(1, id, |memo| {
+                assert!(
+                    !memo.entries.is_empty(),
+                    "{id} must survive {} concurrent sessions",
+                    ids.len()
+                );
+                let before = crate::token_cache::local_stats();
+                measure(memo);
+                assert_eq!(crate::token_cache::local_stats(), before, "{id} stays warm");
+            });
+        }
     }
 
     #[test]
-    fn all_memo_slots_near_budget_match_independent_retained_accounting() {
+    fn all_memo_sessions_near_budget_match_independent_retained_accounting() {
         let pool = HygieneMemos::default();
-        let ids = slot_sessions(&pool);
-        let projection = project_messages(&[text("m", 1, "source")]).unwrap();
-        let mut core = CoreState::empty();
-        core.frozen_units.push(FrozenUnit {
-            key: "cav:m#0".into(),
-            kind: "caveman".into(),
-            frozen_payload: "x".repeat(MEMO_SESSION_BYTES - 8192),
-            reset_rule: String::new(),
-            durability_class: cache_stability::DurabilityClass::Lineage,
-        });
-        let mut independent = std::mem::size_of::<OnceLock<HygieneMemos>>();
-        for bucket in &ids {
-            let id = &bucket[0];
-            pool.with_session(1, id, |memo| {
-                measure_tail_hygiene(&projection, &core, None, &[], 0, &HashSet::new(), memo);
+        // Enough blocks that the per-session budget refuses the tail of the walk.
+        let many = project_messages(
+            &(0..4_000)
+                .map(|i| text(&format!("m{i}"), i, "tail text"))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut independent = empty_table_bytes();
+        let mut rejected = 0;
+        for i in 0..MEMO_SESSION_LIMIT {
+            let id = format!("near-budget-{i}");
+            pool.with_session(1, &id, |memo| {
+                measure_tail_hygiene(
+                    &many,
+                    &CoreState::empty(),
+                    None,
+                    &[],
+                    0,
+                    &HashSet::new(),
+                    memo,
+                );
                 let bytes = id.len() + assert_memo_accounting(memo);
-                assert!(bytes > MEMO_SESSION_BYTES - 16_384 && bytes <= MEMO_SESSION_BYTES);
-                independent += bytes;
+                // Refusing the table's next doubling step leaves headroom below the budget.
+                assert!(bytes > MEMO_SESSION_BYTES / 2 && bytes <= MEMO_SESSION_BYTES);
+                assert!(memo.rejected > 0, "the fixture must exceed the budget");
+                assert_eq!(
+                    memo.entries.len() as u64 + memo.rejected,
+                    many.blocks.len() as u64
+                );
+                independent += SESSION_MEMO_ALLOCATION_BYTES + id.len() + memo.retained_bytes();
+                rejected += memo.rejected;
             });
         }
-        assert_eq!(
-            pool.slots
-                .iter()
-                .filter(|slot| HygieneMemos::lock_slot(slot).is_some())
-                .count(),
-            16
-        );
+        let metrics = pool.metrics();
+        assert_eq!(metrics.session_count, MEMO_SESSION_LIMIT);
+        assert_eq!(metrics.charged_bytes, independent);
+        assert_eq!(metrics.rejected_inserts, rejected);
         assert_eq!(pool.retained_bytes(), independent);
         assert_eq!(
             MEMO_RETAINED_BYTES_BOUND,
-            std::mem::size_of::<OnceLock<HygieneMemos>>() + 16 * MEMO_SESSION_BYTES
+            empty_table_bytes()
+                + MEMO_SESSION_LIMIT * (SESSION_MEMO_ALLOCATION_BYTES + MEMO_SESSION_BYTES)
         );
         assert!(independent <= MEMO_RETAINED_BYTES_BOUND);
         pool.clear();
+        assert_eq!(pool.retained_bytes(), empty_table_bytes());
+        assert_eq!(pool.metrics().session_count, 0);
         assert_eq!(
-            pool.retained_bytes(),
-            std::mem::size_of::<OnceLock<HygieneMemos>>()
+            pool.metrics().rejected_inserts,
+            rejected,
+            "the counter is monotonic"
         );
     }
 

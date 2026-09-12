@@ -71,8 +71,8 @@ needs usage at the emergency threshold so the floor reads run. The
 constructs the interleaving but records no marker.
 
 The witness is the foreign actor's own commit: record the `row_version` it
-returns through the second handle and its completion before the pass's first
-post-commit `cache_state` read begins, and compare it with the `row_version`
+returns through the second handle and its completion between two of the
+pass's post-commit `cache_state` reads, and compare it with the `row_version`
 the pass's transform committed. The pass's own post-commit read is C1's
 subject and is not the witness.
 
@@ -119,12 +119,15 @@ committed, releases the blocked producer, waits for the publish to leave the
 historian idle, and records the `row_version` that publish committed; after
 the pass it asserts the published version exceeds the transform's. Both values
 come from the store through the test's own handle, not from the pass's
-post-commit read, which is C1's subject. The pass's post-commit floor read is
-a [scalar read][floor-live] after this change and still observes the publish:
-the response carries the fold.
+post-commit read, which is C1's subject. The hook runs after the Emergency95
+[pre-floor read][pre-floor-live], so the publish lands between that read and
+`prepare_historian_fire`'s load; the [final floor read][floor-live] is a
+scalar read after this change and still observes the publish: the response
+carries the fold.
 
 The hook stays `#[cfg(test)]`; a campaign outside the unit-test crate still
 needs its own seam, as the investigation log records.
 
-[marker-test]: ../../../../../crates/daemon/src/lib.rs#L35984-L36056
-[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8432
+[marker-test]: ../../../../../crates/daemon/src/lib.rs#L36383-L36440
+[pre-floor-live]: ../../../../../crates/daemon/src/lib.rs#L8312-L8317
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8452-L8455

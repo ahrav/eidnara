@@ -22,10 +22,46 @@ use tokio_util::sync::CancellationToken;
 
 use crate::smart_note_evaluation::next_cron_occurrence;
 
-/// The one task the schedule key names.
+/// The task the user tier's schedule key names.
 pub(crate) const REVIEW_USER_MEMORIES_TASK: &str = "review-user-memories";
 /// Its identity on the lease ledger.
 pub(crate) const REVIEW_USER_MEMORIES_TASK_ID: i64 = 1;
+/// The bounded reclamation of obsolete message-index state.
+pub(crate) const MESSAGE_INDEX_CLEANUP_TASK: &str = "message-index-cleanup";
+pub(crate) const MESSAGE_INDEX_CLEANUP_TASK_ID: i64 = 2;
+
+/// The task a scheduled slot runs. Every kind is leased through the same ledger under its own task identity and its own ledger slot, so a claim a dead scheduler left on one kind is recovered by that kind's next acquisition and never consumes another kind's slot; the host decides what a kind does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ScheduledTask {
+    ReviewUserMemories,
+    /// No production host returns this kind: message-index cleanup has no enable path until its evidence gates exist, so only test hosts schedule it.
+    #[cfg_attr(not(test), expect(dead_code))]
+    MessageIndexCleanup,
+}
+
+impl ScheduledTask {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::ReviewUserMemories => REVIEW_USER_MEMORIES_TASK,
+            Self::MessageIndexCleanup => MESSAGE_INDEX_CLEANUP_TASK,
+        }
+    }
+
+    pub(crate) fn lease_id(self) -> i64 {
+        match self {
+            Self::ReviewUserMemories => REVIEW_USER_MEMORIES_TASK_ID,
+            Self::MessageIndexCleanup => MESSAGE_INDEX_CLEANUP_TASK_ID,
+        }
+    }
+
+    /// The ledger slot the kind's claims live in; slot recovery is keyed by it.
+    pub(crate) fn ledger_slot(self) -> i64 {
+        match self {
+            Self::ReviewUserMemories => SCHEDULER_SLOT,
+            Self::MessageIndexCleanup => SCHEDULER_SLOT + 1,
+        }
+    }
+}
 /// The ledger session every scheduled run is recorded under.
 pub(crate) const SCHEDULER_LEDGER_SESSION: &str = "eidnara-dreamer-scheduler";
 /// The scheduler's worker identity on the lease ledger; one slot per daemon.
@@ -62,6 +98,7 @@ impl SchedulerClock for WallClock {
 pub(crate) struct ScheduledProject {
     /// The authority project the receipt and lease are keyed by.
     pub(crate) project: String,
+    pub(crate) task: ScheduledTask,
     /// The bound route root the run's configuration and producer come from.
     pub(crate) route_root: PathBuf,
     pub(crate) authority_generation: u64,
@@ -142,9 +179,9 @@ pub(crate) struct DreamerScheduler {
     /// instance recorded before, so a claim left by a crashed scheduler is
     /// recovered by its successor under the shared protocol.
     registration_generation: Option<i64>,
-    /// The next cron instant per project, computed from the schedule the
-    /// project had when it was last seen.
-    next_due: HashMap<String, (String, i64)>,
+    /// The next cron instant per project and task, computed from the schedule
+    /// the project had when it was last seen.
+    next_due: HashMap<(String, ScheduledTask), (String, i64)>,
 }
 
 impl DreamerScheduler {
@@ -267,13 +304,16 @@ impl DreamerScheduler {
         projects: &'a [ScheduledProject],
         now_ms: i64,
     ) -> Vec<(i64, &'a ScheduledProject)> {
-        self.next_due
-            .retain(|project, _| projects.iter().any(|seen| seen.project == *project));
-        let mut due: BTreeMap<(i64, &str), &ScheduledProject> = BTreeMap::new();
+        self.next_due.retain(|(project, task), _| {
+            projects
+                .iter()
+                .any(|seen| seen.project == *project && seen.task == *task)
+        });
+        let mut due: BTreeMap<(i64, &str, ScheduledTask), &ScheduledProject> = BTreeMap::new();
         for project in projects {
             let entry = self
                 .next_due
-                .entry(project.project.clone())
+                .entry((project.project.clone(), project.task))
                 .or_insert_with(|| {
                     (
                         project.schedule.clone(),
@@ -287,17 +327,17 @@ impl DreamerScheduler {
                 );
             }
             if entry.1 <= now_ms {
-                due.insert((entry.1, project.project.as_str()), project);
+                due.insert((entry.1, project.project.as_str(), project.task), project);
             }
         }
         due.into_iter()
-            .map(|((due_at_ms, _), project)| (due_at_ms, project))
+            .map(|((due_at_ms, _, _), project)| (due_at_ms, project))
             .collect()
     }
 
     fn advance(&mut self, project: &ScheduledProject, now_ms: i64) {
         self.next_due.insert(
-            project.project.clone(),
+            (project.project.clone(), project.task),
             (
                 project.schedule.clone(),
                 next_due(&project.schedule, now_ms),
@@ -333,11 +373,11 @@ impl DreamerScheduler {
         };
         let claim: LeaseClaim = match store.acquire_dreamer_task(
             &project.project,
-            &slot_command_id(REVIEW_USER_MEMORIES_TASK, due_at_ms),
+            &slot_command_id(project.task.name(), due_at_ms),
             SCHEDULER_INSTANCE,
-            SCHEDULER_SLOT,
+            project.task.ledger_slot(),
             registration_generation,
-            REVIEW_USER_MEMORIES_TASK_ID,
+            project.task.lease_id(),
             due_at_ms,
             self.clock.now_ms(),
         ) {
@@ -365,9 +405,9 @@ impl DreamerScheduler {
         // The claim's `source_revision` is the due instant it was leased for:
         // this slot's for a fresh claim, an earlier one for a rebound claim.
         let leased_due_at_ms = claim.source_revision;
-        let command_id = slot_command_id(REVIEW_USER_MEMORIES_TASK, leased_due_at_ms);
+        let command_id = slot_command_id(project.task.name(), leased_due_at_ms);
         let outcome = host
-            .run_task(project, REVIEW_USER_MEMORIES_TASK, &command_id)
+            .run_task(project, project.task.name(), &command_id)
             .await;
         let response = match &outcome {
             TaskRunOutcome::Ran { response } => response.clone(),
@@ -388,7 +428,7 @@ impl DreamerScheduler {
             &claim.claim_id,
             &format!("{command_id}:complete"),
             SCHEDULER_INSTANCE,
-            SCHEDULER_SLOT,
+            project.task.ledger_slot(),
             &response.to_string(),
             self.clock.now_ms(),
         ) {
@@ -586,6 +626,7 @@ mod tests {
     fn project(store: &MemoryStore, identity: &str, schedule: &str) -> ScheduledProject {
         ScheduledProject {
             project: identity.to_string(),
+            task: ScheduledTask::ReviewUserMemories,
             route_root: PathBuf::from("/project"),
             authority_generation: activate(store, identity),
             schedule: schedule.to_string(),
@@ -780,12 +821,12 @@ mod tests {
             );
         }
         assert_eq!(
-            scheduler.next_due["git:a"].1,
+            scheduler.next_due[&("git:a".to_string(), ScheduledTask::ReviewUserMemories)].1,
             T0 + 45 * MINUTE_MS,
             "a's run crossed the 30-minute slot; its next instant counts from the post-run clock"
         );
         assert_eq!(
-            scheduler.next_due["git:b"].1,
+            scheduler.next_due[&("git:b".to_string(), ScheduledTask::ReviewUserMemories)].1,
             T0 + 60 * MINUTE_MS,
             "b's run crossed the 45-minute slot"
         );
@@ -1068,17 +1109,21 @@ mod tests {
     }
 
     fn scheduler_holds_no_live_claim(store: &MemoryStore, identity: &str) -> bool {
+        holds_no_live_claim(store, identity, ScheduledTask::ReviewUserMemories)
+    }
+
+    fn holds_no_live_claim(store: &MemoryStore, identity: &str, task: ScheduledTask) -> bool {
         // A fresh acquisition for a far-future slot leases at once only when
         // nothing live holds the task; abandon it so the ledger is unchanged.
         let probe = T0 + 1_000 * MINUTE_MS;
         match store
             .acquire_dreamer_task(
                 identity,
-                &command(probe),
+                &slot_command_id(task.name(), probe),
                 "probe",
-                0,
+                task.ledger_slot(),
                 1,
-                REVIEW_USER_MEMORIES_TASK_ID,
+                task.lease_id(),
                 probe,
                 probe,
             )
@@ -1086,7 +1131,13 @@ mod tests {
         {
             LeaseAcquireOutcome::Claim { claim, .. } => {
                 store
-                    .abandon_dreamer_task(identity, &claim.claim_id, "probe", 0, probe)
+                    .abandon_dreamer_task(
+                        identity,
+                        &claim.claim_id,
+                        "probe",
+                        task.ledger_slot(),
+                        probe,
+                    )
                     .unwrap();
                 true
             }
@@ -1287,6 +1338,128 @@ mod tests {
                 .await
                 .expect("run returns once cancelled")
                 .unwrap();
+        }
+    }
+
+    /// A cleanup slot beside the review slot: both are leased under their own task identity through the same ledger and clock, the review task's events, command ids, and schedule are exactly what they are without the cleanup task, a backlog drains oldest first across both kinds, and a predecessor's live cleanup claim is rebound instead of dispatched twice.
+    #[tokio::test]
+    async fn a_cleanup_slot_shares_the_ledger_without_changing_the_review_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let review = project(&store, "git:a", "*/15 * * * *");
+        let cleanup = ScheduledProject {
+            task: ScheduledTask::MessageIndexCleanup,
+            schedule: "*/30 * * * *".to_string(),
+            ..review.clone()
+        };
+        let host = scripted(&store, vec![cleanup.clone(), review.clone()]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = DreamerScheduler::new(clock.shared());
+
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert_eq!(ran(&events), vec![("git:a", T0 + 15 * MINUTE_MS)]);
+        assert_eq!(
+            host.runs.lock().unwrap().as_slice(),
+            &[("git:a".to_string(), command(T0 + 15 * MINUTE_MS))],
+            "the cleanup schedule is not due yet, and the review run is unchanged"
+        );
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert_eq!(
+            ran(&events),
+            vec![
+                ("git:a", T0 + 30 * MINUTE_MS),
+                ("git:a", T0 + 30 * MINUTE_MS)
+            ]
+        );
+        let runs = host.runs.lock().unwrap().clone();
+        assert_eq!(
+            runs[1..]
+                .iter()
+                .map(|(_, command)| command.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                slot_command_id(MESSAGE_INDEX_CLEANUP_TASK, T0 + 30 * MINUTE_MS),
+                command(T0 + 30 * MINUTE_MS),
+            ]
+            .iter()
+            .map(String::as_str)
+            .collect(),
+            "each task runs under its own command id for the shared instant"
+        );
+        // Both slots ended on the ledger under their own task identity.
+        for task in [
+            ScheduledTask::ReviewUserMemories,
+            ScheduledTask::MessageIndexCleanup,
+        ] {
+            let state = store
+                .acquire_dreamer_task(
+                    "git:a",
+                    &slot_command_id(task.name(), T0 + 30 * MINUTE_MS),
+                    SCHEDULER_INSTANCE,
+                    task.ledger_slot(),
+                    scheduler.registration_generation.unwrap(),
+                    task.lease_id(),
+                    T0 + 30 * MINUTE_MS,
+                    clock.now_ms(),
+                )
+                .unwrap();
+            assert!(
+                matches!(state, LeaseAcquireOutcome::Terminal { ref kind, .. } if kind == "applied"),
+                "{task:?}: {state:?}"
+            );
+        }
+        // The same instant does not run either task twice.
+        assert!(scheduler.tick(&host).await.is_empty());
+
+        // A scheduler died holding a cleanup slot: its successor, ranked above it by the ledger, rebinds that claim when the cleanup task next comes due and dispatches the interrupted slot once, under its command id; the review slot runs as always.
+        let generation = scheduler.registration_generation.unwrap();
+        let stranded_due = T0 + 45 * MINUTE_MS;
+        let stranded = match store
+            .acquire_dreamer_task(
+                "git:a",
+                &slot_command_id(MESSAGE_INDEX_CLEANUP_TASK, stranded_due),
+                SCHEDULER_INSTANCE,
+                ScheduledTask::MessageIndexCleanup.ledger_slot(),
+                generation,
+                MESSAGE_INDEX_CLEANUP_TASK_ID,
+                stranded_due,
+                T0 + 60 * MINUTE_MS - 1,
+            )
+            .unwrap()
+        {
+            LeaseAcquireOutcome::Claim { claim, .. } => claim,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(stranded.source_revision, stranded_due);
+        let clock = ManualClock::at(T0 + 30 * MINUTE_MS + 1);
+        let host = scripted(&store, vec![cleanup, review]);
+        let mut successor = DreamerScheduler::new(clock.shared());
+        assert!(successor.tick(&host).await.is_empty());
+        clock.advance(30 * MINUTE);
+        let events = successor.tick(&host).await;
+        assert_eq!(
+            ran(&events),
+            vec![("git:a", stranded_due), ("git:a", stranded_due)],
+            "the review slot that came due at 45 minutes, then the cleanup slot rebound to the stranded claim"
+        );
+        assert_eq!(
+            host.runs.lock().unwrap().as_slice(),
+            &[
+                ("git:a".to_string(), command(stranded_due)),
+                (
+                    "git:a".to_string(),
+                    slot_command_id(MESSAGE_INDEX_CLEANUP_TASK, stranded_due)
+                ),
+            ]
+        );
+        for task in [
+            ScheduledTask::ReviewUserMemories,
+            ScheduledTask::MessageIndexCleanup,
+        ] {
+            assert!(holds_no_live_claim(&store, "git:a", task), "{task:?}");
         }
     }
 }

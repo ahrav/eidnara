@@ -1887,3 +1887,99 @@ fn name_only_remediation_changes_no_descriptor_input() {
     assert_eq!(again.occurrence_id, before.occurrence_id);
     assert_eq!(again.lineage_id, before.lineage_id);
 }
+
+/// Retained evidence no descriptor names can be retired by its evidence object, which also lets the artifact leave the live inventory; evidence a live descriptor cites is refused and the commit rolls back; a non-evidence object is not an evidence target.
+#[test]
+fn retiring_evidence_invalidates_uncited_evidence_and_refuses_cited_evidence() {
+    let fixture = Fixture::open();
+    let orphan = fixture.retain("orphan", "text nobody published");
+    let cited = fixture.retain("cited", "text a descriptor names");
+    let (descriptor, _, _) = fixture
+        .publish(
+            "cited",
+            &request(message(MSG_A, "1"), &cited, "text a descriptor names"),
+        )
+        .unwrap();
+    let tip = fixture.store.tip().unwrap();
+
+    // The orphan's evidence object is retired: the registry row is invalidated and the outbox names the change.
+    let receipt = fixture
+        .store
+        .commit(intent("retire-orphan"), |envelope| {
+            let outcome = envelope.retire_evidence("evidence-object-orphan")?;
+            assert_eq!(outcome.object_kind, "evidence");
+            Ok(outcome.object_id)
+        })
+        .unwrap();
+    assert_eq!(receipt.result, "evidence-object-orphan");
+    let (_, states) = fixture
+        .store
+        .object_states(&["evidence-object-orphan".to_string()])
+        .unwrap();
+    let state = states[0].as_ref().unwrap();
+    assert_eq!(
+        state.object.invalidated_commit_seq,
+        Some(receipt.commit_seq)
+    );
+    assert_eq!(
+        fixture.outbox_changes(receipt.commit_seq, &["text nobody published"]),
+        vec![("evidence_retire".to_string(), None)]
+    );
+    // A descriptor can no longer cite the retired evidence.
+    assert_eq!(
+        fixture
+            .publish(
+                "late",
+                &request(message(MSG_B, "1"), &orphan, "text nobody published"),
+            )
+            .unwrap_err(),
+        SourceDescriptorError::EvidenceMissing
+    );
+    // A second retirement finds no live evidence object.
+    assert_eq!(
+        fixture
+            .store
+            .commit(intent("retire-orphan-again"), |envelope| {
+                envelope.retire_evidence("evidence-object-orphan")?;
+                Ok(String::new())
+            })
+            .unwrap_err(),
+        KernelError::NotFound
+    );
+
+    // Evidence a live descriptor cites stays live: the retirement conflicts and the commit rolls back.
+    let tip_before_conflict = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .commit(intent("retire-cited"), |envelope| {
+                envelope.retire_evidence("evidence-object-cited")?;
+                Ok(String::new())
+            })
+            .unwrap_err(),
+        KernelError::Conflict
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip_before_conflict);
+    assert_eq!(fixture.live(&descriptor.object_id), Some(true));
+    let (_, states) = fixture
+        .store
+        .object_states(&["evidence-object-cited".to_string()])
+        .unwrap();
+    assert_eq!(
+        states[0].as_ref().unwrap().object.invalidated_commit_seq,
+        None
+    );
+
+    // A descriptor object is not evidence.
+    assert_eq!(
+        fixture
+            .store
+            .commit(intent("retire-descriptor-as-evidence"), |envelope| {
+                envelope.retire_evidence(&descriptor.object_id)?;
+                Ok(String::new())
+            })
+            .unwrap_err(),
+        KernelError::NotFound
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip + 1);
+}
