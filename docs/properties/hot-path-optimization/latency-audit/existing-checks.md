@@ -194,8 +194,10 @@ not performance measurements or a full-workspace gate.
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | Commit redacts the core payload, preserves legacy ids, and refuses an integrity secret in `meta`. | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | New-versus-existing session is decided inside the fenced transaction. | unaudited |
 | [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` is pinned on open and re-pinned per fenced write. | unaudited |
-| [`meta_scalar_reads_agree_with_the_full_deserialization`][t-scalar] | Each scalar `meta` read equals the full deserialization where it succeeds and fails where it fails on `meta`; a corrupt `core_state` fails only the full load. | unaudited |
-| [`a_steady_pass_loads_the_full_cache_state_row_once_before_the_transform`][t-load-count] | A steady pass runs the full row select once before the transform and once after the commit, split by the interleave hook, on a handle that was never evicted. | unaudited |
+| [`meta_scalar_reads_agree_with_the_full_deserialization`][t-scalar] | Each scalar `meta` read and the `meta`-only load equal the full deserialization where it succeeds and fail where it fails on `meta`; a corrupt `core_state` fails only the full load. | unaudited |
+| [`cache_state_full_load_counters_key_on_the_prepared_statement`][t-counters] | The full-select run and eviction counters key on the prepared statement text; a cache of one alternating two statements records one re-creation. | unaudited |
+| [`a_steady_pass_loads_meta_once_before_the_transform_and_the_full_row_once_after`][t-load-count] | A steady pass runs the `meta` select once and the full select never before the transform, and the full select once after the commit, split by the interleave hook, on handles that were never evicted. | unaudited |
+| [`pass_state_load_has_its_own_timing_bucket`][t-timing] | The pre-transform `meta` load is reported as the `pass_state_load` pass-trace bucket, present and non-zero on a steady pass. | unaudited |
 | [`single_pass_preparation_reports_change_and_validates_unwalked_keys`][t-single-pass] | Clean input returns byte-identical with `changed` false; a substitution sets `changed` and records one detection; a secret-bearing key under an integrity- or identity-named container is refused. | unaudited |
 | [`a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector`][t-refusal-order] | The `keyed` store fixture, serialized and prepared directly, is refused with one detection in the caller's vector, so the store test's receipt count discriminates. | unaudited |
 | [`cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key`][t-meta-bytes] | Through `commit`: clean `meta` is stored as its serialization; a nested map value secret is substituted and recorded on the `meta` scan; a nested map key secret, preceded in walk order by a substituted value, is refused with no row and no added receipt. | unaudited |
@@ -656,13 +658,19 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
-[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15238-L15441
-[t-load-count]: ../../../../crates/daemon/src/lib.rs#L24667-L24710
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15320-L15537
+[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15544-L15572
+[t-load-count]: ../../../../crates/daemon/src/lib.rs#L24693-L24745
+[t-timing]: ../../../../crates/daemon/src/lib.rs#L24751-L24763
+[t-phase]: ../../../../crates/daemon/src/lib.rs#L24769-L24782
 
-The two checks above were added with the single-load pass (implementation base
-`96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage units);
-their links are to the live tree.
-[t-phase]: ../../../../crates/daemon/src/lib.rs#L24716-L24729
-[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15537-L15590
-[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L15592-L15629
+The five checks above were added with the single-load pass (implementation
+base `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage
+units); their links are to the live tree.
+
+The three preparation checks were added with the single-pass `meta`
+preparation; their links are to the live tree.
+
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15631-L15684
+[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L15686-L15723
 [t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

@@ -199,7 +199,7 @@ branch as well and passing in isolation.
 [walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3388-L3394
 [collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3217
 [unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3483-L3485
-[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15717-L15729
-[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15590
-[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15592-L15629
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15811-L15823
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15631-L15684
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15686-L15723
 [store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

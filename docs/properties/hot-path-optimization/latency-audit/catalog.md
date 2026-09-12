@@ -691,19 +691,23 @@ Exercised: partial - The no-fire CAS test and the emergency interleave test
 exercise the post-commit load. The
 [memory-store differential test](evidence/consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence)
 compares the `revert_epoch`, `historian.state`, and
-`publication_floor_ordinal` scalar reads with `MemoryStore::load` over absent
-keys, JSON `null`, booleans, unknown variants, negative and textual epochs, a
-non-object `historian`, JSON5, and malformed `meta`; the daemon load-count test
-shows one pre-transform full load and one post-commit full load per steady
-pass, split by the interleave hook; the durable-phase test exercises
-`historian_active` on every `PassState`.
+`publication_floor_ordinal` scalar reads and the `meta`-only load with
+`MemoryStore::load` over absent keys, JSON `null`, booleans, unknown variants,
+negative and textual epochs, a non-object `historian`, JSON5, malformed `meta`,
+and malformed `core_state`; the daemon load-count test shows one pre-transform
+`meta` load, no pre-transform full load, and one post-commit full load per
+steady pass, split by the interleave hook, on handles the probe shows were
+never re-created; the durable-phase test exercises `historian_active` on every
+`PassState`.
 Guarantee: Consolidating or narrowing `cache_state` loads never changes what
 any consumer observes: a post-commit consumer sees its own commit, and a
-scalar projection decodes its field as the full load does and fails where the
-full load fails on that field; the per-field divergences (a corrupt
-`core_state`, a corrupt sibling field, a non-object ancestor, an integer above
-`i64::MAX`) are recorded in the evidence and no consumer proceeds on a row the
-full load would have refused.
+scalar or `meta`-only projection decodes its field as the full load does and
+fails where the full load fails on that field; the per-column and per-field
+divergences (a corrupt `core_state`, a corrupt sibling field, a non-object
+ancestor, an integer above `i64::MAX`) are recorded in the evidence, and a
+pre-transform consumer that proceeds on a row whose `core_state` the full load
+refuses does so only in a pass the transform's own snapshot then rejects before
+any commit.
 Check: `always` - Freshness: within one pass, every `cache_state` read that
 executes after `commit_transform`, [`descend_lineage`][descend],
 [`truncate_compartments_for_revert`][truncate], or an awaited historian
@@ -2651,7 +2655,7 @@ evaluation of this area and its disposition are recorded in
 [rejected]: ../../../../crates/memory-store/src/lib.rs#L6691-L6744
 [sched-history]: ../../../../crates/memory-store/src/lib.rs#L6792-L6825
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L767-L784
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8569-L8578
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8614-L8623
 [commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8427-L8494
 [json-content]: ../../../../crates/memory-store/src/lib.rs#L2207-L2217
 [record-scan]: ../../../../crates/memory-store/src/lib.rs#L2224-L2234
