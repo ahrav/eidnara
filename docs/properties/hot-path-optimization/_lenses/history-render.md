@@ -34,5 +34,5 @@ units while preserving existing m0; pressure refold may rematerialize m0.
 [cache]: ../../../../crates/daemon/src/token_cache.rs#L165-L180
 [goldens]: ../../../../crates/daemon/src/decay_render.rs#L614-L800
 [dependency]: ../../../../crates/daemon/Cargo.toml#L21-L32
-[soft]: ../../../../crates/daemon/src/transform.rs#L4455-L4507
+[soft]: ../../../../crates/daemon/src/transform.rs#L4458-L4510
 [defer]: ../../../../crates/cache-stability/src/lib.rs#L221-L287

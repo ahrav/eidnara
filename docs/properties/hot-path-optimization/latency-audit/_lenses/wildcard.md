@@ -593,23 +593,23 @@ call site.
 [pm-body]: ../../../../../crates/host-runtime/tests/support/perf_measurement.rs#L16-L19
 [ring-body]: ../../../../../crates/host-runtime/benches/support/ring.rs#L77
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12389-L12394
-[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27680-L27685
+[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12392-L12397
+[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27683-L27688
 
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8122-L8139
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8145-L8200
-[h-call]: ../../../../../crates/daemon/src/lib.rs#L8193-L8199
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8470-L8495
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14411
-[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14470-L14488
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14492-L14514
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1205
-[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1207-L1218
-[fmt]: ../../../../../crates/daemon/src/transform.rs#L1224-L1357
-[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2381
-[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2860
-[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12239
-[t-line]: ../../../../../crates/daemon/src/transform.rs#L12289
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8164-L8181
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8187-L8250
+[h-call]: ../../../../../crates/daemon/src/lib.rs#L8243-L8249
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8513-L8538
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14455
+[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14514-L14532
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14536-L14558
+[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
+[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
+[fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
+[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2384
+[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2863
+[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12242
+[t-line]: ../../../../../crates/daemon/src/transform.rs#L12292
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
@@ -631,15 +631,15 @@ call site.
 [t-tc-stats]: ../../../../../crates/daemon/src/token_cache.rs#L249
 [t-tc-alias]: ../../../../../crates/daemon/src/token_cache.rs#L266
 [th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
-[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1807-L1823
+[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
 [declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
 [declared]: ../../../../../crates/daemon/src/lib.rs#L2250-L2264
-[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2844-L2848
-[floor]: ../../../../../crates/daemon/src/transform.rs#L5846
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4306-L4317
-[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8569
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24455-L24466
+[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2851
+[floor]: ../../../../../crates/daemon/src/transform.rs#L5849
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
+[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7163
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8572
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24458-L24469
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148
 
 [eval]: ../../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
@@ -664,8 +664,8 @@ call site.
 [edge-margin]: ../../../../../crates/context-core/src/redaction.rs#L380-L385
 [t-windows]: ../../../../../crates/context-core/src/redaction.rs#L827-L856
 [t-only-path]: ../../../../../crates/context-core/src/redaction.rs#L857
-[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2070-L2078
-[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2357-L2392
+[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2064-L2072
+[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2351-L2386
 
 [snap-build]: ../../../../../crates/daemon/src/historian_chunk.rs#L417-L429
 [as-item]: ../../../../../crates/daemon/src/historian_chunk.rs#L37-L46
@@ -674,7 +674,7 @@ call site.
 [t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1749-L1760
 [t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1762-L1763
 [fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
-[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L588
+[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L582
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925
@@ -698,12 +698,12 @@ call site.
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4563-L4572
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4580-L4589
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4797
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5058
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5375
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11795
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4832
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5093
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5410
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11839
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288
@@ -717,8 +717,8 @@ call site.
 [t-hostile]: ../../../../../crates/daemon/src/config.rs#L1722
 [t-mtime]: ../../../../../crates/daemon/src/config.rs#L2165-L2202
 
-[open-sqlite]: ../../../../../crates/storage/src/lib.rs#L1117-L1125
-[classify]: ../../../../../crates/storage/src/lib.rs#L1644-L1674
+[open-sqlite]: ../../../../../crates/storage/src/lib.rs#L1141-L1149
+[classify]: ../../../../../crates/storage/src/lib.rs#L1668-L1698
 [forbid-daemon]: ../../../../../crates/daemon/src/lib.rs
 [forbid-ms]: ../../../../../crates/memory-store/src/lib.rs
 [forbid-cc]: ../../../../../crates/context-core/src/lib.rs

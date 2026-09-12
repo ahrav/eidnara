@@ -122,18 +122,18 @@ tests cover an absent m0, a placeholder, empty content, and warm cache hits.
 The update-count source question is resolved by retirement, not by inventing
 a writer or treating an unreachable condition as covered.
 
-[soft-arm]: ../../../../../crates/daemon/src/transform.rs#L4292-L4305
-[soft-m1-compose]: ../../../../../crates/daemon/src/transform.rs#L4303
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4306-L4317
-[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4306-L4324
-[refold-branch]: ../../../../../crates/daemon/src/transform.rs#L4325-L4352
-[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1865-L1867
+[soft-arm]: ../../../../../crates/daemon/src/transform.rs#L4295-L4308
+[soft-m1-compose]: ../../../../../crates/daemon/src/transform.rs#L4306
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
+[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4309-L4327
+[refold-branch]: ../../../../../crates/daemon/src/transform.rs#L4328-L4355
+[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1868-L1870
 [m1-struct]: ../../../../../crates/daemon/src/m1_compose.rs#L92-L101
 [m1-compose]: ../../../../../crates/daemon/src/m1_compose.rs#L160-L237
 [m1-trim]: ../../../../../crates/daemon/src/m1_compose.rs#L194-L208
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
 [assemble]: ../../../../../crates/daemon/src/memory_render.rs#L206-L231
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8163-L8166
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8205-L8208
 [h1]: ../../catalog.md#history-budget-selection-preserves-reference-bytes
 [h2]: ../../catalog.md#history-budget-boundaries-remain-distinct

@@ -160,7 +160,7 @@ deadline arm and the owned `into_parts` cases only.
 [res-write]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2519-L2531
 [commit-underfill]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2533-L2570
 [res-drop]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2587-L2594
-[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12021-L12077
+[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12065-L12121
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
 [wire63]: ../../../../host-wire-protocol.md#L314
 [hr-terminal]: ../../../host-runtime/catalog.md#req-a-an-admitted-routed-request-emits-at-most-one-terminal-frame

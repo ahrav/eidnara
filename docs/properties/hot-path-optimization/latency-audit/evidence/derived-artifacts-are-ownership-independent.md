@@ -555,10 +555,10 @@ latency.
 [canonical-keys]: ../../../../../crates/daemon/src/served_json.rs#L218
 [canonical-test-entry]: ../../../../../crates/daemon/src/served_json.rs#L116-L119
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
-[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13794
+[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13797
 [canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L252-L279
-[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11823-L11845
-[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13939
+[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11867-L11889
+[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13942
 [canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L171
 
 [bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
@@ -590,8 +590,8 @@ latency.
 [fp-reuse]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L164-L216
 [ser-served]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2016
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2031
+[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2019
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2034
 [prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
 [sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
 [sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16632

@@ -64,5 +64,5 @@ are unaudited, and no new physical-completion trace runs here.
 [cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L937-L954
 [close]: ../../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [wire]: ../../../host-wire-protocol.md#L765-L781
-[transform]: ../../../../crates/daemon/src/lib.rs#L8138-L8202
+[transform]: ../../../../crates/daemon/src/lib.rs#L8180-L8252
 [overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L832-L887

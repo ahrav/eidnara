@@ -249,8 +249,8 @@ two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
 [pass-load]: ../../../../../crates/daemon/src/lib.rs#L8119
-[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6386-L6398
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4670-L4671
+[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6380-L6392
+[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4664-L4665
 [pass-state]: ../../../../../crates/daemon/src/lib.rs#L3506-L3510
 [delta]: ../../../../../crates/daemon/src/lib.rs#L4205
 [lookup]: ../../../../../crates/daemon/src/lib.rs#L4316
@@ -259,14 +259,14 @@ branch as well and passing in isolation.
 [run-transform]: ../../../../../crates/daemon/src/lib.rs#L8220
 [pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
-[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4697-L4698
+[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4691-L4692
 [floor-live]: ../../../../../crates/daemon/src/lib.rs#L8215
-[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6479-L6494
-[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6441-L6453
-[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6459-L6473
-[select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4675-L4691
-[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15283-L15500
-[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15507-L15535
+[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6473-L6488
+[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6435-L6447
+[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6453-L6467
+[select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4669-L4685
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15277-L15494
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15501-L15529
 [load-count]: ../../../../../crates/daemon/src/lib.rs#L24693-L24745
 [timing-test]: ../../../../../crates/daemon/src/lib.rs#L24751-L24763
 [phase-test]: ../../../../../crates/daemon/src/lib.rs#L24769-L24782
