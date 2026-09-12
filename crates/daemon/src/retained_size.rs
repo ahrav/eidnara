@@ -54,6 +54,21 @@ pub(crate) fn value_retained_bytes(value: &Value) -> usize {
     size_of::<Value>().saturating_add(value_heap_bytes(value))
 }
 
+/// Consumes all pointee sizes, adding one Arc header per value and vector capacity.
+pub(crate) fn shared_value_vec_retained_bytes(
+    capacity: usize,
+    value_sizes: impl IntoIterator<Item = usize>,
+) -> usize {
+    value_sizes.into_iter().fold(
+        capacity.saturating_mul(size_of::<std::sync::Arc<Value>>()),
+        |total, value_bytes| {
+            total
+                .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
+                .saturating_add(value_bytes)
+        },
+    )
+}
+
 /// Estimates heap bytes reachable from a JSON value.
 ///
 /// String and vector branches charge capacity. Object branches charge entry

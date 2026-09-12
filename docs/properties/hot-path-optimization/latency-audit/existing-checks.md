@@ -66,7 +66,9 @@ not the handler.
 | [`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline`][t-parked] | Reused `content_hash` fingerprints and `canonical_bytes` equal a full rehash. | unaudited |
 | [`served_fingerprint_block_ids_pin_flat_mid_index_format`][t-fpids] | Fingerprint block ids are `mid#index` and synthetic ids. | unaudited |
 | [`transform_segments_preserve_existing_golden_bytes`][t-segments] | `Exact` segments concatenate into the golden body. | unaudited |
-| [`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`][t-native-inc] | The native prefix is replayed, the tail encoded, and the differential is live. | unaudited |
+| [`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`][t-native-inc] | Real tail expansion shares native values and sidecar metadata. Fresh, reattached, and shared replay produce equal native bytes and projected identity data. At most two served tail messages are encoded; prefix chunks retain pointer identity. The warm request charge equals a fresh walk using the same size estimator, independently of cached charges. The compiled test setting enables the native differential; the negative controls below verify detection. | unaudited |
+| [`native_delta_ingress_core_is_independent_of_changed_output_messages`][t-native-ingress] | Equal but separately allocated ingress/output values share output chunks. Changed output cannot replace raw ingress. Snapshot fallback retains request pointers after native-cache eviction. Cached request charges match capacity-based walks including Arc headers. | unaudited |
+| [`native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate`][t-native-charge-floor] | A scalar-dense raw allocation exceeds its sidecar serialized-size estimate, so the shared raw pointer retains its ingress allocation charge. Full and degraded sidecars preserve ingress/output pointer deduplication, while equal values in distinct allocations retain distinct charges. Request charges remain independent. | unaudited |
 | [`differential_assert_rejects_frontier_inside_mutated_native_region`][t-native-reject] | The differential panics on a corrupt native frontier. | unaudited |
 | [`frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits`][t-vacuity] | Same-length edits and repeats are not vacuously reused. | unaudited |
 | [`duplicate_tool_use_assert_covers_incremental_native_suffix`][t-dup] | Tool-use ids are unique across the cached prefix and encoded suffix. | unaudited |
@@ -383,28 +385,30 @@ not a claim that no related check exists anywhere in the repository.
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2036
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1404
 [t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1603
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36402
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36521
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1589
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22228
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L20956
-[t-pending]: ../../../../crates/daemon/src/transform.rs#L19171
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27907
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27658
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23125
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28983
-[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27838
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22858
-[t-parked]: ../../../../crates/daemon/src/transform.rs#L13749
-[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13619
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L22487
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L21206
+[t-pending]: ../../../../crates/daemon/src/transform.rs#L19038
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27326
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27077
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23384
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28343
+[synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27257
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23117
+[t-parked]: ../../../../crates/daemon/src/transform.rs#L13652
+[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13522
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20652
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L21754
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21686
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L22271
-[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2071
-[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22515
-[t-poison]: ../../../../crates/daemon/src/transform.rs#L22584
-[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22617
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20638
+[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L20857
+[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L20968
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L22014
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21943
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L22531
+[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
+[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22143
+[t-poison]: ../../../../crates/daemon/src/transform.rs#L22212
+[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22245
 [t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L795
 [t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L1104
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
@@ -512,12 +516,12 @@ not a claim that no related check exists anywhere in the repository.
 [t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L233
 [t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L249
 [t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L266
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24267
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24519
-[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24321
-[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24456
-[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21411
-[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28247
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L23721
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L23973
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L23776
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L23910
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21116
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L27666
 [t-preselect]: ../../../../crates/secret-scanner/src/rules.rs#L685-L722
 [t-canaries]: ../../../../crates/secret-scanner/tests/rule_canaries.rs#L4
 [t-qual]: ../../../../crates/secret-scanner/tests/qualification.rs#L49-L63

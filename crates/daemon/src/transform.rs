@@ -692,7 +692,7 @@ pub struct TransformRequest {
     #[serde(default)]
     pub serve_native: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_messages: Option<Vec<Value>>,
+    pub native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_array_fingerprint: Option<String>,
     pub messages: Vec<IngressMessage>,
@@ -855,7 +855,7 @@ struct TransformRequestWire {
     #[serde(default)]
     serve_native: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    native_messages: Option<Vec<Value>>,
+    native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default)]
     full_array_fingerprint: Option<String>,
     #[serde(default)]
@@ -17577,7 +17577,7 @@ pub(crate) mod tests {
         );
         request.provider_id = Some("anthropic".to_string());
         request.serve_native = true;
-        request.native_messages = Some(raw.clone());
+        request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
 
@@ -17686,7 +17686,7 @@ pub(crate) mod tests {
         );
         request.provider_id = Some("anthropic".to_string());
         request.serve_native = true;
-        request.native_messages = Some(raw.clone());
+        request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         request.protected_tags = 0;
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
@@ -19272,7 +19272,7 @@ pub(crate) mod tests {
         request.provider_id = Some("openai".to_string());
         request.model_key = Some("openai/gpt-5.6-sol".to_string());
         request.serve_native = true;
-        request.native_messages = Some(vec![native_tool_message.clone()]);
+        request.native_messages = Some(vec![Arc::new(native_tool_message.clone())]);
         *request
             .messages
             .iter_mut()
