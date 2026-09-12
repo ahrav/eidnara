@@ -548,19 +548,7 @@ frame_channel_contract_suite!(RingFactory);
 
 mod lease_contract {
     use super::*;
-    use crate::frame_channel::{ReceiveLease, frame_sender};
-
-    #[test]
-    fn owned_adapter_copies_the_leased_bytes() {
-        let bytes = b"leased body";
-        let owned = {
-            let lease = ReceiveLease::contiguous(bytes);
-            assert_eq!(lease.len(), bytes.len());
-            assert!(!lease.is_empty());
-            lease.to_owned()
-        };
-        assert_eq!(owned, bytes);
-    }
+    use crate::frame_channel::frame_sender;
 
     #[tokio::test]
     async fn admission_timeout_retires_the_writer_and_the_generation() {

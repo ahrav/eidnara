@@ -305,7 +305,7 @@ describe("HostClient", () => {
         expect(events.length).toBeGreaterThan(2);
     });
 
-    test("a request whose signal is already aborted is rejected not_sent before any byte is published", async () => {
+    test("an already-aborted signal or Sheddable admission is rejected not_sent before any byte is published", async () => {
         const { client, daemon } = await connected();
 
         const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
@@ -314,12 +314,23 @@ describe("HostClient", () => {
 
         const controller = new AbortController();
         controller.abort();
-        const failure = await rejection(
+        const aborted = await rejection(
             client.request(handle, { method: "ping" }, { signal: controller.signal }),
         );
-        expect(failure.kind).toBe("not_sent");
-        expect(failure.code).toBe("aborted");
-        await failure.cleanup;
+        expect(aborted.kind).toBe("not_sent");
+        expect(aborted.code).toBe("aborted");
+        await aborted.cleanup;
+        expect(daemon.drain()).toBeNull();
+
+        const sheddable = await rejection(
+            client.request(
+                handle,
+                { method: "ping" },
+                { admissionClass: AdmissionClass.Sheddable },
+            ),
+        );
+        expect(sheddable.kind).toBe("not_sent");
+        expect(sheddable.code).toBe("invalid_admission_class");
         expect(daemon.drain()).toBeNull();
     });
 
@@ -594,24 +605,5 @@ describe("HostClient", () => {
         expect(await daemon.answerRouted({ ok: true })).toEqual({ method: "ping" });
         expect(await other).toEqual({ ok: true });
         expect(client.cachedManagedRouteCount).toBe(1);
-    });
-
-    test("Sheddable admission on a Request is rejected not_sent before encoding", async () => {
-        const { client, daemon } = await connected();
-
-        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
-        await daemon.acceptRouteOpen();
-        const handle = await opening;
-
-        const failure = await rejection(
-            client.request(
-                handle,
-                { method: "ping" },
-                { admissionClass: AdmissionClass.Sheddable },
-            ),
-        );
-        expect(failure.kind).toBe("not_sent");
-        expect(failure.code).toBe("invalid_admission_class");
-        expect(daemon.drain()).toBeNull();
     });
 });

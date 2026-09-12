@@ -67,10 +67,7 @@
     "provider_executed": false,
     "role": "assistant",
     "synthetic": false,
-    "tool_call_id": "call_text",
-    "tool_input": {
-      "path": "a.txt"
-    }
+    "tool_call_id": "call_text"
   },
   {
     "arc_id": "m2#4",
@@ -84,10 +81,7 @@
     "provider_executed": false,
     "role": "assistant",
     "synthetic": false,
-    "tool_call_id": "call_json",
-    "tool_input": {
-      "target": "b"
-    }
+    "tool_call_id": "call_json"
   },
   {
     "arc_id": "m2#5",
@@ -102,10 +96,7 @@
     "provider_executed": false,
     "role": "assistant",
     "synthetic": false,
-    "tool_call_id": "call_denied",
-    "tool_input": {
-      "path": "c"
-    }
+    "tool_call_id": "call_denied"
   },
   {
     "arc_id": "m2#6",
@@ -120,10 +111,7 @@
     "provider_executed": false,
     "role": "assistant",
     "synthetic": false,
-    "tool_call_id": "call_err",
-    "tool_input": {
-      "path": "d"
-    }
+    "tool_call_id": "call_err"
   },
   {
     "arc_id": "m2#3",
@@ -204,10 +192,7 @@
     "provider_executed": false,
     "role": "assistant",
     "synthetic": false,
-    "tool_call_id": "toolu_err_content",
-    "tool_input": {
-      "target": "release"
-    }
+    "tool_call_id": "toolu_err_content"
   },
   {
     "arc_id": "m5#0",

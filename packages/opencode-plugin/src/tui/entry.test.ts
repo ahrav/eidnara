@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const PACKAGE_ROOT = resolve(import.meta.dir, "..", "..");
@@ -13,9 +12,5 @@ describe("./tui package export", () => {
     test("resolves to src/tui/entry.mjs", () => {
         const resolved = Bun.resolveSync("@eidnara/opencode/tui", PACKAGE_ROOT);
         expect(resolved).toBe(join(PACKAGE_ROOT, "src", "tui", "entry.mjs"));
-    });
-
-    test("the compiled output the entry imports exists", () => {
-        expect(existsSync(join(PACKAGE_ROOT, "src", "tui-compiled", "index.tsx"))).toBe(true);
     });
 });

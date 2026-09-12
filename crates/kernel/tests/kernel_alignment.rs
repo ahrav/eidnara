@@ -617,58 +617,44 @@ fn decision_event_commits_leave_the_projection_untouched() {
     assert_eq!(projection_rows(root.path()), expected);
 }
 
+/// Both canonical payload tables feed slice reads; only observation payloads
+/// feed the alignment derivation.
 #[test]
-fn a_corrupt_stored_decision_payload_is_reported_as_canonical_corruption() {
-    let (root, store) = open_store();
-    seed_domain(&store);
-    seed_pair(&store, None);
-    drop(store);
-
-    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-    connection
-        .execute(
+fn corrupt_stored_decision_and_observation_payloads_are_reported_as_canonical_corruption() {
+    for (corruption, alignment_reads_it) in [
+        (
             "UPDATE decisions SET decision_payload=X'00' WHERE decision_id='decision-1'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    let store = KernelStore::open(root.path()).unwrap();
-    assert_eq!(
-        store.slice_as_of(2).unwrap_err(),
-        KernelError::CorruptCanonicalRow,
-        "a corrupt decision payload was reported as a transient storage fault"
-    );
-}
-
-#[test]
-fn a_corrupt_stored_observation_payload_is_reported_as_canonical_corruption() {
-    let (root, store) = open_store();
-    seed_domain(&store);
-    seed_pair(&store, None);
-    drop(store);
-
-    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-    connection
-        .execute(
+            false,
+        ),
+        (
             "UPDATE observations SET observation_payload=X'00'
              WHERE observation_id='observation-1'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
+            true,
+        ),
+    ] {
+        let (root, store) = open_store();
+        seed_domain(&store);
+        seed_pair(&store, None);
+        drop(store);
 
-    let store = KernelStore::open(root.path()).unwrap();
-    assert_eq!(
-        store.slice_as_of(2).unwrap_err(),
-        KernelError::CorruptCanonicalRow,
-        "a corrupt observation payload was reported as a transient storage fault"
-    );
-    assert_eq!(
-        store.alignment_as_of(2).unwrap_err(),
-        KernelError::CorruptCanonicalRow,
-        "slice and alignment reads disagree about canonical corruption"
-    );
+        let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
+        connection.execute(corruption, []).unwrap();
+        drop(connection);
+
+        let store = KernelStore::open(root.path()).unwrap();
+        assert_eq!(
+            store.slice_as_of(2).unwrap_err(),
+            KernelError::CorruptCanonicalRow,
+            "a corrupt payload was reported as a transient storage fault: {corruption}"
+        );
+        if alignment_reads_it {
+            assert_eq!(
+                store.alignment_as_of(2).unwrap_err(),
+                KernelError::CorruptCanonicalRow,
+                "slice and alignment reads disagree about canonical corruption"
+            );
+        }
+    }
 }
 
 #[test]

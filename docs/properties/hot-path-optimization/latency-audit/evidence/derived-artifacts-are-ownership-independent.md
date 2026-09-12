@@ -27,7 +27,7 @@ never of the allocation or the lane that produced them.
   from the same block for their consumers to agree.
 - The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2919-2921`][prefix-call] when a reusable projection exists and
+  [`:2910-2912`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
@@ -130,7 +130,10 @@ accounting](shared-selection-and-pressure-accounting.md).
 Both production selection constructors borrow the projected wire input.
 The pointer-identity test fails on the clone-based baseline and passes on
 the borrowed representation, including a selection clone and historian input.
-The unchanged selection reference passes all 18 differential tests.
+The unchanged selection reference passes all 18 differential tests. The
+`tool_input` versus `wire.kind()` question from the discovery snapshot is
+resolved by removal: `FlatBlock` no longer carries a separate input copy, so
+there is one projected input and no pair of fields to drift apart.
 
 The sidecar test compares full and incremental order, metadata, and pins over
 three generations with repeated IDs. It also checks sparse prefixes: map

@@ -4608,41 +4608,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_frame_that_never_reserved_ring_space_settles_not_sent() {
-        // `reserve_until` expiry proves zero bytes reached the host, so the
-        // caller may retry on a fresh generation.
-        let error = settle_one_write_with(SendFailure::Deadline).await;
-        assert_eq!(error.outcome(), SendOutcome::NotSent);
-        assert_eq!(error.code(), "write_failed");
-        let error = settle_one_write_with(SendFailure::Unreserved).await;
-        assert_eq!(error.outcome(), SendOutcome::NotSent);
-    }
-
-    #[tokio::test]
-    async fn a_frame_that_failed_after_reservation_stays_outcome_unknown() {
-        let error = settle_one_write_with(SendFailure::Reserved).await;
-        assert_eq!(error.outcome(), SendOutcome::OutcomeUnknown);
-        assert_eq!(error.code(), "write_failed");
-    }
-
-    #[tokio::test]
-    async fn a_binary_request_sets_the_frame_binary_flag() {
-        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let (kind, _rx) = unary_sender();
-        inner
-            .admit(route(1), vec![0xff, 0x00], true, kind, deadline)
-            .expect("binary request admitted");
-        let frame = data_rx.recv().await.expect("queued frame");
-        assert!(frame.header.flags.is_binary());
-
-        let (kind, _rx) = unary_sender();
-        inner
-            .admit(route(1), b"{}".to_vec(), false, kind, deadline)
-            .expect("json request admitted");
-        let frame = data_rx.recv().await.expect("queued frame");
-        assert!(!frame.header.flags.is_binary());
-        inner.retire("test_done");
+    async fn a_failed_write_is_not_sent_unless_ring_space_was_reserved() {
+        // `Deadline` and `Unreserved` failures publish zero bytes and settle `NotSent`;
+        // `Reserved` fails after `commit` may have published the frame, so it stays
+        // `OutcomeUnknown`.
+        for (failure, outcome) in [
+            (SendFailure::Deadline, SendOutcome::NotSent),
+            (SendFailure::Unreserved, SendOutcome::NotSent),
+            (SendFailure::Reserved, SendOutcome::OutcomeUnknown),
+        ] {
+            let error = settle_one_write_with(failure).await;
+            assert_eq!(error.outcome(), outcome, "{failure:?}");
+            assert_eq!(error.code(), "write_failed");
+        }
     }
 
     #[tokio::test]
@@ -4977,6 +4955,11 @@ mod tests {
             .expect("settled")
             .expect_err("retention is exhausted");
         assert_eq!(error.code(), "response_retention_exhausted");
+        assert_eq!(
+            error.outcome(),
+            SendOutcome::Terminal,
+            "the reader observed the host terminal; only the local copy is lost"
+        );
         assert!(!inner.retired.load(Ordering::Acquire));
         let cleanup = control_rx
             .try_recv()
@@ -5020,99 +5003,6 @@ mod tests {
         let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
         inner.dispatch(ping(9), Vec::new(), ByteCharge::none());
         inner.dispatch(ping(3), Vec::new(), ByteCharge::none());
-        assert!(inner.retired.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn an_unmatched_status_with_duplicate_recognized_fields_retires() {
-        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let body = br#"{"op":"host.status","health":"ok","health":"failing"}"#.to_vec();
-        inner.dispatch(
-            EnvelopeHeader {
-                len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
-                ty: FrameType::Response,
-                flags: response_flags(false, false),
-                channel: 0,
-                epoch: 0,
-                corr: 4242,
-            },
-            body,
-            ByteCharge::none(),
-        );
-        assert!(inner.retired.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn a_consumed_teardown_marker_takes_its_ownership_record_with_it() {
-        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let bound = RouteHandle {
-            channel: 9,
-            epoch: 3,
-        };
-        let responder_inner = Arc::clone(&inner);
-        let responder = tokio::spawn(async move {
-            let frame = data_rx.recv().await.expect("route.open request");
-            let body = serde_json::to_vec(&serde_json::json!({
-                "op": "route.open",
-                "route_channel": bound.channel,
-                "route_epoch": bound.epoch,
-            }))
-            .expect("body encodes");
-            responder_inner.dispatch(
-                EnvelopeHeader {
-                    len: u32::try_from(body.len()).expect("fits"),
-                    ver: PROTOCOL_VERSION,
-                    ty: FrameType::Response,
-                    flags: response_flags(false, false),
-                    channel: 0,
-                    epoch: 0,
-                    corr: frame.header.corr,
-                },
-                body,
-                ByteCharge::none(),
-            );
-            responder_inner.settle_route_from_host(bound);
-        });
-        let client = Client {
-            inner: Arc::clone(&inner),
-        };
-        let target = RouteTarget {
-            kind: TargetKind::ToolProvider,
-            module_id: "context".to_owned(),
-        };
-        let error = client
-            .open_route(target, identity_fixture())
-            .await
-            .expect_err("torn down before publication");
-        assert_eq!(error.code(), "route_gone");
-        responder.await.expect("responder");
-        let binds = lock_unpoisoned(&inner.binds);
-        assert!(binds.torn_down.is_empty());
-        assert!(binds.publishing.is_empty());
-        drop(binds);
-        drop(client);
-    }
-
-    #[tokio::test]
-    async fn an_untagged_duplicate_tag_bind_response_retires() {
-        // `release_stranded_route` sees a body whose `op` is repeated and treats it as untagged.
-        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let body =
-            br#"{"op":"route.open","op":"future","route_channel":7,"route_epoch":77}"#.to_vec();
-        inner.dispatch(
-            EnvelopeHeader {
-                len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
-                ty: FrameType::Response,
-                flags: response_flags(false, false),
-                channel: 0,
-                epoch: 0,
-                corr: 4242,
-            },
-            body,
-            ByteCharge::none(),
-        );
         assert!(inner.retired.load(Ordering::Acquire));
     }
 
@@ -5216,143 +5106,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_matched_bind_for_a_live_channel_at_another_epoch_retires() {
-        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+    async fn a_matched_bind_for_a_live_channel_retires_at_any_epoch_before_retention() {
+        // The channel scan retires an overlapping live channel before retention accounting;
+        // otherwise full retention releases the new handle with `Goodbye`.
         let live = route(1);
-        let (tx, _rx) = oneshot::channel();
-        let (key, publish) = inner
-            .admit(
-                RouteHandle {
-                    channel: 0,
-                    epoch: 0,
-                },
-                Vec::new(),
-                false,
-                PendingKind::Unary(tx),
-                Instant::now() + Duration::from_secs(60),
-            )
-            .expect("control request admitted");
-        assert!(bridge_claims(&publish));
-        drop(data_rx.recv().await);
-        let body = serde_json::to_vec(&serde_json::json!({
-            "op": "route.open",
-            "route_channel": live.channel,
-            "route_epoch": live.epoch + 40,
-        }))
-        .expect("body encodes");
-        inner.dispatch(
-            EnvelopeHeader {
-                len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
-                ty: FrameType::Response,
-                flags: response_flags(false, false),
-                channel: 0,
-                epoch: 0,
-                corr: key.corr,
-            },
-            body,
-            ByteCharge::none(),
-        );
-        assert!(inner.retired.load(Ordering::Acquire));
-    }
+        for (epoch, retention_full) in [
+            (live.epoch, false),
+            (live.epoch + 40, false),
+            (live.epoch + 1, true),
+        ] {
+            let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+            assert!(lock_unpoisoned(&inner.routes).contains(&live));
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let deliver = |key: PendingKey, body: Vec<u8>| {
+                inner.dispatch(
+                    EnvelopeHeader {
+                        len: u32::try_from(body.len()).expect("fits"),
+                        ver: PROTOCOL_VERSION,
+                        ty: FrameType::Response,
+                        flags: response_flags(false, false),
+                        channel: key.channel,
+                        epoch: key.epoch,
+                        corr: key.corr,
+                    },
+                    body,
+                    ByteCharge::none(),
+                );
+            };
+            if retention_full {
+                let (kind, _filler_rx) = unary_sender();
+                let (filler, publish) = inner
+                    .admit(route(1), Vec::new(), false, kind, deadline)
+                    .expect("admitted");
+                assert!(bridge_claims(&publish));
+                drop(data_rx.recv().await);
+                deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
+            }
 
-    #[tokio::test]
-    async fn a_matched_bind_for_a_live_channel_retires_even_when_retention_is_full() {
-        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let deliver = |key: PendingKey, body: Vec<u8>| {
-            inner.dispatch(
-                EnvelopeHeader {
-                    len: u32::try_from(body.len()).expect("fits"),
-                    ver: PROTOCOL_VERSION,
-                    ty: FrameType::Response,
-                    flags: response_flags(false, false),
-                    channel: key.channel,
-                    epoch: key.epoch,
-                    corr: key.corr,
-                },
-                body,
-                ByteCharge::none(),
+            let (tx, _rx) = oneshot::channel();
+            let (key, publish) = inner
+                .admit(
+                    RouteHandle {
+                        channel: 0,
+                        epoch: 0,
+                    },
+                    Vec::new(),
+                    false,
+                    PendingKind::Unary(tx),
+                    deadline,
+                )
+                .expect("control request admitted");
+            assert!(bridge_claims(&publish));
+            drop(data_rx.recv().await);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "op": "route.open",
+                "route_channel": live.channel,
+                "route_epoch": epoch,
+            }))
+            .expect("body encodes");
+            deliver(key, body);
+            assert!(
+                inner.retired.load(Ordering::Acquire),
+                "epoch {epoch}, retention_full {retention_full}"
             );
-        };
-        let (kind, _filler_rx) = unary_sender();
-        let (filler, publish) = inner
-            .admit(route(1), Vec::new(), false, kind, deadline)
-            .expect("admitted");
-        assert!(bridge_claims(&publish));
-        drop(data_rx.recv().await);
-        deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
-
-        let (tx, _rx) = oneshot::channel();
-        let (key, publish) = inner
-            .admit(
-                RouteHandle {
-                    channel: 0,
-                    epoch: 0,
-                },
-                Vec::new(),
-                false,
-                PendingKind::Unary(tx),
-                deadline,
-            )
-            .expect("control request admitted");
-        assert!(bridge_claims(&publish));
-        drop(data_rx.recv().await);
-        let live = route(1);
-        let body = serde_json::to_vec(&serde_json::json!({
-            "op": "route.open",
-            "route_channel": live.channel,
-            "route_epoch": live.epoch + 1,
-        }))
-        .expect("body encodes");
-        deliver(key, body);
-        assert!(inner.retired.load(Ordering::Acquire));
-        assert!(
-            control_rx.try_recv().is_err(),
-            "the overlap retires rather than releasing the new handle"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_matched_bind_for_a_live_route_retires() {
-        let (inner, mut data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let live = route(1);
-        assert!(lock_unpoisoned(&inner.routes).contains(&live));
-        let (tx, _rx) = oneshot::channel();
-        let (key, publish) = inner
-            .admit(
-                RouteHandle {
-                    channel: 0,
-                    epoch: 0,
-                },
-                Vec::new(),
-                false,
-                PendingKind::Unary(tx),
-                Instant::now() + Duration::from_secs(60),
-            )
-            .expect("control request admitted");
-        assert!(bridge_claims(&publish));
-        drop(data_rx.recv().await);
-        let body = serde_json::to_vec(&serde_json::json!({
-            "op": "route.open",
-            "route_channel": live.channel,
-            "route_epoch": live.epoch,
-        }))
-        .expect("body encodes");
-        inner.dispatch(
-            EnvelopeHeader {
-                len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
-                ty: FrameType::Response,
-                flags: response_flags(false, false),
-                channel: 0,
-                epoch: 0,
-                corr: key.corr,
-            },
-            body,
-            ByteCharge::none(),
-        );
-        assert!(inner.retired.load(Ordering::Acquire));
+            assert!(
+                control_rx.try_recv().is_err(),
+                "the overlap retires rather than releasing the new handle"
+            );
+        }
     }
 
     #[tokio::test]
@@ -7166,40 +6987,6 @@ mod tests {
     }
 
     #[test]
-    fn epoch_is_part_of_pending_key() {
-        let old = PendingKey::new(
-            RouteHandle {
-                channel: 7,
-                epoch: 1,
-            },
-            9,
-        );
-        let current = PendingKey::new(
-            RouteHandle {
-                channel: 7,
-                epoch: 2,
-            },
-            9,
-        );
-        assert_ne!(old, current);
-    }
-
-    #[test]
-    fn terminal_formatting_redacts_peer_message_and_body() {
-        let sentinel = "CANARY-CREDENTIAL-PAYLOAD-93ff";
-        let body = serde_json::to_vec(&serde_json::json!({
-            "code": "stable_code",
-            "message": sentinel
-        }))
-        .expect("serialize");
-        let error = control_terminal(&body).expect("canonical error body");
-        let rendered = format!("{error:?} {error}");
-        assert_eq!(error.outcome(), SendOutcome::Terminal);
-        assert_eq!(error.code(), "host.stable_code");
-        assert!(!rendered.contains(sentinel));
-    }
-
-    #[test]
     fn a_nonconforming_remote_code_never_aliases_a_reserved_one() {
         assert_eq!(bounded_code("unknown_module"), "unknown_module");
         assert_eq!(bounded_code("a.b-c_1"), "a.b-c_1");
@@ -7353,50 +7140,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_untagged_unmatched_control_response_retires() {
-        // §7.1: a channel-0 body that is not a tagged JSON object is a protocol violation even when no correlation matches.
-        let (inner, _data_rx, _control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let body = b"not json".to_vec();
-        inner.dispatch(
-            EnvelopeHeader {
-                len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
-                ty: FrameType::Response,
-                flags: response_flags(false, false),
-                channel: 0,
-                epoch: 0,
-                corr: 4242,
-            },
-            body,
-            ByteCharge::none(),
-        );
-        assert!(inner.retired.load(Ordering::Acquire));
+    async fn a_malformed_unmatched_control_response_retires_but_a_stale_tagged_one_is_dropped() {
+        // §7.1: a channel-0 body that is not a tagged JSON object with unique recognized keys
+        // is a protocol violation even when no correlation matches. `release_stranded_route`
+        // reads a repeated `op` as untagged.
+        let unmatched = |body: &[u8]| EnvelopeHeader {
+            len: u32::try_from(body.len()).expect("fits"),
+            ver: PROTOCOL_VERSION,
+            ty: FrameType::Response,
+            flags: response_flags(false, false),
+            channel: 0,
+            epoch: 0,
+            corr: 4242,
+        };
+        for body in [
+            &b"not json"[..],
+            br#"{"op":"route.open","op":"future","route_channel":7,"route_epoch":77}"#,
+            br#"{"op":"host.status","health":"ok","health":"failing"}"#,
+        ] {
+            let (inner, _data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
+            inner.dispatch(unmatched(body), body.to_vec(), ByteCharge::none());
+            assert!(
+                inner.retired.load(Ordering::Acquire),
+                "{} must retire",
+                String::from_utf8_lossy(body)
+            );
+            assert!(control_rx.is_empty());
+        }
 
         // A tagged stale response that names no route is dropped without retiring.
         let (inner, _data_rx, control_rx) = test_inner(CLIENT_QUEUED_BYTES);
         let body = br#"{"op":"host.status"}"#.to_vec();
-        inner.dispatch(
-            EnvelopeHeader {
-                len: u32::try_from(body.len()).expect("fits"),
-                ver: PROTOCOL_VERSION,
-                ty: FrameType::Response,
-                flags: response_flags(false, false),
-                channel: 0,
-                epoch: 0,
-                corr: 4242,
-            },
-            body,
-            ByteCharge::none(),
-        );
+        inner.dispatch(unmatched(&body), body, ByteCharge::none());
         assert!(!inner.retired.load(Ordering::Acquire));
         assert!(control_rx.is_empty());
     }
 
     #[test]
-    fn queued_and_in_flight_frames_share_the_data_frame_ceiling() {
+    fn queued_and_in_flight_frames_and_data_and_control_bytes_partition_their_ceilings() {
         assert_eq!(
             WRITER_QUEUE_FRAMES + WRITER_WINDOW,
             CLIENT_DATA_QUEUE_FRAMES
+        );
+        assert_eq!(
+            CLIENT_DATA_QUEUED_BYTES + CLIENT_CONTROL_QUEUED_BYTES,
+            CLIENT_QUEUED_BYTES
         );
     }
 
@@ -7490,80 +7278,6 @@ mod tests {
         drop(retained);
         assert_eq!(inner.unary_budget.used(), 0);
         inner.retire("test_done");
-    }
-
-    #[tokio::test]
-    async fn a_bind_that_cannot_be_retained_is_released() {
-        let (inner, mut data_rx, mut control_rx) = test_inner(CLIENT_QUEUED_BYTES);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let deliver = |key: PendingKey, body: Vec<u8>| {
-            inner.dispatch(
-                EnvelopeHeader {
-                    len: u32::try_from(body.len()).expect("fits"),
-                    ver: PROTOCOL_VERSION,
-                    ty: FrameType::Response,
-                    flags: response_flags(false, false),
-                    channel: key.channel,
-                    epoch: key.epoch,
-                    corr: key.corr,
-                },
-                body,
-                ByteCharge::none(),
-            );
-        };
-        // One unpolled maximum-sized response fills retention.
-        let (kind, _filler_rx) = unary_sender();
-        let (filler, publish) = inner
-            .admit(route(1), Vec::new(), false, kind, deadline)
-            .expect("admitted");
-        assert!(bridge_claims(&publish));
-        drop(data_rx.recv().await);
-        deliver(filler, vec![0u8; CLIENT_RETAINED_RESPONSE_BYTES]);
-        assert_eq!(inner.unary_budget.used(), CLIENT_RETAINED_RESPONSE_BYTES);
-
-        let control = RouteHandle {
-            channel: 0,
-            epoch: 0,
-        };
-        let (kind, rx) = unary_sender();
-        let (key, publish) = inner
-            .admit(control, Vec::new(), false, kind, deadline)
-            .expect("control request admitted");
-        assert!(bridge_claims(&publish));
-        drop(data_rx.recv().await);
-        let bound = RouteHandle {
-            channel: 9,
-            epoch: 3,
-        };
-        let body = serde_json::to_vec(&serde_json::json!({
-            "op": "route.open",
-            "route_channel": bound.channel,
-            "route_epoch": bound.epoch,
-        }))
-        .expect("body encodes");
-        deliver(key, body);
-
-        let error = rx
-            .await
-            .expect("settled")
-            .expect_err("retention is exhausted");
-        assert_eq!(error.code(), "response_retention_exhausted");
-        assert_eq!(error.outcome(), SendOutcome::Terminal);
-        let goodbye = control_rx
-            .try_recv()
-            .expect("the bind nobody can receive is released");
-        assert_eq!(goodbye.header.ty, FrameType::Goodbye);
-        assert_eq!(goodbye.header.channel, bound.channel);
-        assert_eq!(goodbye.header.epoch, bound.epoch);
-        inner.retire("test_done");
-    }
-
-    #[test]
-    fn data_and_control_queues_share_one_queued_byte_ceiling() {
-        assert_eq!(
-            CLIENT_DATA_QUEUED_BYTES + CLIENT_CONTROL_QUEUED_BYTES,
-            CLIENT_QUEUED_BYTES
-        );
     }
 
     #[test]

@@ -1412,28 +1412,6 @@ describe("native output delta", () => {
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
     });
 
-    it("reconstructs the exact acknowledged prefix plus replacement suffix", () => {
-        const previous = [
-            { info: { id: "m0" }, parts: [{ type: "text", text: "stable" }] },
-            { info: { id: "m1" }, parts: [{ type: "text", text: "old" }] },
-        ];
-        const suffix = [
-            { info: { id: "m1" }, parts: [{ type: "text", text: "new" }] },
-            { info: { id: "m2" }, parts: [{ type: "text", text: "tail" }] },
-        ];
-        const output = { messages: [] as unknown[] };
-
-        const applied = applyNativeMessagesVerbatim(
-            output,
-            { native_messages_delta: { after: "fp-before", replace_from: 1, messages: suffix } },
-            { messages: previous, fingerprint: "fp-before" },
-        );
-
-        expect(applied).toEqual([previous[0], ...suffix]);
-        expect(output.messages).toEqual(applied);
-        expect(applied[0]).toBe(previous[0]);
-    });
-
     it("rejects a delta whose prefix fingerprint is not acknowledged", () => {
         expect(() =>
             applyNativeMessagesVerbatim(

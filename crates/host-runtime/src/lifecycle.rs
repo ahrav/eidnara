@@ -1155,22 +1155,26 @@ mod tests {
     fn record_round_trips_and_removes_fenced() {
         let root = temp_root();
         let mut guard = acquire(root.path());
-        guard
-            .write_lifecycle_record(LifecyclePhase::Starting)
-            .expect("write starting");
+        for phase in [
+            LifecyclePhase::Starting,
+            LifecyclePhase::Running,
+            LifecyclePhase::Stopping,
+        ] {
+            guard.write_lifecycle_record(phase).expect("write");
 
-        let bytes = std::fs::read(record_path(&guard)).expect("read record");
-        let RecordDecode::Valid(record) = decode_record(&bytes) else {
-            panic!("strict decode");
-        };
-        assert_eq!(record.phase, LifecyclePhase::Starting);
-        assert_eq!(record.launch_id, hex(guard.launch_id()));
-        assert_eq!(record.daemon_id, hex(guard.daemon_id()));
-        assert_eq!(record.payload_manifest_digest, TEST_DIGEST);
-        assert_eq!(record.pid, std::process::id());
+            let bytes = std::fs::read(record_path(&guard)).expect("read record");
+            let RecordDecode::Valid(record) = decode_record(&bytes) else {
+                panic!("strict decode for {phase:?}");
+            };
+            assert_eq!(record.phase, phase);
+            assert_eq!(record.launch_id, hex(guard.launch_id()), "{phase:?}");
+            assert_eq!(record.daemon_id, hex(guard.daemon_id()), "{phase:?}");
+            assert_eq!(record.payload_manifest_digest, TEST_DIGEST, "{phase:?}");
+            assert_eq!(record.pid, std::process::id(), "{phase:?}");
 
-        let meta = std::fs::metadata(record_path(&guard)).expect("stat record");
-        assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
+            let meta = std::fs::metadata(record_path(&guard)).expect("stat record");
+            assert_eq!(meta.permissions().mode() & 0o7777, 0o600, "{phase:?}");
+        }
 
         guard.remove_lifecycle_record();
         assert!(!record_path(&guard).exists());
@@ -1294,24 +1298,6 @@ mod tests {
     }
 
     #[test]
-    fn the_same_digest_is_recorded_across_every_phase() {
-        let root = temp_root();
-        let guard = acquire(root.path());
-        for phase in [
-            LifecyclePhase::Starting,
-            LifecyclePhase::Running,
-            LifecyclePhase::Stopping,
-        ] {
-            guard.write_lifecycle_record(phase).expect("write");
-            let bytes = std::fs::read(record_path(&guard)).expect("read");
-            let RecordDecode::Valid(record) = decode_record(&bytes) else {
-                panic!("strict decode for {phase:?}");
-            };
-            assert_eq!(record.payload_manifest_digest, TEST_DIGEST, "{phase:?}");
-        }
-    }
-
-    #[test]
     fn probe_reports_stopped_on_an_empty_root_without_creating_anything() {
         let root = temp_root();
         let observed = probe(root.path());
@@ -1334,7 +1320,12 @@ mod tests {
         guard
             .write_lifecycle_record(LifecyclePhase::Starting)
             .expect("starting");
-        assert_eq!(probe(root.path()).state, LifecycleState::Starting);
+        let observed = probe(root.path());
+        assert_eq!(observed.state, LifecycleState::Starting);
+        assert!(
+            !observed.instance_lock_free,
+            "an exclusive incarnation lock must still read as held under a shared probe lock"
+        );
 
         guard
             .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
@@ -1520,20 +1511,6 @@ mod tests {
             observed.reason,
             "publication daemon ID does not match the record"
         );
-    }
-
-    #[test]
-    fn transaction_lock_is_exclusive_on_the_stable_coordination_file() {
-        let root = temp_root();
-        let first = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("first");
-        assert!(matches!(
-            LifecycleTransactionLock::acquire_exclusive(Some(root.path())),
-            Err(InstanceError::AlreadyRunning)
-        ));
-        drop(first);
-        let second =
-            LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("released");
-        drop(second);
     }
 
     /// A transaction holder fails closed at `verify` when its managed namespace is replaced or renamed rather than reporting a commit against a tree it no longer owns.
@@ -1903,46 +1880,40 @@ mod tests {
         }
     }
 
-    /// Fenced removal must not block on a FIFO at the record name.
-    /// Fenced removal runs from `Drop` while the instance lock is held.
-    /// Blocking fenced removal retains the instance lock and prevents later starts.
+    /// Fenced removal runs from `Drop` while the instance lock is held, so a blocking open of
+    /// a FIFO at either evidence name would retain the lock and prevent later starts.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_fifo_at_the_record_name_cannot_hang_fenced_removal() {
-        let root = temp_root();
-        let mut guard = acquire(root.path());
-        let path = record_path(&guard);
-        rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
-            .expect("plant fifo");
+    fn a_fifo_at_an_evidence_name_cannot_hang_fenced_removal() {
+        for name in [LIFECYCLE_RECORD_NAME, CONNECTION_FILE_NAME] {
+            let root = temp_root();
+            let mut guard = acquire(root.path());
+            let path = guard.dir_path().join(name);
+            if name == CONNECTION_FILE_NAME {
+                guard
+                    .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
+                    .expect("publish");
+                std::fs::remove_file(&path).expect("displace publication");
+            }
+            rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
+                .expect("plant fifo");
 
-        within(
-            Duration::from_secs(5),
-            "remove_lifecycle_record blocked on a fifo, retaining the instance lock",
-            move || guard.remove_lifecycle_record(),
-        );
-        assert!(path.exists(), "a foreign shape must survive fenced removal");
-    }
-
-    /// `remove_publication` opens the canonical name from `Drop` too, so a FIFO planted there after publication must be rejected without blocking.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_fifo_at_the_publication_name_cannot_hang_fenced_removal() {
-        let root = temp_root();
-        let mut guard = acquire(root.path());
-        guard
-            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
-            .expect("publish");
-        let path = guard.dir_path().join(CONNECTION_FILE_NAME);
-        std::fs::remove_file(&path).expect("displace publication");
-        rustix::fs::mkfifoat(rustix::fs::CWD, path.as_path(), Mode::from_raw_mode(0o600))
-            .expect("plant fifo");
-
-        within(
-            Duration::from_secs(5),
-            "remove_publication blocked on a fifo, retaining the instance lock",
-            move || guard.remove_publication(),
-        );
-        assert!(path.exists(), "a foreign shape must survive fenced removal");
+            within(
+                Duration::from_secs(5),
+                &format!("fenced removal of {name} blocked on a fifo, retaining the instance lock"),
+                move || {
+                    if name == CONNECTION_FILE_NAME {
+                        guard.remove_publication()
+                    } else {
+                        guard.remove_lifecycle_record()
+                    }
+                },
+            );
+            assert!(
+                path.exists(),
+                "a foreign shape at {name} must survive fenced removal"
+            );
+        }
     }
 
     /// A crash between `O_CREAT` and `fchmod` under a restrictive umask leaves an owner-owned lock file at mode `0000`; the next start must repair it rather than fail on `EACCES` forever.
@@ -2085,21 +2056,6 @@ mod tests {
         for worker in workers {
             worker.join().expect("probe thread");
         }
-    }
-
-    #[test]
-    fn a_shared_freedom_test_still_sees_a_live_holder() {
-        let root = temp_root();
-        let guard = acquire(root.path());
-        guard
-            .write_lifecycle_record(LifecyclePhase::Starting)
-            .expect("starting");
-        let observed = probe(root.path());
-        assert!(
-            !observed.instance_lock_free,
-            "an exclusive incarnation lock must still read as held"
-        );
-        assert_eq!(observed.state, LifecycleState::Starting);
     }
 
     /// Replacing or renaming the managed `lifecycle` directory after transaction-lock acquisition must not create a second transaction owner.

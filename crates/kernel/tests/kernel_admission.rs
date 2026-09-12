@@ -599,60 +599,6 @@ fn approval_revocation_fans_out_support_demotion_without_rewriting_history() {
 }
 
 #[test]
-fn quarantined_approval_cannot_authorize_a_candidate() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-    let quarantined = AdmissionRequest {
-        candidate_id: None,
-        subject_object_id: Some("approval".to_string()),
-        source_class: Some(SourceClass::ExplicitUser),
-        taint_class: Some(TaintClass::UserExplicit),
-        event: AdmissionEvent {
-            kind: EventKind::Quarantine,
-            trigger_object_id: None,
-            approval_object_id: None,
-            evidence_id: None,
-            reason: "approval quarantined".to_string(),
-        },
-    };
-    store
-        .commit(intent("quarantine-approval"), |envelope| {
-            envelope.record_admission(quarantined)?;
-            Ok(String::new())
-        })
-        .unwrap();
-    stage(&store, "blocked-by-quarantine");
-    let mut approved = request("blocked-by-quarantine");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("blocked-by-quarantine"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "blocked-domain".to_string(),
-                    object_id: "blocked-object".to_string(),
-                    name: "name-blocked-by-quarantine".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='blocked-object'"
-        ),
-        0
-    );
-}
-
-#[test]
 fn injected_failure_rolls_back_domain_decision_events_outbox_and_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
@@ -1138,72 +1084,6 @@ fn same_envelope_subject_decision_after_admission_uses_the_recorded_prior() {
 }
 
 #[test]
-fn support_demoted_approval_loses_authorizing_power() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    seed_dependent_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    let mut before = request("granted");
-    before.source_class = Some(SourceClass::ModelInference);
-    before.taint_class = Some(TaintClass::AssistantInference);
-    before.event.kind = EventKind::Verify;
-    before.event.trigger_object_id = None;
-    before.event.approval_object_id = Some("approval-b".to_string());
-    stage(&store, "granted");
-    store
-        .commit(intent("granted"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                before.clone(),
-                AdmissionDomainSpec {
-                    domain_id: "domain-granted".to_string(),
-                    object_id: "object-granted".to_string(),
-                    name: "name-granted".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "admit");
-            Ok(String::new())
-        })
-        .unwrap();
-
-    store
-        .commit(intent("revoke-root"), |envelope| {
-            envelope.revoke_approval("approval", "root authority withdrawn")?;
-            Ok(String::new())
-        })
-        .unwrap();
-
-    let mut after = request("orphaned");
-    after.source_class = Some(SourceClass::ModelInference);
-    after.taint_class = Some(TaintClass::AssistantInference);
-    after.event.kind = EventKind::Verify;
-    after.event.trigger_object_id = None;
-    after.event.approval_object_id = Some("approval-b".to_string());
-    stage(&store, "orphaned");
-    store
-        .commit(intent("orphaned"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                after.clone(),
-                AdmissionDomainSpec {
-                    domain_id: "domain-orphaned".to_string(),
-                    object_id: "object-orphaned".to_string(),
-                    name: "name-orphaned".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='object-orphaned'"
-        ),
-        0
-    );
-}
-
-#[test]
 fn approval_dependent_capacity_blocks_new_grants_and_keeps_revocation_possible() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
@@ -1311,88 +1191,49 @@ fn approval_dependent_capacity_blocks_new_grants_and_keeps_revocation_possible()
 }
 
 #[test]
-fn ledger_rows_from_another_policy_revision_are_refused() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage(&store, "candidate");
-    store
-        .commit(intent("admit"), |envelope| {
-            envelope.insert_admission_observation_for_test(
-                "observation-candidate",
-                "code_present",
-                "domain",
-                "repo",
-                "source-candidate",
-                1,
-            )?;
-            envelope.admit_domain_candidate(
-                request("candidate"),
-                AdmissionDomainSpec {
-                    domain_id: "domain".to_string(),
-                    object_id: "object".to_string(),
-                    name: "name-candidate".to_string(),
-                },
-            )?;
-            Ok(String::new())
-        })
-        .unwrap();
-    drop(store);
-    Connection::open(directory.path().join("kernel.sqlite"))
-        .unwrap()
-        .execute("UPDATE admission_decisions SET policy_revision=2", [])
-        .unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let error = store
-        .commit(intent("cross-revision"), |envelope| {
-            envelope.record_admission(subject_request("object", EventKind::MarkStale))?;
-            Ok(String::new())
-        })
-        .unwrap_err();
-    assert_eq!(error, KernelError::AdmissionPolicy);
-}
-
-#[test]
-fn unknown_ledger_vocabulary_is_refused_not_defaulted() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage(&store, "candidate");
-    store
-        .commit(intent("admit"), |envelope| {
-            envelope.insert_admission_observation_for_test(
-                "observation-candidate",
-                "code_present",
-                "domain",
-                "repo",
-                "source-candidate",
-                1,
-            )?;
-            envelope.admit_domain_candidate(
-                request("candidate"),
-                AdmissionDomainSpec {
-                    domain_id: "domain".to_string(),
-                    object_id: "object".to_string(),
-                    name: "name-candidate".to_string(),
-                },
-            )?;
-            Ok(String::new())
-        })
-        .unwrap();
-    drop(store);
-    Connection::open(directory.path().join("kernel.sqlite"))
-        .unwrap()
-        .execute(
-            "UPDATE admission_decisions SET sensitivity_class='mystery'",
-            [],
-        )
-        .unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let error = store
-        .commit(intent("unknown-vocabulary"), |envelope| {
-            envelope.record_admission(subject_request("object", EventKind::MarkStale))?;
-            Ok(String::new())
-        })
-        .unwrap_err();
-    assert_eq!(error, KernelError::AdmissionPolicy);
+fn unreadable_ledger_rows_are_refused_not_defaulted() {
+    for corruption in [
+        "UPDATE admission_decisions SET policy_revision=2",
+        "UPDATE admission_decisions SET sensitivity_class='mystery'",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        stage(&store, "candidate");
+        store
+            .commit(intent("admit"), |envelope| {
+                envelope.insert_admission_observation_for_test(
+                    "observation-candidate",
+                    "code_present",
+                    "domain",
+                    "repo",
+                    "source-candidate",
+                    1,
+                )?;
+                envelope.admit_domain_candidate(
+                    request("candidate"),
+                    AdmissionDomainSpec {
+                        domain_id: "domain".to_string(),
+                        object_id: "object".to_string(),
+                        name: "name-candidate".to_string(),
+                    },
+                )?;
+                Ok(String::new())
+            })
+            .unwrap();
+        drop(store);
+        Connection::open(directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute(corruption, [])
+            .unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        let error = store
+            .commit(intent("unreadable-prior"), |envelope| {
+                envelope.record_admission(subject_request("object", EventKind::MarkStale))?;
+                Ok(String::new())
+            })
+            .unwrap_err();
+        assert_eq!(error, KernelError::AdmissionPolicy, "{corruption}");
+    }
 }
 
 /// Stages `candidate_id` and registers `kind` observation for its source at `revision`.
@@ -1629,88 +1470,6 @@ fn an_approval_from_another_policy_revision_cannot_authorize() {
 }
 
 #[test]
-fn revoking_an_approval_demotes_a_candidate_promoted_before_materialization() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage_with_observation(&store, "early", "code_present", 1, "early-trigger");
-
-    // The approval promotes the candidate while it is still unmaterialized, so the
-    // ledger row carries `candidate_id` and no `subject_object_id`.
-    let mut approved = request("early");
-    approved.event.kind = EventKind::Approve;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("promote-early"), |envelope| {
-            let decision = envelope.record_admission(approved)?;
-            assert_eq!(decision.effective_maturity, Maturity::Approved);
-            Ok(String::new())
-        })
-        .unwrap();
-
-    store
-        .commit(intent("revoke-early"), |envelope| {
-            envelope.revoke_approval("approval", "authority withdrawn")?;
-            Ok(String::new())
-        })
-        .unwrap();
-
-    // Materialization after revocation keeps the historical rung but cannot
-    // publish support the revoked approval no longer grants.
-    store
-        .commit(intent("materialize-early"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                request("early"),
-                AdmissionDomainSpec {
-                    domain_id: "domain-early".to_string(),
-                    object_id: "object-early".to_string(),
-                    name: "name-early".to_string(),
-                },
-            )?;
-            assert_eq!(decision.historical_maturity, Maturity::Approved);
-            assert_eq!(decision.effective_maturity, Maturity::Verified);
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT effective_maturity FROM admission_decisions
-             WHERE subject_object_id='object-early'"
-        ),
-        "verified"
-    );
-}
-
-#[test]
-fn an_admission_event_carries_the_subject_it_changed() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage_with_observation(&store, "traced", "code_present", 1, "traced-trigger");
-    assert_eq!(
-        admit(&store, request("traced"), "traced", "traced"),
-        "admit"
-    );
-
-    // `change_event` records the projector payload; `outbox` carries the same bytes.
-    for table in ["change_event", "outbox"] {
-        let payload = inspect_text(
-            directory.path(),
-            &format!(
-                "SELECT CAST(payload AS TEXT) FROM {table}
-                 WHERE CAST(payload AS TEXT) LIKE '%\"admission_decision\"%'"
-            ),
-        );
-        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        let audit = &payload["audit"];
-        assert_eq!(audit["subject_object_id"], "object-traced", "{table}");
-        assert_eq!(audit["candidate_id"], "traced", "{table}");
-        assert_eq!(audit["source_class"], "trusted_local_code", "{table}");
-    }
-}
-
-#[test]
 fn a_caller_cannot_manufacture_an_approval_revocation() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
@@ -1741,7 +1500,7 @@ fn a_caller_cannot_manufacture_an_approval_revocation() {
 }
 
 #[test]
-fn quarantining_an_approval_demotes_its_dependents() {
+fn quarantining_an_approval_demotes_its_dependents_and_ends_its_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
@@ -1792,10 +1551,35 @@ fn quarantining_an_approval_demotes_its_dependents() {
         ),
         "demote_support"
     );
+
+    // A quarantined approval grants nothing to a new candidate either.
+    stage(&store, "blocked-by-quarantine");
+    let mut approved = request("blocked-by-quarantine");
+    approved.source_class = Some(SourceClass::ModelInference);
+    approved.taint_class = Some(TaintClass::AssistantInference);
+    approved.event.kind = EventKind::Verify;
+    approved.event.trigger_object_id = None;
+    approved.event.approval_object_id = Some("approval".to_string());
+    assert_eq!(
+        admit(
+            &store,
+            approved,
+            "blocked-by-quarantine",
+            "blocked-by-quarantine"
+        ),
+        "deny"
+    );
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='object-blocked-by-quarantine'"
+        ),
+        0
+    );
 }
 
 #[test]
-fn revocation_cascades_through_dependent_approvals() {
+fn revocation_cascades_through_dependent_approvals_and_strips_their_authority() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     seed_dependent_approval(directory.path());
@@ -1836,6 +1620,23 @@ fn revocation_cascades_through_dependent_approvals() {
              ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
         ),
         "explicit_labeled"
+    );
+
+    // The cascade demoted `approval-b`'s own latest row, so `validate_approval` rejects it.
+    stage(&store, "orphaned");
+    let mut attempted = request("orphaned");
+    attempted.source_class = Some(SourceClass::ModelInference);
+    attempted.taint_class = Some(TaintClass::AssistantInference);
+    attempted.event.kind = EventKind::Verify;
+    attempted.event.trigger_object_id = None;
+    attempted.event.approval_object_id = Some("approval-b".to_string());
+    assert_eq!(admit(&store, attempted, "orphaned", "orphaned"), "deny");
+    assert_eq!(
+        inspect(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='object-orphaned'"
+        ),
+        0
     );
 }
 
@@ -1936,52 +1737,6 @@ fn a_candidate_materializes_at_most_one_canonical_object() {
 }
 
 #[test]
-fn a_bogus_citation_cannot_demote_a_validly_supported_subject() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage(&store, "supported");
-    let mut promoted = request("supported");
-    promoted.source_class = Some(SourceClass::ModelInference);
-    promoted.taint_class = Some(TaintClass::AssistantInference);
-    promoted.event.kind = EventKind::Verify;
-    promoted.event.trigger_object_id = None;
-    promoted.event.approval_object_id = Some("approval".to_string());
-    assert_eq!(admit(&store, promoted, "supported", "promote"), "admit");
-
-    // The subject's own approval is untouched, so citing an unrelated object must
-    // not clamp its support.
-    store
-        .commit(intent("bogus-citation"), |envelope| {
-            let mut forged = subject_request("object-supported", EventKind::Other);
-            forged.source_class = Some(SourceClass::ModelInference);
-            forged.taint_class = Some(TaintClass::AssistantInference);
-            forged.event.approval_object_id = Some("approval-domain-object".to_string());
-            envelope.record_admission(forged)?;
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT effective_maturity FROM admission_decisions
-             WHERE subject_object_id='object-supported'
-             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-        ),
-        "verified"
-    );
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT visibility FROM admission_decisions
-             WHERE subject_object_id='object-supported'
-             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-        ),
-        "automatic"
-    );
-}
-
-#[test]
 fn only_an_accepted_decision_object_self_approves() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
@@ -2068,7 +1823,7 @@ fn a_successful_resubmission_with_new_evidence_is_recorded() {
 }
 
 #[test]
-fn an_invalid_citation_does_not_replace_the_supporting_approval() {
+fn a_bogus_citation_neither_demotes_nor_replaces_the_supporting_approval() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
@@ -2081,8 +1836,8 @@ fn an_invalid_citation_does_not_replace_the_supporting_approval() {
     promoted.event.approval_object_id = Some("approval".to_string());
     assert_eq!(admit(&store, promoted, "carried", "promote"), "admit");
 
-    // A non-raising request citing an invalid approval must not record it as the
-    // supporting authority, or the next uncited request inherits it and demotes.
+    // A non-raising request with an unrelated approval citation cannot clamp the
+    // subject's support or become its recorded supporting authority.
     store
         .commit(intent("bogus-citation"), |envelope| {
             let mut forged = subject_request("object-carried", EventKind::Other);
@@ -2093,6 +1848,24 @@ fn an_invalid_citation_does_not_replace_the_supporting_approval() {
             Ok(String::new())
         })
         .unwrap();
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-carried'
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+        ),
+        "verified"
+    );
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT visibility FROM admission_decisions
+             WHERE subject_object_id='object-carried'
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+        ),
+        "automatic"
+    );
     assert_eq!(
         inspect_text(
             directory.path(),
@@ -2125,7 +1898,7 @@ fn an_invalid_citation_does_not_replace_the_supporting_approval() {
 }
 
 #[test]
-fn the_requested_event_kind_reaches_the_ledger_and_the_payload() {
+fn the_admission_payload_carries_the_subject_and_the_requested_event_kind() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     stage_with_observation(&store, "kinded", "config_present", 1, "kinded-trigger");
@@ -2144,45 +1917,22 @@ fn the_requested_event_kind_reaches_the_ledger_and_the_payload() {
         ),
         "config_observed"
     );
-    let payload = inspect_text(
-        directory.path(),
-        "SELECT CAST(payload AS TEXT) FROM change_event
-         WHERE CAST(payload AS TEXT) LIKE '%\"admission_decision\"%'",
-    );
-    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(
-        payload["audit"]["event_kind"], "config_observed",
-        "{payload}"
-    );
-}
-
-#[test]
-fn a_revoked_root_leaves_no_dependent_approval_able_to_grant() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    seed_dependent_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-    store
-        .commit(intent("revoke-root"), |envelope| {
-            envelope.revoke_approval("approval", "root authority withdrawn")?;
-            Ok(String::new())
-        })
-        .unwrap();
-
-    // `approval-b` held authority under `approval`. After revoking the root it must
-    // no longer be able to promote anything, since `validate_approval` reads only
-    // its own latest row.
-    stage(&store, "post-revoke");
-    let mut attempted = request("post-revoke");
-    attempted.source_class = Some(SourceClass::ModelInference);
-    attempted.taint_class = Some(TaintClass::AssistantInference);
-    attempted.event.kind = EventKind::Verify;
-    attempted.event.trigger_object_id = None;
-    attempted.event.approval_object_id = Some("approval-b".to_string());
-    assert_eq!(
-        admit(&store, attempted, "post-revoke", "post-revoke"),
-        "deny"
-    );
+    // `change_event` records the projector payload; `outbox` carries the same bytes.
+    for table in ["change_event", "outbox"] {
+        let payload = inspect_text(
+            directory.path(),
+            &format!(
+                "SELECT CAST(payload AS TEXT) FROM {table}
+                 WHERE CAST(payload AS TEXT) LIKE '%\"admission_decision\"%'"
+            ),
+        );
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let audit = &payload["audit"];
+        assert_eq!(audit["subject_object_id"], "object-kinded", "{table}");
+        assert_eq!(audit["candidate_id"], "kinded", "{table}");
+        assert_eq!(audit["source_class"], "trusted_local_code", "{table}");
+        assert_eq!(audit["event_kind"], "config_observed", "{table}");
+    }
 }
 
 #[test]
@@ -2818,41 +2568,6 @@ fn an_unused_valid_citation_does_not_replace_the_supporting_approval() {
 }
 
 #[test]
-fn a_citation_whose_chain_reaches_the_subject_is_refused() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    seed_dependent_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    // `approval-b` derives its authority from `approval`, so approving `approval`
-    // while citing `approval-b` would close a cycle.
-    store
-        .commit(intent("cycle-attempt"), |envelope| {
-            let mut cyclic = subject_request("approval", EventKind::Approve);
-            cyclic.source_class = Some(SourceClass::ExplicitUser);
-            cyclic.taint_class = Some(TaintClass::UserExplicit);
-            cyclic.event.approval_object_id = Some("approval-b".to_string());
-            let decision = envelope.record_admission(cyclic)?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-
-    // Both links keep the authority they legitimately held.
-    stage(&store, "after-cycle");
-    let mut granted = request("after-cycle");
-    granted.source_class = Some(SourceClass::ModelInference);
-    granted.taint_class = Some(TaintClass::AssistantInference);
-    granted.event.kind = EventKind::Verify;
-    granted.event.trigger_object_id = None;
-    granted.event.approval_object_id = Some("approval-b".to_string());
-    assert_eq!(
-        admit(&store, granted, "after-cycle", "after-cycle"),
-        "admit"
-    );
-}
-
-#[test]
 fn a_retired_subject_cannot_acquire_new_visibility() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
@@ -3295,36 +3010,6 @@ fn malformed_stored_policy_and_sensitivity_fail_closed_without_read_error() {
             .unwrap()
             .rows
             .is_empty()
-    );
-}
-
-#[test]
-fn valid_old_policy_revision_uses_current_surface_mapping() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    insert_subject(
-        &store,
-        "old-policy",
-        Sensitivity::Normal,
-        Some(EventKind::CodeObserved),
-    );
-    drop(store);
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    connection
-        .execute(
-            "UPDATE admission_decisions SET policy_revision=0
-             WHERE subject_object_id='object-old-policy'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert_eq!(
-        store.visible_as_of(Surface::AutoInject, 1).unwrap().rows[0]
-            .object
-            .object_id,
-        "object-old-policy"
     );
 }
 
@@ -3949,59 +3634,228 @@ fn serving_reads_seek_source_decisions_by_lineage_not_by_null_subject() {
 }
 
 #[test]
-fn source_level_rejection_strips_an_approval_of_its_authority() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // A source-level rejection on the approval's own lineage ('fixture','approval',1).
-    // Staging cannot produce this row: `validate_provenance` refuses `explicit_user`
-    // for both witness kinds, and any other class would drift from the approval's
-    // prior. A restored or imported database can still hold it.
-    connection
-        .execute(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
-                 outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-rejection',NULL,'fixture','approval',1,'explicit_user',
-                 'user_explicit','explicit_reject','approved','approved','rejected','review_only',
-                 'reject','normal',1,'fixture',1,2
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
+fn lineage_rows_that_hide_an_approval_also_strip_its_authority() {
+    // Each case seeds a row on the approval's own lineage ('fixture','approval',1)
+    // that serving cannot honour. Serving hides the approval on `hidden_on`, and
+    // authority reaches the same answer: a hidden approval cannot promote.
+    struct Case {
+        key: &'static str,
+        seed_dependent: bool,
+        ledger: &'static str,
+        latest: Option<&'static str>,
+        hidden_on: Surface,
+    }
+    for case in [
+        Case {
+            key: "source-rejection",
+            seed_dependent: false,
+            // A source-level rejection on the approval's own lineage. Staging cannot
+            // produce this row: `validate_provenance` refuses `explicit_user` for both
+            // witness kinds, and any other class would drift from the approval's
+            // prior. A restored or imported database can still hold it.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-rejection',NULL,'fixture','approval',1,'explicit_user',
+                         'user_explicit','explicit_reject','approved','approved','rejected','review_only',
+                         'reject','normal',1,'fixture',1,2
+                     );",
+            latest: None,
+            hidden_on: Surface::ExplicitSearch,
+        },
+        Case {
+            key: "rejected-lineage",
+            seed_dependent: false,
+            // The ADR is rejected at lineage scope, then records a newer own decision
+            // that qualifies on every field. Serving still withholds it, so authority
+            // must too.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-a-lineage-reject',NULL,'fixture','approval',1,'explicit_user',
+                         'user_explicit','explicit_reject','approved','approved','rejected','review_only',
+                         'reject','normal',1,'fixture',1,2
+                     );
+                     INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-z-own-later','approval','fixture','approval',1,'explicit_user',
+                         'user_explicit','other','approved','approved','active','automatic','admit',
+                         'normal',1,'fixture',1,3
+                     );",
+            latest: Some("approval-z-own-later"),
+            hidden_on: Surface::ExplicitSearch,
+        },
+        Case {
+            key: "hidden-approval",
+            seed_dependent: false,
+            // `explicit_user`/`current_code` is a pairing `source_allows_taint` refuses,
+            // so the evaluator cannot have written this row. Every other field is
+            // permissive.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-illegal-pairing',NULL,'fixture','approval',1,'explicit_user',
+                         'current_code','code_observed','approved','approved','active','automatic',
+                         'admit','normal',1,'fixture',1,2
+                     );",
+            latest: None,
+            hidden_on: Surface::ExplicitSearch,
+        },
+        Case {
+            key: "bad-shape",
+            seed_dependent: false,
+            // Support can only clamp what history earned, so `candidate` history
+            // carrying `verified` support is a shape the evaluator rejects. The pairing
+            // is legal and every stored field is permissive, so only the shape marks
+            // the row.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-bad-shape',NULL,'fixture','approval',1,'explicit_user',
+                         'user_explicit','approve','candidate','verified','active','automatic',
+                         'admit','normal',1,'fixture',1,2
+                     );",
+            latest: None,
+            hidden_on: Surface::ExplicitSearch,
+        },
+        Case {
+            key: "declassified-approval",
+            seed_dependent: false,
+            // An earlier `sensitive` lineage decision followed by a newer `normal` one.
+            // Both rows are otherwise permissive, and the newer one is the latest, so
+            // only the history keeps the approval restricted.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-a-sensitive',NULL,'fixture','approval',1,'explicit_user',
+                         'user_explicit','approve','verified','verified','active','automatic',
+                         'admit','sensitive',1,'fixture',1,2
+                     );
+                     INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-b-normal',NULL,'fixture','approval',1,'explicit_user',
+                         'user_explicit','approve','verified','verified','active','automatic',
+                         'admit','normal',1,'fixture',1,3
+                     );",
+            latest: Some("approval-lineage-b-normal"),
+            hidden_on: Surface::AutoInject,
+        },
+        Case {
+            key: "candidate-lineage",
+            seed_dependent: false,
+            // `visibility_row` derives `explicit_labeled` from candidate support, so this
+            // row withholds automatic serving however its `visibility` token reads.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-candidate',NULL,'fixture','approval',1,'explicit_user',
+                         'user_explicit','approve','candidate','candidate','active','automatic',
+                         'admit','normal',1,'fixture',1,2
+                     );",
+            latest: None,
+            hidden_on: Surface::AutoInject,
+        },
+        Case {
+            key: "personal-lineage",
+            seed_dependent: true,
+            // `trusted_local_code`/`personal` is a legal pairing whose `sensitivity_floor`
+            // is `sensitive`, so the stored `normal` understates what the row carries.
+            // Naming an approval satisfies the support-backing test, leaving the floor
+            // as the only restriction this row still carries.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                         outcome,sensitivity_class,policy_revision,reason,approval_object_id,
+                         commit_seq,decided_at
+                     ) VALUES (
+                         'approval-lineage-personal',NULL,'fixture','approval',1,'trusted_local_code',
+                         'personal','code_observed','verified','verified','active','automatic',
+                         'admit','normal',1,'fixture','approval-b',1,2
+                     );",
+            latest: None,
+            hidden_on: Surface::AutoInject,
+        },
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        seed_approval(directory.path());
+        if case.seed_dependent {
+            seed_dependent_approval(directory.path());
+        }
+        Connection::open(directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute_batch(case.ledger)
+            .unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
 
-    stage(&store, "blocked-by-source-rejection");
-    let mut approved = request("blocked-by-source-rejection");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("blocked-by-source-rejection"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "source-rejected-domain".to_string(),
-                    object_id: "source-rejected-object".to_string(),
-                    name: "name-blocked-by-source-rejection".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='source-rejected-object'"
-        ),
-        0
-    );
+        if let Some(latest) = case.latest {
+            assert_eq!(
+                inspect_text(
+                    directory.path(),
+                    "SELECT admission_decision_id FROM admission_decisions
+                     WHERE source_id='approval'
+                     ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+                ),
+                latest,
+                "{}: the governing rule picks the permissive row",
+                case.key
+            );
+        }
+        assert!(
+            store
+                .visible_as_of(case.hidden_on, 1)
+                .unwrap()
+                .rows
+                .iter()
+                .all(|row| row.object.object_id != "approval"),
+            "{}: the lineage row must hide the approval on {:?}",
+            case.key,
+            case.hidden_on
+        );
+
+        let candidate = format!("promoted-by-{}", case.key);
+        stage(&store, &candidate);
+        let mut approved = request(&candidate);
+        approved.source_class = Some(SourceClass::ModelInference);
+        approved.taint_class = Some(TaintClass::AssistantInference);
+        approved.event.kind = EventKind::Verify;
+        approved.event.trigger_object_id = None;
+        approved.event.approval_object_id = Some("approval".to_string());
+        assert_eq!(
+            admit(&store, approved, &candidate, &candidate),
+            "deny",
+            "{}",
+            case.key
+        );
+        assert_eq!(
+            inspect(
+                directory.path(),
+                &format!(
+                    "SELECT COUNT(*) FROM object_registry WHERE object_id='object-{candidate}'"
+                )
+            ),
+            0,
+            "{}",
+            case.key
+        );
+    }
 }
 
 #[test]
@@ -4164,9 +4018,11 @@ fn an_approval_needs_standing_of_its_own_not_its_lineage() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // An accepted ADR with no decision about itself, sharing a lineage with an
-    // approved source-scoped decision, plus one whose own governing decision
-    // pairs a source class the evaluator forbids with `user_explicit`.
+    // `borrowed` is an accepted ADR with no decision about itself, sharing a lineage
+    // with an approved source-scoped decision. `illegal` has its own governing
+    // decision, which pairs a source class the evaluator forbids with `user_explicit`.
+    // `weak-adr` has its own decision with `effective_maturity = 'verified'`; its
+    // newer lineage decision qualifies on every field.
     connection
         .execute_batch(
             "INSERT INTO object_registry(
@@ -4202,11 +4058,47 @@ fn an_approval_needs_standing_of_its_own_not_its_lineage() {
                  'illegal-admission','illegal','fixture','illegal',1,'untrusted_web',
                  'user_explicit','other','approved','approved','active','automatic','admit',
                  'normal',1,'fixture',1,1
+             );
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('weak-adr','decision','approval-domain','fixture','weak-adr',1,1,'normal');
+             INSERT INTO decisions(
+                 decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
+                 sensitivity_class
+             ) VALUES ('weak-adr-decision','weak-adr','adr_accepted',X'7b7d',1,'normal');
+             INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+             ) VALUES (
+                 'weak-adr-own','weak-adr','fixture','weak-adr',1,'explicit_user','user_explicit',
+                 'other','verified','verified','active','automatic','admit','normal',1,'fixture',
+                 1,1
+             );
+             INSERT INTO admission_decisions(
+                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+             ) VALUES (
+                 'weak-adr-zz-lineage',NULL,'fixture','weak-adr',1,'explicit_user',
+                 'user_explicit','other','approved','approved','active','automatic','admit',
+                 'normal',1,'fixture',1,2
              );",
         )
         .unwrap();
     drop(connection);
     let store = KernelStore::open(directory.path()).unwrap();
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT admission_decision_id FROM admission_decisions
+             WHERE source_id='weak-adr'
+             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
+        ),
+        "weak-adr-zz-lineage",
+        "the governing rule picks the weak ADR's lineage row"
+    );
 
     for (authority, candidate, domain, object) in [
         (
@@ -4221,6 +4113,7 @@ fn an_approval_needs_standing_of_its_own_not_its_lineage() {
             "illegal-domain",
             "illegal-object",
         ),
+        ("weak-adr", "leans-on-weak", "weak-domain", "weak-object"),
     ] {
         stage(&store, candidate);
         let mut approved = request(candidate);
@@ -4254,48 +4147,64 @@ fn an_approval_needs_standing_of_its_own_not_its_lineage() {
 }
 
 #[test]
-fn a_sensitive_trigger_classifies_the_object_it_admits() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage_with_observation(
-        &store,
-        "classified",
-        "code_present",
-        1,
-        "classified-trigger",
-    );
-    // The candidate is normal but its supporting observation is not.
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    connection
-        .execute_batch(
+fn an_admitted_object_carries_the_class_of_its_trigger_and_the_evidence_behind_it() {
+    // The candidate is normal; admission derives its `sensitivity_class` from the
+    // triggering observation or cited evidence.
+    for (key, classified) in [
+        (
+            "classified",
             "UPDATE observations SET sensitivity_class='secret'
              WHERE observation_id='observation-classified';",
-        )
-        .unwrap();
-    drop(connection);
+        ),
+        (
+            "backed",
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO object_registry(
+                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                 created_commit_seq,sensitivity_class
+             ) VALUES ('backing-object','evidence','trigger-backed','repo','backing',1,1,'secret');
+             INSERT INTO evidence_meta(
+                 evidence_id,object_id,artifact_reference,artifact_digest,byte_length,media_type,
+                 retention_class,provider_egress_class,redaction_metadata,created_commit_seq,
+                 sensitivity_class
+             ) VALUES ('backing-1','backing-object','local','digest',1,'text/plain','durable',
+                       'local',X'',1,'secret');
+             UPDATE observations SET evidence_id='backing-1'
+             WHERE observation_id='observation-backed';",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        stage_with_observation(&store, key, "code_present", 1, &format!("{key}-trigger"));
+        let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection.execute_batch(classified).unwrap();
+        drop(connection);
 
-    assert_eq!(
-        admit(&store, request("classified"), "classified", "classified"),
-        "admit"
-    );
-    // Both the decision and the object it materialized carry the trigger's class, so
-    // the admitted content is not exposed below the classification that supported it.
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT sensitivity_class FROM admission_decisions
-             WHERE subject_object_id='object-classified'"
-        ),
-        "secret"
-    );
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT sensitivity_class FROM object_registry
-             WHERE object_id='object-classified'"
-        ),
-        "secret"
-    );
+        assert_eq!(admit(&store, request(key), key, key), "admit", "{key}");
+        // Both the decision and the object it materialized carry the trigger's class, so
+        // the admitted content is not exposed below the classification that supported it.
+        assert_eq!(
+            inspect_text(
+                directory.path(),
+                &format!(
+                    "SELECT sensitivity_class FROM admission_decisions
+                     WHERE subject_object_id='object-{key}'"
+                )
+            ),
+            "secret",
+            "{key}"
+        );
+        assert_eq!(
+            inspect_text(
+                directory.path(),
+                &format!(
+                    "SELECT sensitivity_class FROM object_registry WHERE object_id='object-{key}'"
+                )
+            ),
+            "secret",
+            "{key}"
+        );
+    }
 }
 
 #[test]
@@ -4494,41 +4403,118 @@ fn a_hidden_approval_is_not_authority() {
 }
 
 #[test]
-fn support_above_earned_history_never_serves() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let seq = insert_subject(
-        &store,
-        "impossible",
-        Sensitivity::Normal,
-        Some(EventKind::CodeObserved),
-    );
-    drop(store);
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // Support clamps history; it cannot exceed it. Every other field stays valid.
-    connection
-        .execute(
-            "UPDATE admission_decisions SET maturity='candidate',effective_maturity='verified'
-             WHERE subject_object_id='object-impossible'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT disposition||'/'||visibility FROM admission_decisions
-             WHERE subject_object_id='object-impossible'"
-        ),
-        "active/automatic"
-    );
-    for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
-        assert!(
-            store.visible_as_of(surface, seq).unwrap().rows.is_empty(),
-            "effective maturity above historical must fail closed"
+fn an_own_history_the_evaluator_could_not_have_written_fails_closed_on_every_surface() {
+    // Each ledger edit yields a history the evaluator never produces: support above
+    // earned history; an own decision no binary reads beside a valid lineage row;
+    // an earlier inference-tainted row under a later trusted-code row; a later
+    // `normal` row under an earlier `secret` one.
+    struct Case {
+        key: &'static str,
+        ledger: &'static str,
+        latest: Option<(&'static str, &'static str)>,
+    }
+    for case in [
+        Case {
+            key: "impossible",
+            // Support clamps history; it cannot exceed it. Every other field stays valid.
+            ledger: "UPDATE admission_decisions SET maturity='candidate',effective_maturity='verified'
+                     WHERE subject_object_id='object-impossible';",
+            latest: Some((
+                "SELECT disposition||'/'||visibility FROM admission_decisions
+                 WHERE subject_object_id='object-impossible'",
+                "active/automatic",
+            )),
+        },
+        Case {
+            key: "unreadable",
+            // The object's only own decision becomes uninterpretable, while the
+            // lineage gains a valid automatic decision that would otherwise carry it.
+            ledger: "UPDATE admission_decisions SET policy_revision=99
+                     WHERE subject_object_id='object-unreadable';
+                     INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                     ) VALUES (
+                         'unreadable-lineage',NULL,'fixture','source-unreadable',1,'trusted_local_code',
+                         'current_code','other','verified','verified','active','automatic','admit',
+                         'normal',1,'fixture',1,1
+                     );",
+            latest: None,
+        },
+        Case {
+            key: "relabelled",
+            // `evaluate_admission` refuses any change to a prior decision's source or
+            // taint class. The id sorts before the real row, which stays latest.
+            ledger: "INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
+                         commit_seq,decided_at
+                     )
+                     SELECT '0-earlier-inference-row',subject_object_id,source_kind,source_id,
+                            source_revision,'model_inference','assistant_inference',event_kind,
+                            'candidate','candidate',disposition,visibility,outcome,sensitivity_class,
+                            policy_revision,reason,elevated_support,commit_seq,decided_at
+                     FROM admission_decisions WHERE subject_object_id='object-relabelled';",
+            latest: Some((
+                "SELECT source_class||'/'||taint_class FROM admission_decisions
+                 WHERE subject_object_id='object-relabelled'
+                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+                "trusted_local_code/current_code",
+            )),
+        },
+        Case {
+            key: "declassify",
+            // The evaluator maxes each decision's sensitivity with its prior's, so no
+            // row it writes lowers one.
+            ledger: "UPDATE admission_decisions SET sensitivity_class='secret'
+                      WHERE subject_object_id='object-declassify';
+                     INSERT INTO admission_decisions(
+                         admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                         source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
+                         visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
+                         commit_seq,decided_at
+                     )
+                     SELECT 'zz-declassifying-row',subject_object_id,source_kind,source_id,
+                            source_revision,source_class,taint_class,event_kind,maturity,
+                            effective_maturity,disposition,visibility,outcome,'normal',policy_revision,
+                            reason,elevated_support,commit_seq,decided_at
+                     FROM admission_decisions WHERE subject_object_id='object-declassify';",
+            latest: Some((
+                "SELECT sensitivity_class FROM admission_decisions
+                 WHERE subject_object_id='object-declassify'
+                 ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1",
+                "normal",
+            )),
+        },
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        let seq = insert_subject(
+            &store,
+            case.key,
+            Sensitivity::Normal,
+            Some(EventKind::CodeObserved),
         );
+        drop(store);
+        Connection::open(directory.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute_batch(case.ledger)
+            .unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+
+        // The stored latest row reads as permissive on its own; only history marks it.
+        if let Some((sql, expected)) = case.latest {
+            assert_eq!(inspect_text(directory.path(), sql), expected, "{}", case.key);
+        }
+        for surface in Surface::ALL {
+            assert!(
+                store.visible_as_of(*surface, seq).unwrap().rows.is_empty(),
+                "{} must fail closed on {surface:?}",
+                case.key
+            );
+        }
     }
 }
 
@@ -4599,52 +4585,6 @@ fn an_object_restriction_survives_a_later_lineage_admission() {
                 "a quarantined object must not be relaxed by a lineage admission"
             );
         }
-    }
-}
-
-#[test]
-fn standing_requires_an_own_decision_that_is_itself_valid() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let seq = insert_subject(
-        &store,
-        "unreadable",
-        Sensitivity::Normal,
-        Some(EventKind::CodeObserved),
-    );
-    drop(store);
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // The object's only own decision becomes uninterpretable, while the lineage
-    // gains a valid automatic decision that would otherwise carry it.
-    connection
-        .execute(
-            "UPDATE admission_decisions SET policy_revision=99
-             WHERE subject_object_id='object-unreadable'",
-            [],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'unreadable-lineage',NULL,'fixture','source-unreadable',1,'trusted_local_code',
-                 'current_code','other','verified','verified','active','automatic','admit',
-                 'normal',1,'fixture',1,1
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
-        assert!(
-            store.visible_as_of(surface, seq).unwrap().rows.is_empty(),
-            "a lineage decision must not carry an object whose own decision is unreadable"
-        );
     }
 }
 
@@ -4769,210 +4709,6 @@ fn a_lineage_rejection_demotes_what_the_rejected_authority_supported() {
 }
 
 #[test]
-fn a_weak_own_decision_is_not_rescued_by_a_qualifying_lineage_decision() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // The ADR's own decision stops at `verified`, so it never earned approval.
-    // A newer decision on its lineage qualifies on every field.
-    connection
-        .execute_batch(
-            "INSERT INTO object_registry(
-                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
-                 created_commit_seq,sensitivity_class
-             ) VALUES ('weak-adr','decision','approval-domain','fixture','weak-adr',1,1,'normal');
-             INSERT INTO decisions(
-                 decision_id,object_id,decision_kind,decision_payload,created_commit_seq,
-                 sensitivity_class
-             ) VALUES ('weak-adr-decision','weak-adr','adr_accepted',X'7b7d',1,'normal');
-             INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'weak-adr-own','weak-adr','fixture','weak-adr',1,'explicit_user','user_explicit',
-                 'other','verified','verified','active','automatic','admit','normal',1,'fixture',
-                 1,1
-             );
-             INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'weak-adr-zz-lineage',NULL,'fixture','weak-adr',1,'explicit_user',
-                 'user_explicit','other','approved','approved','active','automatic','admit',
-                 'normal',1,'fixture',1,2
-             );",
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-    // The lineage row really is the one the governing rule would pick.
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT admission_decision_id FROM admission_decisions
-             WHERE source_id='weak-adr'
-             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-        ),
-        "weak-adr-zz-lineage"
-    );
-
-    stage(&store, "leans-on-weak");
-    let mut approved = request("leans-on-weak");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("weak-adr".to_string());
-    store
-        .commit(intent("leans-on-weak"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "weak-domain".to_string(),
-                    object_id: "weak-object".to_string(),
-                    name: "name-leans-on-weak".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='weak-object'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn a_newer_own_decision_does_not_outrank_a_lineage_rejection_for_authority() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // The ADR is rejected at lineage scope, then records a newer own decision that
-    // qualifies on every field. Serving still withholds it, so authority must too.
-    connection
-        .execute_batch(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-a-lineage-reject',NULL,'fixture','approval',1,'explicit_user',
-                 'user_explicit','explicit_reject','approved','approved','rejected','review_only',
-                 'reject','normal',1,'fixture',1,2
-             );
-             INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-z-own-later','approval','fixture','approval',1,'explicit_user',
-                 'user_explicit','other','approved','approved','active','automatic','admit',
-                 'normal',1,'fixture',1,3
-             );",
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-    // The own row really is the newer of the two.
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT admission_decision_id FROM admission_decisions
-             WHERE source_id='approval' ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-        ),
-        "approval-z-own-later"
-    );
-    // And serving withholds the ADR, because the lineage rejection still applies.
-    assert!(
-        store
-            .visible_as_of(Surface::ExplicitSearch, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .all(|row| row.object.object_id != "approval")
-    );
-
-    stage(&store, "leans-on-rejected-lineage");
-    let mut approved = request("leans-on-rejected-lineage");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("leans-on-rejected-lineage"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "rejected-lineage-domain".to_string(),
-                    object_id: "rejected-lineage-object".to_string(),
-                    name: "name-leans-on-rejected-lineage".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='rejected-lineage-object'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn support_above_the_automatic_ceiling_needs_an_approval_to_serve() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let seq = insert_subject(
-        &store,
-        "unbacked",
-        Sensitivity::Normal,
-        Some(EventKind::CodeObserved),
-    );
-    drop(store);
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // `model_inference`/`assistant_inference` has an automatic ceiling of
-    // `candidate`, so `verified` support is a level the evaluator only reaches on a
-    // valid approval. This row names none.
-    connection
-        .execute(
-            "UPDATE admission_decisions
-             SET source_class='model_inference',taint_class='assistant_inference',
-                 maturity='verified',effective_maturity='verified',
-                 disposition='active',visibility='automatic',approval_object_id=NULL
-             WHERE subject_object_id='object-unbacked'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT disposition||'/'||visibility||'/'||effective_maturity
-             FROM admission_decisions WHERE subject_object_id='object-unbacked'"
-        ),
-        "active/automatic/verified"
-    );
-    for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
-        assert!(
-            store.visible_as_of(surface, seq).unwrap().rows.is_empty(),
-            "support above the ceiling with no approval must fail closed"
-        );
-    }
-}
-
-#[test]
 fn a_failed_domain_admission_still_cascades_authority_loss() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
@@ -5078,33 +4814,6 @@ fn a_failed_domain_admission_still_cascades_authority_loss() {
              ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
         ),
         "candidate"
-    );
-}
-
-#[test]
-fn a_root_accepted_adr_serves_without_citing_an_approval() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-    // `admission_ceiling` lifts an accepted decision to `approved` on its own, so
-    // this row legitimately holds support above the automatic ceiling with no
-    // approval named. Serving must not mistake that for unbacked support.
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT effective_maturity||'/'||COALESCE(approval_object_id,'NULL')
-             FROM admission_decisions WHERE subject_object_id='approval'"
-        ),
-        "approved/NULL"
-    );
-    assert!(
-        store
-            .visible_as_of(Surface::AutoInject, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .any(|row| row.object.object_id == "approval"),
-        "a root accepted ADR must still serve"
     );
 }
 
@@ -5263,13 +4972,23 @@ fn an_invalidated_approval_still_serves_at_its_own_snapshot() {
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
     let admitted = 1;
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT effective_maturity||'/'||COALESCE(approval_object_id,'NULL')
+             FROM admission_decisions WHERE subject_object_id='approval'"
+        ),
+        "approved/NULL",
+        "an accepted decision reaches approved through `admission_ceiling` alone"
+    );
     assert!(
         store
             .visible_as_of(Surface::AutoInject, admitted)
             .unwrap()
             .rows
             .iter()
-            .any(|row| row.object.object_id == "approval")
+            .any(|row| row.object.object_id == "approval"),
+        "a root accepted ADR serves without citing an approval"
     );
     let revoked = store
         .commit(intent("revoke-for-time-travel"), |envelope| {
@@ -5301,7 +5020,7 @@ fn an_invalidated_approval_still_serves_at_its_own_snapshot() {
 }
 
 #[test]
-fn a_denied_event_does_not_hide_the_authority_it_carried_forward() {
+fn a_cyclic_citation_is_denied_and_leaves_both_links_authority_and_visibility_intact() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     seed_dependent_approval(directory.path());
@@ -5318,7 +5037,8 @@ fn a_denied_event_does_not_hide_the_authority_it_carried_forward() {
         vec!["approval".to_string(), "approval-b".to_string()]
     );
 
-    // A citation that closes a cycle is denied, but the denial still records a row.
+    // `approval-b` cannot approve `approval`: it derives authority from `approval`,
+    // so the citation would create a cycle. The denial records an admission row.
     let denied = store
         .commit(intent("cycle-attempt"), |envelope| {
             let mut cyclic = subject_request("approval", EventKind::Approve);
@@ -5354,6 +5074,19 @@ fn a_denied_event_does_not_hide_the_authority_it_carried_forward() {
             .collect::<Vec<_>>(),
         before,
         "a denial must not remove what was visible before it"
+    );
+
+    // The denied cyclic citation does not invalidate existing authority.
+    stage(&store, "after-cycle");
+    let mut granted = request("after-cycle");
+    granted.source_class = Some(SourceClass::ModelInference);
+    granted.taint_class = Some(TaintClass::AssistantInference);
+    granted.event.kind = EventKind::Verify;
+    granted.event.trigger_object_id = None;
+    granted.event.approval_object_id = Some("approval-b".to_string());
+    assert_eq!(
+        admit(&store, granted, "after-cycle", "after-cycle"),
+        "admit"
     );
 }
 
@@ -5415,88 +5148,23 @@ fn a_later_event_does_not_strip_an_adrs_self_earned_support() {
 }
 
 #[test]
-fn a_lineage_row_with_a_rejected_pairing_carries_no_authority() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // `explicit_user`/`current_code` is a pairing `source_allows_taint` refuses, so
-    // the evaluator cannot have written this row. Every other field is permissive.
-    connection
-        .execute(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
-                 outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-illegal-pairing',NULL,'fixture','approval',1,'explicit_user',
-                 'current_code','code_observed','approved','approved','active','automatic',
-                 'admit','normal',1,'fixture',1,2
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    // Serving cannot interpret the pairing, so it hides the approval object.
-    assert!(
-        store
-            .visible_as_of(Surface::ExplicitSearch, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .all(|row| row.object.object_id != "approval"),
-        "an uninterpretable lineage row must hide the object it governs"
-    );
-
-    // Authority must reach the same answer: a hidden approval cannot promote.
-    stage(&store, "promoted-by-hidden-approval");
-    let mut approved = request("promoted-by-hidden-approval");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("promoted-by-hidden-approval"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "hidden-approval-domain".to_string(),
-                    object_id: "hidden-approval-object".to_string(),
-                    name: "name-promoted-by-hidden-approval".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='hidden-approval-object'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn a_non_granting_row_cannot_claim_support_it_never_earned() {
-    for outcome in ["deny", "demote_support", "mystery"] {
+fn unbacked_support_above_the_automatic_ceiling_never_serves_whatever_its_outcome() {
+    // `model_inference`/`assistant_inference` tops out at `candidate`, so `verified`
+    // support is a level the evaluator only reaches on a valid approval, and these
+    // rows name none. `admit` is the outcome the observation wrote; a non-granting
+    // outcome does not stand in for an approval, and neither does an outcome token
+    // this binary cannot read.
+    for outcome in ["admit", "deny", "demote_support", "mystery"] {
         let directory = tempfile::tempdir().unwrap();
         let store = KernelStore::open(directory.path()).unwrap();
         let seq = insert_subject(
             &store,
-            "carried",
+            "unbacked",
             Sensitivity::Normal,
             Some(EventKind::CodeObserved),
         );
         drop(store);
         let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-        // `model_inference`/`assistant_inference` tops out at `candidate`, so
-        // `verified` support needs an approval this row does not name. A
-        // non-granting outcome does not stand in for one, and neither does an
-        // outcome token this binary cannot read.
         connection
             .execute(
                 "UPDATE admission_decisions
@@ -5504,13 +5172,22 @@ fn a_non_granting_row_cannot_claim_support_it_never_earned() {
                      maturity='verified',effective_maturity='verified',
                      disposition='active',visibility='automatic',approval_object_id=NULL,
                      outcome=?1
-                 WHERE subject_object_id='object-carried'",
+                 WHERE subject_object_id='object-unbacked'",
                 [outcome],
             )
             .unwrap();
         drop(connection);
         let store = KernelStore::open(directory.path()).unwrap();
 
+        assert_eq!(
+            inspect_text(
+                directory.path(),
+                "SELECT disposition||'/'||visibility||'/'||effective_maturity
+                 FROM admission_decisions WHERE subject_object_id='object-unbacked'"
+            ),
+            "active/automatic/verified",
+            "outcome {outcome}"
+        );
         for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
             assert!(
                 store.visible_as_of(surface, seq).unwrap().rows.is_empty(),
@@ -5567,67 +5244,6 @@ fn only_a_decision_object_holds_its_own_accepted_authority() {
                 .iter()
                 .all(|row| row.object.object_id != "impostor"),
             "self-authority belongs to decision objects only"
-        );
-    }
-}
-
-#[test]
-fn a_later_row_cannot_declassify_what_an_earlier_decision_restricted() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let seq = insert_subject(
-        &store,
-        "declassify",
-        Sensitivity::Normal,
-        Some(EventKind::CodeObserved),
-    );
-    drop(store);
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // The evaluator maxes each decision's sensitivity with its prior's, so no row it
-    // writes lowers one. This pair -- an earlier `secret` and a later `normal` that
-    // is otherwise valid -- is reachable only by restoring an edited ledger.
-    connection
-        .execute_batch(
-            "UPDATE admission_decisions SET sensitivity_class='secret'
-              WHERE subject_object_id='object-declassify';
-             INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
-                 commit_seq,decided_at
-             )
-             SELECT 'zz-declassifying-row',subject_object_id,source_kind,source_id,
-                    source_revision,source_class,taint_class,event_kind,maturity,
-                    effective_maturity,disposition,visibility,outcome,'normal',policy_revision,
-                    reason,elevated_support,commit_seq,decided_at
-             FROM admission_decisions WHERE subject_object_id='object-declassify';",
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT sensitivity_class FROM admission_decisions
-             WHERE subject_object_id='object-declassify'
-             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-        ),
-        "normal"
-    );
-    for surface in [
-        Surface::AutoInject,
-        Surface::AutoSearch,
-        Surface::ExplicitSearch,
-    ] {
-        assert!(
-            store
-                .visible_as_of(surface, seq)
-                .unwrap()
-                .rows
-                .iter()
-                .all(|row| row.object.object_id != "object-declassify"),
-            "a later row must not declassify an earlier decision's sensitivity"
         );
     }
 }
@@ -5727,327 +5343,6 @@ fn an_own_restriction_in_history_outranks_a_permissive_lineage_row() {
             "a permissive lineage row must not outrank a stricter own-object history"
         );
     }
-}
-
-#[test]
-fn a_lineage_row_with_an_impossible_maturity_shape_carries_no_authority() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // Support can only clamp what history earned, so `candidate` history carrying
-    // `verified` support is a shape the evaluator rejects. The pairing is legal and
-    // every stored field is permissive, so only the shape marks the row.
-    connection
-        .execute(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
-                 outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-bad-shape',NULL,'fixture','approval',1,'explicit_user',
-                 'user_explicit','approve','candidate','verified','active','automatic',
-                 'admit','normal',1,'fixture',1,2
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert!(
-        store
-            .visible_as_of(Surface::ExplicitSearch, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .all(|row| row.object.object_id != "approval"),
-        "serving must hide an object governed by a row it cannot interpret"
-    );
-
-    stage(&store, "promoted-by-bad-shape");
-    let mut approved = request("promoted-by-bad-shape");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("promoted-by-bad-shape"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "bad-shape-domain".to_string(),
-                    object_id: "bad-shape-object".to_string(),
-                    name: "name-promoted-by-bad-shape".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='bad-shape-object'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn a_newer_normal_lineage_row_does_not_restore_authority_history_restricted() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // An earlier `sensitive` lineage decision followed by a newer `normal` one. Both
-    // rows are otherwise permissive, and the newer one is the latest, so only the
-    // history keeps the approval restricted.
-    connection
-        .execute_batch(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-a-sensitive',NULL,'fixture','approval',1,'explicit_user',
-                 'user_explicit','approve','verified','verified','active','automatic',
-                 'admit','sensitive',1,'fixture',1,2
-             );
-             INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-b-normal',NULL,'fixture','approval',1,'explicit_user',
-                 'user_explicit','approve','verified','verified','active','automatic',
-                 'admit','normal',1,'fixture',1,3
-             );",
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert!(
-        store
-            .visible_as_of(Surface::AutoInject, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .all(|row| row.object.object_id != "approval"),
-        "history keeps the approval off automatic surfaces"
-    );
-
-    stage(&store, "promoted-by-declassified-approval");
-    let mut approved = request("promoted-by-declassified-approval");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("promoted-by-declassified-approval"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "declassified-approval-domain".to_string(),
-                    object_id: "declassified-approval-object".to_string(),
-                    name: "name-promoted-by-declassified-approval".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry
-             WHERE object_id='declassified-approval-object'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn a_relabelled_latest_row_cannot_launder_an_earlier_classification() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let seq = insert_subject(
-        &store,
-        "relabelled",
-        Sensitivity::Normal,
-        Some(EventKind::CodeObserved),
-    );
-    drop(store);
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // `evaluate_admission` refuses any change to a prior decision's source or taint
-    // class, so an earlier inference-tainted row under a later trusted-code row is a
-    // history it cannot produce. The id sorts before the real row, which stays latest.
-    connection
-        .execute_batch(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,
-                 visibility,outcome,sensitivity_class,policy_revision,reason,elevated_support,
-                 commit_seq,decided_at
-             )
-             SELECT '0-earlier-inference-row',subject_object_id,source_kind,source_id,
-                    source_revision,'model_inference','assistant_inference',event_kind,
-                    'candidate','candidate',disposition,visibility,outcome,sensitivity_class,
-                    policy_revision,reason,elevated_support,commit_seq,decided_at
-             FROM admission_decisions WHERE subject_object_id='object-relabelled';",
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT source_class||'/'||taint_class FROM admission_decisions
-             WHERE subject_object_id='object-relabelled'
-             ORDER BY commit_seq DESC,admission_decision_id DESC LIMIT 1"
-        ),
-        "trusted_local_code/current_code"
-    );
-    for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
-        assert!(
-            store.visible_as_of(surface, seq).unwrap().rows.is_empty(),
-            "a relabelled latest row must not launder an earlier classification"
-        );
-    }
-}
-
-#[test]
-fn a_stored_automatic_token_does_not_override_derived_lineage_visibility() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // `visibility_row` derives `explicit_labeled` from candidate support, so this
-    // row withholds automatic serving however its `visibility` token reads.
-    connection
-        .execute(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
-                 outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-candidate',NULL,'fixture','approval',1,'explicit_user',
-                 'user_explicit','approve','candidate','candidate','active','automatic',
-                 'admit','normal',1,'fixture',1,2
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert!(
-        store
-            .visible_as_of(Surface::AutoInject, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .all(|row| row.object.object_id != "approval"),
-        "candidate lineage support keeps the approval off automatic surfaces"
-    );
-
-    stage(&store, "promoted-by-candidate-lineage");
-    let mut approved = request("promoted-by-candidate-lineage");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("promoted-by-candidate-lineage"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "candidate-lineage-domain".to_string(),
-                    object_id: "candidate-lineage-object".to_string(),
-                    name: "name-promoted-by-candidate-lineage".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='candidate-lineage-object'"
-        ),
-        0
-    );
-}
-
-#[test]
-fn a_taint_sensitivity_floor_applies_to_lineage_rows_that_store_normal() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    seed_dependent_approval(directory.path());
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    // `trusted_local_code`/`personal` is a legal pairing whose `sensitivity_floor` is
-    // `sensitive`, so the stored `normal` understates what the row carries. Naming an
-    // approval satisfies the support-backing test, leaving the floor as the only
-    // restriction this row still carries.
-    connection
-        .execute(
-            "INSERT INTO admission_decisions(
-                 admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
-                 source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
-                 outcome,sensitivity_class,policy_revision,reason,approval_object_id,
-                 commit_seq,decided_at
-             ) VALUES (
-                 'approval-lineage-personal',NULL,'fixture','approval',1,'trusted_local_code',
-                 'personal','code_observed','verified','verified','active','automatic',
-                 'admit','normal',1,'fixture','approval-b',1,2
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    assert!(
-        store
-            .visible_as_of(Surface::AutoInject, 1)
-            .unwrap()
-            .rows
-            .iter()
-            .all(|row| row.object.object_id != "approval"),
-        "the taint floor keeps the approval off automatic surfaces"
-    );
-
-    stage(&store, "promoted-by-personal-lineage");
-    let mut approved = request("promoted-by-personal-lineage");
-    approved.source_class = Some(SourceClass::ModelInference);
-    approved.taint_class = Some(TaintClass::AssistantInference);
-    approved.event.kind = EventKind::Verify;
-    approved.event.trigger_object_id = None;
-    approved.event.approval_object_id = Some("approval".to_string());
-    store
-        .commit(intent("promoted-by-personal-lineage"), |envelope| {
-            let decision = envelope.admit_domain_candidate(
-                approved,
-                AdmissionDomainSpec {
-                    domain_id: "personal-lineage-domain".to_string(),
-                    object_id: "personal-lineage-object".to_string(),
-                    name: "name-promoted-by-personal-lineage".to_string(),
-                },
-            )?;
-            assert_eq!(decision.outcome.as_str(), "deny");
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(
-        inspect(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='personal-lineage-object'"
-        ),
-        0
-    );
 }
 
 #[test]
@@ -6193,7 +5488,7 @@ fn a_new_candidate_id_cannot_reset_a_lineage_rejection() {
 }
 
 #[test]
-fn revoking_an_approval_demotes_a_source_scoped_decision_it_supported() {
+fn revoking_an_approval_demotes_the_source_scoped_promotion_and_the_candidate_it_covered() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
@@ -6246,6 +5541,31 @@ fn revoking_an_approval_demotes_a_source_scoped_decision_it_supported() {
     );
     let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(payload["audit"]["demoted"], 1, "{payload}");
+
+    // Materialization preserves historical maturity and caps effective maturity at the automatic ceiling after revocation.
+    store
+        .commit(intent("materialize-lineage"), |envelope| {
+            let decision = envelope.admit_domain_candidate(
+                request("lineage"),
+                AdmissionDomainSpec {
+                    domain_id: "domain-lineage".to_string(),
+                    object_id: "object-lineage".to_string(),
+                    name: "name-lineage".to_string(),
+                },
+            )?;
+            assert_eq!(decision.historical_maturity, Maturity::Approved);
+            assert_eq!(decision.effective_maturity, Maturity::Verified);
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        inspect_text(
+            directory.path(),
+            "SELECT effective_maturity FROM admission_decisions
+             WHERE subject_object_id='object-lineage'"
+        ),
+        "verified"
+    );
 }
 
 /// An unmaterialized candidate's elevated decision cites the approval through
@@ -6665,11 +5985,26 @@ fn seed_wide_authority_tree(root: &std::path::Path) {
 }
 
 #[test]
-fn a_revocation_past_the_demotion_cap_still_traverses_deferred_approvals() {
+fn a_revocation_past_the_demotion_cap_traverses_deferred_approvals_and_stops_serving_them() {
     let directory = tempfile::tempdir().unwrap();
     seed_approval(directory.path());
     seed_wide_authority_tree(directory.path());
     let store = KernelStore::open(directory.path()).unwrap();
+
+    // Before the revocation every dependent serves on the labeled surface.
+    let tip = store.tip().unwrap();
+    let served = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
+    let served_ids = |served: &kernel::VisibleAsOf| -> std::collections::BTreeSet<String> {
+        served
+            .rows
+            .iter()
+            .map(|row| row.object.object_id.clone())
+            .collect()
+    };
+    let before = served_ids(&served);
+    assert!(before.contains("zz-deep-leaf"));
+    assert!(before.contains("mid-0-dependent-0999"));
+    assert!(before.contains("mid-4-dependent-0000"));
 
     store
         .commit(intent("revoke-root-at-cap"), |envelope| {
@@ -6700,37 +6035,6 @@ fn a_revocation_past_the_demotion_cap_still_traverses_deferred_approvals() {
         "explicit_labeled",
         "a deferred row is left for later, not rewritten past the cap"
     );
-}
-
-#[test]
-fn a_dependent_the_cap_left_elevated_is_not_served_once_its_authority_is_revoked() {
-    let directory = tempfile::tempdir().unwrap();
-    seed_approval(directory.path());
-    seed_wide_authority_tree(directory.path());
-    let store = KernelStore::open(directory.path()).unwrap();
-
-    // Before the revocation every dependent serves on the labeled surface.
-    let tip = store.tip().unwrap();
-    let served = store.visible_as_of(Surface::ExplicitSearch, tip).unwrap();
-    let served_ids = |served: &kernel::VisibleAsOf| -> std::collections::BTreeSet<String> {
-        served
-            .rows
-            .iter()
-            .map(|row| row.object.object_id.clone())
-            .collect()
-    };
-    let before = served_ids(&served);
-    assert!(before.contains("zz-deep-leaf"));
-    assert!(before.contains("mid-0-dependent-0999"));
-    assert!(before.contains("mid-4-dependent-0000"));
-
-    store
-        .commit(intent("revoke-root-at-cap"), |envelope| {
-            let decisions = envelope.revoke_approval("approval", "root authority withdrawn")?;
-            assert_eq!(decisions.len(), 4_096);
-            Ok(String::new())
-        })
-        .unwrap();
 
     // A demoted dependent was rewritten to the support its own classification
     // earns, which still serves labeled. A deferred one was not rewritten, yet
@@ -6778,55 +6082,6 @@ fn a_dependent_the_cap_left_elevated_is_not_served_once_its_authority_is_revoked
             .unwrap(),
     );
     assert_eq!(historical, before);
-}
-
-#[test]
-fn a_trigger_carries_the_class_of_the_evidence_backing_it() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    stage_with_observation(&store, "backed", "code_present", 1, "backed-trigger");
-    // The observation is recorded as normal, but the evidence it cites is secret.
-    let connection = Connection::open(directory.path().join("kernel.sqlite")).unwrap();
-    connection
-        .execute_batch(
-            "PRAGMA foreign_keys=ON;
-             INSERT INTO object_registry(
-                 object_id,object_kind,domain_id,source_kind,source_id,source_revision,
-                 created_commit_seq,sensitivity_class
-             ) VALUES ('backing-object','evidence','trigger-backed','repo','backing',1,1,'secret');
-             INSERT INTO evidence_meta(
-                 evidence_id,object_id,artifact_reference,artifact_digest,byte_length,media_type,
-                 retention_class,provider_egress_class,redaction_metadata,created_commit_seq,
-                 sensitivity_class
-             ) VALUES ('backing-1','backing-object','local','digest',1,'text/plain','durable',
-                       'local',X'',1,'secret');
-             UPDATE observations SET evidence_id='backing-1'
-             WHERE observation_id='observation-backed';",
-        )
-        .unwrap();
-    drop(connection);
-
-    assert_eq!(
-        admit(&store, request("backed"), "backed", "backed"),
-        "admit"
-    );
-    // The admitted object is classified no lower than the material that
-    // supported its admission: the evidence's secret, not the observation's normal.
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT sensitivity_class FROM admission_decisions
-             WHERE subject_object_id='object-backed'"
-        ),
-        "secret"
-    );
-    assert_eq!(
-        inspect_text(
-            directory.path(),
-            "SELECT sensitivity_class FROM object_registry WHERE object_id='object-backed'"
-        ),
-        "secret"
-    );
 }
 
 /// Seeds an accepted decision object `object_id` on lineage `(repo, source_id, 1)`

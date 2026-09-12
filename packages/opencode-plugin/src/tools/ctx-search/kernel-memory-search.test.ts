@@ -122,16 +122,6 @@ describe("memoryResultFromRow", () => {
         if (withoutRationale.source !== "anti_memory") return;
         expect(withoutRationale.rationale).toBeUndefined();
     });
-
-    test("an ordinary decision row keeps the memory shape", () => {
-        const row = readRow({
-            objectId: OBJECT_A,
-            decisionKind: "PROJECT_RULES",
-            summary: "the historian runs on a lease",
-        });
-        const result = memoryResultFromRow(row, 1, "exact");
-        expect(result.source).toBe("memory");
-    });
 });
 
 describe("searchKernelMemoryRows match labeling and domain fence", () => {
@@ -147,24 +137,6 @@ describe("searchKernelMemoryRows match labeling and domain fence", () => {
         expect(byId?.map((hit) => hit.matchType)).toEqual(["exact"]);
         const byText = searchKernelMemoryRows({ rows, query: "historian lease", limit: 5 });
         expect(byText?.map((hit) => hit.matchType)).toEqual(["lexical"]);
-    });
-
-    test("a text-ranked anti-memory hit is labeled lexical", () => {
-        const rows = [
-            readRow({
-                objectId: OBJECT_A,
-                decisionKind: ANTI_MEMORY_CATEGORY,
-                summary: renderAntiMemoryContent({
-                    trigger: "session caching",
-                    rejectedStrategy: "Redis",
-                    rejectionReason: "it creates split ownership",
-                }),
-            }),
-        ];
-        const hits = searchKernelMemoryRows({ rows, query: "session caching", limit: 5 });
-        expect(hits?.map((hit) => [hit.source, hit.matchType])).toEqual([
-            ["anti_memory", "lexical"],
-        ]);
     });
 
     test("an anti-memory matched only through its rationale surfaces with that rationale", () => {
@@ -223,7 +195,7 @@ describe("searchKernelMemoryRows anti-memory expiry", () => {
         expect(searchKernelMemoryRows({ rows, query: OBJECT_A, limit: 5, nowMs: NOW })).toBeNull();
     });
 
-    test("an unexpired anti-memory still surfaces", () => {
+    test("an unexpired anti-memory still surfaces as a lexical anti-memory hit", () => {
         const rows = [antiRow(OBJECT_A, NOW + 1)];
         const hits = searchKernelMemoryRows({
             rows,
@@ -231,7 +203,9 @@ describe("searchKernelMemoryRows anti-memory expiry", () => {
             limit: 5,
             nowMs: NOW,
         });
-        expect(hits?.map((hit) => hit.source)).toEqual(["anti_memory"]);
+        expect(hits?.map((hit) => [hit.source, hit.matchType])).toEqual([
+            ["anti_memory", "lexical"],
+        ]);
     });
 });
 

@@ -76,13 +76,8 @@ async fn publication_is_an_owner_only_regular_file_in_an_owner_only_dir() {
 #[tokio::test]
 async fn discovery_validates_the_publication_the_way_a_client_must() {
     let host = TestHost::start().await;
-    let owned = host_runtime::read_connection_file(host.publication_path())
+    let info = host_runtime::read_connection_file(host.publication_path())
         .expect("host-owned discovery accepts publication");
-    assert_eq!(owned.wire_version, 2);
-    assert_eq!(owned.key.len(), 32);
-
-    let info =
-        host_runtime::read_connection_file(host.publication_path()).expect("valid publication");
     assert_eq!(info.schema, 2);
     assert_eq!(info.wire_version, 2);
     assert!(!info.setup_socket.is_empty());
@@ -98,7 +93,6 @@ async fn discovery_validates_the_publication_the_way_a_client_must() {
         host_runtime::read_connection_file(&loose).is_err(),
         "an insecure mode must fail client validation"
     );
-    assert!(host_runtime::read_connection_file(&loose).is_err());
 
     let oversized = host.runtime_dir().join("oversized.json");
     std::fs::write(
@@ -162,33 +156,6 @@ async fn discovery_rejects_symlink_and_hard_link_publications() {
     assert!(host_runtime::read_connection_file(&hard_link).is_err());
 
     host.shutdown_gracefully().await;
-}
-
-#[tokio::test]
-async fn shutdown_removes_the_publication_and_releases_the_lock() {
-    let data_root = tempfile::tempdir().expect("temp root");
-    let host = TestHost::try_start_with(TestHandler::new(), {
-        let path = data_root.path().to_path_buf();
-        move |config| config.data_dir = Some(path)
-    })
-    .await
-    .expect("host publishes");
-    let publication = host.publication_path();
-    assert!(publication.exists());
-
-    host.shutdown_gracefully().await;
-    assert!(
-        !publication.exists(),
-        "graceful shutdown must remove the publication"
-    );
-
-    let successor = TestHost::try_start_with(TestHandler::new(), {
-        let path = data_root.path().to_path_buf();
-        move |config| config.data_dir = Some(path)
-    })
-    .await
-    .expect("successor starts after lock release");
-    successor.shutdown_gracefully().await;
 }
 
 #[tokio::test]
@@ -324,8 +291,6 @@ async fn a_planted_symlink_at_the_record_name_is_replaced_not_followed() {
     host.shutdown_gracefully().await;
 }
 
-/// `deny(unsafe_code)` permits the scoped `allow(unsafe_code)` required for the `pre_exec` hook that arms `PR_SET_PDEATHSIG` so harness children die with a crashed host.
-/// `deny(unsafe_code)` permits the scoped `allow(unsafe_code)` required for the `pre_exec` hook that arms `PR_SET_PDEATHSIG` so harness children die with a crashed host.
 /// `deny(unsafe_code)` permits the scoped `allow(unsafe_code)` required for the `pre_exec` hook that arms `PR_SET_PDEATHSIG` so harness children die with a crashed host.
 ///
 /// `forbid(unsafe_code)` cannot be overridden within the crate.

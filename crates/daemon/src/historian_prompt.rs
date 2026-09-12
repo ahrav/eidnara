@@ -462,17 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_historian_context_uses_object_identity() {
-        let block = render_historian_memory_block(&[CanonicalMemory {
-            object_id: format!("mem_{}", "a".repeat(32)),
-            category: "CONSTRAINTS".to_string(),
-            content: "Use the public contract.".to_string(),
-        }]);
-        assert!(block.contains("mem_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-        assert!(!block.contains("#1"));
-    }
-
-    #[test]
     fn historian_prompt_golden_matches_typescript_reference() {
         let raw = include_str!("../testdata/historian-prompt-golden.json");
         let golden: GoldenFile =

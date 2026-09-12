@@ -55,9 +55,6 @@ describe("redactSecretText — token counts and scalar diagnostics stay visible"
         expect(redactSecretText("hasUsageTokens=true")).toBe("hasUsageTokens=true");
         expect(redactSecretText("totalInputTokens=132000")).toBe("totalInputTokens=132000");
         expect(redactSecretText("max_tokens=4096")).toBe("max_tokens=4096");
-    });
-
-    test("keeps quoted numeric values matched only on the key word", () => {
         expect(redactSecretText('"max_tokens": "4096"')).toBe('"max_tokens": "4096"');
     });
 
@@ -407,6 +404,9 @@ describe("redactSecretText — credential shapes", () => {
     });
 
     test("a scheme-less header value ends at the next field", () => {
+        expect(redactSecretText("authorization: abc123")).toBe(
+            "authorization: <REDACTED:authorization>",
+        );
         expect(redactSecretText("Authorization: abc123, Other: value")).toBe(
             "Authorization: <REDACTED:authorization>, Other: value",
         );
@@ -924,6 +924,9 @@ describe("redactSecretText — authorization assignments", () => {
     });
 
     test("an assignment value without a known scheme ends at whitespace or its closing quote", () => {
+        expect(redactSecretText("Authorization=abc123")).toBe(
+            "Authorization=<REDACTED:authorization>",
+        );
         expect(redactSecretText("Authorization=abc123 OTHER=value")).toBe(
             "Authorization=<REDACTED:authorization> OTHER=value",
         );
@@ -936,21 +939,6 @@ describe("redactSecretText — authorization assignments", () => {
                 "Authorization: AWS4-HMAC-SHA256 Credential=AKIA/x, SignedHeaders=host, Signature=abc",
             ),
         ).toBe("Authorization: AWS4-HMAC-SHA256 <REDACTED:aws4-hmac-sha256>");
-    });
-
-    test("redacts a scheme-less authorization value and leaves a lone scheme alone", () => {
-        expect(redactSecretText("authorization: abc123")).toBe(
-            "authorization: <REDACTED:authorization>",
-        );
-        expect(redactSecretText("Authorization=abc123")).toBe(
-            "Authorization=<REDACTED:authorization>",
-        );
-        expect(redactSecretText("Authorization: abc123\nHost: y")).toBe(
-            "Authorization: <REDACTED:authorization>\nHost: y",
-        );
-        expect(redactSecretText("Authorization: Bearer\nContent-Type: x")).toBe(
-            "Authorization: Bearer\nContent-Type: x",
-        );
     });
 });
 

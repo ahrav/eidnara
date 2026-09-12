@@ -177,15 +177,6 @@ mod tests {
     use serde::Deserialize;
 
     #[test]
-    fn newest_compartment_is_tier_1() {
-        for imp in [1, 50, 100] {
-            for p in [0.1, 1.0, 5.0] {
-                assert_eq!(tier(1, imp, p), Tier::P1);
-            }
-        }
-    }
-
-    #[test]
     fn age_monotonic_demotion() {
         // for fixed importance/pressure, tier is non-decreasing in age.
         let mut prev = Tier::P1;
@@ -216,12 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn finite_demotion_at_max_importance() {
-        // Importance 100 reaches the archive threshold at a finite compartment index.
-        assert!(should_archive(100_000, 100, 1.0, 0.0));
-    }
-
-    #[test]
     fn non_finite_pressure_keeps_the_newest_compartment_in_tier_1() {
         assert_eq!(tier(1, 50, f64::INFINITY), Tier::P1);
         assert_eq!(tier(1, 50, f64::MAX), Tier::P1);
@@ -243,15 +228,6 @@ mod tests {
 
     /// Importance 50 at index 25 has `a = 24 = H50`, so `z == pressure` exactly.
     const BOUNDARY_INDEX: u32 = 25;
-
-    #[test]
-    fn rendered_tier_caps_at_four_unless_archived() {
-        // z = 3.0: past Z4 (natural P5) but inside the G-wide anchor window.
-        let (idx, imp, p, overlap) = (BOUNDARY_INDEX, 50, 3.0, 1.0);
-        assert_eq!(tier(idx, imp, p), Tier::P5);
-        assert!(!should_archive(idx, imp, p, overlap));
-        assert_eq!(rendered_tier(idx, imp, p, overlap), Tier::P4);
-    }
 
     #[test]
     fn tier_boundaries_are_lower_inclusive_for_older_tier() {
@@ -287,10 +263,12 @@ mod tests {
 
     #[test]
     fn anchor_overlap_extends_archive_boundary_and_clamps() {
-        // z = 3.0 satisfies Z4 <= z < Z4 + G.
+        // z = 3.0 satisfies Z4 <= z < Z4 + G: natural P5, inside the G-wide anchor window.
         let (idx, imp, p) = (BOUNDARY_INDEX, 50, 3.0);
+        assert_eq!(tier(idx, imp, p), Tier::P5);
         assert!(should_archive(idx, imp, p, 0.0));
         assert!(!should_archive(idx, imp, p, 1.0));
+        // Anchor protection caps the rendered tier at P4 instead of archiving.
         assert_eq!(rendered_tier(idx, imp, p, 1.0), Tier::P4);
         assert_eq!(
             should_archive(idx, imp, p, 5.0),

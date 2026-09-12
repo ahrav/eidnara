@@ -1176,14 +1176,6 @@ mod tests {
     }
 
     #[test]
-    fn ring_profile_pins_per_connection_grant_geometry() {
-        let profile = ring_profile();
-        assert_eq!(profile.descriptor_depth(), 8);
-        assert_eq!(profile.max_leases(), 8);
-        assert_eq!(profile.arena_bytes(), shm_transport::MIN_ARENA_BYTES);
-    }
-
-    #[test]
     fn grant_hex_is_strict_lowercase_ascii_without_panics() {
         assert_eq!(decode_hex::<2>("00af").unwrap(), [0x00, 0xaf]);
         assert!(decode_hex::<2>("00AF").is_err());

@@ -139,18 +139,13 @@ describe("createKernelTransport store lifecycle translation", () => {
         });
     }
 
-    test("a managed daemon whose store is starting reads as unavailable:store_starting", async () => {
-        const result = await client(createKernelTransport(storageTransport("starting"))).read({
-            surface: "auto_inject",
-        });
-        expect(result.state).toEqual({ kind: "unavailable", reason: "store_starting" });
-    });
-
-    test("a managed daemon whose store is unavailable reads as unavailable:store_unavailable", async () => {
-        const result = await client(createKernelTransport(storageTransport("unavailable"))).read({
-            surface: "auto_inject",
-        });
-        expect(result.state).toEqual({ kind: "unavailable", reason: "store_unavailable" });
+    test("a managed daemon whose store is starting or unavailable reads as the matching unavailable reason", async () => {
+        for (const storage of ["starting", "unavailable"] as const) {
+            const result = await client(createKernelTransport(storageTransport(storage))).read({
+                surface: "auto_inject",
+            });
+            expect(result.state).toEqual({ kind: "unavailable", reason: `store_${storage}` });
+        }
     });
 
     test("the daemon's terminal store_unavailable answer while its store opens reads as unavailable:store_unavailable", async () => {

@@ -335,9 +335,11 @@ fresh request, the normalized clone, a reattached prefix plus suffix, or a
 shared view. The projection owns canonical replay shells: unknown top-level
 message fields are discarded once, original block JSON survives, and effective
 synthetic metadata is retained. Flat blocks hold an immutable shell and block
-index, not an independent copy of the wire block. Reattached requests share those shells rather
-than raw ingress shells; per block `content_hash == sha256(bytes)`, `bytes ==
-to_string(wire)`, and `tool_input` equals the `input` inside `wire.kind()`;
+index, not an independent copy of the wire block. Reattached requests share
+those shells rather than raw ingress shells; per block `content_hash ==
+sha256(bytes)` and `bytes == to_string(wire)`, and `FlatBlock` holds no tool
+input outside `wire` (the shared wire block itself may keep the input in both
+`kind()` and its retained `original`, and the shell charge counts both);
 and `project_messages_incremental(msgs, cached, k) == project_messages(msgs)`
 with equal [`differential_bytes`][diff-bytes]. Native attachment: under
 `serve_native`, `to_vec(incremental native_messages) ==
@@ -362,9 +364,10 @@ every pass projects and serves, every plugin turn attaches, and every
 downstream digest keys on these fields.
 Fault/timing angle: None in time. A projector that shares block backing but
 computes `bytes` from another serialization; a consumer
-reading `tool_input` and `wire.kind()` from blocks no longer built together
+reading a projected input copy that is not the `wire.kind()` value
 ([`sel_item_from_flat`][sel-item] and
-[`sel_kind_for_flat`][sel-kind] both borrow the wire input); chunk reuse decided by
+[`sel_kind_for_flat`][sel-kind] both borrow the typed wire input, and
+`FlatBlock` holds no copy outside `wire`); chunk reuse decided by
 pointer identity; an incremental sidecar merge that changes first-seen order
 on a repeated mid ([sidecar merge][sidecar-merge]); a direct `to_vec(&message)`
 on a typed shell (rebuilt prefix, reduced, overlaid, or synthetic) that emits
@@ -486,10 +489,10 @@ for the session equals `store.load_tags_for_session(session)` for the
 [`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
 rows with `tag_number = max + offset + 1` in projection block order; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7195-7200`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([`:7196-7201`][mint-input]).
 `always` because the entry is read on the next pass of the same session and
 a stale or speculative row changes the active-tag match at
-[`:7389`][active-match].
+[`:7392`][active-match].
 Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
 [`snapshot`][tag-snapshot] holds a second reference. A design that appends
 in place, or stores the pass's `Arc` back before commit, exposes rows the
@@ -2002,10 +2005,11 @@ has content and `m0_tokens >= 500` and `m1_tokens > m0_tokens * 0.15`;
 `m1_tokens` is `0` when `m1.body == M1_PLACEHOLDER`, and `m0_tokens` is `0`
 when no frozen unit has key `m0`. A cache-backed count may replace the direct
 call only if it equals the direct count for the exact text at each observed
-comparison (H1's cache clause). Composition sets `memory_update_count` to zero;
-the dead update-count disjunct is removed by the explicit owner decision
-recorded in the evidence. The frozen reference retains the original expression
-and is evaluated with zero, so its reachable classifications stay fixed.
+comparison (H1's cache clause). `M1Composition` carries no memory update count;
+composition has no writer for one, and the dead update-count disjunct is
+removed by the explicit owner decision recorded in the evidence. The frozen
+reference retains the original expression and takes that count as a parameter
+the callers set to `0`, so its reachable classifications stay fixed.
 `always` because the classification selects
 between an ordinary SOFT and a rematerialized m0, which H2 states as distinct
 boundaries.
@@ -2468,24 +2472,24 @@ evaluation of this area and its disposition are recorded in
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6821-L6846
 [tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6866-L6871
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6938-L6996
-[mint-input]: ../../../../crates/daemon/src/transform.rs#L7195-L7200
-[append-mint]: ../../../../crates/daemon/src/transform.rs#L7300-L7321
-[taggable]: ../../../../crates/daemon/src/transform.rs#L7325-L7349
-[active-match]: ../../../../crates/daemon/src/transform.rs#L7389
-[make-mut]: ../../../../crates/daemon/src/transform.rs#L7924-L7925
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27900
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27651
+[mint-input]: ../../../../crates/daemon/src/transform.rs#L7196-L7201
+[append-mint]: ../../../../crates/daemon/src/transform.rs#L7303-L7324
+[taggable]: ../../../../crates/daemon/src/transform.rs#L7328-L7352
+[active-match]: ../../../../crates/daemon/src/transform.rs#L7392
+[make-mut]: ../../../../crates/daemon/src/transform.rs#L7927-L7928
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27907
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27658
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
-[flatproj]: ../../../../crates/daemon/src/wire.rs#L188-L200
-[reattach]: ../../../../crates/daemon/src/wire.rs#L216-L243
-[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L373-L381
-[flatten]: ../../../../crates/daemon/src/wire.rs#L731-L796
-[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L886-L895
-[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1745
-[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1792
-[shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1704
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28345
+[flatproj]: ../../../../crates/daemon/src/wire.rs#L186-L198
+[reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
+[diff-bytes]: ../../../../crates/daemon/src/wire.rs#L367-L375
+[flatten]: ../../../../crates/daemon/src/wire.rs#L725-L786
+[fp-reuse]: ../../../../crates/daemon/src/wire.rs#L876-L885
+[shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1731
+[shell-decode]: ../../../../crates/daemon/src/wire.rs#L1778
+[shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1690
 [hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
 [part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
 [th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264
@@ -2530,7 +2534,7 @@ evaluation of this area and its disposition are recorded in
 [descend]: ../../../../crates/daemon/src/transform.rs#L2952-L2963
 [value-compare]: ../../../../crates/daemon/src/transform.rs#L3216
 [truncate]: ../../../../crates/daemon/src/transform.rs#L4121-L4127
-[sched-test]: ../../../../crates/daemon/src/transform.rs#L13603
+[sched-test]: ../../../../crates/daemon/src/transform.rs#L13606
 [received]: ../../../../crates/memory-store/src/lib.rs#L6485-L6535
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6496-L6514
@@ -2686,8 +2690,8 @@ evaluation of this area and its disposition are recorded in
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
 [he-manifest]: ../../../../crates/shm-transport/benches/manifests/v1.json
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12417-L12422
-[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28025-L28030
+[fx-1400]: ../../../../crates/daemon/src/transform.rs#L12420-L12425
+[fx-2500]: ../../../../crates/daemon/src/transform.rs#L28032-L28037
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8115-L8132
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8463-L8488
 [respond]: ../../../../crates/daemon/src/lib.rs#L14404
@@ -2711,17 +2715,17 @@ evaluation of this area and its disposition are recorded in
 [declared]: ../../../../crates/daemon/src/lib.rs#L2243-L2257
 [ao-sig]: ../../../../crates/daemon/src/transform.rs#L2865
 [soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6315
-[t-bypass]: ../../../../crates/daemon/src/transform.rs#L24264
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24555
+[t-bypass]: ../../../../crates/daemon/src/transform.rs#L23721
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24011
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20651
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20958
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21078
-[soft-reference]: ../../../../crates/daemon/src/transform.rs#L24293
-[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24318
-[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24453
-[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21408
-[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28240
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20635
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20942
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21062
+[soft-reference]: ../../../../crates/daemon/src/transform.rs#L23750
+[soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L23775
+[soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L23910
+[tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21116
+[serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L27666
 [tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128

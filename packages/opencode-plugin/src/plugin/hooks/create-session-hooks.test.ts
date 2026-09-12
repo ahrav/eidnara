@@ -4,30 +4,23 @@ import { describe, expect, it } from "bun:test";
 import { buildEidnaraHookConfig } from "./create-session-hooks";
 
 describe("buildEidnaraHookConfig", () => {
-    it("threads toast_duration_ms into the per-session hook config", () => {
-        const config = buildEidnaraHookConfig({
-            enabled: true,
-            protected_tags: 10,
-            cache_ttl: "5m",
-            toast_duration_ms: 30_000,
-        } as never);
-
-        expect(config.toast_duration_ms).toBe(30_000);
-    });
-
-    it("passes toast_duration_ms = 0 through unchanged (disables toasts)", () => {
-        const config = buildEidnaraHookConfig({
-            enabled: true,
-            toast_duration_ms: 0,
-        } as never);
-
-        expect(config.toast_duration_ms).toBe(0);
-    });
-
-    it("leaves toast_duration_ms undefined when unset (consumer applies default)", () => {
-        const config = buildEidnaraHookConfig({ enabled: true } as never);
-
-        expect(config.toast_duration_ms).toBeUndefined();
+    // 0 disables toasts and unset lets the consumer apply its default, so neither may be coerced.
+    it("threads toast_duration_ms through unchanged, including 0 and unset", () => {
+        expect(
+            buildEidnaraHookConfig({
+                enabled: true,
+                protected_tags: 10,
+                cache_ttl: "5m",
+                toast_duration_ms: 30_000,
+            } as never).toast_duration_ms,
+        ).toBe(30_000);
+        expect(
+            buildEidnaraHookConfig({ enabled: true, toast_duration_ms: 0 } as never)
+                .toast_duration_ms,
+        ).toBe(0);
+        expect(
+            buildEidnaraHookConfig({ enabled: true } as never).toast_duration_ms,
+        ).toBeUndefined();
     });
 
     // buildEidnaraHookConfig must preserve hook-consumed plugin-config fields.

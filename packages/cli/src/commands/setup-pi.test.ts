@@ -751,7 +751,7 @@ describe("runSetup", () => {
         }
     });
 
-    it("persists a sidekick thinking level for GitHub Copilot models", async () => {
+    it("persists historian and sidekick thinking levels for GitHub Copilot models", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         setConfigEnv(root, agentDir);
@@ -761,6 +761,7 @@ describe("runSetup", () => {
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
             getPiVersion: () => "0.80.2",
+            // The single available model makes the picker deterministic.
             getAvailableModels: () => ["github-copilot/gpt-5.4"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -768,6 +769,7 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
+        // The confirmations are configurePi=true and sidekickEnabled=true.
         const prompts = new MockPrompts({ confirms: [true, true] });
 
         const code = await runSetup({ prompts, env });
@@ -777,6 +779,7 @@ describe("runSetup", () => {
             historian?: { model?: string; thinking_level?: string };
             sidekick?: { model?: string; thinking_level?: string; disable?: boolean };
         };
+        expect(config.historian?.model).toBe("github-copilot/gpt-5.4");
         expect(config.historian?.thinking_level).toBe("medium");
         expect(config.sidekick?.model).toBe("github-copilot/gpt-5.4");
         expect(config.sidekick?.thinking_level).toBe("medium");
@@ -892,40 +895,6 @@ describe("runSetup", () => {
         expect(config.sidekick).not.toHaveProperty("enabled");
     });
 
-    it("prompts for thinking_level when historian model is github-copilot", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        mkdirSync(agentDir, { recursive: true });
-
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.80.2",
-            // The single available model makes the picker deterministic.
-            getAvailableModels: () => ["github-copilot/gpt-5.4"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
-                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
-            },
-        };
-        // selectOne picks the recommended option ("medium" for thinking_level)
-        // MockPrompts consumes confirmations as configurePi=true and sidekickEnabled=false.
-        const prompts = new MockPrompts({ confirms: [true, false] });
-
-        const code = await runSetup({ prompts, env });
-        expect(code).toBe(0);
-
-        const config = parseJsonc(
-            readFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "utf-8"),
-        ) as {
-            historian?: { model?: string; thinking_level?: string };
-        };
-        // The setup wizard must set thinking_level for github-copilot models.
-        expect(config.historian?.model).toBe("github-copilot/gpt-5.4");
-        expect(config.historian?.thinking_level).toBe("medium");
-    });
-
     it("refuses a malformed target during a dry run, matching a real run", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
@@ -975,13 +944,36 @@ describe("runSetup", () => {
         expect(prompts.messages.join("\n")).toContain("Pi not found");
     });
 
-    it("warns and exits when Pi version is below 0.80.2 and user declines", async () => {
+    it.each([
+        {
+            label: "Pi version is below 0.80.2",
+            version: "0.69.0",
+            message: "Pi 0.69.0 is older than the required 0.80.2",
+            forbidden: null,
+        },
+        {
+            label: "Pi reports no version",
+            version: null,
+            message: "Pi did not report a version, so the required 0.80.2 cannot be verified",
+            forbidden: null,
+        },
+        {
+            label: "Pi prints a wrapper warning that quotes npm 10.0.0 before its own 0.70.0",
+            version: "warning: npm 10.0.0 is out of date\n0.70.0 (pi, unofficial build)",
+            message: "Pi did not report a version, so the required 0.80.2 cannot be verified",
+            forbidden: "10.0.0",
+        },
+    ])("warns and exits without writing when $label and the user declines", async ({
+        version,
+        message,
+        forbidden,
+    }) => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         setConfigEnv(root, agentDir);
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
-            getPiVersion: () => "0.69.0",
+            getPiVersion: () => version,
             getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
             paths: {
                 getPiAgentConfigDir: () => agentDir,
@@ -996,7 +988,8 @@ describe("runSetup", () => {
 
         expect(code).toBe(1);
         const log = prompts.messages.join("\n");
-        expect(log).toContain("Pi 0.69.0 is older than the required 0.80.2");
+        expect(log).toContain(message);
+        if (forbidden !== null) expect(log).not.toContain(forbidden);
         expect(log).toContain("outro:Setup cancelled");
         expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
         expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
@@ -1026,62 +1019,6 @@ describe("runSetup", () => {
         expect(prompts.messages.join("\n")).toContain(
             "Pi 0.69.0 is older than the required 0.80.2",
         );
-    });
-
-    it("asks for the same confirmation when Pi reports no version, and stops when declined", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
-            getPiVersion: () => null,
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
-                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
-            },
-        };
-        const prompts = new MockPrompts({ confirms: [false] });
-
-        const code = await runSetup({ prompts, env });
-
-        expect(code).toBe(1);
-        const log = prompts.messages.join("\n");
-        expect(log).toContain(
-            "Pi did not report a version, so the required 0.80.2 cannot be verified",
-        );
-        expect(log).toContain("outro:Setup cancelled");
-        expect(existsSync(join(root, ".config", "eidnara", "eidnara.jsonc"))).toBe(false);
-        expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
-    });
-
-    it("treats version output without a version-only line as unverified", async () => {
-        const root = makeTempRoot();
-        const agentDir = join(root, ".pi", "agent");
-        setConfigEnv(root, agentDir);
-        const env: SetupEnvironment = {
-            detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
-            // A wrapper warning quoting another tool's version, then a version below the floor.
-            getPiVersion: () => "warning: npm 10.0.0 is out of date\n0.70.0 (pi, unofficial build)",
-            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
-            paths: {
-                getPiAgentConfigDir: () => agentDir,
-                getPiUserConfigPath: () => join(root, ".config", "eidnara", "eidnara.jsonc"),
-                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
-            },
-        };
-        const prompts = new MockPrompts({ confirms: [false] });
-
-        const code = await runSetup({ prompts, env });
-
-        expect(code).toBe(1);
-        const log = prompts.messages.join("\n");
-        expect(log).toContain(
-            "Pi did not report a version, so the required 0.80.2 cannot be verified",
-        );
-        expect(log).not.toContain("10.0.0");
-        expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
     });
 });
 

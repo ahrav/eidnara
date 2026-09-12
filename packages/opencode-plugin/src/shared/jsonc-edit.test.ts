@@ -13,36 +13,29 @@ function parseErrors(text: string): string[] {
 }
 
 describe("appendJsoncArrayValues", () => {
-    it("appends after the last entry when the closing bracket shares its line", () => {
-        const text = '{"a": ["read",\n  "write"]}';
-        const updated = appendJsoncArrayValues(text, ["a"], ["rm"]);
+    it("appends after the last entry when the closing bracket or a trailing comma shares its line", () => {
+        const cases: Array<[string, string[], unknown[], Record<string, string[]>]> = [
+            ['{"a": ["read",\n  "write"]}', ["a"], ["rm"], { a: ["read", "write", "rm"] }],
+            [
+                '{\n  "permission": [\n    "read"]\n}',
+                ["permission"],
+                ["exec"],
+                { permission: ["read", "exec"] },
+            ],
+            ['{"a": [\n  "xxxxxxxx"]\n}', ["a"], ["p", "q"], { a: ["xxxxxxxx", "p", "q"] }],
+            [
+                '{\n  "permission": [\n    "read"\n  ,]\n}',
+                ["permission"],
+                ["exec"],
+                { permission: ["read", "exec"] },
+            ],
+        ];
+        for (const [text, path, values, expected] of cases) {
+            const updated = appendJsoncArrayValues(text, path, values);
 
-        expect(parseErrors(updated)).toEqual([]);
-        expect(parseConfigJsonc(updated)).toEqual({ a: ["read", "write", "rm"] });
-    });
-
-    it("keeps entry order when the closing bracket shares the last entry's line", () => {
-        const text = '{\n  "permission": [\n    "read"]\n}';
-        const updated = appendJsoncArrayValues(text, ["permission"], ["exec"]);
-
-        expect(parseErrors(updated)).toEqual([]);
-        expect(parseConfigJsonc(updated)).toEqual({ permission: ["read", "exec"] });
-    });
-
-    it("appends several values when the closing bracket shares the last entry's line", () => {
-        const text = '{"a": [\n  "xxxxxxxx"]\n}';
-        const updated = appendJsoncArrayValues(text, ["a"], ["p", "q"]);
-
-        expect(parseErrors(updated)).toEqual([]);
-        expect(parseConfigJsonc(updated)).toEqual({ a: ["xxxxxxxx", "p", "q"] });
-    });
-
-    it("keeps a trailing comma that sits on the closing-bracket line", () => {
-        const text = '{\n  "permission": [\n    "read"\n  ,]\n}';
-        const updated = appendJsoncArrayValues(text, ["permission"], ["exec"]);
-
-        expect(parseErrors(updated)).toEqual([]);
-        expect(parseConfigJsonc(updated)).toEqual({ permission: ["read", "exec"] });
+            expect(parseErrors(updated), text).toEqual([]);
+            expect(parseConfigJsonc(updated), text).toEqual(expected);
+        }
     });
 
     it("appends to a multi-line array with the bracket on its own line, preserving comments", () => {
@@ -168,30 +161,25 @@ describe("setJsoncValue", () => {
         );
     });
 
-    it("refuses to edit a document with duplicate object keys", () => {
+    it("refuses to edit a document with duplicate object keys, even below the edited path", () => {
         const text = '{"permission": {"bash": "allow"}, "permission": {"bash": "allow"}}';
-
         expect(() => setJsoncValue(text, ["permission", "bash"], "deny")).toThrow(
             /duplicate key "permission"/,
         );
-    });
-
-    it("refuses duplicate keys that are nested below the edited path", () => {
-        const text = '{"a": {"x": 1, "x": 2}, "b": 1}';
-
-        expect(() => setJsoncValue(text, ["b"], 2)).toThrow(/duplicate key "x"/);
+        expect(() => setJsoncValue('{"a": {"x": 1, "x": 2}, "b": 1}', ["b"], 2)).toThrow(
+            /duplicate key "x"/,
+        );
+        expect(() =>
+            removeJsoncArrayEntries(
+                '{"plugins": ["evil"], "plugins": ["evil"]}',
+                ["plugins"],
+                (entry) => entry === "evil",
+            ),
+        ).toThrow(/duplicate key "plugins"/);
     });
 });
 
 describe("removeJsoncArrayEntries", () => {
-    it("refuses to edit a document with duplicate object keys", () => {
-        const text = '{"plugins": ["evil"], "plugins": ["evil"]}';
-
-        expect(() =>
-            removeJsoncArrayEntries(text, ["plugins"], (entry) => entry === "evil"),
-        ).toThrow(/duplicate key "plugins"/);
-    });
-
     it("keeps the preceding entry's inline comment when removing the last entry", () => {
         const text =
             '{\n  "permission": [\n    "read", // safe\n    "write", // also safe\n    "rm" // dangerous\n  ]\n}';
@@ -213,21 +201,18 @@ describe("removeJsoncArrayEntries", () => {
         );
     });
 
-    it("removes the only entry even when a trailing comma sits on the closing-bracket line", () => {
-        const text = '{\n  "permission": [\n    "rm"\n  ,]\n}';
-        const result = removeJsoncArrayEntries(text, ["permission"], (entry) => entry === "rm");
+    it("removes the only entry or every entry when a trailing comma sits on the closing-bracket line", () => {
+        const cases: Array<[string, string[], Record<string, never[]>]> = [
+            ['{\n  "permission": [\n    "rm"\n  ,]\n}', ["permission"], { permission: [] }],
+            ['{"a": ["p",\n  "x"\n  ,]}', ["a"], { a: [] }],
+        ];
+        for (const [text, path, expected] of cases) {
+            const result = removeJsoncArrayEntries(text, path, () => true);
 
-        expect(parseErrors(result.text)).toEqual([]);
-        expect(result.removed).toBe(true);
-        expect(parseConfigJsonc(result.text)).toEqual({ permission: [] });
-    });
-
-    it("removes every entry when a trailing comma sits on the closing-bracket line", () => {
-        const text = '{"a": ["p",\n  "x"\n  ,]}';
-        const result = removeJsoncArrayEntries(text, ["a"], () => true);
-
-        expect(parseErrors(result.text)).toEqual([]);
-        expect(parseConfigJsonc(result.text)).toEqual({ a: [] });
+            expect(parseErrors(result.text), text).toEqual([]);
+            expect(result.removed, text).toBe(true);
+            expect(parseConfigJsonc(result.text), text).toEqual(expected);
+        }
     });
 
     it("removes first, middle, last, and only entries from single-line arrays", () => {

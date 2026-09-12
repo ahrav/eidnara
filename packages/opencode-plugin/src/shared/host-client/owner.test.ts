@@ -7,10 +7,24 @@ afterEach(() => {
 });
 
 describe("processHostClient", () => {
-    test("shares one connection attempt per publication path", async () => {
+    test("an identical option set shares one connection attempt per publication path", async () => {
+        const bare = `/tmp/missing-eidnara-host-${crypto.randomUUID()}.json`;
+        const firstBare = processHostClient({ connectionFile: bare });
+        expect(processHostClient({ connectionFile: bare })).toBe(firstBare);
+        await expect(firstBare).rejects.toThrow();
+
         const connectionFile = `/tmp/missing-eidnara-host-${crypto.randomUUID()}.json`;
-        const first = processHostClient({ connectionFile });
-        const second = processHostClient({ connectionFile });
+        const credentialSource = { EXAMPLE_API_KEY: "value" };
+        const first = processHostClient({
+            connectionFile,
+            credentialSource,
+            requestTimeoutMs: 2_000,
+        });
+        const second = processHostClient({
+            connectionFile,
+            credentialSource,
+            requestTimeoutMs: 2_000,
+        });
 
         expect(first).toBe(second);
         await expect(first).rejects.toThrow();
@@ -29,42 +43,20 @@ describe("processHostClient", () => {
             connectionFile,
             requestTimeoutMs: 30_000,
         });
+        // Clients with different handshake budgets must not share an owner:
+        // whichever dialed first would fix the budget for the other.
+        const generousHandshake = processHostClient({ connectionFile, handshakeTimeoutMs: 10_000 });
+        const tightHandshake = processHostClient({ connectionFile, handshakeTimeoutMs: 2_000 });
 
         expect(withCredentials).not.toBe(probe);
         expect(differentTimeout).not.toBe(probe);
+        expect(generousHandshake).not.toBe(tightHandshake);
+        expect(generousHandshake).not.toBe(probe);
         await expect(probe).rejects.toThrow();
         await expect(withCredentials).rejects.toThrow();
         await expect(differentTimeout).rejects.toThrow();
-    });
-
-    test("owners keyed by handshake budget keep a generous lane off a tight one", async () => {
-        // Clients with different handshake budgets must not share an owner:
-        // whichever dialed first would fix the budget for the other.
-        const connectionFile = `/tmp/missing-eidnara-host-${crypto.randomUUID()}.json`;
-        const provider = processHostClient({ connectionFile, handshakeTimeoutMs: 10_000 });
-        const hook = processHostClient({ connectionFile, handshakeTimeoutMs: 2_000 });
-
-        expect(provider).not.toBe(hook);
-        await expect(provider).rejects.toThrow();
-        await expect(hook).rejects.toThrow();
-    });
-
-    test("an identical option set still shares one attempt", async () => {
-        const connectionFile = `/tmp/missing-eidnara-host-${crypto.randomUUID()}.json`;
-        const credentialSource = { EXAMPLE_API_KEY: "value" };
-        const first = processHostClient({
-            connectionFile,
-            credentialSource,
-            requestTimeoutMs: 2_000,
-        });
-        const second = processHostClient({
-            connectionFile,
-            credentialSource,
-            requestTimeoutMs: 2_000,
-        });
-
-        expect(first).toBe(second);
-        await expect(first).rejects.toThrow();
+        await expect(generousHandshake).rejects.toThrow();
+        await expect(tightHandshake).rejects.toThrow();
     });
 
     test("keeps owners for distinct publication paths separate", async () => {

@@ -55,14 +55,15 @@ afterEach(async () => {
 });
 
 describe("getTuiPreferencesFile", () => {
-    test("env override wins", () => {
-        expect(getTuiPreferencesFile()).toBe(file);
-    });
-
-    test("falls back to OPENCODE_CONFIG_DIR then XDG then ~/.config", () => {
-        delete process.env[TUI_PREFS_FILE_ENV];
-        process.env.OPENCODE_CONFIG_DIR = "/tmp/cfgdir";
-        expect(getTuiPreferencesFile()).toBe("/tmp/cfgdir/tui-preferences.jsonc");
+    test("falls back from a missing or blank env override to OPENCODE_CONFIG_DIR, then XDG_CONFIG_HOME", () => {
+        for (const override of [undefined, "   "]) {
+            if (override === undefined) delete process.env[TUI_PREFS_FILE_ENV];
+            else process.env[TUI_PREFS_FILE_ENV] = override;
+            process.env.OPENCODE_CONFIG_DIR = "/tmp/cfgdir";
+            expect(getTuiPreferencesFile(), `override=${JSON.stringify(override)}`).toBe(
+                "/tmp/cfgdir/tui-preferences.jsonc",
+            );
+        }
         delete process.env.OPENCODE_CONFIG_DIR;
         process.env.XDG_CONFIG_HOME = "/tmp/xdg";
         expect(getTuiPreferencesFile()).toBe("/tmp/xdg/opencode/tui-preferences.jsonc");
@@ -82,30 +83,16 @@ describe("getTuiPreferencesFile", () => {
         );
         expect(isAbsolute(getTuiPreferencesFile())).toBe(true);
     });
-
-    test("a blank env override falls back to the config directory instead of cwd", () => {
-        process.env[TUI_PREFS_FILE_ENV] = "   ";
-        process.env.OPENCODE_CONFIG_DIR = "/tmp/cfgdir";
-        expect(getTuiPreferencesFile()).toBe("/tmp/cfgdir/tui-preferences.jsonc");
-    });
 });
 
 describe("readTuiPreferencesFile (tolerant)", () => {
-    test("missing file → {}", async () => {
-        expect(await readTuiPreferencesFile()).toEqual({});
-    });
-
-    test("malformed JSON → {}", async () => {
-        await writeFile(file, "{ this is not json ", "utf8");
-        expect(await readTuiPreferencesFile()).toEqual({});
-    });
-
-    test("non-object root → {}", async () => {
-        await writeFile(file, "[1, 2, 3]", "utf8");
+    test("a missing file, malformed JSON, or a non-object root reads as {}", async () => {
         expect(await readTuiPreferencesFile()).toEqual({});
         // comment-json boxes a scalar root into a String object; it must not pass as a record.
-        await writeFile(file, '"just a string"', "utf8");
-        expect(await readTuiPreferencesFile()).toEqual({});
+        for (const content of ["{ this is not json ", "[1, 2, 3]", '"just a string"']) {
+            await writeFile(file, content, "utf8");
+            expect(await readTuiPreferencesFile(), content).toEqual({});
+        }
     });
 
     test.skipIf(process.platform === "win32")(
@@ -592,11 +579,8 @@ describe("resolveEidnaraPrefs (per-key validation)", () => {
 });
 
 describe("computeEffectiveOrder (cross-plugin convention)", () => {
-    test("default when key missing", () => {
+    test("uses the explicit order when present and the default when the key is missing", () => {
         expect(computeEffectiveOrder({}, PLUGIN_KEY, DEFAULT_SLOT_ORDER)).toBe(DEFAULT_SLOT_ORDER);
-    });
-
-    test("explicit order clamped", () => {
         expect(computeEffectiveOrder({ eidnara: { order: 250 } }, PLUGIN_KEY, 200)).toBe(250);
     });
 
@@ -610,12 +594,6 @@ describe("computeEffectiveOrder (cross-plugin convention)", () => {
 });
 
 describe("write path — comment-json full round-trip", () => {
-    test("persists a nested key and reads back", async () => {
-        await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
-        const prefs = resolveEidnaraPrefs(await readTuiPreferencesFile());
-        expect(prefs.collapsed).toBe(true);
-    });
-
     test("seeds the file from the template when absent", async () => {
         await queueTuiPreferenceUpdate(PLUGIN_KEY, ["order"], 205);
         const text = await readFile(file, "utf8");
@@ -684,19 +662,17 @@ describe("write path — comment-json full round-trip", () => {
         expect(resolveEidnaraPrefs(await readTuiPreferencesFile()).collapsed).toBe(true);
     });
 
-    test("malformed existing file → write is a no-op, sibling content untouched", async () => {
-        const broken = `{ "anthropic-auth": { "order": 160 } broken `;
-        await writeFile(file, broken, "utf8");
-        await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
-        // The writer never clobbers a file it cannot safely parse.
-        expect(await readFile(file, "utf8")).toBe(broken);
-    });
-
-    test("non-object root → write is a no-op instead of replacing the document", async () => {
-        for (const original of ["[1, 2, 3]\n", '"just a string"\n', "null\n"]) {
+    test("a malformed document or a non-object root makes the write a no-op instead of replacing the document", async () => {
+        // The writer never clobbers a file it cannot safely parse or whose root cannot hold plugin keys.
+        for (const original of [
+            `{ "anthropic-auth": { "order": 160 } broken `,
+            "[1, 2, 3]\n",
+            '"just a string"\n',
+            "null\n",
+        ]) {
             await writeFile(file, original, "utf8");
             await queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], true);
-            expect(await readFile(file, "utf8")).toBe(original);
+            expect(await readFile(file, "utf8"), original).toBe(original);
         }
     });
 

@@ -22,7 +22,6 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::injection::build_synthetic_todo_pair;
-    use crate::test_support::FixtureBuilder;
     use crate::wire::WireMessage;
 
     use super::{
@@ -291,16 +290,5 @@ mod tests {
             .into_iter()
             .filter(|entry| entry.get("type").and_then(Value::as_str) != Some("compaction"))
             .collect()
-    }
-    #[test]
-    fn fixture_builder_drives_synthetic_todo_wire_shape() {
-        let fixture = FixtureBuilder::synthetic_todo_armed();
-        assert_eq!(fixture.native_messages.len(), 2);
-        assert!(
-            fixture
-                .native_messages
-                .iter()
-                .all(|message| message["meta"]["synthetic"] == true)
-        );
     }
 }

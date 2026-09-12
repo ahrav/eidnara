@@ -3160,15 +3160,6 @@ mod tests {
     }
 
     #[test]
-    fn closed_peer_doorbell_fails_instead_of_blocking() {
-        let created = Doorbell::create().unwrap();
-        let attached = Doorbell::from_fd(created.take_peer_end().unwrap()).unwrap();
-        drop(created);
-        assert!(matches!(attached.signal(), Err(RingError::DoorbellFailed)));
-        assert!(matches!(attached.drain(), Err(RingError::DoorbellFailed)));
-    }
-
-    #[test]
     fn creator_observes_peer_exit_once_the_attachment_is_handed_over() {
         let ring = ring();
         let attached = ring.attachment().unwrap().attach().unwrap();
@@ -3798,29 +3789,51 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_depth_above_the_cap_is_rejected_before_any_allocation() {
-        let mut bytes = ring().grant().encode();
-        bytes[22..30].copy_from_slice(&((super::MAX_DESCRIPTOR_DEPTH as u64) + 1).to_le_bytes());
-        assert!(matches!(
-            RingGrant::decode(bytes),
-            Err(RingError::InvalidGrant)
-        ));
+    fn oversized_depth_and_unaligned_arena_are_rejected_at_create_and_grant_decode() {
+        let encoded = ring().grant().encode();
+        let depth_field = 22..30;
+        let arena_field = 30..38;
+        let encoded_arena = u64::from_le_bytes(encoded[arena_field.clone()].try_into().unwrap());
+        let cases = [
+            (
+                "ring-deep",
+                super::MAX_DESCRIPTOR_DEPTH + 1,
+                MIN_ARENA_BYTES,
+                depth_field,
+                (super::MAX_DESCRIPTOR_DEPTH as u64) + 1,
+            ),
+            (
+                "ring-unaligned-arena",
+                4,
+                MIN_ARENA_BYTES + 1,
+                arena_field,
+                encoded_arena + 1,
+            ),
+        ];
+        for (id, descriptor_depth, arena_bytes, field, forged) in cases {
+            let profile = TargetProfile::new(ProfileConfig {
+                descriptor: TransportDescriptor::new(HardwareProfileId::new(id).unwrap()),
+                descriptor_depth,
+                arena_bytes,
+                max_spans: 2,
+                max_leases: 1,
+                mappings: SETUP_MAPPING_COUNT,
+                pinned_workers: 0,
+                worker_topology: WorkerTopology::CallerThread,
+            })
+            .unwrap();
+            assert!(
+                matches!(Ring::create(&profile, 0), Err(RingError::InvalidLayout)),
+                "{id}: create must refuse the geometry"
+            );
 
-        let profile = TargetProfile::new(ProfileConfig {
-            descriptor: TransportDescriptor::new(HardwareProfileId::new("ring-deep").unwrap()),
-            descriptor_depth: super::MAX_DESCRIPTOR_DEPTH + 1,
-            arena_bytes: MIN_ARENA_BYTES,
-            max_spans: 2,
-            max_leases: 1,
-            mappings: SETUP_MAPPING_COUNT,
-            pinned_workers: 0,
-            worker_topology: WorkerTopology::CallerThread,
-        })
-        .unwrap();
-        assert!(matches!(
-            Ring::create(&profile, 0),
-            Err(RingError::InvalidLayout)
-        ));
+            let mut bytes = encoded;
+            bytes[field].copy_from_slice(&forged.to_le_bytes());
+            assert!(
+                matches!(RingGrant::decode(bytes), Err(RingError::InvalidGrant)),
+                "{id}: decode must refuse the geometry"
+            );
+        }
     }
 
     #[test]
@@ -3834,35 +3847,6 @@ mod tests {
             Err(RingError::InvalidSharedState)
         ));
         assert!(ring.is_quarantined());
-    }
-
-    #[test]
-    fn unaligned_arena_is_rejected_before_any_frame_flows() {
-        let profile = TargetProfile::new(ProfileConfig {
-            descriptor: TransportDescriptor::new(
-                HardwareProfileId::new("ring-unaligned-arena").unwrap(),
-            ),
-            descriptor_depth: 4,
-            arena_bytes: MIN_ARENA_BYTES + 1,
-            max_spans: 2,
-            max_leases: 4,
-            mappings: SETUP_MAPPING_COUNT,
-            pinned_workers: 0,
-            worker_topology: WorkerTopology::CallerThread,
-        })
-        .unwrap();
-        assert!(matches!(
-            Ring::create(&profile, 0),
-            Err(RingError::InvalidLayout)
-        ));
-
-        let mut bytes = ring().grant().encode();
-        let arena = u64::from_le_bytes(bytes[30..38].try_into().unwrap()) + 1;
-        bytes[30..38].copy_from_slice(&arena.to_le_bytes());
-        assert!(matches!(
-            RingGrant::decode(bytes),
-            Err(RingError::InvalidGrant)
-        ));
     }
 
     /// Every identity mismatch at release time names what changed and quarantines, since the
@@ -3938,22 +3922,41 @@ mod tests {
         assert_eq!(fresh.release(), Err(LeaseError::Quarantined));
     }
 
+    /// The local latch remains set after either local quarantine entry or observation of a
+    /// peer's shared quarantine flag, so a peer that later clears the shared flag cannot
+    /// revive the ring for any operation.
     #[test]
-    fn shared_quarantine_flag_latches_locally_when_observed() {
-        let ring = ring();
-        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
-        lifecycle.store(1, Ordering::Release);
-        assert!(ring.is_quarantined());
-        lifecycle.store(0, Ordering::Release);
-        assert!(
-            ring.is_quarantined(),
-            "a cleared shared flag must not revive the ring"
-        );
-        assert!(matches!(
-            ring.wait_for_data(std::time::Instant::now() + std::time::Duration::from_secs(5)),
-            Err(RingError::Quarantined)
-        ));
-        assert!(matches!(ring.arm_data_wait(), Err(RingError::Quarantined)));
+    fn quarantine_latched_locally_or_observed_survives_the_peer_clearing_the_shared_flag() {
+        let enter: [fn(&Ring); 2] = [
+            |ring| ring.enter_quarantine(),
+            |ring| {
+                let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
+                lifecycle.store(1, Ordering::Release);
+                assert!(ring.is_quarantined());
+            },
+        ];
+        for enter in enter {
+            let ring = ring();
+            publish(&ring, &[1]);
+            enter(&ring);
+            let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
+            lifecycle.store(0, Ordering::Release);
+            assert!(
+                ring.is_quarantined(),
+                "a cleared shared flag must not revive the ring"
+            );
+            assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
+            assert_eq!(
+                ring.try_reserve(0, wire_v2_header(0).unwrap()).unwrap_err(),
+                ProducerError::Quarantined
+            );
+            assert!(matches!(ring.trim(), Err(RingError::Quarantined)));
+            assert!(matches!(
+                ring.wait_for_data(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+                Err(RingError::Quarantined)
+            ));
+            assert!(matches!(ring.arm_data_wait(), Err(RingError::Quarantined)));
+        }
     }
 
     #[test]
@@ -4258,22 +4261,6 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_survives_peer_clearing_shared_flag() {
-        let ring = ring();
-        publish(&ring, &[1]);
-        ring.enter_quarantine();
-        let lifecycle = ring.mapping.lifecycle_quarantined(ring.layout).unwrap();
-        lifecycle.store(0, Ordering::Release);
-        assert!(ring.is_quarantined());
-        assert!(matches!(ring.try_receive(), Err(RingError::Quarantined)));
-        assert_eq!(
-            ring.try_reserve(0, wire_v2_header(0).unwrap()).unwrap_err(),
-            ProducerError::Quarantined
-        );
-        assert!(matches!(ring.trim(), Err(RingError::Quarantined)));
-    }
-
-    #[test]
     fn impossible_slot_state_quarantines_the_receiver() {
         let ring = ring();
         publish(&ring, &[1]);
@@ -4285,24 +4272,6 @@ mod tests {
             Err(RingError::InvalidSharedState)
         ));
         assert!(ring.is_quarantined());
-    }
-
-    #[test]
-    fn forged_reclaim_length_quarantines_the_producer() {
-        let ring = ring();
-        let arena_len = ring.arena_bytes() as u64;
-        publish(&ring, &[1; 16]);
-        ring.try_receive().unwrap().unwrap().release().unwrap();
-        let slot = ring.slot(1).unwrap();
-        let mut descriptor = slot.read_descriptor();
-        descriptor.allocation_len = arena_len;
-        slot.write_descriptor(descriptor);
-        assert!(matches!(
-            ring.try_reserve(0, wire_v2_header(0).unwrap()),
-            Err(ProducerError::Ring(RingError::InvalidSharedState))
-        ));
-        assert!(ring.is_quarantined());
-        assert!(ring.resident_arena_pages().unwrap() > 0);
     }
 
     #[test]

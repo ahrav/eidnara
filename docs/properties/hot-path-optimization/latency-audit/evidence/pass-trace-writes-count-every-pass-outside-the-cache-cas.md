@@ -135,8 +135,8 @@ channel, the authority route read, and dreamer tasks only.
 [t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23523
 [t-status]: ../../../../../crates/daemon/src/lib.rs#L23556
 [stable-call]: ../../../../../crates/daemon/src/transform.rs#L1819-L1843
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13521
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13564
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13524
+[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13567
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L767-L784
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [received]: ../../../../../crates/memory-store/src/lib.rs#L6485-L6535

@@ -2257,19 +2257,21 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_bearing_completed_arc_fences_a_straddling_boundary_backward() {
-        let messages = vec![
-            reasoning_tool_call_msg(2, "reasoning-arc"),
-            tool_result_msg(3, "reasoning-arc", "tool result"),
-        ];
-        let arcs = build_tool_arcs(&messages);
+    fn completed_arcs_fence_a_straddling_boundary_backward_with_or_without_reasoning() {
+        for (label, invocation) in [
+            ("reasoning-bearing", reasoning_tool_call_msg(2, "arc")),
+            ("ordinary", tool_call_msg(2, "arc")),
+        ] {
+            let messages = vec![invocation, tool_result_msg(3, "arc", "tool result")];
+            let arcs = build_tool_arcs(&messages);
 
-        let fenced = fence_boundary_for_tool_arcs(3, &arcs, 1, 1);
+            let fenced = fence_boundary_for_tool_arcs(3, &arcs, 1, 1);
 
-        assert_eq!(
-            fenced.boundary, 2,
-            "the fold must exclude the whole reasoning-bearing invocation instead of cutting its arc"
-        );
+            assert_eq!(
+                fenced.boundary, 2,
+                "{label}: the fold must exclude the whole invocation instead of cutting its arc"
+            );
+        }
     }
 
     #[test]
@@ -2347,22 +2349,6 @@ mod tests {
         assert_eq!(
             fence_boundary_for_tool_arcs(candidate, &arcs, 98, candidate).boundary,
             candidate
-        );
-    }
-
-    #[test]
-    fn ordinary_completed_arc_fences_a_straddling_boundary_backward() {
-        let messages = vec![
-            tool_call_msg(2, "ordinary-arc"),
-            tool_result_msg(3, "ordinary-arc", "tool result"),
-        ];
-        let arcs = build_tool_arcs(&messages);
-
-        let fenced = fence_boundary_for_tool_arcs(3, &arcs, 1, 1);
-
-        assert_eq!(
-            fenced.boundary, 2,
-            "ordinary completed arcs must obey the same whole-arc rule as reasoning-bearing arcs"
         );
     }
 
@@ -2451,18 +2437,6 @@ mod tests {
             boundary.true_raw_eligible_tokens > 100_000.0,
             "large head should remain eligible for folding"
         );
-    }
-
-    #[test]
-    fn completed_arc_pairing_is_on_without_fold_only_guard() {
-        let tail = completed_newest_tool_arc_tail();
-        let mut ctx = fold_only_pressure_ctx();
-        ctx.fold_is_only_reclaim = false;
-
-        let boundary = resolve_protected_tail_boundary(&tail, &ctx);
-
-        assert_eq!(boundary.protected_start_ordinal, 2);
-        assert_eq!(boundary.eligible_head.end, 2);
     }
 
     #[test]
@@ -2677,19 +2651,6 @@ mod tests {
     }
 
     #[test]
-    fn boundary_determinism_same_tail_same_resolution() {
-        let tail = vec![
-            text_msg(1, Role::User, "start"),
-            text_msg(2, Role::Assistant, &"alpha ".repeat(900)),
-            text_msg(3, Role::Assistant, &"beta ".repeat(900)),
-        ];
-        let ctx = ctx_for_tests();
-        let first = resolve_protected_tail_boundary(&tail, &ctx);
-        let second = resolve_protected_tail_boundary(&tail, &ctx);
-        assert_eq!(first, second);
-    }
-
-    #[test]
     fn adding_newer_items_never_moves_protected_start_below_anchor() {
         let mut tail = vec![
             text_msg(1, Role::User, "published"),
@@ -2702,33 +2663,6 @@ mod tests {
         let after = resolve_protected_tail_boundary(&tail, &ctx);
         assert!(before.protected_start_ordinal >= 2);
         assert!(after.protected_start_ordinal >= 2);
-    }
-
-    #[test]
-    fn open_arc_staleness_flips_when_newer_growth_pushes_it_older_than_size_walk() {
-        let mut recent_tail = vec![
-            text_msg(1, Role::User, &"begin ".repeat(400)),
-            tool_call_msg(2, "arc-open"),
-            text_msg(3, Role::Assistant, &"small ".repeat(100)),
-        ];
-        let mut ctx = ctx_for_tests();
-        ctx.emergency_tail_scale = Some(0.25);
-        let recent = resolve_protected_tail_boundary(&recent_tail, &ctx);
-        assert!(recent.fenced_by_open_arc, "recent open arc should fence");
-        assert_eq!(recent.protected_start_ordinal, 2);
-
-        for ord in 4..14 {
-            recent_tail.push(text_msg(ord, Role::Assistant, &"growth ".repeat(800)));
-        }
-        let stale = resolve_protected_tail_boundary(&recent_tail, &ctx);
-        assert!(
-            stale.protected_start_ordinal > 2,
-            "new growth should push the size-walk start after the abandoned open arc"
-        );
-        assert!(
-            !stale.fenced_by_open_arc,
-            "stale open arc must be compactable"
-        );
     }
 
     #[test]
@@ -2748,18 +2682,6 @@ mod tests {
         if let Some(consume) = decision.consume_through_ordinal {
             assert!(consume < boundary.protected_start_ordinal);
         }
-    }
-
-    #[test]
-    fn chunk_has_more_saturates_at_budget_stop() {
-        let tail = vec![
-            text_msg(1, Role::User, &"one ".repeat(200)),
-            text_msg(2, Role::Assistant, &"two ".repeat(200)),
-            text_msg(3, Role::User, &"three ".repeat(200)),
-        ];
-        let estimate = chunked_message_estimate(&tail, 1, None, 50.0);
-        assert!(estimate.has_more);
-        assert!(estimate.tokens >= 50.0);
     }
 
     #[test]

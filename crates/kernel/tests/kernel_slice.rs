@@ -515,9 +515,28 @@ fn decisions_for_objects_as_of_returns_only_requested_live_rows() {
             .collect::<Vec<_>>()
     );
 
+    // Payload sizes follow the same selection and report stored payload byte
+    // lengths.
+    let sizes = store.decision_payload_sizes_as_of(&requested, tip).unwrap();
+    assert_eq!(sizes.len(), 1);
+    let (object_id, size) = &sizes[0];
+    assert_eq!(object_id, "decision-object-1");
+    let live = store
+        .decisions_for_objects_as_of(&requested, tip)
+        .unwrap()
+        .remove(0);
+    let stored = serde_json::to_vec(&live.payload).unwrap();
+    assert_eq!(*size, stored.len() as u64);
+
     assert!(
         store
             .decisions_for_objects_as_of(&[], tip)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .decision_payload_sizes_as_of(&[], tip)
             .unwrap()
             .is_empty()
     );
@@ -544,6 +563,12 @@ fn decisions_for_objects_as_of_returns_only_requested_live_rows() {
     );
     assert_eq!(
         store
+            .decision_payload_sizes_as_of(&requested, tip + 1)
+            .unwrap_err(),
+        KernelError::FutureSnapshot
+    );
+    assert_eq!(
+        store
             .decisions_for_objects_as_of(&requested, -1)
             .unwrap_err(),
         KernelError::InvalidInput
@@ -555,56 +580,6 @@ fn decisions_for_objects_as_of_returns_only_requested_live_rows() {
     assert_eq!(
         ids(store.decisions_for_objects_as_of(&many, tip).unwrap()),
         ["decision-object-1", "decision-object-3"]
-    );
-}
-
-#[test]
-fn decision_payload_sizes_match_the_stored_payload_bytes_of_live_rows() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    seed_domain(&store);
-    store
-        .commit(intent("decisions", '1'), |envelope| {
-            envelope.insert_decision(decision(1))?;
-            envelope.insert_decision(decision(2))?;
-            Ok(String::new())
-        })
-        .unwrap();
-    store
-        .commit(intent("retire", '2'), |envelope| {
-            Ok(envelope.retire_decision("decision-object-2")?.result_json())
-        })
-        .unwrap();
-    let tip = store.tip().unwrap();
-    let requested = [
-        "decision-object-1".to_string(),
-        "decision-object-2".to_string(),
-        "decision-object-9".to_string(),
-    ];
-
-    let sizes = store.decision_payload_sizes_as_of(&requested, tip).unwrap();
-    assert_eq!(sizes.len(), 1);
-    let (object_id, size) = &sizes[0];
-    assert_eq!(object_id, "decision-object-1");
-    // The reported size is the stored payload's byte length, the quantity a caller budgets full loads by.
-    let full = store
-        .decisions_for_objects_as_of(&requested, tip)
-        .unwrap()
-        .remove(0);
-    let stored = serde_json::to_vec(&full.payload).unwrap();
-    assert_eq!(*size, stored.len() as u64);
-
-    assert!(
-        store
-            .decision_payload_sizes_as_of(&[], tip)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        store
-            .decision_payload_sizes_as_of(&requested, tip + 1)
-            .unwrap_err(),
-        KernelError::FutureSnapshot
     );
 }
 
@@ -1276,44 +1251,6 @@ fn a_fold_refuses_a_quarantined_survivor() {
 }
 
 #[test]
-fn a_swallowed_decision_insert_error_cannot_commit_an_orphan_registry_row() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    seed_domain(&store);
-    store
-        .commit(intent("first", '1'), |envelope| {
-            envelope.insert_decision(decision(1))?;
-            Ok(String::new())
-        })
-        .unwrap();
-
-    // A fresh object id with a reused decision id: the registry insert succeeds
-    // before the `decisions` insert fails its primary key.
-    let mut duplicate = decision(2);
-    duplicate.decision_id = "decision-1".to_string();
-    let error = store
-        .commit(intent("swallow", '2'), |envelope| {
-            let _ = envelope.insert_decision(duplicate);
-            Ok("swallowed".to_string())
-        })
-        .unwrap_err();
-    assert_eq!(error, KernelError::Conflict);
-
-    assert_eq!(
-        inspect_i64(
-            directory.path(),
-            "SELECT COUNT(*) FROM object_registry WHERE object_id='decision-object-2'"
-        ),
-        0,
-        "a swallowed failure committed a registry row"
-    );
-    assert_eq!(
-        inspect_i64(directory.path(), "SELECT COUNT(*) FROM commit_log"),
-        2
-    );
-}
-
-#[test]
 fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
@@ -1325,6 +1262,8 @@ fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
         })
         .unwrap();
 
+    // The failed insert writes `decision-object-2` to `object_registry` before
+    // detecting duplicate `decision-1`; the callback swallows that failure.
     let mut duplicate = decision(2);
     duplicate.decision_id = "decision-1".to_string();
     let error = store
@@ -1348,7 +1287,7 @@ fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
                 envelope.retire_decision("decision-object-1").unwrap_err(),
                 KernelError::Conflict
             );
-            Ok(String::new())
+            Ok("swallowed".to_string())
         })
         .unwrap_err();
     assert_eq!(error, KernelError::Conflict);
@@ -1358,6 +1297,18 @@ fn a_poisoned_envelope_refuses_every_later_slice_mutation() {
             "SELECT COUNT(*) FROM object_registry WHERE object_kind IN ('decision','observation')"
         ),
         1
+    );
+    assert_eq!(
+        inspect_i64(
+            directory.path(),
+            "SELECT COUNT(*) FROM object_registry WHERE object_id='decision-object-2'"
+        ),
+        0,
+        "a swallowed failure committed a registry row"
+    );
+    assert_eq!(
+        inspect_i64(directory.path(), "SELECT COUNT(*) FROM commit_log"),
+        2
     );
 }
 

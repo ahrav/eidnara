@@ -50,27 +50,12 @@ describe("SQLite runtime selector", () => {
         const compatibilityError = thrown as SqliteRuntimeUnavailableError;
         expect(compatibilityError.runtime).toBe("Node.js");
         expect(compatibilityError.specifier).toBe("node:sqlite");
+        expect(compatibilityError.message).toContain("this Node.js build lacks node:sqlite");
+        expect(compatibilityError.message).not.toContain("Bun build lacks node:sqlite");
         expect(compatibilityError.message).toContain("Node.js >= 24");
         expect(compatibilityError.message).toContain("Bun with bun:sqlite");
         expect(compatibilityError.message).toContain("node:sqlite");
         expect(compatibilityError.cause).toBe(cause);
-    });
-
-    it("blames the detected runtime, not Bun, when node:sqlite is missing under Node.js", async () => {
-        const cause = Object.assign(new Error("No such built-in module: node:sqlite"), {
-            code: "ERR_UNKNOWN_BUILTIN_MODULE",
-        });
-        let thrown: unknown;
-        try {
-            await loadSqliteModule("Node.js", async () => {
-                throw cause;
-            });
-        } catch (error) {
-            thrown = error;
-        }
-        const message = (thrown as Error).message;
-        expect(message).toContain("this Node.js build lacks node:sqlite");
-        expect(message).not.toContain("Bun build lacks node:sqlite");
     });
 
     it("blames Bun when bun:sqlite is missing under Bun", async () => {
@@ -292,10 +277,11 @@ describe("node:sqlite adapter constructor", () => {
         expect(constructed[0]?.location).toBe(":memory:");
     });
 
-    it("rejects a non-string location instead of silently opening :memory:", () => {
+    it("rejects a non-string location and unsupported better-sqlite3 options before constructing", () => {
         const { FakeDatabaseSync, constructed } = makeFakeDatabaseSync();
         const Impl = buildNodeSqliteDatabaseClass(FakeDatabaseSync);
         expect(() => new Impl(Buffer.from("/tmp/x.db"))).toThrow(TypeError);
+        expect(() => new Impl(":memory:", { timeout: 5000 })).toThrow(/timeout/);
         expect(constructed).toHaveLength(0);
     });
 
@@ -313,13 +299,6 @@ describe("node:sqlite adapter constructor", () => {
             expect(constructed[0]?.location).toBe(present);
             expect(constructed[0]?.options).toEqual({});
         });
-    });
-
-    it("rejects better-sqlite3 options the backend cannot honor", () => {
-        const { FakeDatabaseSync, constructed } = makeFakeDatabaseSync();
-        const Impl = buildNodeSqliteDatabaseClass(FakeDatabaseSync);
-        expect(() => new Impl(":memory:", { timeout: 5000 })).toThrow(/timeout/);
-        expect(constructed).toHaveLength(0);
     });
 });
 
@@ -412,11 +391,8 @@ describe("bun:sqlite adapter constructor", () => {
         });
     });
 
-    it.if(onBun)("rejects a non-string location", () => {
+    it.if(onBun)("rejects a non-string location and unsupported better-sqlite3 options", () => {
         expect(() => new Database(Buffer.from("/tmp/x.db"))).toThrow(TypeError);
-    });
-
-    it.if(onBun)("rejects better-sqlite3 options the backend cannot honor", () => {
         expect(() => new Database(":memory:", { timeout: 5000 })).toThrow(/timeout/);
     });
 });

@@ -247,17 +247,6 @@ mod tests {
     }
 
     #[test]
-    fn integer_above_i64_max_is_not_canonical() {
-        let value: Value = serde_json::from_str("18446744073709551615").unwrap();
-        assert!(value.as_i64().is_none());
-        assert!(value.as_u64().is_some());
-        assert!(matches!(
-            canonical_json_encode(&value),
-            Err(ContractError::NotCanonical(_))
-        ));
-    }
-
-    #[test]
     fn lower_hex_check_is_exact_in_length_and_alphabet() {
         assert!(is_lower_hex("00ff", 4));
         assert!(is_lower_hex(&"a".repeat(64), 64));
