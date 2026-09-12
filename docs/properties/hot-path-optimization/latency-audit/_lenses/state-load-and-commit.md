@@ -566,7 +566,7 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 
 [received]: ../../../../../crates/memory-store/src/lib.rs#L7031-L7104
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L7028-L7030
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6573-L6591
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L7055-L7071
 [stable]: ../../../../../crates/memory-store/src/lib.rs#L7109-L7201
 [completed]: ../../../../../crates/memory-store/src/lib.rs#L7206-L7254
 [completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L7203-L7205
