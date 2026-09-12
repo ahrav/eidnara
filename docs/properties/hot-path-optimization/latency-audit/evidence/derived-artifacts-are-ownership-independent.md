@@ -365,7 +365,7 @@ also pass. The extension changes tests and documentation, not served behavior;
 the historical evidence and bound golden remain intact.
 
 [bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
-[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L118-L155
+[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L118-L159
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
 [shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116

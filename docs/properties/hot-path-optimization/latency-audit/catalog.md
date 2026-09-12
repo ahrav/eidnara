@@ -2459,7 +2459,7 @@ evaluation of this area and its disposition are recorded in
 [assemble]: ../../../../crates/daemon/src/lib.rs#L5227-L5231
 [ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13022
 [gate-native]: ../../../../crates/daemon/src/lib.rs#L13078-L13083
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13092-L13106
+[native-attach]: ../../../../crates/daemon/src/lib.rs#L13086-L13106
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13319-L13336
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14425-L14440
 [segments]: ../../../../crates/daemon/src/lib.rs#L14445-L14452
@@ -2685,7 +2685,7 @@ evaluation of this area and its disposition are recorded in
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../crates/daemon/benches/hot_path.rs#L1-L10
-[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L267-L300
+[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L271-L304
 [meta-bound]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [he-payload]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
