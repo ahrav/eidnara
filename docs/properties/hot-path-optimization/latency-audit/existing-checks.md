@@ -419,7 +419,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-native-reject]: ../../../../crates/daemon/src/lib.rs#L22111
 [t-vacuity]: ../../../../crates/daemon/src/lib.rs#L22040
 [t-dup]: ../../../../crates/daemon/src/lib.rs#L22628
-[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
+[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22181
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22250
 [t-interleave]: ../../../../crates/daemon/src/transform.rs#L22283

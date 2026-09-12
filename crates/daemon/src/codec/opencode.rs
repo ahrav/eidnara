@@ -27,24 +27,21 @@ pub type MessageV2Json = Value;
 
 const HARNESS: &str = "opencode";
 
-pub fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages {
+#[cfg(test)]
+pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages {
     decode_opencode_with_sidecar_and_base(messages, None, 0)
 }
 
-pub fn decode_opencode_with_sidecar(
+#[cfg(test)]
+pub(crate) fn decode_opencode_with_sidecar(
     messages: &[MessageV2Json],
     prior: Option<&DecodeSidecar>,
 ) -> DecodedHarnessMessages {
     decode_opencode_with_sidecar_and_base(messages, prior, 0)
 }
 
-/// Decodes messages while inheriting stable message-ID pins from `prior`.
-///
-/// Explicit absolute ordinals win. Missing ordinals are assigned from
-/// `provisional_base + index + 1` with saturating arithmetic. The last
-/// compaction part becomes the extracted boundary and is omitted from CK
-/// content. Unknown parts remain opaque.
-pub fn decode_opencode_with_sidecar_and_base(
+#[cfg(test)]
+pub(crate) fn decode_opencode_with_sidecar_and_base(
     messages: &[MessageV2Json],
     prior: Option<&DecodeSidecar>,
     provisional_base: u64,
@@ -53,6 +50,14 @@ pub fn decode_opencode_with_sidecar_and_base(
     decode_opencode_shared(&shared, prior, provisional_base)
 }
 
+/// Decodes shared messages while inheriting stable message-ID pins from `prior`.
+///
+/// Each envelope is retained in `HarnessMessageMeta::raw` through an `Arc`
+/// clone, so callers that already share values pay no deep copy. Explicit
+/// absolute ordinals win. Missing ordinals are assigned from
+/// `provisional_base + index + 1` with saturating arithmetic. The last
+/// compaction part becomes the extracted boundary and is omitted from CK
+/// content. Unknown parts remain opaque.
 pub(crate) fn decode_opencode_shared(
     messages: &[Arc<Value>],
     prior: Option<&DecodeSidecar>,

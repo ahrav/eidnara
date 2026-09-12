@@ -6,9 +6,10 @@ pub mod sidecar;
 
 mod json;
 
+#[cfg(test)]
+pub(crate) use opencode::decode_opencode;
 pub use opencode::{
-    MessageV2Json, decode_opencode, decode_opencode_with_sidecar,
-    decode_opencode_with_sidecar_and_base, encode_opencode, encode_opencode_with_session,
+    MessageV2Json, encode_opencode, encode_opencode_with_session,
     encode_opencode_with_session_exemptions,
 };
 pub use pi::{PiSessionEntryJson, decode_pi, decode_pi_with_sidecar, encode_pi};

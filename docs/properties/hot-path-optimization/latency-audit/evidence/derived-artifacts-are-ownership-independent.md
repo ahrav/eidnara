@@ -152,10 +152,12 @@ native implementation.
   ingress chunks or the full request snapshot. The request wire decoder also
   owns `Arc<Value>` values. JSON fields and serialization remain unchanged.
 - [Shared decode][shared-decode] borrows parts and retains each envelope in
-  `HarnessMessageMeta::raw` through an `Arc` clone. The value-slice decoder
-  keeps its entry interface and delegates to that same decoder. Full-native
-  encoding reads the shared request values without materializing a value
-  array. Pi adapts to the common sidecar field without changing its output.
+  `HarnessMessageMeta::raw` through an `Arc` clone. It is the only compiled
+  production decoder; the value-slice adapters that wrap owned fixtures in
+  fresh `Arc`s are test-only, so no shipped path can reintroduce that copy.
+  Full-native encoding reads the shared request values without materializing
+  a value array. Pi adapts to the common sidecar field without changing its
+  output.
 - [Ingress accounting][shared-ingress] retains the value-equality test when
   sharing an encoded chunk. An unequal encoded output cannot become the raw
   ingress prefix. Request accounting uses request allocation sizes, not the
@@ -344,16 +346,16 @@ also pass. The extension changes tests and documentation, not served behavior;
 the historical evidence and bound golden remain intact.
 
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
-[shell-build]: ../../../../../crates/daemon/src/wire.rs#L546-L565
+[shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
-[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L214-L243
+[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L212-L241
 [shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L243-L253
-[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1745
-[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L950
-[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1704
+[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1731
+[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L940
+[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1690
 
 [shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4157
-[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L56
+[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
 [shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
 [shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20654
 [shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20873
