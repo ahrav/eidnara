@@ -210,6 +210,7 @@ not performance measurements or a full-workspace gate.
 | [`a_fingerprint_without_an_interesting_entry_keeps_no_retained_receipt`][t-fingerprint] | Five passes with a fingerprint and no interesting entry hold only the live pass's fingerprint scan; a pass that writes the interesting entry keeps one retained receipt. | unaudited |
 | [`a_fingerprint_receipt_is_evicted_with_its_interesting_entry`][t-fingerprint-evict] | One fingerprint-bearing interesting entry followed by 256 without one leaves zero fingerprint receipts once the entry is evicted. | unaudited |
 | [`an_oversized_fingerprint_neither_keeps_nor_evicts_a_history_receipt`][t-fingerprint-bound] | A fingerprint over the diagnostic bound leaves the stored fingerprint's receipt in place, holds only the live pass's scan, and is retired by the next pass. | unaudited |
+| [`observation_receipts_follow_the_ring_across_both_writers`][t-two-writers] | A commit's observation receipt leaves when 256 stable passes push its entry out; the ring and the receipts across both writers count 256. | unaudited |
 | [`a_stale_delivery_does_not_retire_a_re_created_outbox_row`][t-key-reuse] | A handle read before the row was deleted and re-issued under the same key with another payload reports already retired, delivers nothing, and leaves the new row pending. | unaudited |
 | [`side_channel_payloads_are_parsed_before_the_fenced_delivery`][t-parse-first] | With another connection holding the write lock, a malformed payload fails as a parse error in under a second rather than waiting on the lock. | unaudited |
 | [`reassigning_a_scan_range_leaves_later_scans_under_the_default_owner`][t-reassign] | Reassigning a scan range to another owner leaves the write's default owner list alone, so a scan prepared afterwards carries only the default owner. | unaudited |
@@ -542,29 +543,29 @@ not a claim that no related check exists anywhere in the repository.
 [t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36937
 [t-emergency]: ../../../../crates/daemon/src/lib.rs#L36144
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L23426
-[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18461
-[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18515
-[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18584
+[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18542
+[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18596
+[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18665
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-success]: ../../../../crates/daemon/src/lib.rs#L24563
 [t-repeat]: ../../../../crates/daemon/src/lib.rs#L24578
 [t-frozen]: ../../../../crates/daemon/src/lib.rs#L24607
 [t-status]: ../../../../crates/daemon/src/lib.rs#L24860
 [t-divergence]: ../../../../crates/daemon/src/lib.rs#L32912
-[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19475
+[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19556
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13549
-[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16520
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L20965
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20589
+[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16547
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L21046
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20670
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36801
-[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21083
-[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22545
-[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16256
-[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L16173
-[t-container]: ../../../../crates/memory-store/src/lib.rs#L16273
-[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L16310
+[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21164
+[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22626
+[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16283
+[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L16200
+[t-container]: ../../../../crates/memory-store/src/lib.rs#L16300
+[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L16337
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L728
-[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16453
+[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16480
 [t-sync]: ../../../../crates/storage/src/lib.rs#L4286-L4351
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
@@ -669,8 +670,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
-[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15736-L15955
-[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15962-L15990
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15763-L15982
+[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15989-L16017
 [t-load-count]: ../../../../crates/daemon/src/lib.rs#L24695-L24747
 [t-timing]: ../../../../crates/daemon/src/lib.rs#L24753-L24765
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24771-L24784
@@ -683,21 +684,22 @@ units); their links are to the live tree.
 The three preparation checks were added with the single-pass `meta`
 preparation; their links are to the live tree.
 
-[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L16081-L16129
-[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16134-L16168
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L16108-L16156
+[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16161-L16195
 [t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
-[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16632-L16789
-[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16794-L16823
-[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16850-L16892
-[t-first-receive]: ../../../../crates/memory-store/src/lib.rs#L16828-L16845
-[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16959-L17058
-[t-ring]: ../../../../crates/memory-store/src/lib.rs#L17390-L17453
-[t-root]: ../../../../crates/memory-store/src/lib.rs#L17063-L17108
-[t-parse-first]: ../../../../crates/memory-store/src/lib.rs#L17355-L17384
-[t-fingerprint]: ../../../../crates/memory-store/src/lib.rs#L17113-L17160
-[t-fingerprint-evict]: ../../../../crates/memory-store/src/lib.rs#L17165-L17214
-[t-fingerprint-bound]: ../../../../crates/memory-store/src/lib.rs#L17219-L17279
-[t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17284-L17351
-[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24699-L24722
-[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20802-L20962
+[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16659-L16816
+[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16821-L16850
+[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16877-L16919
+[t-first-receive]: ../../../../crates/memory-store/src/lib.rs#L16855-L16872
+[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16986-L17085
+[t-ring]: ../../../../crates/memory-store/src/lib.rs#L17471-L17534
+[t-root]: ../../../../crates/memory-store/src/lib.rs#L17090-L17135
+[t-parse-first]: ../../../../crates/memory-store/src/lib.rs#L17436-L17465
+[t-fingerprint]: ../../../../crates/memory-store/src/lib.rs#L17140-L17187
+[t-fingerprint-evict]: ../../../../crates/memory-store/src/lib.rs#L17192-L17241
+[t-fingerprint-bound]: ../../../../crates/memory-store/src/lib.rs#L17246-L17306
+[t-two-writers]: ../../../../crates/memory-store/src/lib.rs#L17311-L17360
+[t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17365-L17432
+[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24780-L24803
+[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20883-L21043
 [t-outcome]: ../../../../crates/daemon/src/lib.rs#L24791-L24835

@@ -186,8 +186,8 @@ holds none.
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11619-L11697
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14462-L14487
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11743-L11767
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20802-L20962
-[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17284-L17351
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11646-L11724
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14489-L14514
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11770-L11794
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20883-L21043
+[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17365-L17432

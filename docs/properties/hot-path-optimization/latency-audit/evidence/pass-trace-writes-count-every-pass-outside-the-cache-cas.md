@@ -239,11 +239,12 @@ five passes with a fingerprint and no interesting entry holding no retained
 fingerprint receipt, and the [fingerprint-eviction test][fingerprint-evict-test]
 shows one fingerprint-bearing entry followed by 256 without leaving no
 fingerprint receipt behind. The receipts are counts per
-field, not links to individual ring entries: an entry appended by
-`trace_pass_stable` carries a `pass_trace`-owned receipt, and evicting it
-from the ring removes the oldest retained receipt instead, so the retained
-count stays bounded by the ring length while the pairing of receipt to entry
-is not recorded in either design. Lineage descent copies the source scope's live scans, which after
+ring, not links to individual entries, and the count is exact because every
+writer that appends to a ring registers the same history owner:
+[`trace_pass_stable`][stable-ring-owner] places its observation receipt under
+that owner and [evicts][stable-ring-evict] past the ring length after its own
+append, so an observation a commit recorded leaves when stable passes push
+its entry out, as the [two-writer test][two-writer-test] shows. Lineage descent copies the source scope's live scans, which after
 retirement are the latest pass's scans plus the retained scans rather than
 every pass the source ever ran. The [retirement test][retire-test] shows the
 `field_scans` and `scan_owner_copies` counts flat across six passes, flat
@@ -273,27 +274,30 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2438
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16850-L16892
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7046
-[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7076-L7088
-[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16828-L16845
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16794-L16823
-[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2857
-[retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2860
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L9047-L9053
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16877-L16919
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7058
+[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7088-L7100
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16855-L16872
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16821-L16850
+[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
+[retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2869
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L9074-L9080
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2638-L2680
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8981-L8986
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16632-L16789
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16959-L17058
-[history-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9136-L9166
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17390-L17453
-[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9167-L9180
-[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17063-L17108
-[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8960-L8970
-[fingerprint-evict-test]: ../../../../../crates/memory-store/src/lib.rs#L17165-L17214
-[fingerprint-bound-test]: ../../../../../crates/memory-store/src/lib.rs#L17219-L17279
-[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17113-L17160
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24699-L24722
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L9008-L9013
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16659-L16816
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16986-L17085
+[history-owner]: ../../../../../crates/memory-store/src/lib.rs#L2875
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9163-L9192
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17471-L17534
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9194-L9207
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17090-L17135
+[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8987-L8997
+[fingerprint-evict-test]: ../../../../../crates/memory-store/src/lib.rs#L17192-L17241
+[fingerprint-bound-test]: ../../../../../crates/memory-store/src/lib.rs#L17246-L17306
+[stable-ring-owner]: ../../../../../crates/memory-store/src/lib.rs#L7140-L7148
+[stable-ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L7225-L7230
+[two-writer-test]: ../../../../../crates/memory-store/src/lib.rs#L17311-L17360
+[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17140-L17187
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24780-L24803
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7055
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7067

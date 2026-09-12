@@ -2766,34 +2766,42 @@ fn retire_active_scan_scope(
     retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
 }
 
-/// Keeps the newest `keep` history-owner receipts for `field_id` in the session's scope and
-/// prunes the scans that lost their last owner. Rowid order is insertion order among the
-/// surviving rows because SQLite assigns each new rowid above every existing one.
+/// Keeps the newest `keep` history-owner receipts for `field_ids` in the session's scope
+/// and prunes the scans that lost their last owner. Both write families that append to the
+/// rings register the history key, so their owners are read together. Rowid order is
+/// insertion order among the surviving rows because SQLite assigns each new rowid above
+/// every existing one.
 fn evict_history_receipts_beyond(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    field_id: &str,
+    field_ids: &[&str],
     keep: usize,
 ) -> rusqlite::Result<()> {
-    let owner_kind = DurableWriteFamily::CacheState.owner_kind();
-    let owner: Option<(String, String)> = tx
+    let owner_keys = json_id_array(
+        [
+            DurableWriteFamily::CacheState.owner_kind(),
+            DurableWriteFamily::TransformDiagnostics.owner_kind(),
+        ]
+        .iter()
+        .map(|kind| active_scan_private_key(kind, CACHE_STATE_HISTORY_OWNER_KEY))
+        .collect::<Vec<_>>()
+        .iter()
+        .map(String::as_str),
+    )?;
+    let owners: Vec<(String, String)> = tx
         .prepare_cached(
             "SELECT owners.owner_scope_id, owners.domain_owner_id
                FROM scan_domain_owners owners
                JOIN scan_owner_scopes scopes USING(owner_scope_id)
               WHERE scopes.scope_kind = 'session' AND scopes.scope_key = ?1
-                AND owners.owner_kind = ?2 AND owners.owner_key = ?3",
+                AND owners.owner_key IN (SELECT value FROM json_each(?2))",
         )?
-        .query_row(
-            params![
-                active_scan_private_key("session", session_id),
-                owner_kind,
-                active_scan_private_key(owner_kind, CACHE_STATE_HISTORY_OWNER_KEY)
-            ],
+        .query_map(
+            params![active_scan_private_key("session", session_id), owner_keys],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((owner_scope_id, domain_owner_id)) = owner else {
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some((owner_scope_id, _)) = owners.first().cloned() else {
         return Ok(());
     };
     let evicted = tx
@@ -2801,13 +2809,14 @@ fn evict_history_receipts_beyond(
             "SELECT copies.owner_copy_id, copies.scan_id, scans.scan_batch_id
                FROM scan_owner_copies copies
                JOIN field_scans scans USING(scan_id)
-              WHERE copies.domain_owner_id = ?1 AND copies.field_id = ?2
+              WHERE copies.domain_owner_id IN (SELECT value FROM json_each(?1))
+                AND copies.field_id IN (SELECT value FROM json_each(?2))
               ORDER BY copies.rowid DESC LIMIT -1 OFFSET ?3",
         )?
         .query_map(
             params![
-                domain_owner_id,
-                field_id,
+                json_id_array(owners.iter().map(|(_, id)| id.as_str()))?,
+                json_id_array(field_ids.iter().copied())?,
                 i64::try_from(keep).unwrap_or(i64::MAX)
             ],
             |row| {
@@ -2867,6 +2876,9 @@ const CACHE_STATE_HISTORY_OWNER_KEY: &str = "cache_state_history";
 
 /// Mirrors the `256` and `255` literals in the `commit_transform` UPSERT.
 const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
+
+/// The receipt field ids of the two writers that append to `scheduler_history`.
+const OBSERVATION_RING_FIELDS: &[&str] = &["scheduler_observation", "scheduler_history"];
 
 fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
@@ -7125,6 +7137,15 @@ impl MemoryStore {
         write.domain_owner("session", session_id, "pass_trace");
         write.existing_identity("session_id", session_id)?;
         let observation_json = write.content("scheduler_history", &observation_json)?;
+        // The observation joins the ring `commit_transform` also appends to, so its receipt
+        // shares that ring's owner and eviction.
+        let ring_scan = write.scans.len() - 1;
+        write.reassign_scans_in(
+            ring_scan..ring_scan + 1,
+            "session",
+            session_id,
+            CACHE_STATE_HISTORY_OWNER_KEY,
+        );
         let flagged = write.recorded_detections(&["session_id"]);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
@@ -7200,6 +7221,12 @@ impl MemoryStore {
                     observation_json,
                     interesting_json
                 ],
+            )?;
+            evict_history_receipts_beyond(
+                tx,
+                session_id,
+                OBSERVATION_RING_FIELDS,
+                PASS_TRACE_HISTORY_RING_LEN - 1,
             )?;
             Ok(WriteDisposition::Applied(()))
         })?;
@@ -9139,12 +9166,12 @@ impl MemoryStore {
             // entries, so fingerprint receipts and fingerprint-bearing entries share one
             // order: the receipts kept are the entries still stored, less this pass's own,
             // which is persisted after this block.
-            let mut evictions = Vec::with_capacity(4);
+            let mut evictions: Vec<(&[&str], usize)> = Vec::with_capacity(4);
             if scheduler_observation_json.is_some() {
-                evictions.push(("scheduler_observation", PASS_TRACE_HISTORY_RING_LEN - 1));
+                evictions.push((OBSERVATION_RING_FIELDS, PASS_TRACE_HISTORY_RING_LEN - 1));
             }
             if scheduler_interesting_json.is_some() {
-                evictions.push(("scheduler_interesting", PASS_TRACE_HISTORY_RING_LEN - 1));
+                evictions.push((&["scheduler_interesting"], PASS_TRACE_HISTORY_RING_LEN - 1));
                 let stored_fingerprints: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history)
                       WHERE session_id = ?1
@@ -9155,13 +9182,13 @@ impl MemoryStore {
                 let keep = usize::try_from(stored_fingerprints)
                     .unwrap_or(0)
                     .saturating_sub(usize::from(fingerprint_stored));
-                evictions.push(("scheduler_full_array_fingerprint", keep));
+                evictions.push((&["scheduler_full_array_fingerprint"], keep));
             }
             if first_divergence.is_some() {
-                evictions.push(("first_divergence", 0));
+                evictions.push((&["first_divergence"], 0));
             }
-            for (field_id, keep) in evictions {
-                evict_history_receipts_beyond(tx, session_id, field_id, keep)?;
+            for (field_ids, keep) in evictions {
+                evict_history_receipts_beyond(tx, session_id, field_ids, keep)?;
             }
             if let Some(project_root) = canonical_project_root.as_deref() {
                 let stored: bool = tx.query_row(
@@ -17275,6 +17302,60 @@ mod tests {
             field_scan_ids(&store, "ses", &field),
             first,
             "the next pass retires the oversized fingerprint's pass-owned receipt"
+        );
+    }
+
+    /// `trace_pass_stable` and `commit_transform` append to the same observation ring, so a
+    /// commit's receipt leaves when stable passes push its entry out.
+    #[test]
+    fn observation_receipts_follow_the_ring_across_both_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let fields = ["scheduler_observation", "scheduler_history"];
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(None, &core, &meta)
+                },
+            )
+            .unwrap();
+        let commit_receipt = field_scan_ids(&store, "ses", &fields);
+        assert_eq!(commit_receipt.len(), 1);
+        for _ in 0..PASS_TRACE_HISTORY_RING_LEN {
+            store
+                .trace_pass_stable("ses", &observation, None, None)
+                .unwrap();
+        }
+        let history_len: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT json_array_length(scheduler_history) FROM pass_trace \
+                     WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(history_len, PASS_TRACE_HISTORY_RING_LEN as i64);
+        let receipts = field_scan_ids(&store, "ses", &fields);
+        assert_eq!(
+            receipts.len(),
+            PASS_TRACE_HISTORY_RING_LEN,
+            "one receipt per stored ring entry across both writers"
+        );
+        assert!(
+            receipts.is_disjoint(&commit_receipt),
+            "the commit's receipt left with its evicted entry"
         );
     }
 
