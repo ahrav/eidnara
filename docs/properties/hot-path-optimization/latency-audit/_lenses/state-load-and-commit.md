@@ -615,15 +615,15 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L35707
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34939
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L22622
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23465
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23495
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23511
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23539
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23571
-[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L31657
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36044
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L35276
+[t-cas]: ../../../../../crates/daemon/src/lib.rs#L22951
+[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23798
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L23828
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23844
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23876
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L23908
+[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L31994
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13532
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L16453

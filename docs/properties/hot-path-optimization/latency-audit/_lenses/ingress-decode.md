@@ -350,11 +350,11 @@ bodies opaque and states only the `invalid_params` cap codes
 [paging]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [mapinsert]: https://docs.rs/serde_json/1.0.151/src/serde_json/map.rs.html#127-129
 [derivedup]: https://docs.rs/serde_derive/1.0.229/src/serde_derive/de/struct_.rs.html#269
-[t-cap]: ../../../../../crates/daemon/src/lib.rs#L18608-L18665
-[t-fp]: ../../../../../crates/daemon/src/lib.rs#L18668-L18731
-[t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L27220-L27275
-[t-shape]: ../../../../../crates/daemon/src/lib.rs#L33042-L33059
-[t-shape2]: ../../../../../crates/daemon/src/lib.rs#L33062-L33102
+[t-cap]: ../../../../../crates/daemon/src/lib.rs#L18937-L18994
+[t-fp]: ../../../../../crates/daemon/src/lib.rs#L18997-L19060
+[t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L27557-L27612
+[t-shape]: ../../../../../crates/daemon/src/lib.rs#L33379-L33396
+[t-shape2]: ../../../../../crates/daemon/src/lib.rs#L33399-L33439
 [t-envelope]: ../../../../../crates/daemon/src/transform.rs#L16467-L16494
 [t-meta]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../../crates/daemon/tests/direct_host.rs#L48-L128

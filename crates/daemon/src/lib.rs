@@ -16642,7 +16642,7 @@ fn cached_boundary_messages<'a>(
                 .flat_map(|range| projection.blocks[range.clone()].iter())
                 .filter(|block| block.mid == message.mid && !block.synthetic)
                 .map(|block| BoundaryBlock {
-                    id: block.id.clone(),
+                    id: std::borrow::Cow::Borrowed(&block.id),
                     ordinal: block.ordinal,
                     kind: sel_kind_for_flat(block),
                     provider_executed: block.provider_executed,
@@ -16745,9 +16745,9 @@ fn projected_post_drop_percentage(
     for message in messages {
         for block in &message.blocks {
             current_sizes.insert(
-                block.id.clone(),
+                block.id.to_string(),
                 frozen_sizes
-                    .get(&block.id)
+                    .get(block.id.as_ref())
                     .copied()
                     .map(|tokens| tokens as f64)
                     .unwrap_or(block.original_token_count as f64),
@@ -17398,7 +17398,7 @@ mod tests {
                         Role::Assistant
                     },
                     blocks: vec![BoundaryBlock {
-                        id: format!("m-{index}#0"),
+                        id: format!("m-{index}#0").into(),
                         ordinal: index as u64 + 1,
                         kind: SelKind::Text,
                         provider_executed: false,
@@ -17440,9 +17440,9 @@ mod tests {
             for block in &message.blocks {
                 let raw = tokenizer::estimate_tokens(&block.original) as f64;
                 current_sizes.insert(
-                    block.id.clone(),
+                    block.id.to_string(),
                     frozen_sizes
-                        .get(&block.id)
+                        .get(block.id.as_ref())
                         .copied()
                         .map(|tokens| tokens as f64)
                         .unwrap_or(raw),
@@ -17544,6 +17544,335 @@ mod tests {
         bounded.replace("second", second);
         assert!(!bounded.sessions.contains_key("first"));
         assert!(bounded.sessions.contains_key("second"));
+    }
+
+    #[test]
+    fn historian_boundary_construction_matches_owned_reference() {
+        let pair = injection::build_synthetic_todo_pair(
+            r#"[{"content":"historian exclusion","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let mut empty = ck("empty", 1, "");
+        empty.ck.content_mut().clear();
+        let mut request = transform_request(
+            vec![
+                wire_with_role("system", 0, "system", "system sentinel"),
+                empty,
+                ck("unicode", 2, "α🙂e\u{301} 中文"),
+                assistant_tool_call("call-corpus", 3),
+                tool_result("result-corpus", 4, "tool output 🙂"),
+                ck("oversize", 5, &"word ".repeat(2_000)),
+                IngressMessage {
+                    mid: "synthetic-call".into(),
+                    ordinal: 6,
+                    ck: pair.assistant_msg,
+                },
+                IngressMessage {
+                    mid: "synthetic-result".into(),
+                    ordinal: 7,
+                    ck: pair.tool_msg,
+                },
+                wire_with_role("reply", 8, "assistant", "kept reply"),
+                ck("excluded-tail", 9, "outside eligible range"),
+            ],
+            90_000,
+            100_000,
+        );
+        let projection = crate::wire::project_messages(&request.messages).unwrap();
+        for message in &request.messages[6..8] {
+            assert!(message.ck.meta.synthetic);
+            assert!(message.ck.content().iter().any(|block| match block.kind() {
+                BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } => {
+                    injection::is_synthetic_todo_id(id)
+                }
+                _ => false,
+            }));
+            assert!(!projection.identity_by_mid.contains_key(&message.mid));
+        }
+        let (_handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        // Historian preparation reads original request flags alongside the transform's normalized projection.
+        // Reserved synthetic IDs remain excluded from live projection blocks during unflagged replay.
+        for replayed_unflagged in [false, true] {
+            for message in &mut request.messages[6..8] {
+                Arc::make_mut(message).ck.meta.synthetic = !replayed_unflagged;
+            }
+            for include_system in [false, true] {
+                let cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
+                let actual =
+                    cached_boundary_messages(&request, &projection, &cache, include_system);
+                let reference = request
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.ck.meta.synthetic
+                            && (include_system || message.ck.role != "system")
+                    })
+                    .map(|message| BoundaryMsg {
+                        message_ordinal: message.ordinal,
+                        message_id: message.mid.clone(),
+                        role: Role::from_provider(&message.ck.role),
+                        blocks: projection
+                            .blocks
+                            .iter()
+                            .filter(|block| block.mid == message.mid && !block.synthetic)
+                            .map(|block| BoundaryBlock {
+                                id: block.id.clone().into(),
+                                ordinal: block.ordinal,
+                                kind: sel_kind_for_flat(block),
+                                provider_executed: block.provider_executed,
+                                byte_size: block.bytes.len(),
+                                arc_id: block.arc_id.clone(),
+                                original_token_count: tokenizer::estimate_tokens(&block.bytes),
+                                original: Arc::from(block.bytes.to_string()),
+                                rendered: None,
+                                ignored: false,
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(format!("{:?}", actual.messages), format!("{reference:?}"));
+                assert_eq!(
+                    actual.messages.len(),
+                    7 + usize::from(include_system) + 2 * usize::from(replayed_unflagged)
+                );
+                for source in &request.messages[6..8] {
+                    let boundary = actual
+                        .messages
+                        .iter()
+                        .find(|message| message.message_id == source.mid);
+                    assert_eq!(boundary.is_some(), replayed_unflagged);
+                    if let Some(boundary) = boundary {
+                        assert!(boundary.blocks.is_empty());
+                    }
+                }
+                for message in &actual.messages {
+                    for block in &message.blocks {
+                        let source = projection
+                            .blocks
+                            .iter()
+                            .find(|source| source.id == block.id)
+                            .unwrap();
+                        assert!(Arc::ptr_eq(&block.original, &source.bytes));
+                        assert!(matches!(block.id, std::borrow::Cow::Borrowed(_)));
+                        assert_eq!(block.id.as_ptr(), source.id.as_ptr());
+                    }
+                }
+                let target = actual
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .find(|block| block.id == "oversize#0")
+                    .unwrap();
+                let frozen = [frozen_drop(target.id.as_ref())];
+                let pending = [pending_drop(target.id.as_ref())];
+                assert_eq!(frozen[0].key.strip_prefix("red:"), Some(target.id.as_ref()));
+                let frozen_tokens = tokenizer::estimate_tokens(&frozen[0].frozen_payload);
+                assert!(target.original_token_count > frozen_tokens);
+                let other_tokens: usize = actual
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .filter(|block| block.id != target.id)
+                    .map(|block| block.original_token_count)
+                    .sum();
+                let expected_percentage = Some(
+                    (90_000.0
+                        * (1.0 - frozen_tokens as f64 / (other_tokens + frozen_tokens) as f64))
+                        / 100_000.0
+                        * 100.0,
+                );
+                let actual_percentage = projected_post_drop_percentage(
+                    &actual.messages,
+                    &pending,
+                    &frozen,
+                    90_000.0,
+                    100_000.0,
+                );
+                assert_eq!(actual_percentage, expected_percentage);
+                assert_eq!(
+                    actual_percentage,
+                    projected_post_drop_percentage_retokenized_reference(
+                        &reference, &pending, &frozen, 90_000.0, 100_000.0,
+                    )
+                );
+                assert_ne!(
+                    actual_percentage,
+                    projected_post_drop_percentage(
+                        &actual.messages,
+                        &pending,
+                        &[],
+                        90_000.0,
+                        100_000.0,
+                    )
+                );
+                for usage_percentage in [50.0, 81.0, 96.0] {
+                    let context = TriggerContext {
+                        boundary: BoundaryContext {
+                            usage_percentage,
+                            usage_input_tokens: usage_percentage * 1_000.0,
+                            context_limit: 100_000.0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        boundary::check_compartment_trigger(&actual.messages, &context),
+                        boundary::check_compartment_trigger(&reference, &context),
+                    );
+                }
+            }
+            for budget in [1, 128, 32_000] {
+                let live = projection
+                    .blocks
+                    .iter()
+                    .filter(|block| !block.synthetic)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let outcome = assemble_historian_firing(
+                    &store,
+                    &request.messages,
+                    &live,
+                    &projection.identity_by_mid,
+                    HistorianAssemblerConfig {
+                        session_id: request.session_id.clone(),
+                        project_path: "/proj".into(),
+                        project_slug: "proj".into(),
+                        model_chain: vec!["test/model".into()],
+                        token_budget: budget,
+                        boundary: boundary::BoundaryResolution {
+                            protected_start_ordinal: 9,
+                            eligible_head: 0..9,
+                            n_tokens: 0.0,
+                            floored_by_live_prompt: false,
+                            fenced_by_open_arc: false,
+                            true_raw_eligible_tokens: 0.0,
+                            oversize_atomic_unit: false,
+                            raw_message_count: 10,
+                            boundary_reason: "corpus".into(),
+                        },
+                        memory_enabled: false,
+                        project_memory: None,
+                        auto_promote: false,
+                        user_memory_collection_enabled: false,
+                        extraction_free: false,
+                        in_emergency: true,
+                        force_keep_last_compartment: false,
+                        fold_is_only_reclaim: false,
+                        failure_backoff_at_ms: 0,
+                        min_chunk_tokens: 512,
+                    },
+                    0,
+                )
+                .unwrap();
+                if replayed_unflagged && budget == 32_000 {
+                    assert!(matches!(outcome, AssembleHistorianFiringOutcome::NoFire(
+                        historian_chunk::HistorianNoFireReason::MissingBlockIdentity { ref message_id }
+                    ) if message_id == "synthetic-call"));
+                    continue;
+                }
+                let AssembleHistorianFiringOutcome::Fire(firing) = outcome else {
+                    panic!("corpus must fire: {outcome:?}")
+                };
+                let owned_snapshot = live
+                    .iter()
+                    .filter(|block| {
+                        !block.synthetic
+                            && block.role != "system"
+                            && block.ordinal >= firing.chunk.chunk.start_index
+                            && block.ordinal <= firing.chunk.chunk.end_index
+                    })
+                    .map(|block| {
+                        (
+                            block.id.clone(),
+                            block.kind_tag.clone(),
+                            block.bytes.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let reference_fingerprint = owned_snapshot
+                    .iter()
+                    .map(|(id, kind, bytes)| format!("{id}:{kind}:{}", bytes.len()))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                assert_eq!(
+                    firing.chunk_fingerprint.as_bytes(),
+                    reference_fingerprint.as_bytes()
+                );
+                assert_eq!(firing.chunk.snapshot.len(), owned_snapshot.len());
+                for (item, (id, kind, bytes)) in firing.chunk.snapshot.iter().zip(&owned_snapshot) {
+                    assert_eq!(
+                        (&item.id, &item.kind, item.byte_len),
+                        (id, kind, bytes.len())
+                    );
+                }
+                assert!(!firing.chunk_fingerprint.contains("synthetic"));
+                assert!(!firing.chunk_fingerprint.contains("system"));
+                assert!(!firing.chunk_fingerprint.contains("excluded-tail"));
+                assert_eq!(
+                    firing.chunk.chunk.present_ordinals.contains(&7),
+                    replayed_unflagged
+                );
+                let (expected_text, expected_end) = match budget {
+                    1 => ("[1-2] U: α🙂e\u{301} 中文".to_string(), 2),
+                    128 => (
+                        "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash".to_string(),
+                        4,
+                    ),
+                    _ => (
+                        format!(
+                            "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash\n[5] U: {}\n[8] A: kept reply",
+                            "word ".repeat(2_000).trim_end(),
+                        ),
+                        8,
+                    ),
+                };
+                assert_eq!(firing.chunk.text.as_bytes(), expected_text.as_bytes());
+                assert_eq!(firing.to_ordinal, expected_end);
+                let expected_input = if budget == 1 {
+                    assert!(firing.chunk.token_estimate > budget);
+                    "\n[… tokens truncated by the daemon to fit the historian window …]"
+                } else {
+                    &expected_text
+                };
+                let references = historian_prompt::build_reference_blocks_from_stored(
+                    &request.session_id,
+                    1,
+                    &[],
+                );
+                let expected_prompt = historian_prompt::build_compartment_agent_prompt(
+                    &historian_prompt::CompartmentPromptInputs {
+                        seed_examples: &references.seed_examples,
+                        session_references: &references.session_references,
+                        project_memory: "",
+                        input_source: expected_input,
+                        memory_enabled: false,
+                        extraction_free: false,
+                    },
+                );
+                assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
+                let expected_raw = request
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.ck.meta.synthetic && (1..=expected_end).contains(&message.ordinal)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    firing.raw_chunk_messages.as_bytes(),
+                    serde_json::to_vec(&expected_raw).unwrap()
+                );
+                let expected_digest = match budget {
+                    1 => "38304e8a6ce873573260fbc9967ed890fd10757d9cb9eb49f452b4b551bde4ae",
+                    128 => "f2e94e33234ce5ccb894fe7ca26805cecb16b2d1b775be2a585dc7c9e4876a56",
+                    _ => "aa1ff018eccefed2d25ded6fe08b537bb5cdd43b31dd7012114824a69ac96ce6",
+                };
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
+                    expected_digest
+                );
+            }
+        }
     }
 
     #[test]
@@ -17789,7 +18118,7 @@ mod tests {
             message_id: "m1".to_string(),
             role: Role::User,
             blocks: vec![BoundaryBlock {
-                id: "drop#0".to_string(),
+                id: "drop#0".into(),
                 ordinal: 0,
                 kind: SelKind::Text,
                 provider_executed: false,
@@ -17824,7 +18153,7 @@ mod tests {
     #[test]
     fn trigger_suppresses_fire_when_projected_drops_hit_relative_target() {
         let block = |id: &str, text: &str| BoundaryBlock {
-            id: id.to_string(),
+            id: id.to_string().into(),
             ordinal: 0,
             kind: SelKind::Text,
             provider_executed: false,
@@ -23400,6 +23729,10 @@ mod tests {
             );
             wait_for_count(&producer.starts, 1).await;
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
+                "f8600b851c98346e9ccede4e9bbdf04b0c1067c3235da0d19a39156248f85776"
+            );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
             assert!(!first_prompt.contains("replayed synthetic carrier sentinel"));
@@ -23516,6 +23849,10 @@ mod tests {
             );
             wait_for_count(&producer.starts, 2).await;
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
+                "3dff45d4a9291a345afccf1f2251d2a860993ac1a84b95165e7845467ed5f882"
+            );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
             let native = if let Some(suffix) = third_response.get("native_messages_delta") {

@@ -203,7 +203,7 @@ in the records' open questions.
 [b3]: catalog.md#tag-baseline-cache-entry-is-never-mutated-by-a-pass
 [b4]: catalog.md#hygiene-digest-is-kind-prefixed-part-content
 [b5]: catalog.md#replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22866
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23195
 [c1]: catalog.md#consolidated-cache-state-reads-match-per-consumer-loads
 [c2]: catalog.md#pass-trace-writes-count-every-pass-outside-the-cache-cas
 [c3]: catalog.md#side-channel-drain-delivers-each-row-once-and-keeps-its-schedule

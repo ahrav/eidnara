@@ -677,7 +677,7 @@ call site.
 [fp-field]: ../../../../../crates/memory-store/src/lib.rs#L588
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
-[t-fp]: ../../../../../crates/daemon/src/historian.rs#L4006-L4033
+[t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925
 [diff-header]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L100-L113

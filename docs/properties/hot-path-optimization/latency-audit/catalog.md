@@ -1875,24 +1875,27 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - The fingerprint literal, three differential proptests,
-the golden, and the marker test exist; none exercises a fingerprint format
-change across a restart.
+Exercised: partial - The frozen construction corpus compares owned boundary
+inputs, length-only snapshots, exact transcript and prompt bytes, and refusal
+behavior. It also checks a frozen-size lookup hit through a borrowed block ID.
+The scripted producer pins captured prompts on two delta lanes.
+The fingerprint literal, three truncation differentials, golden, and marker
+test also pass. No test crosses a binary upgrade during an in-flight firing.
 Guarantee: The historian receives the same prompt bytes, and the durable
 chunk fingerprint still matches across restart.
 Check: `always` - [`truncate_historian_input_if_needed`][trunc] returns bytes
 identical to the frozen reference in
 [`historian_truncate_differential.rs`][diff-ref] (same cut point, same
-marker), and a snapshot item carrying only `bytes.len()` yields the same
+marker), and a snapshot item carrying only the UTF-8 byte length yields the same
 [`compute_chunk_fingerprint`][fp] string as one carrying the bytes. `always`
 because the fingerprint is computed on every firing and its string is durable
 state.
 Fault/timing angle: A fingerprint format change lands while a firing is in
 flight across a restart, so the stored string no longer equals the recomputed
-one and publication fails with `FingerprintMismatch`. The snapshot is built at
-[`:417-429`][snap-build] with `bytes: block.bytes.to_string()`; its only
-reader is [`as_item`][as-item] feeding the fingerprint, which reads
-`item.bytes.len()` into the literal `id:kind:len|...`, stored in
+one and publication fails with `FingerprintMismatch`. The [snapshot][snap-build]
+stores `byte_len: block.bytes.len()` without retaining content. Its
+[`as_item`][as-item] view feeds the fingerprint, which writes the same UTF-8
+length into the literal `id:kind:len|...`, stored in
 [`HistorianDurableState.chunk_fingerprint`][fp-field] and compared by
 [`verify_chunk_fingerprint`][fp-verify] and the [publish predicate][fp-predicate].
 Truncation binary-searches UTF-16 unit positions with an uncached
@@ -1903,17 +1906,20 @@ Required faults and enabling state: A restart with an in-flight historian
 firing; a chunk whose text exceeds `token_budget`, which needs a large
 session.
 Confidence: high - [Evidence](evidence/historian-firing-input-is-preserved-by-cheaper-construction.md).
-The snapshot, the fingerprint, its two comparisons, and the truncation call
-at [`:692`][trunc-call] are source-verified.
+The snapshot, the fingerprint, its two comparisons, and the [truncation
+call][trunc-call] are source-verified. [Boundary construction][boundary-view]
+borrows block IDs and shares the projection's original `Arc<str>` allocation.
+The snapshot owns IDs and kinds because assembled firings outlive the
+projection; rendering reads borrowed flat blocks, not snapshot content.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the fingerprint test, the production-window, exact-budget, and
-small-window differentials, the golden, and the marker test; all unaudited.
+small-window differentials, the golden, the marker test, the [construction
+corpus][construction-corpus], and the [producer capture][firing-capture]; all
+unaudited.
 Impact: Historian prompt bytes change, or an in-flight firing fails
 publication after a restart.
-Open questions:
-- May the specification relax truncation to "any prefix within budget on a
-  scalar boundary plus the marker"? The tests pin byte identity and the
-  historian prompt bytes would change. (needs human input)
+Open questions: None. Exact bytes, including the truncation probe sequence,
+remain required; this construction change does not relax that contract.
 
 ### cron-next-occurrence-matches-the-minute-stepper
 
@@ -2556,8 +2562,8 @@ evaluation of this area and its disposition are recorded in
 [active-match]: ../../../../crates/daemon/src/transform.rs#L7426
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27955
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27706
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23276
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23549
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23605
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23886
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28973
 [tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3042-L3043
 [tag-protection]: ../../../../crates/daemon/src/transform.rs#L3704-L3717
@@ -2803,9 +2809,9 @@ evaluation of this area and its disposition are recorded in
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24329
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24351
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20688
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L21004
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21124
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L21017
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L21333
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21453
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L24358
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24384
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24518
@@ -2828,10 +2834,13 @@ evaluation of this area and its disposition are recorded in
 [edge-margin]: ../../../../crates/context-core/src/redaction.rs#L380-L385
 [ms-content]: ../../../../crates/memory-store/src/lib.rs#L2070-L2078
 [ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2357-L2392
-[snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L417-L429
-[as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L37-L46
-[trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L692
-[trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L742-L777
+[snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L418-L430
+[as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L40-L46
+[trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L693
+[trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L744-L777
+[boundary-view]: ../../../../crates/daemon/src/lib.rs#L16612-L16672
+[construction-corpus]: ../../../../crates/daemon/src/lib.rs#L17550
+[firing-capture]: ../../../../crates/daemon/src/lib.rs#L23605
 [fp]: ../../../../crates/daemon/src/historian.rs#L140-L158
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L588
 [fp-verify]: ../../../../crates/daemon/src/historian.rs#L326-L334
@@ -2898,7 +2907,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L10981-L10985
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5900-L5909
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36126
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36463
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18581
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18786
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261
