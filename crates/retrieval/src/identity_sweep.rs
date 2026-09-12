@@ -43,55 +43,71 @@ pub struct Candidate {
     /// The host job the row last named; the caller decides whether that host still holds it.
     pub host_job_id: Option<String>,
     pub has_vector: bool,
-    /// The row's job identifier, the selection cursor: passing it as `after` resumes selection past this row.
     pub job_id: String,
 }
 
-/// `CROSS JOIN` keeps `occurrence_tombstones` and `vector_generations` as the outer tables, avoiding a scan of all
-/// finished `embedding_jobs` rows before applying `LIMIT`. Each branch is cut to the limit before the union, so the
-/// union and the final sort hold at most twice the limit.
-fn candidates_statement() -> String {
+/// An empty candidate list can still carry a continuation cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidatePage {
+    pub candidates: Vec<Candidate>,
+    /// Job rows visited, whether or not they are eligible for reclamation.
+    pub inspected: usize,
+    /// The last inspected job ID, even when no candidates were found; `None` only for an empty page.
+    pub last_job_id: Option<String>,
+}
+
+fn candidates_statement(has_after: bool) -> String {
+    let range = if has_after { "WHERE j.job_id>?2" } else { "" };
+    let unreferenced = unreferenced();
     format!(
-        "SELECT c.occurrence_id,c.generation_id,c.state,c.host_job_id,
-                EXISTS(SELECT 1 FROM occurrence_vectors v WHERE v.occurrence_id=c.occurrence_id AND v.generation_id=c.generation_id),
-                c.job_id
-         FROM (SELECT * FROM (SELECT j.job_id,j.occurrence_id,j.generation_id,j.state,j.host_job_id
-                              FROM occurrence_tombstones t CROSS JOIN embedding_jobs j ON j.occurrence_id=t.occurrence_id
-                              WHERE {FINISHED_JOB} AND (?2 IS NULL OR j.job_id>?2) ORDER BY j.job_id LIMIT ?1)
-               UNION
-               SELECT * FROM (SELECT j.job_id,j.occurrence_id,j.generation_id,j.state,j.host_job_id
-                              FROM vector_generations g CROSS JOIN embedding_jobs j ON j.generation_id=g.generation_id
-                              WHERE {RETIRED_GENERATION} AND {FINISHED_JOB} AND (?2 IS NULL OR j.job_id>?2) ORDER BY j.job_id LIMIT ?1)) c
-         ORDER BY c.job_id LIMIT ?1"
+        "SELECT j.occurrence_id,j.generation_id,j.state,j.host_job_id,
+                EXISTS(SELECT 1 FROM occurrence_vectors v WHERE v.occurrence_id=j.occurrence_id AND v.generation_id=j.generation_id),
+                j.job_id,({FINISHED_JOB} AND {unreferenced})
+         FROM embedding_jobs j
+         {range}
+         ORDER BY j.job_id LIMIT ?1"
     )
 }
 
 /// The exact SQL `candidates` runs, so a test can measure its plan and cost against the baseline schema.
 #[cfg(feature = "test-support")]
-pub fn candidates_sql() -> String {
-    candidates_statement()
+pub fn candidates_sql(has_after: bool) -> String {
+    candidates_statement(has_after)
 }
 
-/// The finished, unreferenced identities in job identifier order, at most `limit`, restricted to rows after the `after` cursor when one is given.
+/// Inspects at most `limit` job rows after `after` and returns finished, unreferenced identities in job ID order.
+///
+/// Eligibility filters the page, so zero candidates does not mean exhaustion.
+/// A full page's `last_job_id` is the continuation cursor; fewer than `limit` inspected rows means this snapshot reached the end.
 pub fn candidates(
     conn: &GuardedConn<'_>,
     limit: NonZeroUsize,
     after: Option<&str>,
-) -> Result<Vec<Candidate>, ProjectionError> {
-    let mut statement = conn.prepare(&candidates_statement())?;
+) -> Result<CandidatePage, ProjectionError> {
+    let mut statement = conn.prepare(&candidates_statement(after.is_some()))?;
     // A limit above `i64::MAX` clamps instead of wrapping: SQLite reads a negative limit as no limit at all.
     let limit = i64::try_from(limit.get()).unwrap_or(i64::MAX);
-    let rows = statement.query_map(params![limit, after], |row| {
-        Ok(Candidate {
-            occurrence_id: row.get(0)?,
-            generation_id: row.get(1)?,
-            state: row.get(2)?,
-            host_job_id: row.get(3)?,
-            has_vector: row.get(4)?,
-            job_id: row.get(5)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let mut rows = match after {
+        Some(after) => statement.query(params![limit, after])?,
+        None => statement.query([limit])?,
+    };
+    let mut page = CandidatePage::default();
+    while let Some(row) = rows.next()? {
+        let job_id: String = row.get(5)?;
+        if row.get::<_, bool>(6)? {
+            page.candidates.push(Candidate {
+                occurrence_id: row.get(0)?,
+                generation_id: row.get(1)?,
+                state: row.get(2)?,
+                host_job_id: row.get(3)?,
+                has_vector: row.get(4)?,
+                job_id: job_id.clone(),
+            });
+        }
+        page.inspected += 1;
+        page.last_job_id = Some(job_id);
+    }
+    Ok(page)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

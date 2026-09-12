@@ -12,6 +12,8 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepReport {
+    /// Job rows inspected, including identities that remain referenced or unfinished.
+    pub inspected: usize,
     /// Finished, unreferenced identities the selection found, before any holder or recheck excluded them.
     pub candidates: usize,
     /// Candidates the host still holds; their rows stay until the holder exits.
@@ -55,28 +57,31 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Inspects at most `max_candidates` finished, unreferenced identities and reclaims those no holder protects. Selection resumes across calls, so held rows consume this call's bound without starving later identities.
+    /// Inspects at most `max_jobs` job rows and reclaims finished, unreferenced identities that no holder protects.
+    /// Selection advances past every inspected row, even on candidate-free pages, and wraps after a short page.
+    /// Keeping `cursor` across calls prevents live or held rows from starving later identities.
     ///
     /// # Errors
     ///
     /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
-    pub fn run_sweep(&mut self, max_candidates: NonZeroUsize) -> Result<SweepReport, SweepError> {
+    pub fn run_sweep(&mut self, max_jobs: NonZeroUsize) -> Result<SweepReport, SweepError> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SweepError::Quarantined(quarantine));
         }
         let mut report = SweepReport::default();
         let page = self
             .projection
-            .read(|conn| candidates(conn, max_candidates, self.cursor.as_deref()))
+            .read(|conn| candidates(conn, max_jobs, self.cursor.as_deref()))
             .map_err(SweepError::Read)?;
-        report.candidates = page.len();
-        self.cursor = if page.len() < max_candidates.get() {
+        report.inspected = page.inspected;
+        report.candidates = page.candidates.len();
+        self.cursor = if page.inspected < max_jobs.get() {
             None
         } else {
-            page.last().map(|candidate| candidate.job_id.clone())
+            page.last_job_id
         };
-        let mut free = Vec::with_capacity(page.len());
-        for candidate in page {
+        let mut free = Vec::with_capacity(page.candidates.len());
+        for candidate in page.candidates {
             if self.holds(&candidate) {
                 report.held.push(candidate);
             } else {

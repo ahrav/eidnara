@@ -22,7 +22,7 @@ use host_runtime::synapse::{
 use kernel::source_identity::Occurrence;
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    CurrentInputExpectation, Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow,
+    CurrentInputDescriptor, Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow,
     KernelStore, ProjectScope, ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec,
     Sensitivity, SourceClass, SourceDescriptorRequest, SourceHoldAdmission, SourceHoldBinding,
     SourceHoldBounds, SourcePageBounds, SourceRow, TaintClass,
@@ -42,7 +42,6 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 const CONSUMER: &str = "search";
-const KERNEL_INCARNATION: &str = "kernel-1";
 const POLICY: &str = "source-policy.v1";
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SCOPE: &str = "project:a";
@@ -169,10 +168,10 @@ fn generation() -> VectorGeneration {
     }
 }
 
-fn identity() -> ProjectionIdentity {
+fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
     ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+        kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
         identity_contract_version: "search-projection-identity-v2".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -413,9 +412,20 @@ impl Corpus {
     fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
+        let kernel_incarnation_id: String = Connection::open_with_flags(
+            data_home.join("kernel/kernel.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(), 1)?;
+                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
                 register_generation(conn, &generation(), 1)?;
                 Ok(())
             })
@@ -426,7 +436,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id,
                 hold_id: "0123456789abcdef0123456789abcdef".to_string(),
                 snapshot_commit_seq: snapshot,
                 through_commit_seq: snapshot,
@@ -777,7 +787,13 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     // Nothing is eligible on a fresh projection: a sweep is a witnessed no-op.
     let untouched = inventory(dir.path());
     let report = sweep(&projection, &synapse, ten());
-    assert_eq!(report, SweepReport::default());
+    assert_eq!(
+        report,
+        SweepReport {
+            inspected: 6,
+            ..SweepReport::default()
+        }
+    );
     assert_eq!(inventory(dir.path()), untouched);
 
     // Current generation: alpha, beta, gamma, delta embedded; echo left pending; foxtrot stopped.
@@ -822,8 +838,9 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     );
     let fixed = singletons(dir.path());
 
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &synapse, NonZeroUsize::new(11).unwrap());
     assert_eq!(report.held, Vec::<Candidate>::new());
+    assert_eq!(report.inspected, 11);
     assert_eq!(report.survivors, 0);
     assert_eq!(
         (
@@ -892,7 +909,10 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     let again = sweep(&projection, &synapse, ten());
     assert_eq!(
         again,
-        SweepReport::default(),
+        SweepReport {
+            inspected: 8,
+            ..SweepReport::default()
+        },
         "a second sweep finds nothing left"
     );
     assert_eq!(engine.calls(), 4);
@@ -981,7 +1001,8 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
     // Selection observes two candidates: old under the current generation, late under the retired one.
     let selected = projection
         .read(|conn| candidates(conn, ten(), None))
-        .unwrap();
+        .unwrap()
+        .candidates;
     let mut pairs: Vec<(&str, &str)> = selected
         .iter()
         .map(|candidate| {
@@ -1260,12 +1281,13 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let generation = generation();
     let project = ProjectScope::new(PROJECT).unwrap();
     let publication = VectorPublication {
-        expectation: CurrentInputExpectation {
+        input: CurrentInputDescriptor {
             object_id: row.object_id.clone(),
             source_revision: row.revision,
-            occurrence_id: row.detail.occurrence_id.clone(),
-            payload_id: row.detail.payload_id.clone(),
-            artifact_digest: row.detail.artifact_digest.clone(),
+            detail: row.detail.clone(),
+            domain_id: row.domain_id.clone(),
+            sensitivity: row.sensitivity,
+            created_commit_seq: row.created_commit_seq,
         },
         generation: &generation,
         vector: &vector,
@@ -1291,7 +1313,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
             PublicationFault::LoseLocalCommitReply,
         )
     });
-    let report = report.expect("the sweep ran inside the reconciliation window");
+    let report = report.unwrap_or_else(|| panic!("no reconciliation sweep: {result:?}"));
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 1, 0),
@@ -1310,6 +1332,86 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     assert!(inventory(dir.path()).is_empty());
 }
 
+fn occurrences_in_job_order(data_home: &Path) -> Vec<String> {
+    let conn = inspect(data_home);
+    let mut statement = conn
+        .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY job_id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
+    for count in [3, 4] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        for name in ["a", "b", "c", "d"].iter().take(count) {
+            corpus.publish(name, &format!("{name} text"));
+        }
+        let (projection, _) = corpus.bootstrap(dir.path());
+        let ordered = occurrences_in_job_order(dir.path());
+        for occurrence in &ordered[2..] {
+            tombstone(&projection, occurrence, 50);
+        }
+        let engine = TestEngine::new();
+        let synapse = component(&engine, SynapseLimits::default());
+        let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+        let two = NonZeroUsize::new(2).unwrap();
+        let before = inventory(dir.path());
+        assert_eq!(
+            sweeper.run_sweep(two).unwrap(),
+            SweepReport {
+                inspected: 2,
+                ..SweepReport::default()
+            }
+        );
+        assert_eq!(inventory(dir.path()), before);
+
+        assert_eq!(
+            sweeper.run_sweep(two).unwrap(),
+            SweepReport {
+                inspected: count - 2,
+                candidates: count - 2,
+                jobs_reclaimed: count - 2,
+                ..SweepReport::default()
+            }
+        );
+        assert!(
+            inventory(dir.path())
+                .iter()
+                .all(|(o, _, _)| ordered[..2].contains(o))
+        );
+        tombstone(&projection, &ordered[0], 60);
+        if count == 4 {
+            assert_eq!(
+                sweeper.run_sweep(two).unwrap(),
+                SweepReport::default(),
+                "a full final page requires an EOF read before wrapping"
+            );
+        }
+        assert_eq!(
+            sweeper.run_sweep(two).unwrap(),
+            SweepReport {
+                inspected: 2,
+                candidates: 1,
+                jobs_reclaimed: 1,
+                ..SweepReport::default()
+            },
+            "wraparound revisits a prefix identity that became eligible"
+        );
+        assert_eq!(
+            inventory(dir.path()),
+            BTreeSet::from([(ordered[1].clone(), GENERATION.to_string(), Row::Job)])
+        );
+        assert_eq!(engine.calls(), 0);
+    }
+}
+
 /// Held candidates consume the inspection bound without starving free identities across sweeps.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_candidates_do_not_starve_free_identities_behind_them() {
@@ -1320,17 +1422,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
         corpus.publish(name, &format!("{name} text"));
     }
     let (projection, _) = corpus.bootstrap(dir.path());
-    let ordered: Vec<String> = {
-        let conn = inspect(dir.path());
-        let mut statement = conn
-            .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY job_id")
-            .unwrap();
-        statement
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<String>, _>>()
-            .unwrap()
-    };
+    let ordered = occurrences_in_job_order(dir.path());
     let (held_occurrences, free_occurrence) = ordered.split_at(3);
     // The free identity dies before dispatch, so no host ever held it.
     tombstone(&projection, &free_occurrence[0], 50);
@@ -1351,12 +1443,14 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
     for occurrence in held_occurrences {
         let report = sweeper.run_sweep(NonZeroUsize::new(1).unwrap()).unwrap();
+        assert_eq!(report.inspected, 1, "one job row is inspected");
         assert_eq!(report.candidates, 1, "one candidate is inspected");
         assert_eq!(report.held.len(), 1, "one held identity survives");
         assert_eq!(&report.held[0].occurrence_id, occurrence);
         assert_eq!(report.jobs_reclaimed, 0);
     }
     let report = sweeper.run_sweep(NonZeroUsize::new(1).unwrap()).unwrap();
+    assert_eq!(report.inspected, 1, "one job row is inspected");
     assert_eq!(report.candidates, 1, "one candidate is inspected");
     assert!(report.held.is_empty());
     assert_eq!(
@@ -1428,7 +1522,13 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     );
     assert_eq!(required_vectors(dir.path()), required);
     let again = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
-    assert_eq!(again, SweepReport::default());
+    assert_eq!(
+        again,
+        SweepReport {
+            inspected: 1,
+            ..SweepReport::default()
+        }
+    );
     drop(projection);
     let _ = SearchProjection::open(dir.path()).unwrap();
     assert_eq!(inventory(dir.path()), expected);
