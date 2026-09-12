@@ -1,28 +1,24 @@
-//! The projection's lifecycle intent, kept outside the disposable `search/` family so a rebuild or an authorized recovery survives deleting the database it is about. One record, `search-lifecycle/intent.json`, names the transition, the selected generation, the kernel incarnation, the consumer binding, the cause, the attempt identity, the fixed recovery target once established, the episode allowance and how much of it is consumed, and the operator authorization a recovery needs. A repeated request with the same attempt identity reconciles to the record already there; a request that disagrees with it is refused and changes nothing. The record is replaced by rename after its bytes are synced and the directory is synced afterwards, so a reader sees the prior record, the new one, or explicit unavailability, never a mixture.
+//! The projection's lifecycle intent, kept outside the disposable `search/` family so a rebuild or an authorized recovery survives deleting the database it is about. One record, `search-lifecycle/intent.json`, names the transition, the selected generation, the kernel incarnation, the consumer binding, the cause, the attempt identity, the fixed recovery target once established, the episode allowance and how much of it is consumed, and the operator authorization a recovery needs. A repeated request with the same attempt identity reconciles to the record already there; a request that disagrees with it is refused and changes nothing. The record is replaced by rename after its bytes are synced and the directory is synced afterwards, so a reader sees the prior record, the new one, or explicit unavailability, never a mixture. The family is deleted under its own storage lease, so a live projection is never unlinked from under itself.
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use retrieval::dispatch::valid_authorization_ref;
 use rustix::fs::{FlockOperation, OFlags};
 use serde::{Deserialize, Serialize};
+use storage::{StoreError, delete_sqlite_family};
 
 use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
+use crate::search_projection::search_descriptor;
 
 pub const CONTROL_DIR: &str = "search-lifecycle";
 pub const CONTROL_RECORD: &str = "intent.json";
 const TEMP_PREFIX: &str = "intent.";
 const TEMP_SUFFIX: &str = ".tmp";
 const SCHEMA: u32 = 1;
-/// The database and its journals, the family the intent outlives.
-const DISPOSABLE_FAMILY: [&str; 4] = [
-    "search.sqlite",
-    "search.sqlite-wal",
-    "search.sqlite-shm",
-    "search.sqlite-journal",
-];
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
@@ -162,6 +158,9 @@ pub enum IntentRefusal {
     DeadlineExpired,
     #[error("no intent is recorded")]
     NoIntent,
+    /// A live store holds the disposable family's storage lease; nothing was removed.
+    #[error("a live projection holds the disposable family")]
+    FamilyHeld,
     #[error("control record I/O failed: {0}")]
     Io(String),
     /// The rename succeeded and the directory sync did not; the new record is visible now and may or may not survive power loss. The caller reads the record again rather than retrying the write.
@@ -188,9 +187,13 @@ pub enum WriteBarrier {
 
 /// The daemon's handle on the control record.
 pub struct ProjectionLifecycle {
+    /// The data home the record governs; the disposable family it may delete is the one under this same root.
+    data_home: PathBuf,
     dir: PathBuf,
     /// The directory, held open for the exclusive lock every read-then-replace runs under.
     dir_fd: File,
+    /// Serializes this handle's own threads. `flock` belongs to the open file description, so a second lock on `dir_fd` from another thread of this process would be granted at once and the first guard's unlock would release it for both.
+    threads: Mutex<()>,
     #[cfg(feature = "test-support")]
     barrier: Option<Box<dyn Fn(WriteBarrier) + Send + Sync>>,
 }
@@ -219,8 +222,10 @@ impl ProjectionLifecycle {
             ));
         }
         let this = Self {
+            data_home: data_home.to_path_buf(),
             dir,
             dir_fd,
+            threads: Mutex::new(()),
             #[cfg(feature = "test-support")]
             barrier: None,
         };
@@ -237,10 +242,17 @@ impl ProjectionLifecycle {
         Ok(this)
     }
 
-    /// Takes the directory's exclusive lock for the guard's lifetime, so one read-then-replace at a time runs in this process or any other.
+    /// Takes the handle's thread lock and then the directory's exclusive `flock` for the guard's lifetime, so one read-then-replace at a time runs in this process or any other.
     fn lock(&self) -> io::Result<DirectoryLock<'_>> {
+        let threads = self
+            .threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         rustix::fs::flock(&self.dir_fd, FlockOperation::LockExclusive)?;
-        Ok(DirectoryLock(&self.dir_fd))
+        Ok(DirectoryLock {
+            _flock: FlockRelease(&self.dir_fd),
+            _threads: threads,
+        })
     }
 
     /// Calls `barrier` at each write barrier; a test child parks there so its parent can kill it.
@@ -297,11 +309,11 @@ impl ProjectionLifecycle {
         }
     }
 
-    /// Persists `request` under the gate's admission of the transition's hook at [`EntryPoint::Reload`]. Authorization is checked before the gate and the gate before the record, so a denied request reads nothing and writes nothing.
+    /// Validates `request` before asking `gate` to admit its hook at [`EntryPoint::Reload`], and reads the record only once admitted.
     ///
     /// # Errors
     ///
-    /// Returns the refusal. The record is unchanged in every refused case except [`IntentRefusal::DurabilityUnknown`].
+    /// Returns [`IntentRefusal::AllowanceExhausted`] when `allowance` is zero or [`IntentRefusal::DeadlineExpired`] when `deadline` precedes `now`, before the gate is asked.
     pub fn record(
         &self,
         gate: &HookGate,
@@ -329,6 +341,12 @@ impl ProjectionLifecycle {
                 return Err(IntentRefusal::IllegalCombination);
             }
             _ => {}
+        }
+        if request.allowance == 0 {
+            return Err(IntentRefusal::AllowanceExhausted);
+        }
+        if now > request.deadline {
+            return Err(IntentRefusal::DeadlineExpired);
         }
         gate.admit(request.transition.hook(), EntryPoint::Reload)
             .map_err(IntentRefusal::Denied)?;
@@ -407,31 +425,26 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Removes the disposable family under `data_home`: the database and every journal. Refused unless an intent is recorded and the gate admits its transition, so the family is never deleted without the record that explains its absence.
+    /// Removes the database and journals of this handle's disposable family while holding the family's exclusive storage lease. The gate must admit a recorded intent whose deadline has not passed and whose episode allowance remains.
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], or [`IntentRefusal::Denied`] before removing anything, and [`IntentRefusal::Io`] for a removal that failed for a reason other than the file being absent.
+    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], [`IntentRefusal::DeadlineExpired`], [`IntentRefusal::AllowanceExhausted`], or [`IntentRefusal::FamilyHeld`] before removing anything, and [`IntentRefusal::Io`] for a removal that failed for a reason other than the file being absent.
     pub fn delete_disposable_family(
         &self,
         gate: &HookGate,
-        data_home: &Path,
+        now: i64,
     ) -> Result<LifecycleIntent, IntentRefusal> {
         let _lock = self.lock().map_err(io_refusal)?;
         let intent = self.admitted_intent(gate)?;
-        let family = data_home.join("search");
-        for name in DISPOSABLE_FAMILY {
-            match fs::remove_file(family.join(name)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(io_refusal(error)),
-            }
+        if now > intent.episodes.deadline {
+            return Err(IntentRefusal::DeadlineExpired);
         }
-        match open_directory(&family) {
-            Ok(directory) => directory.sync_all().map_err(io_refusal)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_refusal(error)),
+        if intent.episodes.consumed >= intent.episodes.allowance {
+            return Err(IntentRefusal::AllowanceExhausted);
         }
+        let descriptor = search_descriptor(&self.data_home).map_err(store_refusal)?;
+        delete_sqlite_family(&descriptor).map_err(store_refusal)?;
         Ok(intent)
     }
 
@@ -477,10 +490,15 @@ impl ProjectionLifecycle {
     }
 }
 
-/// Releases the directory's exclusive lock when dropped.
-struct DirectoryLock<'a>(&'a File);
+/// Fields drop in declaration order, so the `flock` is released before `_threads`.
+struct DirectoryLock<'a> {
+    _flock: FlockRelease<'a>,
+    _threads: MutexGuard<'a, ()>,
+}
 
-impl Drop for DirectoryLock<'_> {
+struct FlockRelease<'a>(&'a File);
+
+impl Drop for FlockRelease<'_> {
     fn drop(&mut self) {
         let _ = rustix::fs::flock(self.0, FlockOperation::Unlock);
     }
@@ -499,4 +517,11 @@ fn owned_by_caller(metadata: &fs::Metadata) -> bool {
 
 fn io_refusal(error: io::Error) -> IntentRefusal {
     IntentRefusal::Io(error.kind().to_string())
+}
+
+fn store_refusal(error: StoreError) -> IntentRefusal {
+    match error {
+        StoreError::Lease(lease::LeaseError::Held { .. }) => IntentRefusal::FamilyHeld,
+        other => IntentRefusal::Io(other.to_string()),
+    }
 }
