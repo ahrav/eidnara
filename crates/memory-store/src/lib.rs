@@ -2775,7 +2775,7 @@ fn retire_active_scan_scope(
 /// Keeps the newest `keep` retained receipts for `field_id` in the session's scope and
 /// prunes the scans that lost their last owner. Rowid order is insertion order among the
 /// surviving rows because SQLite assigns each new rowid above every existing one.
-fn evict_retained_ring_receipts(
+fn evict_retained_receipts_beyond(
     tx: &GuardedConn<'_>,
     session_id: &str,
     field_id: &str,
@@ -4842,6 +4842,13 @@ struct HistorianSideChannelOutboxId {
     source_start: u64,
     source_end: u64,
     item_index: usize,
+}
+
+/// A due outbox row's payload, parsed before its delivery transaction begins.
+enum SideChannelCandidate {
+    Event(HistorianEventCandidate),
+    Primer(HistorianPrimerCandidate),
+    UserObservation(HistorianUserMemoryCandidate),
 }
 
 enum AbandonHistorianTxnOutcome {
@@ -8784,10 +8791,16 @@ impl MemoryStore {
         let canonical_project_root = project_root
             .filter(|root| !root.is_empty())
             .map(|root| canonical_root(root).to_string_lossy().into_owned());
+        // A root the session already stores keeps its earlier receipt, so this scan joins
+        // the retained owner only when the write inserts the root.
+        let root_scan = canonical_project_root
+            .as_deref()
+            .map(|project_root| {
+                write.identity("project_root", project_root)?;
+                Ok::<_, MemoryStoreError>(write.scans.len() - 1)
+            })
+            .transpose()?;
         let retained_scans_start = write.scans.len();
-        if let Some(project_root) = canonical_project_root.as_deref() {
-            write.identity("project_root", project_root)?;
-        }
         if let Some(fingerprint) = scheduler_full_array_fingerprint {
             write.identity("scheduler_full_array_fingerprint", fingerprint)?;
         }
@@ -9071,22 +9084,41 @@ impl MemoryStore {
                      scheduler_interesting_json
                  ],
             )?;
-            // The UPSERT above dropped the oldest ring entry once the ring was full; the
-            // receipt for that entry goes with it, before this pass's receipt is persisted.
-            for (field_id, appended) in [
-                ("scheduler_observation", scheduler_observation_json.is_some()),
-                ("scheduler_interesting", scheduler_interesting_json.is_some()),
+            // The UPSERT above dropped the oldest ring entry once the ring was full and
+            // replaced `last_divergence`; the receipts for those bytes go with them, before
+            // this pass's receipts are persisted.
+            for (field_id, appended, keep) in [
+                (
+                    "scheduler_observation",
+                    scheduler_observation_json.is_some(),
+                    PASS_TRACE_HISTORY_RING_LEN - 1,
+                ),
+                (
+                    "scheduler_interesting",
+                    scheduler_interesting_json.is_some(),
+                    PASS_TRACE_HISTORY_RING_LEN - 1,
+                ),
+                ("first_divergence", first_divergence.is_some(), 0),
             ] {
                 if appended {
-                    evict_retained_ring_receipts(
-                        tx,
-                        session_id,
-                        field_id,
-                        PASS_TRACE_HISTORY_RING_LEN - 1,
-                    )?;
+                    evict_retained_receipts_beyond(tx, session_id, field_id, keep)?;
                 }
             }
             if let Some(project_root) = canonical_project_root.as_deref() {
+                let stored: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM transform_session_roots
+                                    WHERE session_id = ?1 AND project_root = ?2)",
+                    params![session_id, project_root],
+                    |row| row.get(0),
+                )?;
+                if let (false, Some(root_scan)) = (stored, root_scan) {
+                    coordinated.prepared.borrow_mut().reassign_scans_in(
+                        root_scan..root_scan + 1,
+                        "session",
+                        session_id,
+                        CACHE_STATE_RETAINED_OWNER_KEY,
+                    );
+                }
                 // Durable root lineage is committed with the cache CAS, so a restart cannot
                 // authenticate a root that never produced the accepted session state.
                 tx.execute(
@@ -11551,46 +11583,37 @@ impl MemoryStore {
         #[cfg(not(any(test, feature = "test-support")))]
         let crash_after_insert = false;
 
-        // The target insert and the outbox retirement commit together or not at all.
+        // Parsing runs before the write lock is taken; the target insert and the outbox
+        // retirement commit together or not at all.
+        let parse_error = |error: serde_json::Error| MemoryStoreError::Serde(error.to_string());
+        let candidate = match row.id.kind.as_str() {
+            "event" => SideChannelCandidate::Event(
+                serde_json::from_str(&row.payload_json).map_err(parse_error)?,
+            ),
+            "primer" => SideChannelCandidate::Primer(
+                serde_json::from_str(&row.payload_json).map_err(parse_error)?,
+            ),
+            "user_observation" => SideChannelCandidate::UserObservation(
+                serde_json::from_str(&row.payload_json).map_err(parse_error)?,
+            ),
+            other => {
+                return Err(MemoryStoreError::Serde(format!(
+                    "unknown historian side-channel kind {other:?}"
+                )));
+            }
+        };
         let deliver = |tx: &GuardedConn<'_>| -> rusqlite::Result<()> {
-            match row.id.kind.as_str() {
-                "event" => {
-                    let candidate: HistorianEventCandidate =
-                        serde_json::from_str(&row.payload_json).map_err(|error| {
-                            rusqlite::Error::ToSqlConversionFailure(Box::new(
-                                MemoryStoreError::Serde(error.to_string()),
-                            ))
-                        })?;
-                    insert_historian_events_tx(
-                        tx,
-                        &row.session_id,
-                        std::slice::from_ref(&candidate),
-                    )?;
+            match &candidate {
+                SideChannelCandidate::Event(candidate) => insert_historian_events_tx(
+                    tx,
+                    &row.session_id,
+                    std::slice::from_ref(candidate),
+                )?,
+                SideChannelCandidate::Primer(candidate) => {
+                    insert_historian_primer_tx(tx, candidate)?
                 }
-                "primer" => {
-                    let candidate: HistorianPrimerCandidate =
-                        serde_json::from_str(&row.payload_json).map_err(|error| {
-                            rusqlite::Error::ToSqlConversionFailure(Box::new(
-                                MemoryStoreError::Serde(error.to_string()),
-                            ))
-                        })?;
-                    insert_historian_primer_tx(tx, &candidate)?;
-                }
-                "user_observation" => {
-                    let candidate: HistorianUserMemoryCandidate =
-                        serde_json::from_str(&row.payload_json).map_err(|error| {
-                            rusqlite::Error::ToSqlConversionFailure(Box::new(
-                                MemoryStoreError::Serde(error.to_string()),
-                            ))
-                        })?;
-                    insert_historian_user_observation_tx(tx, &candidate)?;
-                }
-                other => {
-                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
-                        MemoryStoreError::Serde(format!(
-                            "unknown historian side-channel kind {other:?}"
-                        )),
-                    )));
+                SideChannelCandidate::UserObservation(candidate) => {
+                    insert_historian_user_observation_tx(tx, candidate)?
                 }
             }
             if crash_after_insert {
@@ -16894,6 +16917,89 @@ mod tests {
         let third = field_copy_counts(&store, "ses", &retained);
         assert_eq!(third["project_root"], 3, "got {third:?}");
         assert_eq!(third["scheduler_observation"], 3, "got {third:?}");
+    }
+
+    /// A root the session already stores and a divergence that replaces `last_divergence`
+    /// add no stored bytes, so their receipts do not accumulate across passes.
+    #[test]
+    fn re_observed_roots_and_replaced_divergences_keep_one_retained_receipt_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let fields = ["project_root", "first_divergence"];
+        let mut version = None;
+        for pass in 0..5 {
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            project_root: Some("/root-a"),
+                            first_divergence: Some("{\"where\":\"m1\"}"),
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+            let counts = field_copy_counts(&store, "ses", &fields);
+            // The retained receipt for the stored root plus, from the second pass on, the
+            // live pass's own scan of it, which the next pass retires.
+            let live_root_scans = i64::from(pass > 0);
+            assert_eq!(
+                (counts["project_root"], counts["first_divergence"]),
+                (1 + live_root_scans, 1),
+                "pass {pass}: one retained receipt for the stored root and one for the readable divergence, got {counts:?}"
+            );
+        }
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-b"),
+                    ..base_commit(version, &core, &meta)
+                },
+            )
+            .unwrap();
+        let counts = field_copy_counts(&store, "ses", &fields);
+        assert_eq!(
+            (counts["project_root"], counts["first_divergence"]),
+            (2, 1),
+            "a second stored root adds its receipt; the divergence keeps its one, got {counts:?}"
+        );
+    }
+
+    /// A malformed side-channel payload fails before the delivery takes the write lock.
+    #[test]
+    fn side_channel_payloads_are_parsed_before_the_fenced_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let row = HistorianSideChannelOutboxRow {
+            session_id: "ses".to_string(),
+            id: HistorianSideChannelOutboxId {
+                firing_seq: 1,
+                kind: "event".to_string(),
+                source_start: 0,
+                source_end: 1,
+                item_index: 0,
+            },
+            payload_json: "{not json".to_string(),
+            attempt_count: 0,
+        };
+        let writer = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let error = store.deliver_historian_side_channel(&row).unwrap_err();
+        let elapsed = started.elapsed();
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(
+            matches!(error, MemoryStoreError::Serde(_)),
+            "a parse failure is reported as such, got {error:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the parse failed without waiting on the held write lock, took {elapsed:?}"
+        );
     }
 
     /// The `pass_trace` history rings drop their oldest entry past 256, so a receipt for an

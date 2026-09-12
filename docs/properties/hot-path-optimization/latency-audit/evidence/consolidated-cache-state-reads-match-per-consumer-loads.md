@@ -249,7 +249,7 @@ two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
 [pass-load]: ../../../../../crates/daemon/src/lib.rs#L8119
-[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6496-L6508
+[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6503-L6515
 [meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4780-L4781
 [pass-state]: ../../../../../crates/daemon/src/lib.rs#L3506-L3510
 [delta]: ../../../../../crates/daemon/src/lib.rs#L4205
@@ -261,12 +261,12 @@ branch as well and passing in isolation.
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
 [scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4807-L4808
 [floor-live]: ../../../../../crates/daemon/src/lib.rs#L8215
-[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6589-L6604
-[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6551-L6563
-[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6569-L6583
+[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6596-L6611
+[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6558-L6570
+[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6576-L6590
 [select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4785-L4801
-[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15418-L15635
-[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15642-L15670
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15441-L15658
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15665-L15693
 [load-count]: ../../../../../crates/daemon/src/lib.rs#L24693-L24745
 [timing-test]: ../../../../../crates/daemon/src/lib.rs#L24751-L24763
 [phase-test]: ../../../../../crates/daemon/src/lib.rs#L24769-L24782

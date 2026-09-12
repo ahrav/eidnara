@@ -180,7 +180,7 @@ and the outbox holds none.
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11483-L11570
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14334-L14358
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11616-L11640
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20221-L20360
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11560-L11638
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14357-L14381
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11639-L11663
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20327-L20466

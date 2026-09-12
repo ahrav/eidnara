@@ -213,12 +213,22 @@ The retirement adds a fixed number of cached statements to the fenced commit
 bound as a JSON array, and a scope prune) that the receive-side saving does
 not offset; the branch's stated cost claim is about the receive write, and the
 retirement is what keeps the pass-owned audit rows bounded. The retained
-owner's rows grow with the bytes they describe: one receipt per root, per
-history entry, and per divergence, on the same order as the completed-trace
-receipts. The history rings keep 256 entries, so a pass that appends to a full
-ring [evicts the oldest retained receipt][ring-evict] for that field in the
-same transaction; the [ring test][ring-test] shows the receipt count for each
-ring field equal to its ring length across 296 passes. Lineage descent copies the source scope's live scans, which after
+owner's rows grow with the bytes they describe: one receipt per stored root,
+per ring entry, and one for the divergence readable as `last_divergence`. The
+history rings keep 256 entries, so a pass that appends to a full ring
+[evicts the oldest retained receipt][ring-evict] for that field in the same
+transaction, and a new divergence evicts the receipt of the one it replaces;
+the [ring test][ring-test] shows the receipt count for each ring field equal
+to its ring length across 296 passes. A root the session already stores
+[keeps its earlier receipt][root-stored]: the re-observing pass's scan stays
+under the pass owner and is retired by the next pass, so the
+[root test][root-test] shows one retained root receipt and one divergence
+receipt across five passes that repeat both. The receipts are counts per
+field, not links to individual ring entries: an entry appended by
+`trace_pass_stable` carries a `pass_trace`-owned receipt, and evicting it
+from the ring removes the oldest retained receipt instead, so the retained
+count stays bounded by the ring length while the pairing of receipt to entry
+is not recorded in either design. Lineage descent copies the source scope's live scans, which after
 retirement are the latest pass's scans plus the retained scans rather than
 every pass the source ever ran. The [retirement test][retire-test] shows the
 `field_scans` and `scan_owner_copies` counts flat across six passes, flat
@@ -248,20 +258,22 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2629-L2637
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2444
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16717-L16759
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7029
-[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7059-L7071
-[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16695-L16712
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16661-L16690
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16740-L16782
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7036
+[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7066-L7078
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16718-L16735
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16684-L16713
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2863
 [retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L8985-L8991
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L8998-L9004
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2644-L2686
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8936-L8938
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16518-L16656
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16798-L16897
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9074-L9088
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L16903-L16966
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24191-L24214
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8949-L8951
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16541-L16679
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16821-L16920
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9087-L9106
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17009-L17072
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9108-L9121
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L16925-L16970
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24297-L24320
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24789-L24833
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7038
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7045
