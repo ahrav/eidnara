@@ -22582,15 +22582,31 @@ pub(crate) mod tests {
     fn production_transform_reuses_hygiene_memo_and_recounts_only_edited_block() {
         const CHILD: &str = "EIDNARA_HYGIENE_MEMO_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            // libtest names tests without the crate segment that `module_path!` includes.
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, rest)| rest);
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "transform::tests::production_transform_reuses_hygiene_memo_and_recounts_only_edited_block", "--nocapture"])
+                .arg("--exact")
+                .arg(format!(
+                    "{module}::{}",
+                    stringify!(
+                        production_transform_reuses_hygiene_memo_and_recounts_only_edited_block
+                    )
+                ))
+                .arg("--nocapture")
                 .env(CHILD, "1")
-                .output().unwrap();
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
+                "{stdout}\n{}",
                 String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "the child must run exactly this test:\n{stdout}"
             );
             return;
         }

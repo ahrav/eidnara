@@ -23,14 +23,14 @@ B2 can pass without the divergent observer ever being reached.
 - [`expand_transform_tail_delta`][expand] runs when `parsed.tail_delta` is an
   object with `after`; it reattaches the prefix through
   [`reattach_messages_prefix`][reattach-call] from the projection cache and
-  deep-copies the native prefix ([`:4228-4231`][native-deep]).
+  deep-copies the native prefix ([`:4235-4238`][native-deep]).
 - [`prepare_historian_fire`][historian-fire] is called with `&parsed` on the
-  Emergency95 arm ([`:8245-8247`][prepare-a]) and on the ordinary arm
-  ([`:8336-8338`][prepare-b]); it returns `no_models` without firing when
+  Emergency95 arm ([`:8258-8260`][prepare-a]) and on the ordinary arm
+  ([`:8349-8351`][prepare-b]); it returns `no_models` without firing when
   [`cfg.model_chain.is_empty()`][no-models], and [`model_chain`][cfg-models]
   defaults to empty.
-- `serve_native` gates the native attach ([`:8406`][native-gate]) and requires
-  the `OpencodeAiSdk` profile ([`:7946-7947`][native-profile]).
+- `serve_native` gates the native attach ([`:8419`][native-gate]) and requires
+  the `OpencodeAiSdk` profile ([`:7959-7960`][native-profile]).
 - [`compaction_enabled`][cfg-compaction] defaults to `true`; with it off the
   pass returns through `apply_additive_only` before normalization.
 - [`tail_reclaim`][tail-reclaim] is `true` for every shipping profile, so a
@@ -87,17 +87,17 @@ a shared-view design as well.
 - Conclusion: unresolved, needs a captured plugin body; the catalog's
   `medium` confidence stands.
 
-[normalize]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2083-L2100
-[t-collapsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L27269-L27270
-[expand]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4151-L4245
-[reattach-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4188-L4190
-[native-deep]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4228-L4231
-[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
-[no-models]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5189-L5196
-[native-profile]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7946-L7947
-[prepare-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8245-L8247
-[prepare-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8336-L8338
-[native-gate]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8406
+[normalize]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2091-L2108
+[t-collapsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L27551-L27552
+[expand]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4158-L4252
+[reattach-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4195-L4197
+[native-deep]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4235-L4238
+[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5001
+[no-models]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5196-L5203
+[native-profile]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7959-L7960
+[prepare-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8258-L8260
+[prepare-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8349-L8351
+[native-gate]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8419
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
@@ -149,7 +149,7 @@ The default-production reachability class and medium confidence remain.
 Test adequacy remains unaudited. No benchmark or measurement campaign ran;
 parent measurement and whole-repository landing gates remain separate.
 
-[witness]: ../../../../../crates/daemon/src/lib.rs#L22857
+[witness]: ../../../../../crates/daemon/src/lib.rs#L23195
 
 ## Third-turn prefix and production-prompt checks
 

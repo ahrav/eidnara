@@ -32,18 +32,18 @@ numbering split; this record covers the cache entry's immutability and the
   only when `observed == summary`, the tail length equals the appended count,
   and the last tail row carries `max_tag_number`; otherwise it reloads
   [`load_tags_for_session`][load-order], which orders by `tag_number ASC`.
-- The pass loads `tag_rows` at [`:3002`][load-call] and later runs
+- The pass loads `tag_rows` at [`:3010`][load-call] and later runs
   [`append_tag_mint_rows(Arc::make_mut(tag_rows), ..)`][make-mut] whether or
   not the mint batch is empty. [`append_tag_mint_rows`][append-mint] numbers
   each mint row `max + offset + 1` in the order of `tag_mints`, which is
   projection block order, and returns the start index.
-- Mint inputs are built at [`:7156-7161`][mint-input] with
+- Mint inputs are built at [`:7164-7169`][mint-input] with
   `source_bytes: source.as_bytes().to_vec()` from [`taggable_source`][taggable],
   which returns the text of a user or assistant `Text` block or the first text
   of a tool result. The active-tag match at [`:7353`][active-match] compares
   `row.source_bytes == source.as_bytes()` for the same predicate.
 - The commit takes mint inputs from `tag_rows[tag_mint_start..]`
-  ([`:4924-4934`][commit-inputs]). The store numbers each new row from
+  ([`:4932-4942`][commit-inputs]). The store numbers each new row from
   [`COALESCE(MAX(tag_number), 0) + 1`][store-number] inside the write
   transaction and skips existing block ids ([`:7140-7145`][store-existed]);
   `source_bytes` pass through
@@ -232,41 +232,41 @@ Execution provenance: 2026-09-12, working tree merging `0cf2fb3a` into
 
 [tc-tagnum]: ../../../daemon/transform/catalog.md#speculative-tag-numbering-has-two-authorities
 [r1]: ../../catalog.md#prepared-field-output-and-audit-policy-agree
-[load-call]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L3002
-[commit-inputs]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L4924-L4934
-[tag-entry]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L6782-L6807
-[tag-snapshot]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L6827-L6832
-[load-tags]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L6899-L6957
-[mint-input]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7156-L7161
-[append-mint]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7261-L7282
-[taggable]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7286-L7310
-[active-match]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7350
-[make-mut]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7883-L7884
-[t-tagcold]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L22418
-[t-poison]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L22487
-[t-interleave]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L22520
+[load-call]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L3010
+[commit-inputs]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L4932-L4942
+[tag-entry]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L6790-L6815
+[tag-snapshot]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L6835-L6840
+[load-tags]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L6907-L6965
+[mint-input]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7164-L7169
+[append-mint]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7269-L7290
+[taggable]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7294-L7318
+[active-match]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7358
+[make-mut]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L7891-L7892
+[t-tagcold]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L22700
+[t-poison]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L22769
+[t-interleave]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L22802
 [store-existed]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/memory-store/src/lib.rs#L7140-L7145
 [mint-prepared]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/memory-store/src/lib.rs#L7156-L7164
 [store-number]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/memory-store/src/lib.rs#L7205-L7209
 [load-order]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/memory-store/src/lib.rs#L7245-L7273
-[live-entry]: ../../../../../crates/daemon/src/transform.rs#L6828-L6853
-[live-baseline]: ../../../../../crates/daemon/src/transform.rs#L3034-L3035
-[live-protection]: ../../../../../crates/daemon/src/transform.rs#L3696-L3709
-[live-tail]: ../../../../../crates/daemon/src/transform.rs#L7943-L7953
-[live-combined]: ../../../../../crates/daemon/src/transform.rs#L3430-L3438
-[live-hygiene]: ../../../../../crates/daemon/src/transform.rs#L8495-L8559
-[live-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L471-L486
-[live-iterator-test]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1180
-[live-bootstrap-test]: ../../../../../crates/daemon/src/transform.rs#L21441
-[live-protection-test]: ../../../../../crates/daemon/src/transform.rs#L23275
-[live-refusal-test]: ../../../../../crates/daemon/src/transform.rs#L11848
-[live-commit]: ../../../../../crates/daemon/src/transform.rs#L4951-L4960
-[live-load]: ../../../../../crates/daemon/src/transform.rs#L6951-L7013
-[live-charge]: ../../../../../crates/daemon/src/transform.rs#L6918-L6934
-[live-charge-test]: ../../../../../crates/daemon/src/transform.rs#L11885
-[live-interleave]: ../../../../../crates/daemon/src/transform.rs#L22344
-[live-sharing]: ../../../../../crates/daemon/src/transform.rs#L22391
-[live-rollback]: ../../../../../crates/daemon/src/transform.rs#L22428
+[live-entry]: ../../../../../crates/daemon/src/transform.rs#L6836-L6861
+[live-baseline]: ../../../../../crates/daemon/src/transform.rs#L3042-L3043
+[live-protection]: ../../../../../crates/daemon/src/transform.rs#L3704-L3717
+[live-tail]: ../../../../../crates/daemon/src/transform.rs#L7951-L7961
+[live-combined]: ../../../../../crates/daemon/src/transform.rs#L3438-L3446
+[live-hygiene]: ../../../../../crates/daemon/src/transform.rs#L8503-L8567
+[live-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L565-L580
+[live-iterator-test]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1283
+[live-bootstrap-test]: ../../../../../crates/daemon/src/transform.rs#L21707
+[live-protection-test]: ../../../../../crates/daemon/src/transform.rs#L23557
+[live-refusal-test]: ../../../../../crates/daemon/src/transform.rs#L11856
+[live-commit]: ../../../../../crates/daemon/src/transform.rs#L4959-L4968
+[live-load]: ../../../../../crates/daemon/src/transform.rs#L6959-L7021
+[live-charge]: ../../../../../crates/daemon/src/transform.rs#L6926-L6942
+[live-charge-test]: ../../../../../crates/daemon/src/transform.rs#L11893
+[live-interleave]: ../../../../../crates/daemon/src/transform.rs#L22626
+[live-sharing]: ../../../../../crates/daemon/src/transform.rs#L22673
+[live-rollback]: ../../../../../crates/daemon/src/transform.rs#L22710
 [live-prepared]: ../../../../../crates/memory-store/src/lib.rs#L8234-L8249
 [live-bytes]: ../../../../../crates/memory-store/src/lib.rs#L2079-L2086
 [live-policy]: ../../../../../crates/memory-store/src/lib.rs#L2204-L2233

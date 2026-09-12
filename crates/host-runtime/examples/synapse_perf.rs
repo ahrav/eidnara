@@ -25,9 +25,9 @@ use host_runtime::synapse::{
     EmbeddingEngine, LaneInfo, SYNAPSE_MODULE_ID, SynapseComponent, SynapseLimits,
 };
 use host_runtime::{
-    BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostInit,
-    HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome,
-    RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
+    BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostHandler,
+    HostInit, HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx,
+    RequestOutcome, RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 use perf_measurement::{
     AttemptDisposition, AttemptRecord, DeterministicRng, LogicalDisposition, LogicalRecord,
@@ -372,14 +372,21 @@ struct HostThread {
 }
 
 impl HostThread {
-    /// `retained_result_bytes` is the lane's declared retention cap; the host budget must cover it above the resident floor plus one inbound body or startup refuses the composite.
-    fn start(
-        component: SynapseComponent,
-        data_dir: std::path::PathBuf,
-        retained_result_bytes: u64,
-    ) -> Result<Self, String> {
+    fn start(component: SynapseComponent, data_dir: std::path::PathBuf) -> Result<Self, String> {
         let composite = StaticComposite::new(PerfPrimary, component, PlaceholderBroca)
             .map_err(|error| format!("compose host: {error}"))?;
+        let retained_resident_bytes = composite
+            .resource_declarations()
+            .iter()
+            .try_fold(0u64, |total, declaration| {
+                total.checked_add(declaration.retained_resident_bytes)
+            })
+            .ok_or_else(|| "component resident declarations exceed u64".to_owned())?;
+        let max_resident_bytes = HostLimits::default()
+            .max_resident_bytes
+            .checked_add(host_runtime::synapse::bundle::MAX_MODEL_BYTES)
+            .and_then(|bytes| bytes.checked_add(retained_resident_bytes))
+            .ok_or_else(|| "composite host resident budget exceeds u64".to_owned())?;
         let shutdown = CancellationToken::new();
         let run_shutdown = shutdown.clone();
         let (tx, done) = std::sync::mpsc::channel();
@@ -399,9 +406,7 @@ impl HostThread {
                                     data_dir: Some(data_dir),
                                     daemon_ver: "eidnara-host/synapse-perf".to_owned(),
                                     limits: HostLimits {
-                                        max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES
-                                            + u64::from(host_runtime::MAX_FRAME_BODY_LEN)
-                                            + retained_result_bytes,
+                                        max_resident_bytes,
                                         ..Default::default()
                                     },
                                     ..Default::default()
@@ -2069,14 +2074,9 @@ async fn run(
     if let Arm::Batch(shape) = opts.arm {
         limits.max_page_vectors = shape.page_vectors();
     }
-    let retained_result_bytes = limits.max_retained_result_bytes;
     let component = SynapseComponent::ready_with_engine(lane(), engine, limits)
         .map_err(|error| format!("validate Synapse limits: {error}"))?;
-    let host = HostThread::start(
-        component,
-        data_root.path().to_path_buf(),
-        retained_result_bytes,
-    )?;
+    let host = HostThread::start(component, data_root.path().to_path_buf())?;
     let publication = data_root
         .path()
         .join("eidnara")
