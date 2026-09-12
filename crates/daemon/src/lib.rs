@@ -39,6 +39,7 @@ pub mod search_catchup;
 pub mod search_projection;
 pub mod search_writer;
 pub mod selection;
+pub mod served_json;
 pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;

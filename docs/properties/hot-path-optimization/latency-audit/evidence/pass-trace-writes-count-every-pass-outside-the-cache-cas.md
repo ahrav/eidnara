@@ -121,22 +121,22 @@ channel, the authority route read, and dreamer tasks only.
 - Conclusion: unresolved, needs R3's owner-relationship normalization.
 
 [r3]: ../../catalog.md#redaction-audit-does-not-depend-on-retained-payload
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8137
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8200-L8207
-[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8270-L8273
-[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8378-L8381
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8442
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6203-L6253
-[age]: ../../../../../crates/daemon/src/lib.rs#L6244
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7832-L7880
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23464
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23494
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23510
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23538
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8138
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8201-L8208
+[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8271-L8274
+[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8379-L8382
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8443
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6204-L6254
+[age]: ../../../../../crates/daemon/src/lib.rs#L6245
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7833-L7881
+[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23465
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L23495
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23511
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23539
 [t-status]: ../../../../../crates/daemon/src/lib.rs#L23571
-[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1819-L1843
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13524
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13567
+[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1827-L1851
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13532
+[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13575
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L767-L784
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6484
 [received]: ../../../../../crates/memory-store/src/lib.rs#L6485-L6535

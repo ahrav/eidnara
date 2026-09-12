@@ -198,12 +198,12 @@ and independent reviews belong to the controller. The historical design
 questions above are resolved only as preservation requirements: neither
 observer semantics nor fingerprint identifiers change.
 
-[ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2083-L2132
+[ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2091-L2140
 [message-view]: ../../../../../crates/daemon/src/wire.rs#L378
-[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27077
-[delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23399
-[delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L23132
-[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28343
+[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27359
+[delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23400
+[delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L23133
+[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28625
 
 ## Retention and observer-scope verification
 

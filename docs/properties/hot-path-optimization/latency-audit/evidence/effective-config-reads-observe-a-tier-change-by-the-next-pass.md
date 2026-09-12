@@ -100,13 +100,13 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 - Missing evidence: A specification decision.
 - Conclusion: needs human input.
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4562-L4571
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L222-L223
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4796
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5019-L5057
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5057
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5374
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11794
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4563-L4572
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4797
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5020-L5058
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5058
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5375
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11795
 [tier-struct]: ../../../../../crates/daemon/src/config.rs#L222-L228
 [cache-struct]: ../../../../../crates/daemon/src/config.rs#L230-L235
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245

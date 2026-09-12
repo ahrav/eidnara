@@ -263,7 +263,7 @@ caps: an unpaged transform body is at most 512 KiB by the plugin's measure
 and therefore under the 1 MiB facade cap and 32 MiB transform cap
 ([`enforce_request_byte_cap`][hostcap]); every paged page satisfies
 `serde_json::to_vec(&request).len() <= TRANSFORM_PAGE_MAX_BYTES`
-([constant][hostpage], [check at lib.rs:9317][hostpagecheck]). `always`
+([constant][hostpage], [check at lib.rs:9324-9330][hostpagecheck]). `always`
 because a page rejected for size fails the
 whole series with `buffer_overflow`.
 Guarantee: The plugin's 512 KiB decision is never less strict than the host's
@@ -415,7 +415,7 @@ Suspiciously quiet: `transform-stage-logger.ts` has no test file;
    and the guarantee stands; the stated rationale is not reproduced.
 4. Page cap measure. [module-wire.ts:9][pagemax] says the facade accepts
    pages up to 512 KiB; the host enforces 512 KiB on the `serde_json`
-   re-serialization ([lib.rs:9317][hostpagecheck]) while the plugin measures
+   re-serialization ([lib.rs:9324-9330][hostpagecheck]) while the plugin measures
    `JSON.stringify` output. Both say 512 KiB; the measured text differs.
 5. Audit framing (not a source contract). The audit describes "synchronous
    file flushes" per line and a regex scan of the body. The logger batches
@@ -483,9 +483,9 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [evlog]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
 [redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [injection]: ../../../../../crates/daemon/src/injection.rs#L195-L230
-[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15317-L15491
-[hostpage]: ../../../../../crates/daemon/src/lib.rs#L741-L742
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9323-L9329
+[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15318-L15492
+[hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9324-L9330
 [t377]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L377
 [t440]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
 [t466]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466

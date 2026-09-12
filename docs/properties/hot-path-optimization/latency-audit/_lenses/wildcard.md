@@ -163,7 +163,7 @@ only; no test ran and nothing outside this file changed.
   uncached ([135-137][tc-u32]) and tokenizes outside the lock, so concurrent
   misses may tokenize twice ([107-109][tc-concurrent]).
   [`cached_estimate_tokens`][tc-cet] prefixes a NUL so raw content cannot
-  alias a tail-hygiene key; [`tail_hygiene.rs:264`][th-cwd] and
+  alias a tail-hygiene key; [`tail_hygiene.rs:614`][th-cwd] and
   [`m0_compose` via `bench_internals`][bi-trim] are the other callers.
 - Fault/timing angle: Two sessions miss on the same digest at once; a
   generation rotation at the cap while a promote-on-hit insert runs.
@@ -396,7 +396,7 @@ only; no test ran and nothing outside this file changed.
   [`prepare_historian_fire`][call-fire], and the wrapup path
   [5368][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
-  open ([lib.rs:216-217][binding-doc]). One `ConfigCache` per handler holds
+  open ([lib.rs:223-224][binding-doc]). One `ConfigCache` per handler holds
   one project tier, so two bound project roots alternating re-read the file
   every call ([368-372][tier-cached]). The staleness contract at HEAD
   already ignores a same-mtime edit ([test 2182-2188][t-mtime]).
@@ -584,8 +584,8 @@ call site.
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L291-L293
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
-[bi-tc]: ../../../../../crates/daemon/src/lib.rs#L191-L199
-[bi-trim]: ../../../../../crates/daemon/src/lib.rs#L172-L180
+[bi-tc]: ../../../../../crates/daemon/src/lib.rs#L192-L200
+[bi-trim]: ../../../../../crates/daemon/src/lib.rs#L173-L181
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
 [he-blocked]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
@@ -593,23 +593,23 @@ call site.
 [pm-body]: ../../../../../crates/host-runtime/tests/support/perf_measurement.rs#L16-L19
 [ring-body]: ../../../../../crates/host-runtime/benches/support/ring.rs#L77
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12381-L12386
-[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27398-L27403
+[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12389-L12394
+[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27680-L27685
 
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8121-L8138
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8144-L8199
-[h-call]: ../../../../../crates/daemon/src/lib.rs#L8192-L8198
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8469-L8494
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14410
-[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14469-L14487
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14491-L14513
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1018-L1197
-[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1199-L1210
-[fmt]: ../../../../../crates/daemon/src/transform.rs#L1216-L1349
-[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2373
-[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2852
-[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12231
-[t-line]: ../../../../../crates/daemon/src/transform.rs#L12281
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8122-L8139
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8145-L8200
+[h-call]: ../../../../../crates/daemon/src/lib.rs#L8193-L8199
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8470-L8495
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14411
+[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14470-L14488
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14492-L14514
+[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1205
+[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1207-L1218
+[fmt]: ../../../../../crates/daemon/src/transform.rs#L1224-L1357
+[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2381
+[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2860
+[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12239
+[t-line]: ../../../../../crates/daemon/src/transform.rs#L12289
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
@@ -630,16 +630,16 @@ call site.
 [t-tc-rotate]: ../../../../../crates/daemon/src/token_cache.rs#L233
 [t-tc-stats]: ../../../../../crates/daemon/src/token_cache.rs#L249
 [t-tc-alias]: ../../../../../crates/daemon/src/token_cache.rs#L266
-[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L264
-[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1799-L1815
-[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2242-L2247
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2249-L2263
-[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2836-L2840
-[floor]: ../../../../../crates/daemon/src/transform.rs#L5838
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
+[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
+[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1807-L1823
+[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2250-L2264
+[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2844-L2848
+[floor]: ../../../../../crates/daemon/src/transform.rs#L5846
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4306-L4317
 [mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8561
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24173-L24184
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8569
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24455-L24466
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148
 
 [eval]: ../../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
@@ -698,12 +698,12 @@ call site.
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4562-L4571
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L222-L223
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4796
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5057
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5374
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11794
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4563-L4572
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4797
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5058
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5375
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11795
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288

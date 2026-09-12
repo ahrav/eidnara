@@ -111,8 +111,8 @@ window, two drainers, ordering across firings, the limit, or the backoff.
 - Conclusion: resolved with answer - the code and doc agree at HEAD; a fold
   must rewrite the doc and prove the one-row delete-or-rollback guard.
 
-[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8130-L8134
-[no-models]: ../../../../../crates/daemon/src/lib.rs#L5195-L5202
+[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8131-L8135
+[no-models]: ../../../../../crates/daemon/src/lib.rs#L5196-L5203
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
 [kinds]: ../../../../../crates/memory-store/src/lib.rs#L4513-L4516

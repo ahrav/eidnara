@@ -19,7 +19,7 @@ sequence, not only its budget, decides the output bytes.
   [`ChunkSnapshotOwnedItem`][owned-item] with `bytes:
   block.bytes.to_string()`.
 - Every reader goes through [`as_item`][as-item]: the builder at
-  [`:696-701`][fp-call], the restart path at [`lib.rs:4881-4883`][fp-restart],
+  [`:696-701`][fp-call], the restart path at [`lib.rs:4888-4890`][fp-restart],
   and one test. [`compute_chunk_fingerprint`][fp] formats
   `id:kind:bytes.len()` joined by `|`; its doc says the fingerprint records
   byte lengths rather than content bytes.
@@ -102,7 +102,7 @@ test; none exercises a format change across a restart.
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L4006-L4033
-[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4887-L4889
+[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4888-L4890
 [diff-header]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L100-L113

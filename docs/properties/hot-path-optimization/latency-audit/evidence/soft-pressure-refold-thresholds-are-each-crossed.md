@@ -14,28 +14,28 @@ is never distinguished from the reference. The parent's
 
 ## Evidence trail
 
-- The three disjuncts and their inputs are at [`:4310-4316`][soft-predicate]:
+- The three disjuncts and their inputs are at [`:4318-4324`][soft-predicate]:
   `m1.memory_update_count > 40`; `m1_has_content && m1_tokens as f64 >
   history_budget_tokens * 0.20 && history_budget_tokens > 0.0`;
   `m1_has_content && m0_tokens >= 500 && m1_tokens as f64 > m0_tokens as f64
   * 0.15`.
 - `m0_tokens` is the direct count of the frozen unit with key `m0`
-  ([`:4298-4303`][m0-count]); the HARD arm writes that unit at
-  [`:4217`][m0-unit] and the refold branch rewrites it at
-  [`:4407`][m0-unit-refold]. `m1_tokens` is the direct count of
+  ([`:4306-4311`][m0-count]); the HARD arm writes that unit at
+  [`:4225`][m0-unit] and the refold branch rewrites it at
+  [`:4415`][m0-unit-refold]. `m1_tokens` is the direct count of
   `m1.body` when it differs from [`M1_PLACEHOLDER`][placeholder]
-  ([`:4304-4309`][m1-count]).
+  ([`:4312-4317`][m1-count]).
 - `m1.body` has content when [`compose_m1`][m1-compose] renders at least one
   of: new compartments past `folded_compartment_seq`, a changed user profile
   under `memory_enabled`, or newly claimed notes ([`:174-222`][m1-pieces]).
 - `history_budget_tokens` is the request value filtered to finite and
   `>= 0.0`, else the binding's frozen budget
-  ([`lib.rs:8156-8159`][budget-filter]); a small positive budget is reachable
+  ([`lib.rs:8163-8166`][budget-filter]); a small positive budget is reachable
   from the request.
 - `memory_update_count` is `0` on every composition
   ([`m1_compose.rs:231`][m1-count-zero]); no other writer exists in the
   workspace, so the first disjunct is never true at HEAD.
-- The SOFT plan is chosen by the classifier at [`:3795-3813`][plan-select];
+- The SOFT plan is chosen by the classifier at [`:3803-3821`][plan-select];
   a subagent request is forced to SOFT or Defer, and `force_hard` forces HARD.
 
 ## Failure scenario
@@ -113,15 +113,15 @@ stored compartments at 74/75/76 tokens. The test drives a SOFT plan and checks
 its SOFT-or-HARD result. This is bounded characterization, not evidence that
 these shapes represent production traffic.
 
-[plan-select]: ../../../../../crates/daemon/src/transform.rs#L3795-L3813
-[m0-unit]: ../../../../../crates/daemon/src/transform.rs#L4217
-[m0-unit-refold]: ../../../../../crates/daemon/src/transform.rs#L4407
-[m0-count]: ../../../../../crates/daemon/src/transform.rs#L4298-L4303
-[m1-count]: ../../../../../crates/daemon/src/transform.rs#L4304-L4309
-[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4310-L4316
+[plan-select]: ../../../../../crates/daemon/src/transform.rs#L3803-L3821
+[m0-unit]: ../../../../../crates/daemon/src/transform.rs#L4225
+[m0-unit-refold]: ../../../../../crates/daemon/src/transform.rs#L4415
+[m0-count]: ../../../../../crates/daemon/src/transform.rs#L4306-L4311
+[m1-count]: ../../../../../crates/daemon/src/transform.rs#L4312-L4317
+[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4318-L4324
 [m1-struct]: ../../../../../crates/daemon/src/m1_compose.rs#L92-L101
 [m1-compose]: ../../../../../crates/daemon/src/m1_compose.rs#L160-L237
 [m1-pieces]: ../../../../../crates/daemon/src/m1_compose.rs#L174-L222
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8162-L8165
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8163-L8166
