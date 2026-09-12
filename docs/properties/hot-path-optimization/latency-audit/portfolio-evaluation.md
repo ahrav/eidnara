@@ -1077,11 +1077,11 @@ None.
 exceeds the 60 to 120 line target (173 lines including 34 link definitions)
 to keep every verified anchor; the C6 and W13 files are within it.
 
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L11795
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5058
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L11801
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5064
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1948-L1987
 [cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[copies]: ../../../../crates/daemon/src/lib.rs#L15415-L15424
+[copies]: ../../../../crates/daemon/src/lib.rs#L15421-L15430
 [diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1224-L1357

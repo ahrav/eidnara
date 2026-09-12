@@ -85,10 +85,10 @@ policy, M5 allocation acceptance, and final external scope remain owner gates.
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L998
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
-[scopes]: ../../../crates/storage/src/lib.rs#L1057-L1139
-[snapshot]: ../../../crates/storage/src/lib.rs#L5432-L5469
+[scopes]: ../../../crates/storage/src/lib.rs#L1185-L1267
+[snapshot]: ../../../crates/storage/src/lib.rs#L5697-L5734
 [history]: ../../../crates/daemon/src/decay_render.rs#L296-L338
-[prepare]: ../../../crates/memory-store/src/lib.rs#L2204-L2243
+[prepare]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
 [outer]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [ledger]: evidence/request-work-accounting-covers-retained-resources.md#evidence-trail
 [reference]: catalog.md#fixed-reference-identity

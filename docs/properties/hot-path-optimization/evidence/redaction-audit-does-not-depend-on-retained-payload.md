@@ -62,7 +62,7 @@ Existing checks are unaudited, and no new parity or allocation run occurs here.
   M5 allocation acceptance still needs separate owner-approved measurement;
   neither receipt parity nor sentinel absence proves allocation savings.
 
-[retain]: ../../../../crates/memory-store/src/lib.rs#L2221-L2242
-[json]: ../../../../crates/memory-store/src/lib.rs#L2133-L2143
-[audit]: ../../../../crates/memory-store/src/lib.rs#L2356-L2424
-[execute]: ../../../../crates/memory-store/src/lib.rs#L2245-L2271
+[retain]: ../../../../crates/memory-store/src/lib.rs#L2306-L2327
+[json]: ../../../../crates/memory-store/src/lib.rs#L2218-L2228
+[audit]: ../../../../crates/memory-store/src/lib.rs#L2441-L2509
+[execute]: ../../../../crates/memory-store/src/lib.rs#L2330-L2356

@@ -227,6 +227,27 @@ mod sqlite_backend {
             Self::over(claimed, epoch, None)
         }
 
+        /// Starts recording statement-cache reuse; an earlier recording is discarded.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn start_statement_reuse_probe(&self) {
+            self.gate.lock().statement_probe = Some(std::collections::BTreeMap::new());
+        }
+
+        /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
+        /// how many times the statement cache handed out a re-created handle after a
+        /// returned handle of that key had run. Every key prepared appears; a cache sized
+        /// for the hot set shows zero for each. Empty when the probe was never started.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn statement_evictions(&self) -> std::collections::BTreeMap<String, u32> {
+            self.gate
+                .lock()
+                .statement_probe
+                .iter()
+                .flat_map(|probe| probe.iter())
+                .map(|(sql, reuse)| (sql.clone(), reuse.evictions))
+                .collect()
+        }
+
         fn over(claimed: ClaimedConnection, epoch: u64, lease: Option<HeldFileLease>) -> Self {
             SqliteStore {
                 conn: Mutex::new(claimed.conn),
@@ -312,7 +333,8 @@ mod sqlite_backend {
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             // `scope` is declared after `tx` so its mode leaves before `tx` issues `ROLLBACK` during unwinding.
             let scope = CallbackScope::read_only(&tx, &self.gate)?;
-            let out = f(&GuardedConn::new(&tx)).map_err(|e| StoreError::Backend(e.to_string()));
+            let out = f(&GuardedConn::new(&tx, &self.gate))
+                .map_err(|e| StoreError::Backend(e.to_string()));
             let restored = scope.release();
             // Finishing the read transaction releases its snapshot; there is nothing to
             // commit.
@@ -422,7 +444,7 @@ mod sqlite_backend {
             claim_fence(&tx, self.epoch)?;
 
             let scope = CallbackScope::writable(&tx, &self.gate)?;
-            let out = f(&GuardedConn::new(&tx));
+            let out = f(&GuardedConn::new(&tx, &self.gate));
             // The callback error outranks a release error: losing the reason the
             // write failed is worse than losing the scope-release failure.
             let released = scope.release();
@@ -540,6 +562,49 @@ mod sqlite_backend {
     /// control, pragma writes, statement batches, and transaction control.
     pub struct GuardedConn<'a> {
         conn: &'a Connection,
+        #[cfg(any(test, feature = "test-support"))]
+        gate: &'a AuthorityGate,
+    }
+
+    /// A statement from the connection's cache, returned to it on drop. Dereferences to the
+    /// prepared statement.
+    pub struct CachedStatement<'a> {
+        inner: rusqlite::CachedStatement<'a>,
+        /// The armed probe and the cache key, so the run count can be recorded when the
+        /// statement returns to the cache.
+        #[cfg(any(test, feature = "test-support"))]
+        probe: Option<(&'a AuthorityGate, String)>,
+    }
+
+    impl<'a> Deref for CachedStatement<'a> {
+        type Target = rusqlite::Statement<'a>;
+
+        fn deref(&self) -> &rusqlite::Statement<'a> {
+            &self.inner
+        }
+    }
+
+    impl<'a> DerefMut for CachedStatement<'a> {
+        fn deref_mut(&mut self) -> &mut rusqlite::Statement<'a> {
+            &mut self.inner
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    impl Drop for CachedStatement<'_> {
+        fn drop(&mut self) {
+            if let Some((gate, sql)) = &self.probe {
+                gate.record_statement_return(sql, &self.inner);
+            }
+        }
+    }
+
+    /// Bytes the SQLite library holds through its allocator, across every connection in
+    /// the process, so an assertion on a delta must leave room for concurrent connections.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn library_memory_used() -> i64 {
+        // SAFETY: `sqlite3_memory_used` takes no pointers and reads no Rust-managed memory.
+        unsafe { rusqlite::ffi::sqlite3_memory_used() }
     }
 
     /// Reaches pragmas and statement batches but not the authorizer, so a maintenance
@@ -654,8 +719,14 @@ mod sqlite_backend {
     }
 
     impl<'a> GuardedConn<'a> {
-        fn new(conn: &'a Connection) -> Self {
-            Self { conn }
+        fn new(conn: &'a Connection, gate: &'a AuthorityGate) -> Self {
+            #[cfg(not(any(test, feature = "test-support")))]
+            let _ = gate;
+            Self {
+                conn,
+                #[cfg(any(test, feature = "test-support"))]
+                gate,
+            }
         }
 
         /// # Errors
@@ -693,8 +764,13 @@ mod sqlite_backend {
         /// # Errors
         ///
         /// Returns the SQLite error from preparing `sql`.
-        pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'a>> {
-            self.conn.prepare_cached(sql)
+        pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<CachedStatement<'a>> {
+            let inner = self.conn.prepare_cached(sql)?;
+            Ok(CachedStatement {
+                #[cfg(any(test, feature = "test-support"))]
+                probe: self.gate.record_statement_handout(sql, &inner),
+                inner,
+            })
         }
 
         pub fn last_insert_rowid(&self) -> i64 {
@@ -813,6 +889,22 @@ mod sqlite_backend {
         /// Whether `pin_fence_durability` has run on the connection since open or since the
         /// last maintenance callback, which may have lowered what it pinned.
         durability_pinned: bool,
+        /// Armed by a test through [`SqliteStore::start_statement_reuse_probe`]; `None`
+        /// costs one load per cached preparation. Per cache key: the highest run count a
+        /// returned handle carried, and how many handouts with no runs followed a return
+        /// that had run. That sequence means the statement cache re-created the handle; a
+        /// handle that was prepared and never stepped keeps a zero run count without an
+        /// eviction.
+        #[cfg(any(test, feature = "test-support"))]
+        statement_probe: Option<std::collections::BTreeMap<String, StatementReuse>>,
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[derive(Clone, Copy, Default)]
+    struct StatementReuse {
+        /// `last_runs` records the run count a handle reported when it last returned to the cache.
+        last_runs: i32,
+        evictions: u32,
     }
 
     /// `sqlite3_set_authorizer` with a non-null hook expires every prepared statement, so the
@@ -839,6 +931,8 @@ mod sqlite_backend {
                     mode: ConnectionMode::Unrestricted,
                     schema: None,
                     durability_pinned: false,
+                    #[cfg(any(test, feature = "test-support"))]
+                    statement_probe: None,
                 }),
             });
             let hook = Arc::clone(&gate);
@@ -925,6 +1019,40 @@ mod sqlite_backend {
             }
             self.lock().durability_pinned = true;
             Ok(())
+        }
+
+        /// SQLite keeps the run count on a handle it re-prepares in place, so a handle with
+        /// no runs after a returned handle of the same key had run is a handle the
+        /// statement cache re-created. The key is trimmed as the cache trims it. Returns
+        /// the probe reference the statement records its return against, when armed.
+        #[cfg(any(test, feature = "test-support"))]
+        fn record_statement_handout<'g>(
+            &'g self,
+            sql: &str,
+            statement: &rusqlite::Statement<'_>,
+        ) -> Option<(&'g AuthorityGate, String)> {
+            let runs = statement.get_status(rusqlite::StatementStatus::Run);
+            let mut state = self.lock();
+            let probe = state.statement_probe.as_mut()?;
+            let key = sql.trim().to_string();
+            let reuse = probe.entry(key.clone()).or_default();
+            if runs == 0 && reuse.last_runs > 0 {
+                reuse.evictions += 1;
+            }
+            Some((self, key))
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
+        fn record_statement_return(&self, key: &str, statement: &rusqlite::Statement<'_>) {
+            let runs = statement.get_status(rusqlite::StatementStatus::Run);
+            let mut state = self.lock();
+            if let Some(reuse) = state
+                .statement_probe
+                .as_mut()
+                .and_then(|probe| probe.get_mut(key))
+            {
+                reuse.last_runs = runs;
+            }
         }
 
         /// The maintenance path is unrestricted, so it may have changed the schema, the
@@ -2501,9 +2629,11 @@ mod sqlite_backend {
     }
 }
 
+#[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
+pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
 pub use sqlite_backend::{
-    APPLICATION_ID, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
+    APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
     open_sqlite, schema_inventory,
 };
@@ -5020,6 +5150,141 @@ mod tests {
             matches!(&refused, Err(StoreError::Backend(m)) if m.contains("shadows")),
             "the uncached temp scan still refuses the shadow, got {refused:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The page-cache, temporary-store, and memory-map pragmas belong to the connection-open
+    /// path; a guarded callback of either kind is denied them, and a denied pragma leaves
+    /// the value the maintenance path set.
+    #[test]
+    fn guarded_callbacks_are_denied_the_connection_resource_pragmas() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|c| {
+                c.pragma_update(None, "cache_size", -512)?;
+                c.pragma_update(None, "temp_store", "MEMORY")?;
+                c.pragma_update(None, "mmap_size", 0)
+            })
+            .expect("the open path owns the resource pragmas");
+        for (pragma, value) in [
+            ("cache_size", "-8"),
+            ("temp_store", "FILE"),
+            ("mmap_size", "65536"),
+        ] {
+            let read = store.with_conn(|c| c.execute(&format!("PRAGMA {pragma} = {value}"), []));
+            assert!(
+                matches!(&read, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "a read callback is denied `PRAGMA {pragma}`, got {read:?}"
+            );
+            let fenced =
+                store.with_conn_fenced(|tx| tx.execute(&format!("PRAGMA {pragma} = {value}"), []));
+            assert!(
+                matches!(&fenced, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "a fenced callback is denied `PRAGMA {pragma}`, got {fenced:?}"
+            );
+        }
+        let (cache_size, temp_store, mmap_size): (i64, i64, i64) = store
+            .with_conn(|c| {
+                Ok((
+                    c.query_row("PRAGMA cache_size", [], |r| r.get(0))?,
+                    c.query_row("PRAGMA temp_store", [], |r| r.get(0))?,
+                    c.query_row("PRAGMA mmap_size", [], |r| r.get(0))?,
+                ))
+            })
+            .expect("reading the pragmas stays allowed");
+        assert_eq!((cache_size, temp_store, mmap_size), (-512, 2, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A handle with no runs handed out after a returned handle of its key had run means
+    /// the cache re-created it. A cache sized below the working set churns, a cache sized
+    /// for it does not.
+    #[test]
+    fn statement_evictions_are_counted_per_text() {
+        let sequence = [
+            "SELECT 1", "SELECT 2", "SELECT 1", "SELECT 3", "SELECT 2", "SELECT 1",
+        ];
+        let run_sequence = |store: &SqliteStore| {
+            store
+                .with_conn_fenced(|tx| {
+                    for text in sequence {
+                        tx.prepare_cached(text)?
+                            .query_row([], |r| r.get::<_, i64>(0))?;
+                    }
+                    Ok(())
+                })
+                .expect("run the sequence")
+        };
+        let size = |store: &SqliteStore, capacity: usize| {
+            store
+                .with_conn_unfenced(|c| {
+                    c.set_prepared_statement_cache_capacity(capacity);
+                    Ok(())
+                })
+                .expect("size the cache")
+        };
+
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 2);
+        store.start_statement_reuse_probe();
+        run_sequence(&store);
+        let churned = store.statement_evictions();
+        // Capacity two under the sequence: `SELECT 1` is evicted by `SELECT 3` and
+        // re-created at the end; `SELECT 2` is evicted by the second `SELECT 1` and
+        // re-created before its second run.
+        assert_eq!(
+            churned,
+            std::collections::BTreeMap::from([
+                ("SELECT 1".to_string(), 1),
+                ("SELECT 2".to_string(), 1),
+                ("SELECT 3".to_string(), 0),
+            ]),
+            "the undersized cache re-created every revisited statement once"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 3);
+        store.start_statement_reuse_probe();
+        run_sequence(&store);
+        run_sequence(&store);
+        let fitted = store.statement_evictions();
+        assert_eq!(fitted.len(), 3);
+        assert!(
+            fitted.values().all(|evictions| *evictions == 0),
+            "a fitted cache re-creates no handle, got {fitted:?}"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A replacement handle returned without running carries no run evidence, so
+        // handing the same handle out again is reuse, not another re-creation.
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 1);
+        store.start_statement_reuse_probe();
+        store
+            .with_conn_fenced(|tx| {
+                for text in ["SELECT 1", "SELECT 2"] {
+                    tx.prepare_cached(text)?
+                        .query_row([], |r| r.get::<_, i64>(0))?;
+                }
+                for _ in 0..2 {
+                    drop(tx.prepare_cached("SELECT 1")?);
+                }
+                Ok(())
+            })
+            .expect("run the unstepped reuse");
+        assert_eq!(
+            store.statement_evictions().get("SELECT 1"),
+            Some(&1),
+            "the unstepped reuse of the re-created handle is not an eviction"
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 

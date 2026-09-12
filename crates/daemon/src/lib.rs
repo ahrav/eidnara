@@ -2261,6 +2261,9 @@ pub const STORAGE_CONNECTIONS: u64 = 2;
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
 /// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
+/// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
+/// The search projection's connection holds `search_projection::CACHE_KIB` of page cache.
+/// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2274,6 +2277,9 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
     + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64 * STORAGE_CONNECTIONS
+    + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
+    + memory_store::MMAP_BUDGET_BYTES as u64
+    + search_projection::CACHE_KIB as u64 * 1024
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
@@ -24581,6 +24587,48 @@ mod tests {
         assert_eq!(
             trace.last_reject_error.as_deref(),
             Some("live-source ordinals not strictly increasing")
+        );
+    }
+
+    /// rusqlite's default prepared-statement capacity, which the memory store replaces.
+    const RUSQLITE_DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 16;
+
+    /// The memory store's statement cache is sized for the whole hot set. A warm pass
+    /// followed by steady passes on the same growing session prepares fewer distinct texts
+    /// than the capacity, with margin for formatted variants, and re-creates no statement
+    /// after it has run. rusqlite evicts only on insertion past capacity, so the distinct
+    /// count is the load-bearing claim and the eviction count is its consequence; the
+    /// undersized case is exercised in the storage crate's eviction probe.
+    #[tokio::test(flavor = "current_thread")]
+    async fn steady_passes_evict_no_statement_from_the_memory_store_cache() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let mut messages = vec![ck("m1", 1, "turn 1")];
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["status"], "ok", "warm pass");
+        store.start_statement_reuse_probe();
+        for turn in 2..=5u64 {
+            messages.push(ck(&format!("m{turn}"), turn, &format!("turn {turn}")));
+            let response = call_transform(&handler, messages.clone()).await;
+            assert_eq!(response["status"], "ok", "pass {turn}");
+        }
+        let reuse = store.statement_evictions();
+        let margin = memory_store::STATEMENT_CACHE_CAPACITY / 4;
+        assert!(
+            reuse.len() + margin <= memory_store::STATEMENT_CACHE_CAPACITY,
+            "{} distinct cached statements leave less than {margin} of headroom under {}",
+            reuse.len(),
+            memory_store::STATEMENT_CACHE_CAPACITY
+        );
+        assert!(
+            reuse.len() > RUSQLITE_DEFAULT_STATEMENT_CACHE_CAPACITY,
+            "the steady passes exercise more than the default capacity, got {}",
+            reuse.len()
+        );
+        let evicted: Vec<_> = reuse.iter().filter(|(_, count)| **count > 0).collect();
+        assert!(
+            evicted.is_empty(),
+            "statements were re-created after eviction: {evicted:?}"
         );
     }
 

@@ -66,7 +66,9 @@ Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969`; bundled SQLite
 Preservation authority: implementation tickets
 [#428](https://github.com/ahrav/eidnara/issues/428) (mode gate) and
 [#429](https://github.com/ahrav/eidnara/issues/429) (schema-version keyed
-snapshot and once-per-connection durability pin), and the
+snapshot and once-per-connection durability pin), and
+[#430](https://github.com/ahrav/eidnara/issues/430) (connection-open pragmas
+and statement-cache capacity), and the
 [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
 The store installs [one authorizer per connection][gate-install] at open. The
@@ -187,10 +189,38 @@ pins the remaining expiry: `query_only` is a flag pragma and SQLite expires
 every statement on the connection for each one, so the counts over read,
 read, fenced, fenced calls are `0, >=1, higher, unchanged`. The
 [temp-write test][temp-write] shows `query_only` is the read path's write
-barrier for the temp database as well as main. Removing the toggle is the
-open question of the connection-open unit
-([#430](https://github.com/ahrav/eidnara/issues/430)); both tests name the
-behavior that unit would change.
+barrier for the temp database as well as main. The connection-open unit
+([#430](https://github.com/ahrav/eidnara/issues/430)) resolved the open
+question with those two tests: `query_only` blocks temp-database writes, it is
+the read callback's only write barrier because `deny_scope_escapes` allows
+DML on every non-infrastructure table, and the read path therefore keeps its
+two pragma statements.
+
+The connection-open path owns the resource pragmas. The memory store's
+[connection profile][profile] reads `PRAGMA page_size` and the
+`MAX_MMAP_SIZE` compile option, derives `cache_size` in pages from a byte
+budget and the measured page size, caps `mmap_size` at the compile-time
+maximum, and reads back what took effect; the [profile test][profile-test]
+checks each derivation. `temp_store` stays at its default: SQLite bounds a
+sorter's in-memory list at `cache_size` and spills the rest only to a
+file-backed temp store, so a temp store held in memory removes the bound and
+keeps every sorted row in the heap. The [sort-spill test][sort-spill] sorts
+four page-cache budgets of rows through a read callback and shows the library
+retaining about one budget. The
+[resource-pragma test][resource-pragmas] shows read and fenced callbacks denied
+`cache_size`, `temp_store`, and `mmap_size` writes while the maintenance-set
+values stand. The memory store sets an explicit
+[statement-cache capacity][capacity] covering its distinct cached texts, with
+the kernel store's capacity as precedent. The [eviction probe][eviction-probe]
+extends the statement-reuse probe: a handle handed out with no runs after a
+returned handle of the same text had run means the cache re-created it, and an
+undersized cache shows exactly that. The [steady-pass test][pass-probe] shows a
+warm pass and four steady passes on one growing session preparing more distinct
+texts than the default capacity would hold, fewer than the configured capacity
+with a quarter of it as headroom, and re-creating no statement; the distinct
+count is the load-bearing claim, since the cache evicts only on insertion past
+capacity. The budgets are declared, not measured; the W1 measurement contract
+owns their effect.
 
 The [restoration test][restore-test] shows maintenance regaining its pragma
 writes after a panicking read and a panicking fenced callback, `query_only`
@@ -214,7 +244,13 @@ denial-matrix tests that existed at the baseline pass unchanged. After the
 schema-version keyed snapshot and the once-per-connection pin the same command
 passed 76 tests: seven internal tests (key reuse and replacement, defensive
 mode, forged version, retained bound, release comparison, pin, maintenance
-unwind) and the rename test were added.
+unwind) and the rename test were added. After the connection-open pragmas and
+the statement-cache capacity it passed 81 tests: the 76 above, the three
+tests the `origin/main` merge brought in, the resource-pragma denial rows, and
+the eviction probe (an earlier revision counted 78 and omitted the three merged
+tests); `cargo test -p memory-store --locked`
+gained the connection-profile test and `cargo test -p daemon --locked` the
+steady-pass eviction test.
 
 After the flush moved into a drop guard, `cargo test -p storage --locked`
 passed 72 tests at `perf/mode-gated-authorizer` merged with `origin/main`:
@@ -224,50 +260,59 @@ Review-time verification: the new test failed with `Ok(())` in place of
 flush is one action of the maintenance exit guard, and the same command
 passes 80 tests: the 76 above, the three from `origin/main`, and the
 flush-on-unwind test. With the rescan flush, the parsed-schema reload, the
-unretained-policy check, and the foreign-WAL check it passes 84 tests. The
-anchors below are to the live tree at that state.
+unretained-policy check, and the foreign-WAL check it passes 84 tests. Merged
+with this branch's resource-pragma rows and eviction probe
+(`perf/schema-version-keyed-callback-cache` at `3958bb8`), the same command
+passes 86 tests. The anchors below are to that merged tree.
 
 [lock]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L195-L209
 [read]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L229-L245
 [write]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L290-L316
-[live-read]: ../../../../crates/storage/src/lib.rs#L305-L321
-[live-write]: ../../../../crates/storage/src/lib.rs#L370-L434
+[live-read]: ../../../../crates/storage/src/lib.rs#L326-L343
+[live-write]: ../../../../crates/storage/src/lib.rs#L392-L456
 [scope]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L624-L705
 [cache]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L487-L498
 [facade]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5563-L5586
 [notes]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5999-L6025
 [scope-owners]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4772-L4823
-[mode]: ../../../../crates/storage/src/lib.rs#L717-L729
-[gate-install]: ../../../../crates/storage/src/lib.rs#L1494
-[flush]: ../../../../crates/storage/src/lib.rs#L334-L344
-[scope-install]: ../../../../crates/storage/src/lib.rs#L1037-L1139
-[mode-hold]: ../../../../crates/storage/src/lib.rs#L940-L942
-[apply]: ../../../../crates/storage/src/lib.rs#L2001-L2039
-[gate-tests]: ../../../../crates/storage/src/lib.rs#L2162-L2501
-[probe]: ../../../../crates/storage/src/lib.rs#L4880-L4977
-[read-witness]: ../../../../crates/storage/src/lib.rs#L5031-L5060
-[temp-write]: ../../../../crates/storage/src/lib.rs#L5067-L5090
-[restore-test]: ../../../../crates/storage/src/lib.rs#L5096-L5148
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L5154-L5184
-[surface-test]: ../../../../crates/storage/src/lib.rs#L5191-L5211
-[flush-test]: ../../../../crates/storage/src/lib.rs#L5213-L5255
-[cached-test]: ../../../../crates/storage/src/lib.rs#L4833
-[snapshot]: ../../../../crates/storage/src/lib.rs#L737-L747
-[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L884-L906
-[infra-check]: ../../../../crates/storage/src/lib.rs#L1112-L1127
-[bound]: ../../../../crates/storage/src/lib.rs#L771
-[rename-test]: ../../../../crates/storage/src/lib.rs#L4984-L5024
-[pin-test]: ../../../../crates/storage/src/lib.rs#L2400-L2438
-[bound-test]: ../../../../crates/storage/src/lib.rs#L2349-L2370
-[durability-test]: ../../../../crates/storage/src/lib.rs#L4131-L4196
-[forge-test]: ../../../../crates/storage/src/lib.rs#L2313-L2343
-[defensive]: ../../../../crates/storage/src/lib.rs#L835
-[defensive-test]: ../../../../crates/storage/src/lib.rs#L2287-L2307
-[release-test]: ../../../../crates/storage/src/lib.rs#L2376-L2392
-[pin]: ../../../../crates/storage/src/lib.rs#L912-L928
-[maintenance-exit]: ../../../../crates/storage/src/lib.rs#L526-L535
-[unwind-test]: ../../../../crates/storage/src/lib.rs#L2443-L2492
-[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5299-L5338
-[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5262-L5292
-[unretained-policy-test]: ../../../../crates/storage/src/lib.rs#L5383-L5429
-[parsed-schema-test]: ../../../../crates/storage/src/lib.rs#L5344-L5377
+[mode]: ../../../../crates/storage/src/lib.rs#L793-L805
+[gate-install]: ../../../../crates/storage/src/lib.rs#L1622
+[flush]: ../../../../crates/storage/src/lib.rs#L356-L366
+[scope-install]: ../../../../crates/storage/src/lib.rs#L1165-L1267
+[mode-hold]: ../../../../crates/storage/src/lib.rs#L1068-L1070
+[apply]: ../../../../crates/storage/src/lib.rs#L2129-L2167
+[gate-tests]: ../../../../crates/storage/src/lib.rs#L2290-L2629
+[probe]: ../../../../crates/storage/src/lib.rs#L5010-L5107
+[read-witness]: ../../../../crates/storage/src/lib.rs#L5296-L5325
+[temp-write]: ../../../../crates/storage/src/lib.rs#L5332-L5355
+[restore-test]: ../../../../crates/storage/src/lib.rs#L5361-L5413
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L5419-L5449
+[surface-test]: ../../../../crates/storage/src/lib.rs#L5456-L5476
+[cached-test]: ../../../../crates/storage/src/lib.rs#L4963
+[snapshot]: ../../../../crates/storage/src/lib.rs#L813-L823
+[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L978-L1000
+[infra-check]: ../../../../crates/storage/src/lib.rs#L1240-L1255
+[bound]: ../../../../crates/storage/src/lib.rs#L847
+[rename-test]: ../../../../crates/storage/src/lib.rs#L5114-L5154
+[pin-test]: ../../../../crates/storage/src/lib.rs#L2528-L2566
+[bound-test]: ../../../../crates/storage/src/lib.rs#L2477-L2498
+[durability-test]: ../../../../crates/storage/src/lib.rs#L4261-L4326
+[forge-test]: ../../../../crates/storage/src/lib.rs#L2441-L2471
+[defensive]: ../../../../crates/storage/src/lib.rs#L927
+[defensive-test]: ../../../../crates/storage/src/lib.rs#L2415-L2435
+[release-test]: ../../../../crates/storage/src/lib.rs#L2504-L2520
+[pin]: ../../../../crates/storage/src/lib.rs#L1006-L1022
+[maintenance-exit]: ../../../../crates/storage/src/lib.rs#L548-L557
+[unwind-test]: ../../../../crates/storage/src/lib.rs#L2571-L2620
+[profile]: ../../../../crates/memory-store/src/lib.rs#L496-L538
+[profile-test]: ../../../../crates/memory-store/src/lib.rs#L15111-L15138
+[sort-spill]: ../../../../crates/memory-store/src/lib.rs#L15145-L15170
+[capacity]: ../../../../crates/memory-store/src/lib.rs#L478
+[resource-pragmas]: ../../../../crates/storage/src/lib.rs#L5159-L5197
+[eviction-probe]: ../../../../crates/storage/src/lib.rs#L5203-L5262
+[pass-probe]: ../../../../crates/daemon/src/lib.rs#L24602-L24632
+[flush-test]: ../../../../crates/storage/src/lib.rs#L5478-L5520
+[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5564-L5603
+[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5527-L5557
+[unretained-policy-test]: ../../../../crates/storage/src/lib.rs#L5648-L5694
+[parsed-schema-test]: ../../../../crates/storage/src/lib.rs#L5609-L5642

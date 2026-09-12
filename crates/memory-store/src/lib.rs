@@ -460,6 +460,91 @@ pub enum MediaKind {
 /// store identity `storage::open_sqlite` checks on every open.
 const BASELINE: &str = include_str!("../baseline.sql");
 
+/// Bytes of page cache the store connection holds; `PRAGMA cache_size` is derived from
+/// this and the file's measured page size, so a file with a different page size holds the
+/// same bytes. The daemon counts this budget in its retained-resident declaration. The
+/// budget is declared, not measured; the W1 measurement contract owns its effect.
+pub const PAGE_CACHE_BUDGET_BYTES: i64 = 16 * 1024 * 1024;
+/// Bytes of the database file SQLite may map instead of reading into the page cache,
+/// capped by the library's compile-time maximum. Mapped pages are file-backed and
+/// reclaimable; the daemon still counts this budget in its retained-resident declaration.
+pub const MMAP_BUDGET_BYTES: i64 = 64 * 1024 * 1024;
+/// Prepared statements the connection keeps. Statements survive across fenced callbacks, so
+/// the cache must hold the whole hot set rather than one callback's statements. The crate
+/// prepares about 55 distinct literal texts through `prepare_cached`; nine sites format
+/// their text, and the `IN (...)` placeholder lists among them vary with the input shape,
+/// so the population is sampled by the daemon's steady-pass probe rather than counted.
+/// The kernel store uses 128 for a comparable set.
+pub const STATEMENT_CACHE_CAPACITY: usize = 128;
+
+/// What the connection-open path measured and set. Sizing is derived from these values,
+/// not from assumed defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionProfile {
+    /// `PRAGMA page_size` of the opened file.
+    pub page_size: i64,
+    /// `PRAGMA cache_size` in pages: the page-cache budget divided by the page size.
+    pub cache_pages: i64,
+    /// `PRAGMA mmap_size` as the library reports it after the budget was applied; zero when
+    /// the library was compiled without memory-mapped I/O.
+    pub mmap_bytes: i64,
+    /// `MAX_MMAP_SIZE` from `PRAGMA compile_options`; zero when the library was compiled
+    /// without memory-mapped I/O.
+    pub compile_max_mmap_bytes: i64,
+}
+
+impl ConnectionProfile {
+    /// Reads the file's page size and the library's compile options, applies the budgets
+    /// derived from them, and reads back what took effect. A library without the
+    /// `MAX_MMAP_SIZE` option is refused rather than silently left unmapped. `temp_store`
+    /// stays at its default: SQLite spills a sorter past `cache_size` only to a file-backed
+    /// temp store.
+    fn apply(conn: &storage::MaintenanceConn<'_>) -> rusqlite::Result<Self> {
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        if !(512..=65_536).contains(&page_size) || page_size.count_ones() != 1 {
+            return Err(rusqlite::Error::UserFunctionError(
+                format!("page_size {page_size} is not a power of two between 512 and 65536").into(),
+            ));
+        }
+        let mut options = conn.prepare("PRAGMA compile_options")?;
+        let compile_max_mmap_bytes = options
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .find_map(|option| {
+                option
+                    .strip_prefix("MAX_MMAP_SIZE=")
+                    .and_then(parse_compile_option_int)
+            })
+            .ok_or_else(|| {
+                rusqlite::Error::UserFunctionError(
+                    "compile option MAX_MMAP_SIZE is missing; the memory-map budget cannot be applied"
+                        .into(),
+                )
+            })?;
+        conn.pragma_update(None, "cache_size", PAGE_CACHE_BUDGET_BYTES / page_size)?;
+        conn.pragma_update(
+            None,
+            "mmap_size",
+            MMAP_BUDGET_BYTES.min(compile_max_mmap_bytes),
+        )?;
+        Ok(Self {
+            page_size,
+            cache_pages: conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
+            mmap_bytes: conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
+            compile_max_mmap_bytes,
+        })
+    }
+}
+
+/// Compile options print integers as decimal or as `0x`-prefixed hexadecimal.
+fn parse_compile_option_int(text: &str) -> Option<i64> {
+    match text.strip_prefix("0x") {
+        Some(hex) => i64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
 /// Sentinel row_version meaning "no row present" (COALESCE default inside the txn).
 const NO_ROW: i64 = -1;
 const MAX_DURABLE_TEXT_BYTES: usize = 512 * 1024;
@@ -5010,6 +5095,7 @@ impl<'a> FacadeMutationTxn<'a> {
 
 pub struct MemoryStore {
     inner: SqliteStore,
+    connection_profile: ConnectionProfile,
     // Distinguishes independent stores in the process-local tag baseline cache. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
@@ -5296,6 +5382,24 @@ impl MemoryStore {
         self.tag_cache_namespace
     }
 
+    /// What the connection-open path measured and set on this store's connection.
+    pub fn connection_profile(&self) -> &ConnectionProfile {
+        &self.connection_profile
+    }
+
+    /// Starts recording statement-cache reuse on the store's connection.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_statement_reuse_probe(&self) {
+        self.inner.start_statement_reuse_probe();
+    }
+
+    /// Per SQL text prepared through the statement cache since the probe started, how many
+    /// times the cache handed out a re-created handle after that text had already run.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn statement_evictions(&self) -> std::collections::BTreeMap<String, u32> {
+        self.inner.statement_evictions()
+    }
+
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, MemoryStoreError> {
         let inner = open_sqlite(descriptor, BASELINE)?;
         let note_caller_project = Arc::new(Mutex::new(None::<NoteCallerScope>));
@@ -5306,7 +5410,7 @@ impl MemoryStore {
         // The baseline's triggers call these functions; SQLite resolves them when a
         // trigger fires, so registering after the baseline is applied is sound, and the
         // same connection must expose them before the first guarded write is possible.
-        inner.with_conn_unfenced(move |conn| {
+        let connection_profile = inner.with_conn_unfenced(move |conn| {
             conn.create_scalar_function(
                 "note_caller_project",
                 0,
@@ -5412,10 +5516,12 @@ impl MemoryStore {
                         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
                 },
             )?;
-            Ok(())
+            conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+            ConnectionProfile::apply(conn)
         })?;
         let store = MemoryStore {
             inner,
+            connection_profile,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             note_caller_project,
             facade_authority_scope,
@@ -14999,6 +15105,68 @@ mod tests {
 
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         MemoryStore::test_descriptor(dir, "eidnara-test")
+    }
+
+    #[test]
+    fn the_connection_profile_is_derived_from_the_page_size_and_compile_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let profile = store.connection_profile();
+        assert_eq!(
+            profile.cache_pages * profile.page_size,
+            PAGE_CACHE_BUDGET_BYTES,
+            "the page cache holds the budget in pages of the measured size, got {profile:?}"
+        );
+        assert_eq!(
+            profile.mmap_bytes,
+            MMAP_BUDGET_BYTES.min(profile.compile_max_mmap_bytes),
+            "the map is the budget capped by the compile-time maximum, got {profile:?}"
+        );
+        let (cache_size, mmap_size): (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
+                    conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            (cache_size, mmap_size),
+            (profile.cache_pages, profile.mmap_bytes)
+        );
+    }
+
+    /// SQLite bounds a sorter's in-memory list at `cache_size` pages and spills excess rows
+    /// to the temp store only when the temp store uses files; with the temp store in memory
+    /// every sorted row stays in the heap. A read callback sorting four budgets of rows
+    /// retains about one budget when the bound applies.
+    #[test]
+    fn a_transient_sort_past_the_page_cache_budget_spills_instead_of_growing_the_heap() {
+        const PAYLOAD_BYTES: i64 = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rows = 4 * PAGE_CACHE_BUDGET_BYTES / PAYLOAD_BYTES;
+        let retained = store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?1)
+                     SELECT payload FROM (SELECT n, randomblob(?2) AS payload FROM seq)
+                      ORDER BY (n * 7919) % 10007, n",
+                )?;
+                let before = storage::library_memory_used();
+                let mut sorted = statement.query(params![rows, PAYLOAD_BYTES])?;
+                sorted.next()?.expect("the sort yields its first row");
+                Ok(storage::library_memory_used() - before)
+            })
+            .unwrap();
+        assert!(
+            retained <= 2 * PAGE_CACHE_BUDGET_BYTES,
+            "sorting {} bytes retained {retained} bytes; the sorter did not spill at the {} byte page-cache budget",
+            rows * PAYLOAD_BYTES,
+            PAGE_CACHE_BUDGET_BYTES
+        );
     }
 
     /// Editing one block through the accessors re-encodes that block and leaves the
