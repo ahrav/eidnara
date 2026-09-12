@@ -85,8 +85,8 @@ policy, M5 allocation acceptance, and final external scope remain owner gates.
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L998
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
-[scopes]: ../../../crates/storage/src/lib.rs#L1202-L1284
-[snapshot]: ../../../crates/storage/src/lib.rs#L5714-L5751
+[scopes]: ../../../crates/storage/src/lib.rs#L1210-L1292
+[snapshot]: ../../../crates/storage/src/lib.rs#L5749-L5786
 [history]: ../../../crates/daemon/src/decay_render.rs#L296-L338
 [prepare]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
 [outer]: ../../../crates/daemon/src/m0_compose.rs#L178-L215

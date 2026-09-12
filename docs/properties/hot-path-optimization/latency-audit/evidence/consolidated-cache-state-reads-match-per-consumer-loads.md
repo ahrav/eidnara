@@ -269,12 +269,12 @@ branch as well and passing in isolation.
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
 [scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4691-L4692
 [floor-live]: ../../../../../crates/daemon/src/lib.rs#L8217-L8221
-[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6473-L6488
-[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6435-L6447
-[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6453-L6467
+[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6479-L6498
+[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6441-L6457
+[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6459-L6477
 [select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4669-L4685
-[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15277-L15494
-[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15501-L15529
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15279-L15507
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15509-L15542
 [load-count]: ../../../../../crates/daemon/src/lib.rs#L24695-L24747
 [timing-test]: ../../../../../crates/daemon/src/lib.rs#L24753-L24765
 [phase-test]: ../../../../../crates/daemon/src/lib.rs#L24771-L24784

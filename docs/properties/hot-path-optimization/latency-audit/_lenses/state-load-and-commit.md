@@ -514,8 +514,8 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6503-L6633
 [with-conn]: ../../../../../crates/storage/src/lib.rs#L343-L360
 [fenced]: ../../../../../crates/storage/src/lib.rs#L409-L473
-[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1492-L1493
-[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2221-L2239
+[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1500-L1501
+[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2229-L2247
 [pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2330-L2357
 [audit]: ../../../../../crates/memory-store/src/lib.rs#L2376-L2534
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2555-L2558
@@ -613,8 +613,8 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36850
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36057
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36886
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36093
 [t-cas]: ../../../../../crates/daemon/src/lib.rs#L23425
 [t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
 [t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
@@ -638,4 +638,4 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15768
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15911
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L4278-L4343
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L4286-L4351

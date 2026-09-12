@@ -463,7 +463,7 @@ not a claim that no related check exists anywhere in the repository.
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1520
 [t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1817
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L37274
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L37310
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1707
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1746
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1793
@@ -524,8 +524,8 @@ not a claim that no related check exists anywhere in the repository.
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8308-L8316
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5510
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36850
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L36057
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36886
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L36093
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L23425
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L17055
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L17109
@@ -541,7 +541,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L15978
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L19388
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19183
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36714
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36750
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19506
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L20967
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15714
@@ -550,7 +550,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15768
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L606
 [t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15911
-[t-sync]: ../../../../crates/storage/src/lib.rs#L4278-L4343
+[t-sync]: ../../../../crates/storage/src/lib.rs#L4286-L4351
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249

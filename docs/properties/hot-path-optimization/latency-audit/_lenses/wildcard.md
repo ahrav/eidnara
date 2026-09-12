@@ -714,8 +714,8 @@ call site.
 [t-gate]: ../../../../../crates/daemon/src/config.rs#L1649
 [t-hostile]: ../../../../../crates/daemon/src/config.rs#L1715
 [t-mtime]: ../../../../../crates/daemon/src/config.rs#L2117-L2155
-[open-sqlite]: ../../../../../crates/storage/src/lib.rs#L1542-L1550
-[classify]: ../../../../../crates/storage/src/lib.rs#L2091-L2141
+[open-sqlite]: ../../../../../crates/storage/src/lib.rs#L1550-L1558
+[classify]: ../../../../../crates/storage/src/lib.rs#L2099-L2149
 [forbid-daemon]: ../../../../../crates/daemon/src/lib.rs
 [forbid-ms]: ../../../../../crates/memory-store/src/lib.rs
 [forbid-cc]: ../../../../../crates/context-core/src/lib.rs
