@@ -867,24 +867,30 @@ returned after the loop completes. `always` because
 [`user_memory_candidates`][obs-insert] are plain inserts with no dedupe
 (only [`primer_candidates`][primer-insert] upserts), and these rules define
 which rows a pass touches.
-Fault/timing angle: Process crash between the mark commit and the
-[per-row delete][delete-one]; the publish task's own drain
-([`:10762-10771`][publish-drain]) overlapping the pass drain on one session;
+Fault/timing angle: A failure between the target insert and the
+[retirement][retire] inside the delivery transaction; the publish task's own
+drain ([after a publish][publish-drain]) overlapping the pass drain on one
+session, so a drainer delivers a row another drainer already retired; a
+session reset that re-issues an outbox key while a stale handle is in flight;
 a target insert failing after the outbox state change in a reordered
-transaction; an empty-drain shortcut that skips the [leftover delete][delete-all];
-a delete-in-place that changes which rows [count as pending][status-sc].
+transaction; an empty-drain shortcut that skips the
+[sweep of rows an earlier build marked][delete-all]; a retirement that
+changes which rows [count as pending][status-sc].
 Required faults and enabling state: A published firing with events, primers,
-and user observations; a crash or abort injected between the two fenced
-transactions; a second drainer started between load and deliver; multiple
-rows per kind across two firings; an injected failure on one kind; `now_ms`
-before and after the computed `next_attempt_at_ms`.
+and user observations; a failure injected inside the delivery transaction
+after the insert; a second drainer that read the row before the first retired
+it; a row deleted and re-created under its key with another payload while a
+handle from the earlier read is held; multiple rows per kind across two
+firings; an injected failure on one kind; `now_ms` before and after the
+computed `next_attempt_at_ms`.
 Confidence: high - [Evidence](evidence/side-channel-drain-delivers-each-row-once-and-keeps-its-schedule.md).
 [`drain_historian_side_channels`][drain] and its [doc][drain-doc],
 [`load_due_historian_side_channels`][load-due] with the
 [order index][idx-order], [`deliver_historian_side_channel`][deliver],
-[`mark_historian_side_channel_delivered_tx`][mark] (requires `changed == 1`
-under `delivered_at_ms IS NULL`), and
-[`record_historian_side_channel_failure`][failure] are source-verified.
+[`retire_historian_side_channel_tx`][retire] (a `DELETE` under
+`delivered_at_ms IS NULL` and the row's payload that requires
+`changed == 1`), and [`record_historian_side_channel_failure`][failure] are
+source-verified.
 Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
 cover restart redelivery, per-kind isolation, CAS-loser enqueue, and revert
 deletion; all unaudited.
@@ -2647,8 +2653,8 @@ evaluation of this area and its disposition are recorded in
 [prepare]: ../../../../crates/daemon/src/lib.rs#L5041-L5114
 [no-fire]: ../../../../crates/daemon/src/lib.rs#L5497-L5510
 [handler]: ../../../../crates/daemon/src/lib.rs#L8176-L8439
-[received-call]: ../../../../crates/daemon/src/lib.rs#L8192
-[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8266-L8273
+[received-call]: ../../../../crates/daemon/src/lib.rs#L8206
+[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8282-L8289
 [commit-call]: ../../../../crates/daemon/src/lib.rs#L8266
 [roots-insert]: ../../../../crates/daemon/src/lib.rs#L8281-L8286
 [floor-a]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
@@ -2656,7 +2662,7 @@ evaluation of this area and its disposition are recorded in
 [floor-b]: ../../../../crates/daemon/src/lib.rs#L8420-L8439
 [pc-store]: ../../../../crates/daemon/src/lib.rs#L8449-L8456
 [guidance-remove]: ../../../../crates/daemon/src/lib.rs#L8460-L8465
-[completed-call]: ../../../../crates/daemon/src/lib.rs#L8498
+[completed-call]: ../../../../crates/daemon/src/lib.rs#L8512
 [cfg-models]: ../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1942-L1981
@@ -2667,14 +2673,14 @@ evaluation of this area and its disposition are recorded in
 [sched-test]: ../../../../crates/daemon/src/transform.rs#L13689
 [received]: ../../../../crates/memory-store/src/lib.rs#L7021-L7094
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L7018-L7020
-[flagged]: ../../../../crates/memory-store/src/lib.rs#L6570-L6588
+[flagged]: ../../../../crates/memory-store/src/lib.rs#L7045-L7061
 [stable]: ../../../../crates/memory-store/src/lib.rs#L7099-L7191
 [completed]: ../../../../crates/memory-store/src/lib.rs#L7196-L7244
 [completed-doc]: ../../../../crates/memory-store/src/lib.rs#L7193-L7195
 [rejected]: ../../../../crates/memory-store/src/lib.rs#L7250-L7303
 [sched-history]: ../../../../crates/memory-store/src/lib.rs#L7351-L7384
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L852-L869
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8698-L8707
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8888-L8897
 [commit-trace]: ../../../../crates/memory-store/src/lib.rs#L9026-L9093
 [json-content]: ../../../../crates/memory-store/src/lib.rs#L2251-L2261
 [record-scan]: ../../../../crates/memory-store/src/lib.rs#L2268-L2278
@@ -2692,18 +2698,17 @@ evaluation of this area and its disposition are recorded in
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1588-L1589
 [phase]: ../../../../crates/memory-store/src/lib.rs#L622-L631
 [drain]: ../../../../crates/memory-store/src/lib.rs#L11446-L11504
-[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L10945-L10947
+[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11441-L11445
 [status-sc]: ../../../../crates/memory-store/src/lib.rs#L11506-L11532
 [load-due]: ../../../../crates/memory-store/src/lib.rs#L11534-L11568
 [deliver]: ../../../../crates/memory-store/src/lib.rs#L11572-L11650
+[retire]: ../../../../crates/memory-store/src/lib.rs#L14415-L14440
 [failure]: ../../../../crates/memory-store/src/lib.rs#L11652-L11691
-[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11158-L11171
-[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11173-L11195
+[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11696-L11720
 [publish]: ../../../../crates/memory-store/src/lib.rs#L11197
 [publish-drain]: ../../../../crates/memory-store/src/lib.rs#L11400-L11409
 [kinds]: ../../../../crates/memory-store/src/lib.rs#L4812-L4815
 [events-insert]: ../../../../crates/memory-store/src/lib.rs#L14247-L14268
-[mark]: ../../../../crates/memory-store/src/lib.rs#L13872-L13897
 [primer-insert]: ../../../../crates/memory-store/src/lib.rs#L14442-L14484
 [obs-insert]: ../../../../crates/memory-store/src/lib.rs#L14486-L14507
 [receive-seam]: ../../../../crates/memory-store/src/lib.rs#L6305
@@ -2865,8 +2870,8 @@ evaluation of this area and its disposition are recorded in
 [rules-radius-doc]: ../../../../crates/secret-scanner/default_rules.yaml#L12
 [airtable]: ../../../../crates/secret-scanner/default_rules.yaml#L297-L309
 [edge-margin]: ../../../../crates/context-core/src/redaction.rs#L380-L385
-[ms-content]: ../../../../crates/memory-store/src/lib.rs#L2155-L2163
-[ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2442-L2477
+[ms-content]: ../../../../crates/memory-store/src/lib.rs#L2205-L2213
+[ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2506-L2541
 [snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L418-L430
 [as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L40-L46
 [trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L693
