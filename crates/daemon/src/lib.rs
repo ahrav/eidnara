@@ -8610,7 +8610,7 @@ impl Handler {
     ) -> PreparedOutcome {
         let body = serde_json::to_vec(&request).unwrap();
         let (_, outcome) = self
-            .dispatch_body(route, &body, probe_request(&body).as_ref())
+            .dispatch_body(route, &body, lane_probe(&body).as_ref())
             .await;
         outcome
     }
@@ -11924,7 +11924,7 @@ impl CompositeComponent for Handler {
             }
             None => return settle_prepared(&ctx, resident_capacity_error()).await,
         };
-        let probe = cap_probe.or_else(|| probe_request(body));
+        let probe = cap_probe.or_else(|| lane_probe(body));
         let (_, outcome) = self.dispatch_body(ctx.route, body, probe.as_ref()).await;
         settle_prepared(&ctx, outcome).await
     }
@@ -15468,6 +15468,16 @@ struct RequestEntryProbe {
 
 fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
     serde_json::from_slice(body).ok()
+}
+
+/// The probe that selects the lane for an admitted body. A body whose bytes never spell
+/// `transform` cannot name that route through the tree's unescaped read except by an escaped
+/// discriminator, which then takes the tree lane like any body without a probe, so the walk
+/// is skipped for it and a facade body pays only its `Value` parse, as before the direct lane.
+fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
+    memchr::memmem::find(body, b"transform")
+        .is_some()
+        .then(|| probe_request(body))?
 }
 
 /// The direct lane requires `true` so a body the tree refuses never decodes typed.
@@ -19631,6 +19641,11 @@ mod tests {
                     r#","native_messages":[{{"a":1,"{RAW_VALUE_TOKEN}":1}}]"#
                 )),
             ),
+            ("escaped discriminator", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(r#""kind":"transform""#, r#""kind":"tr\u0061nsform""#, 1)
+                    .into_bytes()
+            }),
             ("raw-value token after a key inside a message", {
                 let body = String::from_utf8(valid("")).unwrap();
                 body.replacen(
@@ -19730,6 +19745,7 @@ mod tests {
                 "other route",
                 "raw-value token holding a document",
                 "raw-value token not in first position",
+                "escaped discriminator",
                 "raw-value token after a key inside a message",
                 "nesting at the tree limit",
             ],
@@ -19838,7 +19854,7 @@ mod tests {
             let (tree, _store, _dir, _project) =
                 handler_with_store(Arc::new(ProducerState::default()), default_test_config());
             let (lane, through_body) = direct
-                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref())
+                .dispatch_body(test_route(7), &body, lane_probe(&body).as_ref())
                 .await;
             let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let through_tree = tree

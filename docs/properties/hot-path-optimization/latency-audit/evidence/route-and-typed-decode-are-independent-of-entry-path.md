@@ -137,7 +137,11 @@ body: the `method` and `kind` discriminators and whether any
 [`TRANSFORM_PAGE_FIELDS`][pageconst] key is present. A body over 1 MiB is
 probed by the byte cap before the resident reservation, as it always was; a
 body at or under 1 MiB is admitted by its length and probed after the
-reservation, so no parse runs before it, as before this change. The probe's
+reservation, so no parse runs before it, as before this change; that later
+[lane probe][lane-probe] runs only when the body's bytes spell `transform`
+somewhere, so a facade body pays its `Value` parse and nothing more, as before
+the direct lane, and a body naming the route only through an escaped
+discriminator takes the tree lane. The probe's
 one body-proportional cost is serde_json's unescape buffer for a long escaped
 key or discriminator, so this ordering keeps that buffer inside admission
 control for every body the cap does not need to classify. The probe's
@@ -211,13 +215,14 @@ before the term it peaked four copies against a three-copy charge.
 [`handle_transform_for_test`][test-entry] serializes its request and enters at
 the body branch, so the crate's transform tests run the direct lane.
 
-The [corpus][t-corpus] holds 42 bodies: a valid body under `kind` and under
+The [corpus][t-corpus] holds 43 bodies: a valid body under `kind` and under
 `method`, an unknown top-level field, `null` on an `Option` and on a defaulted
 field, a wrong type, a float, an exponent, a negative and an above-`u64`
 integer on integer fields, `-0` on a float field, a repeated top-level key, a
 repeated discriminator, a repeated nested key, a missing required field, a
 missing and an unknown serializer profile, a `null` and a lone page field, a
-non-string and an overlong `method` beside `kind`, another route, trailing
+non-string and an overlong `method` beside `kind`, an escaped discriminator,
+another route, trailing
 bytes, malformed JSON, array, string and empty bodies, `messages` as an object,
 an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
 field, the raw-value token opening an object under an ignored field, with a
@@ -230,7 +235,7 @@ asserts the same response with the timing block removed, or the same code and
 message; it pins the nine bodies that took the direct lane and asserts the valid
 body was served. The [decode differential][t-decode-diff] asserts for every
 body that the walk implies the tree parses it, that where both decodes accept a
-body they produce the same request (pinning the sixteen such bodies, with `-0`
+body they produce the same request (pinning the seventeen such bodies, with `-0`
 compared by bit pattern), pins the bodies only the tree accepts to the three
 repeated-key shapes (the derive refuses a repeated field; the handler's
 fallback carries them), pins the bodies only the direct decode accepts to the
@@ -319,33 +324,34 @@ against those failures.
 
 [handle-live]: ../../../../../crates/daemon/src/lib.rs#L11910-L11930
 [dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12667-L12689
+[lane-probe]: ../../../../../crates/daemon/src/lib.rs#L15473-L15481
 [probe-live]: ../../../../../crates/daemon/src/lib.rs#L15463-L15471
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15473-L15476
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15483-L15486
 [raw-token]: ../../../../../crates/daemon/src/lib.rs#L15453-L15460
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15487-L15520
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15532-L15556
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15559-L15646
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15650-L15655
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15665-L15672
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15867-L15890
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15497-L15530
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15542-L15566
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15569-L15656
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15660-L15665
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15675-L15682
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15877-L15900
 [direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7976-L7988
 [tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7992-L8012
 [typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8019
 [page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9531
-[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15763
+[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15773
 [test-entry]: ../../../../../crates/daemon/src/lib.rs#L8606-L8616
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19376-L19424
-[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19429-L19459
-[t-token]: ../../../../../crates/daemon/src/lib.rs#L19464-L19476
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19479-L19662
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19683-L19810
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19833-L19871
-[t-observed]: ../../../../../crates/daemon/src/lib.rs#L21464-L21492
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19296-L19373
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19386-L19434
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19439-L19469
+[t-token]: ../../../../../crates/daemon/src/lib.rs#L19474-L19486
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19489-L19677
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19698-L19826
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19849-L19887
+[t-observed]: ../../../../../crates/daemon/src/lib.rs#L21480-L21508
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19306-L19383
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L89-L127
 [t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L143-L164
 [t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L166-L187
-[scratch-live]: ../../../../../crates/daemon/src/lib.rs#L15765-L15766
+[scratch-live]: ../../../../../crates/daemon/src/lib.rs#L15775-L15776
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488
