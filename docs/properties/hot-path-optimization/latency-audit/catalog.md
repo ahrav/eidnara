@@ -2681,7 +2681,7 @@ evaluation of this area and its disposition are recorded in
 [drain-doc]: ../../../../crates/memory-store/src/lib.rs#L10803-L10805
 [status-sc]: ../../../../crates/memory-store/src/lib.rs#L10853-L10879
 [load-due]: ../../../../crates/memory-store/src/lib.rs#L10881-L10915
-[deliver]: ../../../../crates/memory-store/src/lib.rs#L11361-L11448
+[deliver]: ../../../../crates/memory-store/src/lib.rs#L11385-L11472
 [failure]: ../../../../crates/memory-store/src/lib.rs#L10975-L11014
 [delete-all]: ../../../../crates/memory-store/src/lib.rs#L11016-L11029
 [delete-one]: ../../../../crates/memory-store/src/lib.rs#L11031-L11053

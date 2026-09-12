@@ -199,9 +199,11 @@ not performance measurements or a full-workspace gate.
 | [`single_pass_preparation_reports_change_and_validates_unwalked_keys`][t-single-pass] | Clean input returns byte-identical with `changed` false; a substitution sets `changed` and records one detection; a secret-bearing key under an integrity- or identity-named container is refused. | unaudited |
 | [`a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector`][t-refusal-order] | The `keyed` store fixture, serialized and prepared directly, is refused with one detection in the caller's vector, so the store test's receipt count discriminates. | unaudited |
 | [`cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key`][t-meta-bytes] | Through `commit`: clean `meta` is stored as its serialization; a nested map value secret is substituted and recorded on the `meta` scan; a nested map key secret, preceded in walk order by a substituted value, is refused with no row and no added receipt. | unaudited |
-| [`settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain`][t-retire] | Audit row counts stay flat across six passes, and again across passes after a historian publish bumped the row version; a tag mint's scans are added and kept; the pass owner, the shared overlay owner, and the publish owner each hold exactly their own copies. | unaudited |
+| [`settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain`][t-retire] | Audit row counts stay flat across six passes, and again across passes after a historian publish bumped the row version; a tag mint's scans are added and kept; the pass owner, the retained owner, and the publish owner each hold exactly their own copies. | unaudited |
 | [`a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows`][t-seq-conflict] | A pass that loses the compartment-generation check retires nothing; the live pass's rows and owner copies are unchanged. | unaudited |
 | [`a_clean_pass_trace_receive_records_no_scan_audit_rows`][t-receive] | A clean receive records no audit row; a detected identity on a known session still does. | unaudited |
+| [`retained_pass_fields_keep_their_scan_receipts_across_the_next_pass`][t-retained] | A second pass keeps the first pass's receipts for its root, scheduler observation, interesting observation, and divergence while both roots, both history entries, and the divergence stay stored; the replaced `meta` keeps one live receipt; a third pass adds to the retained receipts. | unaudited |
+| [`reassigning_a_scan_range_leaves_later_scans_under_the_default_owner`][t-reassign] | Reassigning a scan range to another owner leaves the write's default owner list alone, so a scan prepared afterwards carries only the default owner. | unaudited |
 | [`a_crash_between_delivery_and_retirement_redelivers_once_under_concurrent_drainers`][t-side-channel-crash] | An injected failure between insert and retirement rolls both back; rows read by a second drainer before the first retired them deliver nothing a second time; the outbox ends empty rather than marked; the C6 marker is recorded per kind. | unaudited |
 | [`pass_trace_counts_every_outcome_and_a_failed_receive_does_not_veto_the_commit`][t-outcome] | Rejected, committed, and stable passes count three receives; a receive whose UPSERT fails inside its own transaction leaves the commit intact. | unaudited |
 | [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
@@ -669,8 +671,10 @@ their links are to the live tree.
 [t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15751-L15799
 [t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L15804-L15838
 [t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L720
-[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16302-L16440
-[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16445-L16474
-[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16479-L16521
-[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L19870-L20009
+[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16326-L16464
+[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16469-L16498
+[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16503-L16545
+[t-retained]: ../../../../crates/memory-store/src/lib.rs#L16584-L16683
+[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L23908-L23931
+[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20032-L20171
 [t-outcome]: ../../../../crates/daemon/src/lib.rs#L24765-L24809
