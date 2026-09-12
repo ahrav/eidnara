@@ -304,7 +304,7 @@ A third finding named the sorted re-read above: three corpus bodies placing
 the token after another key under `tail_delta`, in a `native_messages`
 element, and inside a message were added, and the entry differential failed on
 the first with the direct lane serving `need_full_sync` where the tree dispatch
-returned `bad_request` (`invalid type: integer `1`, expected raw value`); the
+returned `bad_request` (``invalid type: integer `1`, expected raw value``); the
 walk now refuses the token at every key and both differentials pass with the
 lists re-pinned.
 A fourth finding named a moved timing boundary: `request_observed_to_handler`

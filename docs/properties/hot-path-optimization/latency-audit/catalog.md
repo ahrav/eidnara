@@ -236,13 +236,15 @@ including `null`, selects the [page lane][pagefields]; anything else is
 of the three [transform-class names][class], the ceiling is inclusive at
 `MAX_TRANSFORM_FRAME_BYTES`, and the probe retains no body-proportional memory
 past its read (its unescape buffer for an escaped key is released with it).
-Decode: `decode_unpaged(body)` and `decode_via_value(body)` agree on accept
-versus reject, on the error code, and on the resulting `TransformRequest`
-for duplicate top-level keys (last wins today), unknown fields, `null` on
-`Option` and on defaulted fields, missing `session_id` or `render_config`,
-and malformed JSON (`unrecognized_request_shape` with `non-object JSON
-(null)`). Conservative probe refusals on duplicate discriminator keys are
-permitted. `always` because routing and decode run on every request and a
+Decode: where `decode_unpaged(body)` and `decode_via_value(body)` both
+accept a body they decode it to the same `TransformRequest`, and where both
+refuse they refuse with the same code, for unknown fields, `null` on `Option`
+and on defaulted fields, missing `session_id` or `render_config`, and
+malformed JSON (`unrecognized_request_shape` with `non-object JSON (null)`);
+a body with a duplicate top-level key is refused by the derived decoder and
+carried by the tree (last wins today), so it reaches the handler through the
+tree fallback and the entry outcome still agrees. Conservative probe refusals
+on duplicate discriminator keys are permitted. `always` because routing and decode run on every request and a
 divergence misroutes or rejects silently; the corpus makes the check finite.
 Fault/timing angle: None in time. A direct `from_slice::<TransformRequest>`
 on one lane derives the lane from `kind`, treats a `null` page field as
