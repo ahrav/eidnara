@@ -189,9 +189,11 @@ the lane it took, which the handler discards and the tests assert. The
 both decode their `Value` with `from_value` and enter the same
 [typed handler][typed-entry] the direct lane enters; the
 `request_observed_at_ms` read moved from the raw `Value` to the typed field,
-which decodes to the same value wherever the typed decode succeeds. The
-`handler_total` timing starts before the typed decode on both lanes; on the
-direct lane that decode reads the body bytes, so the direct lane's
+which decodes to the same value wherever the typed decode succeeds, and
+`request_observed_to_handler` still ends where the typed decode starts, the
+[boundary test][t-observed] holding a decode begun ten seconds earlier out of
+the span. The `handler_total` timing starts before the typed decode on both
+lanes; on the direct lane that decode reads the body bytes, so the direct lane's
 `handler_total` includes the byte parse that the tree lane's `Value` parse
 precedes. The walk's only body-proportional cost is serde_json's scratch buffer
 for one escaped string at a time, released with the walk, and it runs after the
@@ -251,10 +253,13 @@ transform-class body nested past the depth limit still admitted. The
 escape through the byte cap and measures less than half the body's size
 allocated; before the ordering above it measured the key's length.
 
-The numeric open question is answered by the run: the tree and the direct
-decode share one parser and one set of visitors, so a float or exponent on an
-integer field, an integer above `u64::MAX`, a negative on an unsigned field,
-and `-0` on a float field give the same accept or refusal on both. The
+The numeric open question is answered by the decode differential over the
+corpus, not by construction: the tree lane parses numbers into `Value` and
+`from_value` hands them to the typed visitors, while the direct lane hands the
+typed visitors the token, and on the corpus a float or exponent on an integer
+field, an integer above `u64::MAX`, a negative on an unsigned field, and `-0`
+on a float field gave the same accept or refusal on both, `-0` compared by bit
+pattern. The
 repeated-key question stays open as a contract question; the behavior is
 unchanged, last-wins through the tree.
 
@@ -294,6 +299,12 @@ the first with the direct lane serving `need_full_sync` where the tree dispatch
 returned `bad_request` (`invalid type: integer `1`, expected raw value`); the
 walk now refuses the token at every key and both differentials pass with the
 lists re-pinned.
+A fourth finding named a moved timing boundary: `request_observed_to_handler`
+sampled its clock after the typed decode where it had sampled before the
+`from_value` call. `request_observed_to_handler_ends_before_the_typed_decode`
+failed at `request_observed_to_handler was 20000 ms; the decode span of 10 s
+must not be counted in it` and passes with the sample backed to the decode
+start.
 `cargo test -p daemon --locked --no-fail-fast` then passed every test but the
 two `dreamer_run_task_bounds_*` tests, which fail under full-suite load on the
 base as well, and `publication_search_deadline_preserves_admission_without_recharging`,
@@ -306,34 +317,35 @@ tree dispatch refused it with `unrecognized_request_shape`, and the probe
 accepted it where the tree did not parse it. The rule and the split were added
 against those failures.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11906-L11926
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12663-L12685
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15459-L15467
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15469-L15472
-[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15449-L15456
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15483-L15516
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15528-L15552
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15555-L15642
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15646-L15651
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15661-L15668
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15863-L15886
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11910-L11930
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12667-L12689
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15463-L15471
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15473-L15476
+[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15453-L15460
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15487-L15520
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15532-L15556
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15559-L15646
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15650-L15655
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15665-L15672
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15867-L15890
 [direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7976-L7988
 [tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7992-L8012
-[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8017
-[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9527
-[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15759
-[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8602-L8612
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19372-L19420
-[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19425-L19455
-[t-token]: ../../../../../crates/daemon/src/lib.rs#L19460-L19472
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19475-L19658
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19679-L19806
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19829-L19867
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19292-L19369
+[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8019
+[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9531
+[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15763
+[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8606-L8616
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19376-L19424
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19429-L19459
+[t-token]: ../../../../../crates/daemon/src/lib.rs#L19464-L19476
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19479-L19662
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19683-L19810
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19833-L19871
+[t-observed]: ../../../../../crates/daemon/src/lib.rs#L21464-L21492
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19296-L19373
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L89-L127
 [t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L143-L164
 [t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L166-L187
-[scratch-live]: ../../../../../crates/daemon/src/lib.rs#L15761-L15762
+[scratch-live]: ../../../../../crates/daemon/src/lib.rs#L15765-L15766
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

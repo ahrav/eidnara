@@ -8014,6 +8014,8 @@ impl Handler {
     /// The transform handler proper. `decode_started_at` is taken before the typed decode
     /// on both lanes, so `handler_total` covers it; on the direct lane that decode reads
     /// the body bytes, on the tree lane the bytes were parsed into a `Value` before it.
+    /// `request_observed_to_handler` ends at that same instant, so the decode is counted
+    /// once, in `handler_total`.
     async fn handle_transform_typed(
         &self,
         channel: RouteHandle,
@@ -8024,10 +8026,12 @@ impl Handler {
     ) -> PreparedOutcome {
         let handler_started_at = decode_started_at;
         let mut delta_expand_ms = 0.0;
+        let decode_started_at_ms =
+            now_ms().saturating_sub(decode_started_at.elapsed().as_millis() as i64);
         let request_observed_to_handler = parsed
             .request_observed_at_ms
             .and_then(|observed| i64::try_from(observed).ok())
-            .map(|observed| now_ms().saturating_sub(observed) as f64)
+            .map(|observed| decode_started_at_ms.saturating_sub(observed) as f64)
             .unwrap_or(0.0);
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
         if serializer_profile.is_none() {
@@ -21455,6 +21459,36 @@ mod tests {
                 "profile {profile} changed the legacy response when serve_native=false"
             );
         }
+    }
+
+    /// `request_observed_to_handler` ends where the typed decode starts, on both lanes: a
+    /// decode that began ten seconds ago does not add those seconds to the span.
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_observed_to_handler_ends_before_the_typed_decode() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let observed_at = now_ms() - 20_000;
+        let mut body = request(vec![ck("m1", 1, "hello")]);
+        body["request_observed_at_ms"] = json!(observed_at);
+        let parsed: TransformRequest = serde_json::from_value(body).unwrap();
+        let decode_started_at = Instant::now() - Duration::from_secs(10);
+        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let outcome = handler
+            .handle_transform_typed(test_route(7), parsed, false, decode_started_at, &ticket)
+            .await;
+        ticket.finish(false);
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("unexpected handler outcome: {outcome:?}");
+        };
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        let span = response["timings"]["request_observed_to_handler"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (9_000.0..11_000.0).contains(&span),
+            "request_observed_to_handler was {span} ms; the decode span of 10 s must not be \
+             counted in it"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
