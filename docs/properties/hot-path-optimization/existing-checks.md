@@ -152,7 +152,7 @@ Checks added with the mode-gated authorizer (implementation base
 | [Foreign rename observed][rename-test] | After an `ALTER TABLE ... RENAME` on a second connection, the next callback denies a temp shadow of the new name, allows the old one, and still refuses a maintenance-left shadow. | unaudited |
 | [Rescan flushes cached statements][rescan-flush-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a second connection creates main `late` and writes the old schema version back; no temp `late` is created. Failed with `Ok(())` before the rescan flushed the cache. | unaudited |
 | [Unretained policy still flushes][unretained-policy-test] | A `CREATE TEMP TABLE late (x)` cached under an oversized foreign schema is refused `not authorized` after a second connection creates main `late` and writes back the schema version the store last saw; no temp `late` is created. Failed with `Ok(())` while the retained snapshot survived an oversized replacement. | unaudited |
-| [Foreign journal-mode switch refused][foreign-wal-test] | A second connection's `PRAGMA journal_mode = DELETE` fails with `database is locked` while the store is open and idle; the store's next fenced write still runs in WAL without re-running the pin. | unaudited |
+| [Foreign journal-mode switch refused][foreign-wal-test] | A second connection's `PRAGMA journal_mode = DELETE` returns the unchanged `wal` mode or a `DatabaseBusy` error while the store is open and idle; the store's next fenced write still runs in WAL without re-running the pin. | unaudited |
 
 [reuse-probe]: ../../../crates/storage/src/lib.rs#L4878-L4975
 [read-witness]: ../../../crates/storage/src/lib.rs#L5029-L5058

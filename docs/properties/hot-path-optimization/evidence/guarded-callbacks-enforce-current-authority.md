@@ -129,10 +129,10 @@ snapshot, and leaving its temp shadow to be refused. The
 fenced-re-pins case, and the journal-mode refusal is unchanged. Another
 connection cannot leave WAL while this one holds the database open, and
 `synchronous` is connection-local, so the pin holds between maintenance
-callbacks; the [foreign-WAL test][foreign-wal-test] shows a second
-connection's `PRAGMA journal_mode = DELETE` returning `database is locked`
-while the store is idle between callbacks, and the next fenced write still in
-WAL. A snapshot is retained only within
+callbacks; the [foreign-WAL test][foreign-wal-test] accepts a second
+connection's `PRAGMA journal_mode = DELETE` returning the unchanged `wal` mode
+or a `DatabaseBusy` error while the store is idle between callbacks, and
+shows the next fenced write still in WAL. A snapshot is retained only within
 [`SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`][bound], measured over the collections'
 heap including hashbrown buckets, the trailing control group, and the `Arc`
 counts, which the daemon adds to its declared
