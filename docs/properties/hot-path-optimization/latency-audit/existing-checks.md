@@ -192,14 +192,17 @@ not performance measurements or a full-workspace gate.
 | [`a_steady_pass_loads_the_full_cache_state_row_once_before_the_transform`][t-load-count] | A steady pass runs the full row select once before the transform and once after the commit, split by the interleave hook, on a handle that was never evicted. | unaudited |
 | [`single_pass_preparation_reports_change_and_validates_unwalked_keys`][t-single-pass] | Clean input returns byte-identical with `changed` false; a substitution sets `changed` and records one detection; a secret-bearing key under an integrity- or identity-named container is refused. | unaudited |
 | [`cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key`][t-meta-bytes] | Through `commit`: clean `meta` is stored as its serialization; a nested map value secret is substituted and recorded on the `meta` scan; a nested map key secret is refused with no row. | unaudited |
+| [`settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain`][t-retire] | Audit row counts stay flat across six passes, and again across passes after a historian publish bumped the row version; a tag mint's scans are added and kept; the pass owner, the shared overlay owner, and the publish owner each hold exactly their own copies. | unaudited |
+| [`a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows`][t-seq-conflict] | A pass that loses the compartment-generation check retires nothing; the live pass's rows and owner copies are unchanged. | unaudited |
+| [`a_clean_pass_trace_receive_records_no_scan_audit_rows`][t-receive] | A clean receive records no audit row; a detected identity on a known session still does. | unaudited |
+| [`a_crash_between_delivery_and_retirement_redelivers_once_under_concurrent_drainers`][t-crash] | An injected failure between insert and retirement rolls both back; rows read by a second drainer before the first retired them deliver nothing a second time; the outbox ends empty rather than marked; the C6 marker is recorded per kind. | unaudited |
+| [`pass_trace_counts_every_outcome_and_a_failed_receive_does_not_veto_the_commit`][t-outcome] | Rejected, committed, and stable passes count three receives; a receive whose UPSERT fails inside its own transaction leaves the commit intact. | unaudited |
 | [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
 
 None found: `first_divergence`
 NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
 commits twice; a `pass_trace` write failure beside a successful cache commit;
-a crash between the outbox mark commit and the delete commit; two drainers
-overlapping on one session; outbox ordering across firings, the per-kind
-limit, or the backoff values.
+outbox ordering across firings, the per-kind limit, or the backoff values.
 
 Suspiciously quiet: the drain result and every trace result are discarded
 with `let _ =` in the handler, so a regression in either surfaces only
@@ -652,3 +655,8 @@ their links are to the live tree.
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24716-L24729
 [t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15537-L15582
 [t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L701
+[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16263-L16401
+[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16406-L16435
+[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16440-L16482
+[t-crash]: ../../../../crates/memory-store/src/lib.rs#L19831-L19970
+[t-outcome]: ../../../../crates/daemon/src/lib.rs#L24736-L24780

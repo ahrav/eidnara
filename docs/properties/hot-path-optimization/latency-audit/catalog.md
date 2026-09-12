@@ -755,9 +755,12 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - Reject, success, repeated-reject, frozen-state, status,
-scheduler, and secret-session tests exist; none covers `first_divergence`
-after a rejected pass, `receive_count` after an Emergency95 rerun, or a
-`pass_trace` failure beside a successful cache commit.
+scheduler, and secret-session tests exist; the
+[outcome test](evidence/pass-trace-writes-count-every-pass-outside-the-cache-cas.md#receive-cost-evidence)
+covers a rejected, committed, and stable pass counting three receives and a
+`pass_trace` receive failure beside a successful cache commit; none covers
+`first_divergence` after a rejected pass or `receive_count` after an
+Emergency95 rerun.
 Guarantee: The receive breadcrumb is independent of the pass outcome and of
 the cache-state CAS, and diagnostics can neither veto nor enlarge the state
 commit.
@@ -822,9 +825,13 @@ Type: safety
 Reachability: explicit-config-only
 Status: active
 Exercised: partial - Restart redelivery and per-kind fault isolation exist;
-none covers a crash between the mark commit and the delete commit, two
-overlapping drainers, ordering across firings, the per-kind limit, or the
-backoff values.
+the
+[crash test](evidence/side-channel-drain-delivers-each-row-once-and-keeps-its-schedule.md#single-transaction-evidence)
+covers a crash between the target insert and the retirement, and a drainer
+that delivers rows another drainer already retired; a crash between a mark
+commit and a delete commit is no longer constructible because delivery and
+retirement share one commit; none covers ordering across firings, the
+per-kind limit, or the backoff values.
 Guarantee: The outbox row is the only duplicate guard for events and user
 observations, and the drain's scheduling shape is unchanged by any
 transaction restructuring.
@@ -967,8 +974,12 @@ Exercised: partial - [`status_diagnostics_surface_pending_historian_side_channel
 constructs one pending `event` row and a pass whose drain delivers it;
 [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc]
 leaves one pending row per kind, one kind at a time, and drains it directly;
-no campaign marker records the situation and no run has all three kinds due
-in one pass drain.
+the
+[crash test](evidence/side-channel-row-is-due-during-a-drain.md#marker-evidence)
+records the `DueSideChannelMarker` for all three kinds due in one direct
+drain, a `reachable` witness for the drain function rather than a `sometimes`
+witness for a handler pass; no run has all three kinds due in a handler pass
+drain.
 Guarantee: A cache-state campaign reaches a pass drain with a due outbox row
 of each kind, so C3's per-row clauses are evaluated on real rows rather than
 on an empty drain.
@@ -2661,7 +2672,7 @@ evaluation of this area and its disposition are recorded in
 [drain-doc]: ../../../../crates/memory-store/src/lib.rs#L10803-L10805
 [status-sc]: ../../../../crates/memory-store/src/lib.rs#L10853-L10879
 [load-due]: ../../../../crates/memory-store/src/lib.rs#L10881-L10915
-[deliver]: ../../../../crates/memory-store/src/lib.rs#L10917-L10973
+[deliver]: ../../../../crates/memory-store/src/lib.rs#L11361-L11448
 [failure]: ../../../../crates/memory-store/src/lib.rs#L10975-L11014
 [delete-all]: ../../../../crates/memory-store/src/lib.rs#L11016-L11029
 [delete-one]: ../../../../crates/memory-store/src/lib.rs#L11031-L11053

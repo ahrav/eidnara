@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The implementation evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -94,20 +96,41 @@ test records the marker, and none has all three kinds due in one pass drain.
   witness rather than the exemption.
 - Conclusion: resolved with answer - constructible; the witness is recorded.
 
-[pass-drain]: ../../../../../crates/daemon/src/lib.rs#L8124-L8128
-[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L35555
-[daemon-cargo]: ../../../../../crates/daemon/Cargo.toml#L92
-[cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
-[cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
-[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4513-L4516
-[fail-sc]: ../../../../../crates/memory-store/src/lib.rs#L5900-L5909
-[publish]: ../../../../../crates/memory-store/src/lib.rs#L10559
-[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10762-L10771
-[drain]: ../../../../../crates/memory-store/src/lib.rs#L10806-L10851
-[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L10853-L10879
-[load-due]: ../../../../../crates/memory-store/src/lib.rs#L10881-L10915
-[due-predicate]: ../../../../../crates/memory-store/src/lib.rs#L10893-L10894
-[backoff]: ../../../../../crates/memory-store/src/lib.rs#L10981-L10985
-[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L13713-L13737
-[t-faults-sc]: ../../../../../crates/memory-store/src/lib.rs#L18704-L18801
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L18920-L18974
+[pass-drain]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8124-L8128
+[t-status-sc]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L35555
+[daemon-cargo]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/Cargo.toml#L92
+[cfg-models]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/config.rs#L119
+[cfg-user-mem]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/config.rs#L126
+[kinds]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4513-L4516
+[fail-sc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5900-L5909
+[publish]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10559
+[publish-drain]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10762-L10771
+[drain]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10806-L10851
+[status-sc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10853-L10879
+[load-due]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10881-L10915
+[due-predicate]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10893-L10894
+[backoff]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10981-L10985
+[enqueue]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13713-L13737
+[t-faults-sc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L18704-L18801
+[t-restart]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L18920-L18974
+
+## Marker evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/434)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+The [drain][drain-live] records a `DueSideChannelMarker` for every kind whose
+due read returns rows: the kind, the pending rows read, and the drain's
+`now_ms`, before delivery runs. The marker is compiled under `test-support`,
+so daemon tests reach it; the store keeps the newest 64 so a long-lived
+`test-support` daemon does not grow it without bound. The
+[crash test][crash-test] asserts a marker for each of the three kinds with one
+pending row; the situation is a failed inline delivery followed by a direct
+call to the drain function, not a handler pass, so the witness is `reachable`
+for the drain function rather than the `sometimes` witness the record's
+guarantee names. A handler-pass run with all three kinds due is still open.
+
+[drain-live]: ../../../../../crates/memory-store/src/lib.rs#L11235-L11293
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L19831-L19970

@@ -2046,6 +2046,9 @@ struct PreparedWrite {
     scans: Vec<PreparedFieldScan>,
     domain_owners: Vec<PreparedDomainOwner>,
     existing_scan_links: BTreeSet<PreparedExistingScanLink>,
+    /// Set by a write whose audit rows may be omitted when every scan preserved an existing
+    /// identity and found nothing; every other write records its clean scans.
+    skip_audit_when_only_clean_identities: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2091,7 +2094,16 @@ impl PreparedWrite {
             scans: Vec::new(),
             domain_owners: Vec::new(),
             existing_scan_links: BTreeSet::new(),
+            skip_audit_when_only_clean_identities: false,
         }
+    }
+
+    /// Lets this write omit its audit rows when every scan preserved an existing identity
+    /// and found nothing. Such a scan substitutes no byte, refuses nothing, and carries no
+    /// detection; its rows would state only that the identity was read again. A write that
+    /// wants the receipt anyway, as the authority and lineage writes do, leaves this unset.
+    fn skip_audit_when_only_clean_identities(&mut self) {
+        self.skip_audit_when_only_clean_identities = true;
     }
 
     fn domain_owner(
@@ -2132,6 +2144,32 @@ impl PreparedWrite {
             if !scan.owners.contains(&owner) {
                 scan.owners.push(owner.clone());
             }
+        }
+    }
+
+    /// Makes `owner` the only owner of the scans in `range`, registering it as a domain
+    /// owner of the write. Called after every field is prepared, so no later scan inherits
+    /// the owner through the default owner list.
+    fn own_scans_in(
+        &mut self,
+        range: std::ops::Range<usize>,
+        scope_kind: &'static str,
+        scope_key: impl Into<String>,
+        owner_key: impl Into<String>,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+        let owner = PreparedDomainOwner {
+            scope_kind,
+            scope_key: scope_key.into(),
+            owner_key: owner_key.into(),
+        };
+        if !self.domain_owners.contains(&owner) {
+            self.domain_owners.push(owner.clone());
+        }
+        for scan in &mut self.scans[range] {
+            scan.owners = vec![owner.clone()];
         }
     }
 
@@ -2379,9 +2417,22 @@ impl ActiveWriteTransaction<'_> {
             .domain_owner(scope_kind, scope_key, owner_key);
     }
 
+    /// Writes the audit rows for the prepared scans. A write that opted in through
+    /// [`PreparedWrite::skip_audit_when_only_clean_identities`] records nothing when every
+    /// scan preserved an existing identity and found nothing; any substituting, rejecting,
+    /// or detecting scan keeps the whole write's rows.
     fn persist_audit(&self) -> rusqlite::Result<()> {
         let prepared = self.prepared.borrow();
         if prepared.scans.is_empty() {
+            return Ok(());
+        }
+        let preserve_only_and_clean = prepared.scans.iter().all(|scan| {
+            scan.detection_action == "preserve" && scan.redaction.detections.is_empty()
+        });
+        if prepared.skip_audit_when_only_clean_identities
+            && preserve_only_and_clean
+            && prepared.existing_scan_links.is_empty()
+        {
             return Ok(());
         }
         if prepared.domain_owners.is_empty() {
@@ -2413,7 +2464,7 @@ impl ActiveWriteTransaction<'_> {
                 let private_scope_key = active_scan_private_key(owner.scope_kind, &owner.scope_key);
                 let private_owner_key =
                     active_scan_private_key(prepared.owner_kind, &owner.owner_key);
-                let proposed_scope_id = opaque_sqlite_id(self.tx)?;
+                let proposed_scope_id = opaque_id()?;
                 insert_scope.execute(params![
                     proposed_scope_id,
                     owner.scope_kind,
@@ -2423,7 +2474,7 @@ impl ActiveWriteTransaction<'_> {
                     .query_row(params![owner.scope_kind, private_scope_key], |row| {
                         row.get(0)
                     })?;
-                let proposed_owner_id = opaque_sqlite_id(self.tx)?;
+                let proposed_owner_id = opaque_id()?;
                 insert_owner.execute(params![
                     proposed_owner_id,
                     owner_scope_id,
@@ -2437,7 +2488,7 @@ impl ActiveWriteTransaction<'_> {
                 domain_owner_ids.push((owner.clone(), domain_owner_id));
             }
         }
-        let batch_id = opaque_sqlite_id(self.tx)?;
+        let batch_id = opaque_id()?;
         self.tx
             .prepare_cached(
                 "INSERT INTO scan_batches(scan_batch_id,owner_kind,created_at_ms)
@@ -2472,7 +2523,7 @@ impl ActiveWriteTransaction<'_> {
                     )),
                 )));
             }
-            let scan_id = opaque_sqlite_id(self.tx)?;
+            let scan_id = opaque_id()?;
             insert_scan.execute(params![
                 scan_id,
                 batch_id,
@@ -2491,7 +2542,7 @@ impl ActiveWriteTransaction<'_> {
                         )))
                     })?;
                 insert_copy.execute(params![
-                    opaque_sqlite_id(self.tx)?,
+                    opaque_id()?,
                     scan_id,
                     domain_owner_id,
                     prepared.owner_kind,
@@ -2558,9 +2609,18 @@ fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
 
 const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 
-fn opaque_sqlite_id(tx: &GuardedConn<'_>) -> rusqlite::Result<String> {
-    tx.prepare_cached("SELECT lower(hex(randomblob(16)))")?
-        .query_row([], |row| row.get(0))
+/// Thirty-two lowercase hex characters from sixteen random bytes, the shape every audit
+/// identifier column checks. Generated in Rust so an audit write spends no statement on an
+/// identifier; the per-row link copy below keeps SQLite's `randomblob` because it needs one
+/// value per selected row.
+fn opaque_id() -> rusqlite::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
+            "random source unavailable for an audit identifier: {error}"
+        ))))
+    })?;
+    Ok(hex_digest(bytes))
 }
 
 /// Deletes the audit rows that lost their last owner, restricted to `scan_ids`.
@@ -2691,6 +2751,26 @@ fn retire_active_scan_scope(
     retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
 }
 
+/// Markers kept per store; the oldest is dropped past this many.
+#[cfg(any(test, feature = "test-support"))]
+const DUE_SIDE_CHANNEL_MARKER_CAP: usize = 64;
+
+/// A drain that found due outbox rows for one kind before delivering them.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueSideChannelMarker {
+    pub kind: String,
+    pub pending_rows: usize,
+    pub now_ms: i64,
+}
+
+/// Owner of the scans the latest accepted pass recorded for the fields it replaces in
+/// `cache_state` and `pass_trace`. One key rather than one per row version: other writers
+/// bump `row_version` without passing through `commit_transform`, and a key they never
+/// register could not be retired by the next pass, so the next pass retires this owner
+/// whatever wrote the row it replaces.
+const CACHE_STATE_PASS_OWNER_KEY: &str = "cache_state_pass";
+
 fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
     for part in parts {
@@ -2709,9 +2789,9 @@ fn active_scan_private_key(kind: &str, value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn hex_digest(bytes: [u8; 32]) -> String {
+fn hex_digest<const N: usize>(bytes: [u8; N]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(64);
+    let mut output = String::with_capacity(N * 2);
     for byte in bytes {
         output.push(char::from(HEX[usize::from(byte >> 4)]));
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
@@ -5167,6 +5247,19 @@ pub struct MemoryStore {
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
+    /// Kinds whose next delivery fails after the target insert and before the outbox
+    /// retirement, inside the delivery transaction, so the rollback of both is observable.
+    #[cfg(any(test, feature = "test-support"))]
+    historian_side_channel_crash_after_insert_once: Mutex<BTreeSet<String>>,
+    /// One entry per drain that found due rows for a kind: the kind, the pending rows read,
+    /// and the drain's `now_ms`, recorded before delivery runs.
+    #[cfg(any(test, feature = "test-support"))]
+    due_side_channel_markers: Mutex<Vec<DueSideChannelMarker>>,
+    /// Makes the next `trace_pass_received` fail inside its transaction, before the
+    /// UPSERT, so a caller's independence from the breadcrumb can be shown on a healthy
+    /// store.
+    #[cfg(any(test, feature = "test-support"))]
+    pass_trace_receive_fail_once: std::sync::atomic::AtomicBool,
     /// Makes the next `authority_project_for_route` fail as a backend error,
     /// so a caller's store-failure branch can be exercised on a healthy store.
     #[cfg(any(test, feature = "test-support"))]
@@ -5597,6 +5690,12 @@ impl MemoryStore {
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            historian_side_channel_crash_after_insert_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            due_side_channel_markers: Mutex::new(Vec::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            pass_trace_receive_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
@@ -6070,6 +6169,37 @@ impl MemoryStore {
             "unknown historian side-channel kind: {kind}"
         );
         self.historian_side_channel_fail_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(kind.to_string());
+    }
+
+    /// Makes the next `trace_pass_received` fail inside its transaction, before its UPSERT.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_pass_trace_receive_for_test(&self) {
+        self.pass_trace_receive_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every drain that found due outbox rows for a kind, in order: the marker the C6
+    /// record names, recorded from the outbox read before delivery ran.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn due_side_channel_markers(&self) -> Vec<DueSideChannelMarker> {
+        self.due_side_channel_markers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Makes the next delivery of `kind` fail between its target insert and its outbox
+    /// retirement, inside the delivery transaction.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn crash_next_historian_side_channel_after_insert_for_test(&self, kind: &str) {
+        assert!(
+            HISTORIAN_SIDE_CHANNEL_KINDS.contains(&kind),
+            "unknown historian side-channel kind: {kind}"
+        );
+        self.historian_side_channel_crash_after_insert_once
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(kind.to_string());
@@ -6753,9 +6883,22 @@ impl MemoryStore {
         let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
         write.domain_owner("session", session_id, "pass_trace");
         write.existing_identity("session_id", session_id)?;
+        // The breadcrumb carries no content of its own; a clean identity leaves the audit
+        // with nothing to say, so the ordinary pass pays the one UPSERT below.
+        write.skip_audit_when_only_clean_identities();
         let flagged = write.recorded_detections(&["session_id"]);
+        #[cfg(any(test, feature = "test-support"))]
+        let fail_upsert = self
+            .pass_trace_receive_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
+            #[cfg(any(test, feature = "test-support"))]
+            if fail_upsert {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    MemoryStoreError::Serde("injected pass-trace receive failure".to_string()),
+                )));
+            }
             // A clean identity skips this query, so the ordinary pass pays one UPSERT.
             // A detected one is only tolerable when the session is already keyed by it;
             // a trace breadcrumb must not be what introduces a secret-bearing session.
@@ -8439,7 +8582,20 @@ impl MemoryStore {
     ) -> Result<u64, MemoryStoreError> {
         ensure_durable_text_bound(session_id)?;
         let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
-        write.domain_owner("session", session_id, "cache_state");
+        // `row_version` uses SQLite's signed `i64` range; reject values whose successor
+        // would overflow or equal `NO_ROW`.
+        let next = request
+            .expected
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|next| i64::try_from(*next).is_ok())
+            .ok_or_else(|| {
+                MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
+            })?;
+        // The fields this pass replaces in `cache_state` and `pass_trace` are owned by the
+        // latest pass and retired when the next pass settles over them; only the cumulative
+        // overlay rows stay under the shared owner below.
+        write.domain_owner("session", session_id, CACHE_STATE_PASS_OWNER_KEY);
         // Record the scan without deciding on it. Whether this `session_id` is a new
         // identity is settled by the row this transaction actually finds, because a
         // `delete_session` landing after an out-of-transaction existence read would leave a
@@ -8494,6 +8650,7 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
+        let overlay_scans_start = write.scans.len();
         let tag_mints = tag_mints
             .iter()
             .map(|input| {
@@ -8541,6 +8698,7 @@ impl MemoryStore {
                 })
             })
             .transpose()?;
+        let overlay_scans = overlay_scans_start..write.scans.len();
         let max_seen_ordinal = max_seen_ordinal
             .map(|ordinal| {
                 i64::try_from(ordinal).map_err(|_| {
@@ -8587,15 +8745,6 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
-        // `row_version` uses SQLite's signed `i64` range; reject values whose successor
-        // would overflow or equal `NO_ROW`.
-        let next = expected
-            .unwrap_or(0)
-            .checked_add(1)
-            .filter(|next| i64::try_from(*next).is_ok())
-            .ok_or_else(|| {
-                MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
-            })?;
         let scheduler_interesting_json = scheduler_observation
             .filter(|_| {
                 scheduler_pass_is_interesting(
@@ -8632,6 +8781,9 @@ impl MemoryStore {
         } else {
             current_time_ms()
         };
+        // Tag, temporal-mark, user-hint, and channel-1 rows accumulate across passes and
+        // stay owned by the session's shared owner; every other scan belongs to this pass.
+        write.own_scans_in(overlay_scans, "session", session_id, "cache_state");
 
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
@@ -8674,6 +8826,18 @@ impl MemoryStore {
                 }
             }
 
+            // Every check that can turn this transaction into a replay has passed. The pass
+            // that wrote the row this one replaces has settled, so its scans no longer
+            // describe stored bytes; this pass's scans are persisted after the writes.
+            if current != NO_ROW {
+                retire_active_scan_domain_owner(
+                    tx,
+                    "session",
+                    session_id,
+                    DurableWriteFamily::CacheState.owner_kind(),
+                    CACHE_STATE_PASS_OWNER_KEY,
+                )?;
+            }
             // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
             tx.execute(
                 "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
@@ -11064,8 +11228,10 @@ impl MemoryStore {
     }
 
     /// Drain due historian side-channel work without coupling any target table to another.
-    /// A successful target write marks the outbox row delivered in the same transaction; the
-    /// acknowledgement row is deleted only after that commit, so restart replay is idempotent.
+    /// A successful target write retires the outbox row in the same fenced transaction,
+    /// guarded by the row still being pending, so a row is delivered exactly once whether a
+    /// second drainer runs beside this one or the process restarts between drains. Rows an
+    /// earlier build marked delivered without deleting are swept first when any exist.
     pub fn drain_historian_side_channels(
         &self,
         session_id: &str,
@@ -11086,15 +11252,28 @@ impl MemoryStore {
                 now_ms,
                 per_kind_limit.min(HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND),
             )?;
+            #[cfg(any(test, feature = "test-support"))]
+            if !rows.is_empty() {
+                let mut markers = self
+                    .due_side_channel_markers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if markers.len() == DUE_SIDE_CHANNEL_MARKER_CAP {
+                    markers.remove(0);
+                }
+                markers.push(DueSideChannelMarker {
+                    kind: kind.to_string(),
+                    pending_rows: rows.len(),
+                    now_ms,
+                });
+            }
             for row in rows {
                 result.attempted += 1;
-                match self.deliver_historian_side_channel(&row, now_ms) {
-                    Ok(()) => {
-                        result.succeeded += 1;
-                        if let Err(error) = self.delete_delivered_historian_side_channel(&row) {
-                            bookkeeping_error.get_or_insert(error);
-                        }
-                    }
+                match self.deliver_historian_side_channel(&row) {
+                    Ok(true) => result.succeeded += 1,
+                    // Another drainer retired the row after this one read it; nothing was
+                    // delivered here and nothing is due.
+                    Ok(false) => {}
                     Err(error) => {
                         result.failed += 1;
                         if let Err(record_error) =
@@ -11177,11 +11356,12 @@ impl MemoryStore {
         })?)
     }
 
+    /// Delivers one due row. `Ok(false)` means another drainer retired the row first, so
+    /// this transaction rolled back and delivered nothing.
     fn deliver_historian_side_channel(
         &self,
         row: &HistorianSideChannelOutboxRow,
-        now_ms: i64,
-    ) -> Result<(), MemoryStoreError> {
+    ) -> Result<bool, MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         if self
             .historian_side_channel_fail_once
@@ -11195,44 +11375,76 @@ impl MemoryStore {
             )));
         }
 
-        match row.id.kind.as_str() {
-            "event" => {
-                let candidate: HistorianEventCandidate = serde_json::from_str(&row.payload_json)
-                    .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                self.inner.with_conn_fenced(|tx| {
+        #[cfg(any(test, feature = "test-support"))]
+        let crash_after_insert = self
+            .historian_side_channel_crash_after_insert_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&row.id.kind);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let crash_after_insert = false;
+
+        // The target insert and the outbox retirement commit together or not at all.
+        let deliver = |tx: &GuardedConn<'_>| -> rusqlite::Result<()> {
+            match row.id.kind.as_str() {
+                "event" => {
+                    let candidate: HistorianEventCandidate =
+                        serde_json::from_str(&row.payload_json).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(
+                                MemoryStoreError::Serde(error.to_string()),
+                            ))
+                        })?;
                     insert_historian_events_tx(
                         tx,
                         &row.session_id,
                         std::slice::from_ref(&candidate),
                     )?;
-                    mark_historian_side_channel_delivered_tx(tx, row, now_ms)
-                })?;
-            }
-            "primer" => {
-                let candidate: HistorianPrimerCandidate =
-                    serde_json::from_str(&row.payload_json)
-                        .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                self.inner.with_conn_fenced(|tx| {
+                }
+                "primer" => {
+                    let candidate: HistorianPrimerCandidate =
+                        serde_json::from_str(&row.payload_json).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(
+                                MemoryStoreError::Serde(error.to_string()),
+                            ))
+                        })?;
                     insert_historian_primer_tx(tx, &candidate)?;
-                    mark_historian_side_channel_delivered_tx(tx, row, now_ms)
-                })?;
-            }
-            "user_observation" => {
-                let candidate: HistorianUserMemoryCandidate =
-                    serde_json::from_str(&row.payload_json)
-                        .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                self.inner.with_conn_fenced(|tx| {
+                }
+                "user_observation" => {
+                    let candidate: HistorianUserMemoryCandidate =
+                        serde_json::from_str(&row.payload_json).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(
+                                MemoryStoreError::Serde(error.to_string()),
+                            ))
+                        })?;
                     insert_historian_user_observation_tx(tx, &candidate)?;
-                    mark_historian_side_channel_delivered_tx(tx, row, now_ms)
-                })?;
+                }
+                other => {
+                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        MemoryStoreError::Serde(format!(
+                            "unknown historian side-channel kind {other:?}"
+                        )),
+                    )));
+                }
             }
-            other => {
-                return Err(MemoryStoreError::Serde(format!(
-                    "unknown historian side-channel kind {other:?}"
+            if crash_after_insert {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    MemoryStoreError::Serde(format!(
+                        "injected historian {} crash between delivery and retirement",
+                        row.id.kind
+                    )),
                 )));
             }
+            retire_historian_side_channel_tx(tx, row)
+        };
+        match self.inner.with_conn_fenced(deliver) {
+            Ok(()) => Ok(true),
+            Err(StoreError::Backend(message))
+                if message.contains(SIDE_CHANNEL_ROW_ALREADY_RETIRED) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 
     fn record_historian_side_channel_failure(
@@ -11276,39 +11488,29 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Rows marked delivered but not deleted come only from a store file written before
+    /// delivery and retirement shared one transaction. A read decides whether the fenced
+    /// delete runs, so a store without such rows pays no durable write here.
     fn delete_delivered_historian_side_channels(
         &self,
         session_id: &str,
     ) -> Result<(), MemoryStoreError> {
+        let marked: bool = self.inner.with_conn(|conn| {
+            conn.prepare_cached(
+                "SELECT EXISTS(
+                     SELECT 1 FROM historian_side_channel_outbox
+                      WHERE session_id = ?1 AND delivered_at_ms IS NOT NULL)",
+            )?
+            .query_row(params![session_id], |row| row.get(0))
+        })?;
+        if !marked {
+            return Ok(());
+        }
         self.inner.with_conn_fenced(|tx| {
             tx.execute(
                 "DELETE FROM historian_side_channel_outbox
                   WHERE session_id = ?1 AND delivered_at_ms IS NOT NULL",
                 params![session_id],
-            )?;
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    fn delete_delivered_historian_side_channel(
-        &self,
-        row: &HistorianSideChannelOutboxRow,
-    ) -> Result<(), MemoryStoreError> {
-        self.inner.with_conn_fenced(|tx| {
-            tx.execute(
-                "DELETE FROM historian_side_channel_outbox
-                  WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
-                    AND source_start = ?4 AND source_end = ?5 AND item_index = ?6
-                    AND delivered_at_ms IS NOT NULL",
-                params![
-                    row.session_id,
-                    row.id.firing_seq as i64,
-                    row.id.kind,
-                    row.id.source_start as i64,
-                    row.id.source_end as i64,
-                    row.id.item_index as i64,
-                ],
             )?;
             Ok(())
         })?;
@@ -13999,14 +14201,20 @@ fn enqueue_historian_side_channels_tx(
     Ok(())
 }
 
-fn mark_historian_side_channel_delivered_tx(
+/// The error a delivery returns when its outbox row was retired by another drainer between
+/// the due read and the delivery; the transaction rolls back and the drain counts nothing.
+const SIDE_CHANNEL_ROW_ALREADY_RETIRED: &str = "historian side-channel row already retired";
+
+/// Retires one pending outbox row inside the delivery transaction. The `delivered_at_ms IS
+/// NULL` predicate is the row-still-pending guard: a concurrent drainer that retired the row
+/// first leaves nothing to delete, the error rolls this transaction's target insert back,
+/// and the row is delivered once.
+fn retire_historian_side_channel_tx(
     tx: &GuardedConn<'_>,
     row: &HistorianSideChannelOutboxRow,
-    now_ms: i64,
 ) -> rusqlite::Result<()> {
     let changed = tx.execute(
-        "UPDATE historian_side_channel_outbox
-            SET delivered_at_ms = ?7, last_attempt_at_ms = ?7, last_error = NULL
+        "DELETE FROM historian_side_channel_outbox
           WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
             AND source_start = ?4 AND source_end = ?5 AND item_index = ?6
             AND delivered_at_ms IS NULL",
@@ -14017,11 +14225,12 @@ fn mark_historian_side_channel_delivered_tx(
             row.id.source_start as i64,
             row.id.source_end as i64,
             row.id.item_index as i64,
-            now_ms,
         ],
     )?;
     if changed != 1 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            MemoryStoreError::Serde(SIDE_CHANNEL_ROW_ALREADY_RETIRED.to_string()),
+        )));
     }
     Ok(())
 }
@@ -16010,6 +16219,268 @@ mod tests {
 
     /// A "nothing happened" commit: every optional effect empty. Tests
     /// override only the fields they exercise via struct update.
+    fn scan_audit_rows(store: &MemoryStore) -> (i64, i64) {
+        store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row("SELECT COUNT(*) FROM field_scans", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM scan_owner_copies", [], |row| {
+                        row.get(0)
+                    })?,
+                ))
+            })
+            .unwrap()
+    }
+
+    /// Copies per owner within the session scope, as `(owner_kind, copies)` sorted.
+    fn owner_copy_counts(store: &MemoryStore, session_id: &str) -> Vec<(String, i64)> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT o.owner_kind, COUNT(*) FROM scan_owner_copies c \
+                     JOIN scan_domain_owners o ON o.domain_owner_id = c.domain_owner_id \
+                     JOIN scan_owner_scopes s ON s.owner_scope_id = o.owner_scope_id \
+                     WHERE s.scope_kind = 'session' AND s.scope_key = ?1 \
+                     GROUP BY o.domain_owner_id ORDER BY o.owner_kind, COUNT(*)",
+                )?;
+                let rows = statement
+                    .query_map([active_scan_private_key("session", session_id)], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap()
+    }
+
+    /// The scans a pass records for the fields it replaces are retired when the next pass
+    /// settles over them, so the audit rows for a session do not grow with the pass count,
+    /// also when another writer bumped the row version between passes; the scans for
+    /// cumulative overlay rows stay under the shared owner and remain.
+    #[test]
+    fn settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = publishing_meta();
+        let mut expected = None;
+        let mut steady = None;
+        for pass in 0..6u64 {
+            let version = store
+                .commit_transform("ses", base_commit(expected, &core, &meta))
+                .unwrap();
+            expected = Some(version);
+            let rows = scan_audit_rows(&store);
+            assert!(
+                rows.0 > 0,
+                "a pass records scans for the fields it replaces"
+            );
+            match steady {
+                None => steady = Some(rows),
+                Some(steady) => assert_eq!(
+                    rows, steady,
+                    "pass {pass}: the retired pass's rows keep the count flat"
+                ),
+            }
+        }
+        let steady_before_publish = steady.unwrap();
+        let steady = steady_before_publish;
+        assert_eq!(
+            owner_copy_counts(&store, "ses"),
+            vec![("cache_state".to_string(), steady.1)],
+            "one live pass owner holds every copy"
+        );
+
+        // A historian publish bumps the row version without passing through a pass; the
+        // next pass still retires the previous pass's scans and the publish's own remain.
+        let published = store
+            .publish_historian_chunk(HistorianPublishRequest {
+                session_id: "ses",
+                expected_row_version: expected,
+                expected_revert_epoch: 0,
+                predicate: &publish_predicate(),
+                project_path: "git:proj",
+                compartments: &[publish_compartment()],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                raw_chunk_messages: None,
+            })
+            .unwrap();
+        let after_publish = scan_audit_rows(&store);
+        assert!(
+            after_publish.0 > steady.0,
+            "the publish records its own scans"
+        );
+        let mut expected = Some(published.row_version);
+        let mut after_publish_steady = None;
+        for pass in 0..3u64 {
+            let version = store
+                .commit_transform("ses", base_commit(expected, &core, &meta))
+                .unwrap();
+            expected = Some(version);
+            let rows = scan_audit_rows(&store);
+            match after_publish_steady {
+                None => {
+                    assert_eq!(
+                        rows, after_publish,
+                        "the pass after the publish retires the previous pass, not the publish"
+                    );
+                    after_publish_steady = Some(rows);
+                }
+                Some(steady) => assert_eq!(
+                    rows, steady,
+                    "pass {pass} after the publish: the count stays flat"
+                ),
+            }
+        }
+        let steady = after_publish_steady.unwrap();
+
+        let mint = [TagMintInput {
+            block_id: "block-1".to_string(),
+            kind: "message".to_string(),
+            token_count: 3,
+            source_bytes: b"tagged source".to_vec(),
+        }];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    overlays: TransformOverlayBatch {
+                        tag_mints: &mint,
+                        created_at_ms: 1,
+                        ..TransformOverlayBatch::default()
+                    },
+                    ..base_commit(expected, &core, &meta)
+                },
+            )
+            .unwrap();
+        let with_overlay = scan_audit_rows(&store);
+        assert!(
+            with_overlay.0 > steady.0,
+            "the tag mint's scans are added, got {with_overlay:?} after {steady:?}"
+        );
+        store
+            .commit_transform("ses", base_commit(Some(version), &core, &meta))
+            .unwrap();
+        assert_eq!(
+            scan_audit_rows(&store),
+            with_overlay,
+            "the overlay scans remain while the later pass settles"
+        );
+        let tags: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM tags WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(tags, 1, "the cumulative overlay row remains");
+        let overlay_copies = with_overlay.1 - steady.1;
+        let publish_copies = after_publish.1 - steady_before_publish.1;
+        let mut counts = owner_copy_counts(&store, "ses");
+        counts.sort();
+        let mut want = vec![
+            ("cache_state".to_string(), overlay_copies),
+            ("cache_state".to_string(), steady_before_publish.1),
+            ("historian_side_channels".to_string(), publish_copies),
+        ];
+        want.sort();
+        assert_eq!(
+            counts, want,
+            "the shared overlay owner, the live pass owner, and the publish owner hold \
+             exactly their own copies"
+        );
+    }
+
+    /// A pass that loses the compartment-generation check replays without touching the
+    /// audit: the live pass's scan rows still describe the stored bytes.
+    #[test]
+    fn a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let version = store
+            .commit_transform("ses", base_commit(None, &core, &meta))
+            .unwrap();
+        let live = scan_audit_rows(&store);
+        assert!(live.0 > 0);
+        let error = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    compartment_max_seq: Some(7),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, MemoryStoreError::CasConflict { .. }));
+        assert_eq!(
+            scan_audit_rows(&store),
+            live,
+            "the losing pass retired nothing"
+        );
+        assert_eq!(
+            owner_copy_counts(&store, "ses"),
+            vec![("cache_state".to_string(), live.1)]
+        );
+    }
+
+    /// The pass-trace receive write is one statement when the session identity is clean:
+    /// a preserved identity with no detection records no audit row.
+    #[test]
+    fn a_clean_pass_trace_receive_records_no_scan_audit_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let before = scan_audit_rows(&store);
+        store.trace_pass_received("ses", 1).unwrap();
+        store.trace_pass_received("ses", 2).unwrap();
+        assert_eq!(
+            scan_audit_rows(&store),
+            before,
+            "a clean receive leaves the audit alone"
+        );
+        let received: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT receive_count FROM pass_trace WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(received, 2);
+        // A detected identity on a known session is preserved and still audited.
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at) \
+             VALUES ('password=legacy', 1, ?1, ?2, 0)",
+            params![
+                serde_json::to_string(&CoreState::empty()).unwrap(),
+                serde_json::to_string(&ModuleMeta::default()).unwrap()
+            ],
+        )
+        .unwrap();
+        drop(raw);
+        store.trace_pass_received("password=legacy", 3).unwrap();
+        assert!(
+            scan_audit_rows(&store).0 > before.0,
+            "a detected identity keeps its audit row"
+        );
+    }
+
     fn base_commit<'a>(
         expected: Option<u64>,
         core: &'a CoreState,
@@ -19346,6 +19817,156 @@ mod tests {
                 .pending_count,
             0
         );
+    }
+
+    /// Delivery and retirement share one fenced transaction: a crash injected between them
+    /// rolls both back, the row stays pending, and the next drain delivers it once. Two
+    /// drainers over the same due rows deliver each row once, because the retirement's
+    /// row-still-pending guard fails the second drainer's transaction. Every drain that
+    /// found a due row records the C6 marker before delivering.
+    /// A delivery whose crash lands after the target insert rolls the insert back with the
+    /// retirement, so the row stays pending; a drainer holding rows another drainer
+    /// already retired delivers none of them a second time.
+    #[test]
+    fn a_crash_between_delivery_and_retirement_redelivers_once_under_concurrent_drainers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+            store.fail_next_historian_side_channel_for_test(kind);
+        }
+        let event = HistorianEventCandidate {
+            kind: "trajectory_correction".into(),
+            at_compartment: Some(1),
+            compartment_id: Some(0),
+            fields_json: "{\"detail\":\"fixed\"}".into(),
+            created_at: 123,
+            harness: "module".into(),
+        };
+        let primer = HistorianPrimerCandidate {
+            project_path: "git:proj".into(),
+            session_id: "ses".into(),
+            question: "How is publication recovered?".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            source_start_message_id: "m10".into(),
+            source_end_message_id: "m20".into(),
+            source_message_time: 123,
+            created_at: 123,
+        };
+        let observation = HistorianUserMemoryCandidate {
+            content: "The user prefers explicit recovery semantics.".into(),
+            session_id: "ses".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            created_at: 123,
+        };
+        let expected = store.load("ses").unwrap().row_version;
+        store
+            .publish_historian_chunk(HistorianPublishRequest {
+                session_id: "ses",
+                expected_row_version: expected,
+                expected_revert_epoch: 0,
+                predicate: &publish_predicate(),
+                project_path: "git:proj",
+                compartments: &[publish_compartment()],
+                events: std::slice::from_ref(&event),
+                primer_candidates: std::slice::from_ref(&primer),
+                user_memory_candidates: std::slice::from_ref(&observation),
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                raw_chunk_messages: None,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            3,
+            "the inline drain failed every kind, so three rows are pending"
+        );
+
+        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+            store.crash_next_historian_side_channel_after_insert_for_test(kind);
+        }
+        let crashed = store
+            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .unwrap();
+        assert_eq!(
+            (crashed.attempted, crashed.succeeded, crashed.failed),
+            (3, 0, 3)
+        );
+        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 0);
+        assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 0);
+        assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 0);
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            3,
+            "the crash rolled the inserts back and left every row pending"
+        );
+
+        // A second drainer read its due rows before the first drainer delivered them.
+        let stale: Vec<HistorianSideChannelOutboxRow> = HISTORIAN_SIDE_CHANNEL_KINDS
+            .iter()
+            .flat_map(|kind| {
+                store
+                    .load_due_historian_side_channels("ses", kind, i64::MAX, 32)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(stale.len(), 3);
+        let drained = store
+            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .unwrap();
+        assert_eq!(
+            (drained.attempted, drained.succeeded, drained.failed),
+            (3, 3, 0)
+        );
+        for row in &stale {
+            assert!(
+                !store.deliver_historian_side_channel(row).unwrap(),
+                "the stale {} row was retired first, so its delivery rolls back",
+                row.id.kind
+            );
+        }
+        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
+        assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 1);
+        assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            0,
+            "the outbox is empty after the drain"
+        );
+        let outbox_rows: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(outbox_rows, 0, "delivered rows are retired, not marked");
+
+        let markers = store.due_side_channel_markers();
+        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+            assert!(
+                markers
+                    .iter()
+                    .any(|marker| marker.kind == kind && marker.pending_rows == 1),
+                "a drain found a due {kind} row before delivering, got {markers:?}"
+            );
+        }
     }
 
     #[test]

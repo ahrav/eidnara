@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The implementation evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -121,36 +123,108 @@ channel, the authority route read, and dreamer tasks only.
 - Conclusion: unresolved, needs R3's owner-relationship normalization.
 
 [r3]: ../../catalog.md#redaction-audit-does-not-depend-on-retained-payload
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8131
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8194-L8201
-[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8264-L8267
-[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8372-L8375
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8436
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6197-L6247
-[age]: ../../../../../crates/daemon/src/lib.rs#L6238
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7826-L7874
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23449
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23479
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23495
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23523
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23556
-[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1819-L1843
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13524
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13567
-[passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L767-L784
-[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6484
-[received]: ../../../../../crates/memory-store/src/lib.rs#L6485-L6535
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6496-L6514
-[stable]: ../../../../../crates/memory-store/src/lib.rs#L6540-L6632
-[stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6594-L6601
-[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6634-L6636
-[completed]: ../../../../../crates/memory-store/src/lib.rs#L6637-L6685
-[rejected-doc]: ../../../../../crates/memory-store/src/lib.rs#L6687-L6690
-[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6691-L6744
-[reject-bump]: ../../../../../crates/memory-store/src/lib.rs#L6738
-[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L6792-L6825
-[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8427-L8494
-[commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8441
-[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15376
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L17545
+[received-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8131
+[rejected-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8194-L8201
+[rerun-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8264-L8267
+[rerun-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8372-L8375
+[completed-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8436
+[status-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L6197-L6247
+[age]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L6238
+[health-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7826-L7874
+[t-reject]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23449
+[t-success]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23479
+[t-repeat]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23495
+[t-frozen]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23523
+[t-status]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23556
+[stable-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1819-L1843
+[t-sched]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L13524
+[sched-test]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L13567
+[passtrace-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L767-L784
+[received-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6482-L6484
+[received]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6485-L6535
+[flagged]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6496-L6514
+[stable]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6540-L6632
+[stable-ring]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6594-L6601
+[completed-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6634-L6636
+[completed]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6637-L6685
+[rejected-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6687-L6690
+[rejected]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6691-L6744
+[reject-bump]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6738
+[sched-history]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6792-L6825
+[commit-trace]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L8427-L8494
+[commit-init]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L8441
+[t-secret]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15376
+[t-upserts]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L17545
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268
+
+## Receive-cost evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/434)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+The receive write stays outside the cache compare-and-swap; the specification
+excludes folding it in because the counter increment is not idempotent. Its
+cost falls two ways. Audit identifiers are [generated in Rust][opaque-id] from
+the workspace random source, so an audit write spends no statement per
+identifier; the per-row link copy keeps SQLite's `randomblob` because it needs
+one value per selected row. The receive write [opts in][receive-opt-in] to
+[skipping its audit rows][audit-skip] when its one scan preserved an existing
+identity and found nothing: it substituted no byte, refused nothing, and
+carries no detection. The opt-in is per write. The completed-trace, authority,
+lineage, and compartment writes keep recording their clean scans, so the R1
+parity check and the redaction receipts other tests count are unchanged. Any
+substituting, rejecting, or detecting scan keeps the receive write's rows, and
+the [receive test][receive-test] shows a clean receive leaving the audit
+tables alone while a detected identity on a known session still records its
+row. The identifiers are generated inside the fenced transaction, so a random
+source failure now aborts the write where `randomblob` could not fail; on
+Linux after boot that failure is not reachable.
+
+The scans a pass records for the fields it replaces are owned by
+[one fixed pass owner][pass-owner] that the next pass
+[retires after every replay check has passed][retire]; the key is not per
+row version because other writers (historian publish, lineage descent,
+recomputation reset) bump `row_version` without registering an owner, and a
+key they never wrote could not be retired. The tag, temporal-mark, user-hint,
+and channel-1 scans are [reassigned][overlay-owner] to the shared owner
+because their rows accumulate; the shared owner is registered only when the
+pass carries an overlay. The retirement adds a bounded number of statements
+to the fenced commit (one owner lookup, one copy delete, one orphan-scan
+prune, one owner delete, and a scope prune) that the receive-side saving does
+not offset; the branch's stated cost claim is about the receive write, and the
+retirement is what keeps the audit tables bounded. Lineage descent copies the
+source scope's live scans, which after retirement are the latest pass's scans
+plus overlays rather than every pass the source ever ran. The
+[retirement test][retire-test] shows the `field_scans` and `scan_owner_copies`
+counts flat across six passes, flat again across passes after a historian
+publish bumped the row version, a tag mint's scans added and kept through the
+next pass, and the pass owner, the shared overlay owner, and the publish owner
+each holding exactly their own copies. The
+[conflict test][seq-conflict-test] shows a pass that loses the
+compartment-generation check retiring nothing.
+
+The [daemon test][outcome-test] shows a rejected, a committed, and a stable
+pass counting three receives, and a fourth pass whose receive UPSERT is
+[injected to fail inside its own transaction][receive-fail] still committing
+its cache state.
+
+### Focused execution, 2026-09-12
+
+`cargo test -p memory-store --locked` passed 180 tests including the four
+above; `cargo test -p daemon --locked` passed 1013, the two
+`dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+branch as well and passing in isolation.
+
+[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2616-L2624
+[audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2432
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16440-L16482
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6888
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16406-L16435
+[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2772
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L8832
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8786
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16263-L16401
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24736-L24780
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6897

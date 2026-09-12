@@ -520,7 +520,7 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [claim-fence]: ../../../../../crates/storage/src/lib.rs#L1582-L1600
 [pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2245-L2272
 [audit]: ../../../../../crates/memory-store/src/lib.rs#L2291-L2449
-[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2470-L2473
+[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2616-L2624
 [max-text]: ../../../../../crates/memory-store/src/lib.rs#L465
 
 [epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4271-L4289
@@ -599,7 +599,7 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L10803-L10805
 [status-sc]: ../../../../../crates/memory-store/src/lib.rs#L10853-L10879
 [load-due]: ../../../../../crates/memory-store/src/lib.rs#L10881-L10915
-[deliver]: ../../../../../crates/memory-store/src/lib.rs#L10917-L10973
+[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11361-L11448
 [failure]: ../../../../../crates/memory-store/src/lib.rs#L10975-L11014
 [delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11016-L11029
 [delete-one]: ../../../../../crates/memory-store/src/lib.rs#L11031-L11053
