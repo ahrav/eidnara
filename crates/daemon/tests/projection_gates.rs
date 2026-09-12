@@ -424,6 +424,21 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         Err(Denial::EvidenceIdentity),
         "a coverage report of another generation is not this projection's"
     );
+    // The report's identity can be current while its counts were taken for another registered generation; the generation it names is bound too.
+    let mut other_generation = passing();
+    other_generation
+        .evidence
+        .coverage
+        .as_mut()
+        .unwrap()
+        .report
+        .generation
+        .generation_epoch += 1;
+    assert_eq!(
+        other_generation.judge(hook),
+        Err(Denial::EvidenceIdentity),
+        "coverage counted for another vector generation is not this projection's"
+    );
 
     let mut no_coverage = passing();
     no_coverage.evidence.coverage = None;
@@ -548,16 +563,15 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
     );
 
     let mut failed_run = passing();
-    failed_run.evidence.harness_runs.insert(
-        HARNESSES[0].to_owned(),
-        HarnessRun::Failed {
-            reason: "timeout".to_owned(),
-        },
-    );
-    assert!(matches!(
+    failed_run
+        .evidence
+        .harness_runs
+        .insert(HARNESSES[0].to_owned(), HarnessRun::Failed);
+    // The denial names the harness, never the run's own text: refusal diagnostics carry identities, not content (CC11).
+    assert_eq!(
         failed_run.judge(hook),
-        Err(Denial::Failed(Gate::BothHarness, _))
-    ));
+        Err(Denial::Failed(Gate::BothHarness, HARNESSES[0].to_owned()))
+    );
     let mut one_harness = passing();
     one_harness.evidence.harness_runs.remove(HARNESSES[1]);
     assert_eq!(

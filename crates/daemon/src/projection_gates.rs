@@ -374,11 +374,11 @@ pub struct ResourceEvidence {
     pub decoded_heap_high_water_bytes: u64,
 }
 
-/// One harness's full-path run under one identity.
+/// One harness's full-path run under one identity. A failed run carries no text: the denial names the harness and the campaign record holds the cause (CC11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HarnessRun {
     Passed { identity: InvalidationIdentity },
-    Failed { reason: String },
+    Failed,
 }
 
 /// Everything the gates read, gathered under `identity`.
@@ -392,7 +392,7 @@ pub struct Evidence {
     pub harness_runs: BTreeMap<String, HarnessRun>,
 }
 
-/// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes; `Failed` carries the harness's own reason.
+/// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes, never content.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Denial {
     #[error("no manifest is installed")]
@@ -478,7 +478,14 @@ impl EvidenceEvaluator {
         hook: ProjectionHook,
         coverage: &ProjectionCoverage,
     ) -> Result<(), Denial> {
-        if InvalidationIdentity::from(&coverage.report.identity) != self.current {
+        // The report carries the projection identity it was read under and the registered generation its counts were taken for; a report for an older generation still names the current identity, so both are bound.
+        let generation = &coverage.report.generation;
+        if InvalidationIdentity::from(&coverage.report.identity) != self.current
+            || generation.embedding_model != self.current.embedding_model
+            || generation.tokenizer_fingerprint != self.current.tokenizer_fingerprint
+            || generation.vector_dimension != self.current.vector_dimension
+            || generation.generation_epoch != self.current.generation_epoch
+        {
             return Err(Denial::EvidenceIdentity);
         }
         for class in hook.classes() {
@@ -567,11 +574,8 @@ impl EvidenceEvaluator {
             match self.evidence.harness_runs.get(harness) {
                 Some(HarnessRun::Passed { identity }) if *identity == self.current => {}
                 Some(HarnessRun::Passed { .. }) => return Err(Denial::EvidenceIdentity),
-                Some(HarnessRun::Failed { reason }) => {
-                    return Err(Denial::Failed(
-                        Gate::BothHarness,
-                        format!("{harness}: {reason}"),
-                    ));
+                Some(HarnessRun::Failed) => {
+                    return Err(Denial::Failed(Gate::BothHarness, harness.to_owned()));
                 }
                 None => return Err(Denial::Missing(Gate::BothHarness)),
             }

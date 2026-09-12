@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "identity_contract_version": "search-projection-identity-v2",
+  "identity_contract_version": "search-projection-identity-v3",
   "ticket": "https://github.com/ahrav/eidnara/issues/352",
   "tuple_encoding": {
     "version_byte": 2,
