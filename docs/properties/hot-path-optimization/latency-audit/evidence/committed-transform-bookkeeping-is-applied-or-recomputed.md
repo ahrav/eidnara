@@ -48,7 +48,7 @@ In-memory mutations after `run_transform()` returns, in order:
   [`guidance_date_for_session`][guidance-pin] when the loaded `meta` has no
   date, and [`guidance_date_for_transform`][guidance-fn] returns it until it
   is removed. The transform copies `ctx.guidance_date` into `meta` only on a
-  bust pass ([`transform.rs:3990-3991`][guidance-meta]).
+  bust pass ([`transform.rs:3998-3999`][guidance-meta]).
 - [`:8407-8419`][native-attach] updates `native_attachments`;
   [`:8436`][trace-complete] writes the completion trace;
   [`:8439`][observation] records the response observation;

@@ -263,7 +263,7 @@ caps: an unpaged transform body is at most 512 KiB by the plugin's measure
 and therefore under the 1 MiB facade cap and 32 MiB transform cap
 ([`enforce_request_byte_cap`][hostcap]); every paged page satisfies
 `serde_json::to_vec(&request).len() <= TRANSFORM_PAGE_MAX_BYTES`
-([constant][hostpage], [check at lib.rs:9317][hostpagecheck]). `always`
+([constant][hostpage], [check at lib.rs:9324-9330][hostpagecheck]). `always`
 because a page rejected for size fails the
 whole series with `buffer_overflow`.
 Guarantee: The plugin's 512 KiB decision is never less strict than the host's
@@ -415,7 +415,7 @@ Suspiciously quiet: `transform-stage-logger.ts` has no test file;
    and the guarantee stands; the stated rationale is not reproduced.
 4. Page cap measure. [module-wire.ts:9][pagemax] says the facade accepts
    pages up to 512 KiB; the host enforces 512 KiB on the `serde_json`
-   re-serialization ([lib.rs:9317][hostpagecheck]) while the plugin measures
+   re-serialization ([lib.rs:9324-9330][hostpagecheck]) while the plugin measures
    `JSON.stringify` output. Both say 512 KiB; the measured text differs.
 5. Audit framing (not a source contract). The audit describes "synchronous
    file flushes" per line and a regex scan of the body. The logger batches

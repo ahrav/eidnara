@@ -38,14 +38,14 @@ a pass lands in while every H record still passes.
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
   compartment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
-  `ProducerContext` at [`lib.rs:8156-8159`][budget-filter], which admits only
+  `ProducerContext` at [`lib.rs:8163-8166`][budget-filter], which admits only
   finite values `>= 0.0` from the request and falls back to the bound
   budget; a zero budget disables the second disjunct through the
   `> 0.0` guard.
 - [`compose_m1`][m1-compose] returns `memory_update_count: 0`
   unconditionally at [`:231`][m1-count-zero]; the field has no other writer
   in the workspace.
-- The comment at [`transform.rs:1857-1859`][hard-only-doc] says the injected
+- The comment at [`transform.rs:1865-1867`][hard-only-doc] says the injected
   estimator is HARD-only; it does not describe these two direct calls.
 
 ## Failure scenario

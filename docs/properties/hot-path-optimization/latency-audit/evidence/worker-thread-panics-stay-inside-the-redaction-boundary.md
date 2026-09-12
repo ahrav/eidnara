@@ -62,7 +62,7 @@ widens to every pass.
 - The other production `thread_local!` the boundary crosses is the
   token-cache counter block at [`token_cache.rs:57`][tc-local] (W2). The
   third in the inspected crates is `#[cfg(test)]`
-  ([`transform.rs:487-490`][tl-test]).
+  ([`transform.rs:495-498`][tl-test]).
 - The host-runtime catalog's
   [every-callback-invocation-is-inside-the-redaction-guard][hr-redact]
   inventories the host's own call sites and
@@ -114,7 +114,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 
 - Sources examined: [`dispatch.rs:985-989`][terminal],
   [`mod.rs:460-468`][blocking], [`read.rs:296-322`][read-arms],
-  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3808-3810`][spawn-store-open].
+  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3815-3817`][spawn-store-open].
 - Findings: Three distinct mappings exist for a `JoinError` from a worker
   panic: an `internal_error` terminal (host), a `store_unavailable` response
   (kernel routes), and a re-panic (store open). The kernel-route mapping is a

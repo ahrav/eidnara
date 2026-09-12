@@ -32,7 +32,7 @@ three direct `tokenizer::estimate_tokens` calls in production transform code.
   sharding note at [`:112-113`][tc-shard] is conditional ("if concurrent
   sessions ever contend here") and cites no measurement.
 - Key domains: tail hygiene hashes `kind_name ‖ NUL ‖ content` and calls
-  `count_with_digest` at [`tail_hygiene.rs:264`][th-cwd];
+  `count_with_digest` at [`tail_hygiene.rs:614`][th-cwd];
   [`cached_estimate_tokens`][tc-cet] hashes `NUL ‖ content`, bypasses inputs
   under `MIN_CACHED_LEN = 64` with a `bypassed` bump, and the two domains are
   disjoint because no kind name can prefix a NUL.

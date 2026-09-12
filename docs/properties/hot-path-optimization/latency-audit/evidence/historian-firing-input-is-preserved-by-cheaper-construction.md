@@ -19,7 +19,7 @@ sequence, not only its budget, decides the output bytes.
   [`ChunkSnapshotOwnedItem`][owned-item] with `bytes:
   block.bytes.to_string()`.
 - Every reader goes through [`as_item`][as-item]: the builder at
-  [`:696-701`][fp-call], the restart path at [`lib.rs:4881-4883`][fp-restart],
+  [`:696-701`][fp-call], the restart path at [`lib.rs:4888-4890`][fp-restart],
   and one test. [`compute_chunk_fingerprint`][fp] formats
   `id:kind:bytes.len()` joined by `|`; its doc says the fingerprint records
   byte lengths rather than content bytes.
