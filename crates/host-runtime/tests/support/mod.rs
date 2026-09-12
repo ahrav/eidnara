@@ -614,7 +614,7 @@ impl HostHandler for TestHandler {
                 });
                 response
             }
-            "blocking_hold" | "blocking_detached" | "blocking_panic" => {
+            "blocking_hold" | "blocking_detached" | "blocking_panic" | "blocking_cooperative" => {
                 let Some(charge) = ctx.try_reserve_resident(1024) else {
                     return RequestOutcome::error(
                         "scratch_exhausted",
@@ -639,17 +639,22 @@ impl HostHandler for TestHandler {
                 }
                 let gate = Arc::clone(&self.inner.blocking_gate);
                 let started = Arc::clone(&self.inner.blocking_started);
+                let cooperative = mode == "blocking_cooperative";
+                let signal = ctx.cancel_signal();
                 let held = ctx.run_blocking(move || {
                     started.fetch_add(1, Ordering::SeqCst);
                     let (lock, ready) = &*gate;
                     let mut released = lock.lock().expect("blocking gate lock");
-                    while !*released {
-                        released = ready.wait(released).expect("blocking gate lock");
+                    while !*released && !(cooperative && signal.is_cancelled()) {
+                        released = ready
+                            .wait_timeout(released, Duration::from_millis(10))
+                            .expect("blocking gate lock")
+                            .0;
                     }
                     drop(charge);
                     b"held-done".to_vec()
                 });
-                if mode == "blocking_detached" {
+                if mode == "blocking_detached" || cooperative {
                     drop(held);
                     return response_from_slice(&ctx, b"detached", false).await;
                 }

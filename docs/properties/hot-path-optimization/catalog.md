@@ -228,12 +228,12 @@ Exercised: partial - the
 [cancel and route-close tests](evidence/route-cleanup-waits-for-request-owned-physical-work.md#request-work-join-evidence)
 hold a request's blocking work on its thread, cancel or close, and see no
 terminal, no route-gone, and no charge release until the work is released, then
-one of each, with work the handler did not await joined by route close alone;
-the late-release test releases the work after the close has aborted the
-dispatch task and still sees the `cancelled` terminal before route-gone; the
-budget test holds work past a shortened route-close budget and sees the fatal
-path, not cleanup; the panic and stderr tests cover the redacted diagnostic,
-the internal-error settlement, and the charge released on unwind. Work the
+one of each. Detached work remains joined by route close and host shutdown.
+Paused-time tests observe dispatch abort before releasing a completion token;
+fallback then emits one `cancelled` terminal. Held tokens past both close
+windows refuse cleanup. A real held-worker test checks that fatal close retains
+the handler and instance lock until release. The panic and stderr tests cover
+redaction, internal-error settlement, and charge release on unwind. Work the
 daemon submits through `kernel_routes::blocking` runs through none of this, and
 no relocated transform runs through the seam yet.
 Guarantee: The callback completion gate precedes route cleanup and reuse, and
@@ -242,8 +242,11 @@ the request's cancel arm and by route close, with its panics redacted.
 Check: `always` - At route-gone entry and cleanup-gated reuse, an independent
 ledger contains no live request-owned work that can access that route's state;
 an unquiesced timeout follows the fatal/refusal path instead of cleanup; a
-cancelled terminal is not sent while the request's blocking work runs, and is
-sent once it stops, whether the dispatch task or the route drain emits it.
+cancelled terminal is not sent while the request's blocking work runs. If
+cancellation wins and the generation remains viable through output admission,
+one cancelled terminal is queued after work stops. Logical settlement does not
+prove peer observation: retired generations and failed delivery preserve
+`outcome_unknown`, and unquiesced work follows fatal refusal.
 Fault/timing angle: Cancellation or outer-future drop precedes actual worker
 completion, including a worker that has not observed abort.
 Required faults and enabling state: Hold request work at an observable live
@@ -251,10 +254,10 @@ barrier, start route or generation close, and independently observe completion,
 route-gone, and reuse. Classify durable outcomes through existing CAS/receipts.
 Confidence: medium - [Evidence](evidence/route-cleanup-waits-for-request-owned-physical-work.md).
 The handler completion fence, the request ledger the cancel arm waits on, the
-route-tracker entry of the join task, and the route drain's fallback settlement
+physical-work and observer tracker tokens, and the route drain's fallback settlement
 are source-verified and exercised for work submitted through
 `RequestCtx::run_blocking`. The daemon's `kernel_routes::blocking` still
-submits request-owned store work at ten call sites outside both ledgers and
+submits request-owned store work at ten call sites outside these ledgers and
 outside the redaction guard, so the `always` check does not hold for kernel
 routes today; see the open question.
 Existing check: [Lifecycle checks](existing-checks.md#execution-lifecycle) cover
@@ -262,7 +265,7 @@ settlement and cleanup cases; their status is unaudited.
 Impact: Cleanup can race live work or permit stale work to affect reused state.
 Open questions:
 - What owns and joins any proposed off-worker transform work? The host does:
-  `RequestCtx::run_blocking` enters the work in the request's and the route's
+  `RequestCtx::run_blocking` enters the work in request, route, and host
   ledgers, and the daemon keeps no drain of its own. (answered)
 - `kernel_routes::blocking`
   ([mod.rs:462-468](../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468))
@@ -664,8 +667,8 @@ them without creating implementation tickets.
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8133-L8202
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
-[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L934
-[close]: ../../../crates/host-runtime/src/dispatch.rs#L1234-L1298
+[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L824-L940
+[close]: ../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
 [read-callback]: ../../../crates/storage/src/lib.rs#L229-L245
 [write-callback]: ../../../crates/storage/src/lib.rs#L290-L316
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271

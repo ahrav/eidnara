@@ -70,8 +70,8 @@ that precede it on the branch.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/437)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 Join-owner decision: the host owns the join. A completion guard carried by the
-request context enters blocking work in the request's own ledger and in the
-route's; the daemon keeps no per-route drain of its own.
+request context enters blocking work in request, route, and host trackers;
+the daemon keeps no per-route drain of its own.
 
 [`RequestCtx::run_blocking`][run-blocking] is the seam. It submits the closure
 to the blocking pool at the call, under [`redact_sync`][redact-sync], so a panic
@@ -85,12 +85,13 @@ and an offer made once the route's fence has closed as `RouteClosing`: such
 work is refused rather than run outside every join. Registration takes a route
 tracker token before checking whether the fence has closed. An accepted offer
 therefore holds the drain open before submitting its closure. The join itself
-runs in a task of its own, entered in
-[two ledgers][work-ledgers]: the request tracker that
-[`dispatch_request` creates][ctx-work] for each request, and the route tracker
-that is the existing handler completion fence. Dropping the future the handler
-awaits, as an aborted handler does, detaches only the result: the join task
-keeps both trackers non-empty until the thread finishes.
+runs in a task of its own. [Completion tokens][work-ledgers] belong to both
+the physical closure and its observer. Request cancellation waits on the
+[`dispatch_request` ledger][ctx-work], route close waits on the route ledger,
+and shutdown waits on the existing host tracker. Dropping the observer during
+secondary-runtime shutdown cannot release the physical closure's tokens.
+Host-wide tokens are not abort handles, so forced shutdown cannot remove them;
+the existing deferred reaper retains the handler and instance lock until drain.
 
 The cancel arm aborts and joins the handler task as before and then
 [closes and waits on the request ledger][cancel-join] before it settles the
@@ -104,19 +105,24 @@ The abort drops the dispatch task at its wait on the request ledger, before
 that task's own `settle`, so when the work then finishes inside the post-abort
 budget the [route drain settles][close-fallback] each collected pending entry
 that is still unsettled as `cancelled` before route-gone; `settle` is
-first-terminal-wins, so a request the task settled earlier is left alone.
-Neither budget moves. The host cannot stop a thread that has started, so the
+first-terminal-wins, including admission rejection, so a request with an earlier
+terminal is left alone. Post-abort waiting and fallback emission share one
+absolute deadline. Undeliverable fallback output retires the generation;
+logical settlement does not guarantee a received terminal on a retired link.
+The host cannot stop a thread that has started, so the
 seam's contract asks the work to terminate on its own or to observe the
 request's [cancel signal][cancel-signal] at its safe points; the signal is an
 observation-only view of the token, so a handler cannot cancel its own request
 through it; work held past the budget follows the fatal path, which is E1's
-stated outcome for unquiesced work. Values the closure captures, charges
-included, are released when it returns or unwinds, on the blocking thread,
-whichever side stopped waiting, so a charge returns exactly once. Two
-consequences are recorded rather than changed: a cancelled request keeps its
-pending permit while the cancel arm waits on its work, and work entered from a
-task that outlives the handler task, after the cancel arm has waited, is joined
-by route close alone.
+stated outcome for unquiesced work. Captures dropped by the closure release
+on its return or unwind. Captures moved into the result, including charges,
+remain owned by the channel or receiver until their final owner drops them.
+The counted-charge test explicitly drops its charge on the blocking thread;
+it does not establish an unconditional release-on-return guarantee.
+A cancelled request keeps its pending permit while its cancel arm waits.
+Work entered after that arm has drained remains joined by route close and host
+shutdown. Request tokens are route children, so detached cooperative work
+still observes route cancellation after the pending entry is removed.
 
 The seam covers only work submitted through it. The daemon's
 [`kernel_routes::blocking`][daemon-blocking] is a bare `spawn_blocking` whose
@@ -138,15 +144,15 @@ release, no second terminal, and a served request on the same route. The
 [route-close test][t-close] sends `Goodbye` while the closure is held, sees no
 terminal, no route-gone and no release, releases, then sees the `cancelled`
 terminal, exactly one route-gone, and one release. The [detached test][t-detached]
-has the handler answer without awaiting its work, so only the route ledger
-holds it, and shows route-gone waiting for the release all the same. The
-[budget test][t-fatal] holds the work past a shortened route-close budget and
-shows no route-gone and a lifecycle-fatal shutdown, the refusal path rather
-than cleanup. The [late-release test][t-late] shortens the budget to four
-hundred milliseconds, releases the work at six hundred, after the close has
-aborted the dispatch task, and sees the `cancelled` terminal, exactly one
-route-gone, one release, and a graceful shutdown; before the route drain
-settled unsettled entries this test timed out waiting for the terminal. The
+has the handler answer without awaiting its work, and shows route-gone waiting
+for release despite the earlier response. The
+[budget test][t-fatal] uses paused time, observes dispatch abort, and retains
+a completion token through both close windows; cleanup is refused at the
+shared deadline. The [late-release test][t-late] observes the dispatch future's
+drop signal before releasing that token, then checks one cancelled terminal.
+These replace sleep-based phase assumptions. Separate integration tests hold
+real blocking threads and check cancellation, route cleanup, and instance
+exclusion. The
 [panic test][t-panic] shows a panic inside the closure settling as one
 `internal_error` terminal with the held charge released once, and the
 [stderr test][t-stderr] re-runs the binary as a child that panics inside the
@@ -156,27 +162,31 @@ hook.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p host-runtime --locked` passed every suite, `tests/dispatch.rs`
-with 27 tests including the seven above.
+`cargo test --locked -p host-runtime --all-features` passed the crate suites,
+including 384 library tests, 28 dispatch tests, and eight doctests. Tests that
+require external runtimes remain ignored. The close-phase unit tests use paused
+Tokio time and an abort-drop signal; they do not claim to execute real blocking
+threads. Separate integration tests exercise held physical work and instance
+exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L593-L619
-[work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L452-L455
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L592-L624
+[work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L451-L455
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L460-L468
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L495-L530
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52-L55
 [ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915
-[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L950
-[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1234-L1298
-[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1274-L1289
+[cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
+[close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
+[close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1290-L1313
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
-[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L660
+[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L665
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776
 [t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L781-L825
 [t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L830-L866
-[t-fatal]: ../../../../crates/host-runtime/tests/dispatch.rs#L871-L898
-[t-late]: ../../../../crates/host-runtime/tests/dispatch.rs#L901-L944
-[t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L950-L984
+[t-fatal]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L179-L205
+[t-late]: ../../../../crates/host-runtime/src/runtime/close_tests.rs#L149-L177
+[t-panic]: ../../../../crates/host-runtime/tests/dispatch.rs#L872-L906
 [t-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L610-L612
 
 [fence]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L873-L934

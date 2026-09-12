@@ -674,11 +674,11 @@ async fn panic_redaction_subprocess_child() {
 
 /// Releases the held blocking closures when dropped, so a failed assertion cannot leave a
 /// blocking thread waiting through the host's shutdown.
-struct ReleaseOnDrop<'h>(&'h TestHost);
+struct ReleaseOnDrop<'h>(&'h support::TestHandler);
 
 impl Drop for ReleaseOnDrop<'_> {
     fn drop(&mut self) {
-        self.0.handler.release_blocking();
+        self.0.release_blocking();
     }
 }
 
@@ -724,7 +724,7 @@ async fn start_held_blocking_work(
 #[tokio::test]
 async fn cancel_waits_for_the_request_blocking_work() {
     let host = TestHost::start().await;
-    let release = ReleaseOnDrop(&host);
+    let release = ReleaseOnDrop(&host.handler);
     let (mut client, channel, epoch, corr) =
         start_held_blocking_work(&host, "cancel-held", "blocking_hold", 1).await;
 
@@ -780,7 +780,7 @@ async fn cancel_waits_for_the_request_blocking_work() {
 #[tokio::test]
 async fn route_close_waits_for_the_request_blocking_work() {
     let host = TestHost::start().await;
-    let release = ReleaseOnDrop(&host);
+    let release = ReleaseOnDrop(&host.handler);
     let (mut client, channel, epoch, corr) =
         start_held_blocking_work(&host, "close-held", "blocking_hold", 1).await;
 
@@ -824,12 +824,12 @@ async fn route_close_waits_for_the_request_blocking_work() {
     host.shutdown_gracefully().await;
 }
 
-/// A handler that answers while its blocking work runs leaves that work in the route ledger
-/// alone: the response settles at once, and route close still waits for the work.
+/// A handler can answer before its blocking work finishes.
+/// Route close still waits for that work.
 #[tokio::test]
 async fn route_close_waits_for_blocking_work_the_handler_did_not_await() {
     let host = TestHost::start().await;
-    let release = ReleaseOnDrop(&host);
+    let release = ReleaseOnDrop(&host.handler);
     let (mut client, channel, epoch, corr) =
         start_held_blocking_work(&host, "close-detached", "blocking_detached", 1).await;
     let frame = client.frame_within(BUDGET).await.expect("terminal");
@@ -858,84 +858,6 @@ async fn route_close_waits_for_blocking_work_the_handler_did_not_await() {
         .iter()
         .any(|handle| handle.channel == channel)
     {
-        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(host.handler.blocking_charges_released(), 1);
-    host.shutdown_gracefully().await;
-}
-
-/// Blocking work held past the route-close budget is not cleaned up around: the close
-/// aborts the dispatch, waits the budget again, and trips the host's fatal path.
-#[tokio::test]
-async fn blocking_work_held_past_the_route_close_budget_is_fatal_not_cleaned_up() {
-    let host = TestHost::start_with(|config| {
-        config.timing.route_close_budget = Duration::from_millis(200);
-        config.timing.shutdown_deadline = Duration::from_secs(3);
-    })
-    .await;
-    let release = ReleaseOnDrop(&host);
-    let (mut client, channel, epoch, _corr) =
-        start_held_blocking_work(&host, "close-overrun", "blocking_hold", 1).await;
-
-    client
-        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
-        .await
-        .expect("route goodbye");
-    // Both budget windows elapse while the work is held.
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    assert!(
-        host.handler.route_gones().is_empty(),
-        "route-gone ran around blocking work that never stopped"
-    );
-    drop(release);
-
-    let result = host.shutdown().await;
-    assert!(
-        matches!(result, Err(host_runtime::HostError::LifecycleFatal(_))),
-        "expected lifecycle fatal, got {result:?}"
-    );
-}
-
-#[tokio::test]
-async fn blocking_work_released_after_the_dispatch_abort_still_settles_cancelled() {
-    let host = TestHost::start_with(|config| {
-        config.timing.route_close_budget = Duration::from_millis(400);
-    })
-    .await;
-    let release = ReleaseOnDrop(&host);
-    let (mut client, channel, epoch, corr) =
-        start_held_blocking_work(&host, "close-late", "blocking_hold", 1).await;
-
-    client
-        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
-        .await
-        .expect("route goodbye");
-    // `release` keeps the blocking work held after the route-close budget aborts dispatch.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert!(
-        host.handler.route_gones().is_empty(),
-        "route-gone ran while the blocking work was still held"
-    );
-    assert_eq!(host.handler.blocking_charges_released(), 0);
-    drop(release);
-
-    let (_, frame) = client
-        .frames_until_corr(corr, BUDGET)
-        .await
-        .expect("terminal for the request whose dispatch task was aborted");
-    assert_eq!(frame.error_code(), "cancelled");
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    loop {
-        let gones = host.handler.route_gones();
-        if gones.iter().any(|handle| handle.channel == channel) {
-            assert_eq!(
-                gones.iter().filter(|h| h.channel == channel).count(),
-                1,
-                "route-gone must fire once"
-            );
-            break;
-        }
         assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1536,4 +1458,75 @@ async fn work_offered_while_the_route_drains_is_joined_or_refused() {
         );
     }
     host.shutdown_gracefully().await;
+}
+
+#[tokio::test]
+async fn detached_blocking_work_observes_route_cancellation() {
+    let host = TestHost::start_with(|config| {
+        config.timing.route_close_budget = Duration::from_millis(100);
+    })
+    .await;
+    let release = ReleaseOnDrop(&host.handler);
+    let (mut client, channel, epoch, _) =
+        start_held_blocking_work(&host, "cooperative", "blocking_cooperative", 1).await;
+    assert_eq!(client.frame_within(BUDGET).await.unwrap().ty, TY_RESPONSE);
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(1), async {
+        while host.handler.blocking_charges_released() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    drop(release);
+    let shutdown = host.shutdown().await;
+    assert!(stopped, "detached work never observed route cancellation");
+    assert!(
+        shutdown.is_ok(),
+        "cooperative close must not trip fatal: {shutdown:?}"
+    );
+}
+
+#[tokio::test]
+async fn held_blocking_work_retains_handler_and_instance_after_fatal_close() {
+    let root = tempfile::tempdir().unwrap();
+    let host = TestHost::start_with(|config| {
+        config.data_dir = Some(root.path().to_path_buf());
+        config.timing.route_close_budget = Duration::from_millis(50);
+        config.timing.shutdown_deadline = Duration::from_millis(200);
+        config.timing.lifecycle_callback_deadline = Duration::from_millis(50);
+    })
+    .await;
+    let handler = host.handler.clone();
+    let release = ReleaseOnDrop(&handler);
+    let (_client, _channel, _epoch, _corr) =
+        start_held_blocking_work(&host, "fatal-owner", "blocking_hold", 1).await;
+    let result = host.shutdown().await;
+    let shutdown_ran = handler.events().contains(&support::Event::Shutdown);
+    let dropped = handler.handler_dropped();
+    let successor = TestHost::try_start_with(support::TestHandler::new(), |config| {
+        config.data_dir = Some(root.path().to_path_buf());
+    })
+    .await;
+    let excluded = matches!(successor, Err(host_runtime::HostError::Instance(_)));
+    if let Ok(successor) = successor {
+        successor.shutdown_gracefully().await;
+    }
+    drop(release);
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while !handler.handler_dropped() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(result.is_err());
+    assert!(
+        !shutdown_ran && !dropped && excluded,
+        "live work lost ownership: shutdown={shutdown_ran}, dropped={dropped}, successor_excluded={excluded}"
+    );
+    assert!(
+        handler.handler_dropped(),
+        "released work must finish deferred cleanup"
+    );
 }
