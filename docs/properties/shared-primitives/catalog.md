@@ -721,15 +721,15 @@ Open questions: None.
 ### protected-transactions-pin-fence-durability
 
 Type: safety
-Reachability: default-production - every fenced write, including fenced DDL, re-pins the journal settings.
+Reachability: default-production - `open_sqlite` pins the journal settings, and the first fenced write after a maintenance callback re-pins them; guarded callbacks cannot change them and another connection cannot leave WAL while the store holds the database open.
 Status: active
-Exercised: yes - open, a read callback that is denied lowering `synchronous`, and a fenced write plus a fenced schema change that re-pin `FULL` and WAL after the maintenance path changed them.
+Exercised: yes - open, a read callback that is denied lowering `synchronous`, a fenced write plus a fenced schema change that re-pin `FULL` and WAL after the maintenance path changed them, a fenced write that leaves a raw-connection `synchronous=OFF` alone until maintenance runs, a panicking maintenance callback that still re-arms the pin, and a second connection refused `journal_mode = DELETE` while the store is open.
 Guarantee: Every fence-checked transaction runs with `synchronous = FULL` and a WAL journal, whatever the maintenance path set between transactions.
 Check: `always` - `always(synchronous == FULL && journal_mode == wal)` at the start of `open_sqlite`'s fence transaction and every `with_conn_fenced` transaction.
 Fault/timing angle: With WAL and `synchronous = NORMAL`, power loss can roll back a committed fence claim, which reissues a superseded epoch.
 Required faults and enabling state: A maintenance callback that lowers `synchronous` or changes the journal mode, followed by a fenced write.
-Confidence: high - [evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_fence_durability` (`crates/storage/src/lib.rs:898-913`) runs before each protected transaction; `open_pins_full_synchronous` (`crates/storage/src/lib.rs:3391-3400`) and `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:3424-3490`) observe the pinned values. Power loss itself is not injected.
-Existing check: `open_pins_full_synchronous`, `a_read_callback_cannot_lower_fence_durability`; audited at U2.
+Confidence: high - [evidence](evidence/protected-transactions-pin-fence-durability.md). `pin_durability_once` (`crates/storage/src/lib.rs:912-928`) runs `pin_fence_durability` (`crates/storage/src/lib.rs:1347-1349`) before a fenced transaction unless the pin has held since open or since the last maintenance callback, whose exit guard re-arms it; `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:4131-4196`), `the_durability_pin_runs_once_per_connection_until_maintenance` (`crates/storage/src/lib.rs:2400-2438`), `a_panicking_maintenance_callback_still_invalidates_the_connection_caches` (`crates/storage/src/lib.rs:2443-2492`), and `a_second_connection_cannot_leave_wal_while_the_store_holds_the_database_open` (`crates/storage/src/lib.rs:5262-5292`) observe the pinned values. Power loss itself is not injected.
+Existing check: `open_pins_full_synchronous`, `a_read_callback_cannot_lower_fence_durability`; audited at U2. The once-per-connection tests are unaudited.
 Impact: A fence claim that looked committed disappears after power loss and two writers hold equal epochs.
 Open questions: None.
 

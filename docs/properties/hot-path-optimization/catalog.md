@@ -309,14 +309,19 @@ run in `cargo test -p storage`: a warm fenced statement is not re-prepared
 across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, and a
 temp-shadow statement cached before it is refused afterwards; a statement
 prepared under the unrestricted mode is refused in a guarded callback once the
-cache is flushed; a panicking read or fenced callback returns the connection to
+cache is flushed; the flush also runs when a maintenance callback panics, so a
+temp-shadow statement cached before that callback's main DDL is refused
+afterwards; a panicking read or fenced callback returns the connection to
 the unrestricted mode and rolls its partial write back; and baseline text with
 a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
 format-marker delete is refused by the store connection's gate. With the
 snapshot keyed on the schema and data versions, a rename through a second
 connection is observed by the next callback even when the schema version is
 written back, a maintenance-left temp shadow is still refused, a panicking
-maintenance callback still discards the snapshot and re-arms the pin, and the
+maintenance callback still discards the snapshot and re-arms the pin, a
+rescan under an unchanged schema version flushes the cached statements and
+reloads the parsed schema, a
+second connection cannot leave WAL while the store is open, and the
 durability pin runs once per connection until the maintenance path re-arms it. No baseline-versus-candidate trace over interleaved facade
 callers runs.
 Guarantee: Cached statements and reduced callback setup preserve each call's
@@ -635,8 +640,8 @@ them without creating implementation tickets.
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L934
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
-[read-callback]: ../../../crates/storage/src/lib.rs#L229-L245
-[write-callback]: ../../../crates/storage/src/lib.rs#L290-L316
+[read-callback]: ../../../crates/storage/src/lib.rs#L326-L343
+[write-callback]: ../../../crates/storage/src/lib.rs#L392-L456
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4031-L4058
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
