@@ -54,7 +54,7 @@ messages at [`:393`][inc-skip]. Consumers of the projection copy again:
 [`BoundaryBlock`][boundary-block],
 [`tail_for_selection.clone()`][tail-clone] copies the whole `Vec<SelItem>`,
 [`taggable_source`][taggable] text becomes `source_bytes: Vec<u8>` on every
-minted [`TagRow`][tagrow] ([`:7156-7161`][mint-input]), and
+minted [`TagRow`][tagrow] ([`:7164-7169`][mint-input]), and
 [`measure_tail_hygiene`][hygiene] builds a fresh content `String` per part and
 hashes `kind_name`, NUL, `content` in [`part_measurement`][part-measure].
 On output, [`ServedMessage::from_message_reusing`][served-reusing] computes
@@ -80,8 +80,8 @@ Clone sites in scope, what reads the copy, and whether the copy is mutated:
 | [`native-deep`][native-deep] | `Value` per native prefix message | none | sidecar decode (which [copies each raw message again][raw-clone] into [`HarnessMessageMeta.raw`][decode-sidecar]), `native_ingress_chunks` equality, retained-bytes accounting |
 | [`prefix-copy`][prefix-copy] | `FlatBlock` per cached prefix block | none | the incremental `FlatProjection` |
 | [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323][sel-consume], [boundary.rs:1729][boundary-consume], [injection.rs:403][injection-consume]) | reductions, historian tool summaries, todo capture |
-| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7353`][active-match], caveman source at [`:5691-5694`][caveman-source] |
-| [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4924-4934`][commit-inputs] |
+| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7361`][active-match], caveman source at [`:5699-5702`][caveman-source] |
+| [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4932-4942`][commit-inputs] |
 | [`part-measure`][part-measure] | content `String` per part | none | hygiene `content_hash`, token cache key, `T`/`U` |
 | [`served-reusing`][served-reusing] | `Value` tree plus bytes per served message | none | wire bytes, `canonical_hash`, `output_identity`, native message keys |
 
@@ -298,7 +298,7 @@ and
 assert every committed `TagRow.source_bytes` equals the block's
 [`taggable_source`][taggable] text bytes exactly. `always` because the
 cache entry is read on the next pass of the same session and a stale or
-speculative row changes the active-tag match at [`:7353`][active-match].
+speculative row changes the active-tag match at [`:7361`][active-match].
 Guarantee: Pass-local mint rows never become visible through the tag
 baseline cache, and every visible row's `source_bytes` is byte-equal to the
 projected text it tags.
@@ -439,67 +439,67 @@ both sides and neither resolved here:
 [tc-synthetic]: ../../../daemon/transform/catalog.md#synthetic-strip-precedes-every-coverage-read
 [tc-tagnum]: ../../../daemon/transform/catalog.md#speculative-tag-numbering-has-two-authorities
 [r1]: ../../catalog.md#prepared-field-output-and-audit-policy-agree
-[arc-parsed]: ../../../../../crates/daemon/src/lib.rs#L8115
-[expand]: ../../../../../crates/daemon/src/lib.rs#L4151-L4245
-[native-deep]: ../../../../../crates/daemon/src/lib.rs#L4228-L4231
-[store-pc]: ../../../../../crates/daemon/src/lib.rs#L4302-L4345
-[historian-fire]: ../../../../../crates/daemon/src/lib.rs#L4994
-[boundary-call]: ../../../../../crates/daemon/src/lib.rs#L5074
-[assemble]: ../../../../../crates/daemon/src/lib.rs#L5234-L5238
-[native-sidecar]: ../../../../../crates/daemon/src/lib.rs#L12887-L12907
-[encode-full]: ../../../../../crates/daemon/src/lib.rs#L12981-L13024
-[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13026-L13070
-[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13072-L13079
-[native-attach]: ../../../../../crates/daemon/src/lib.rs#L13082-L13094
-[newest-assistant]: ../../../../../crates/daemon/src/lib.rs#L13138-L13143
-[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13315-L13332
-[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14427-L14442
-[segments]: ../../../../../crates/daemon/src/lib.rs#L14448-L14454
-[cached-boundary]: ../../../../../crates/daemon/src/lib.rs#L16566-L16626
-[boundary-filter]: ../../../../../crates/daemon/src/lib.rs#L16597
-[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16628-L16643
-[token-count]: ../../../../../crates/daemon/src/lib.rs#L2028-L2050
-[t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L20644
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20948
-[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L21678
-[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L21748
-[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L22220
-[t-dup]: ../../../../../crates/daemon/src/lib.rs#L22264
-[served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
-[with-identity]: ../../../../../crates/daemon/src/transform.rs#L218-L225
-[ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2013-L2020
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2022-L2037
-[served-fps]: ../../../../../crates/daemon/src/transform.rs#L2039-L2081
-[normalize]: ../../../../../crates/daemon/src/transform.rs#L2083-L2100
-[lineage-pass]: ../../../../../crates/daemon/src/transform.rs#L2713-L2717
-[apply-head]: ../../../../../crates/daemon/src/transform.rs#L2836-L2866
-[additive]: ../../../../../crates/daemon/src/transform.rs#L2847-L2849
-[shadow]: ../../../../../crates/daemon/src/transform.rs#L2951
-[live]: ../../../../../crates/daemon/src/transform.rs#L2965-L2969
-[ordinal-check]: ../../../../../crates/daemon/src/transform.rs#L2975-L2986
-[tail-clone]: ../../../../../crates/daemon/src/transform.rs#L3994
-[commit-inputs]: ../../../../../crates/daemon/src/transform.rs#L4924-L4934
-[caveman-source]: ../../../../../crates/daemon/src/transform.rs#L5691-L5694
-[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6315-L6344
-[pending-pass]: ../../../../../crates/daemon/src/transform.rs#L6626-L6654
-[tag-entry]: ../../../../../crates/daemon/src/transform.rs#L6782-L6807
-[tag-snapshot]: ../../../../../crates/daemon/src/transform.rs#L6827-L6832
-[load-tags]: ../../../../../crates/daemon/src/transform.rs#L6899-L6957
-[mint-input]: ../../../../../crates/daemon/src/transform.rs#L7156-L7161
-[append-mint]: ../../../../../crates/daemon/src/transform.rs#L7264-L7285
-[taggable]: ../../../../../crates/daemon/src/transform.rs#L7289-L7313
-[active-match]: ../../../../../crates/daemon/src/transform.rs#L7353
-[make-mut]: ../../../../../crates/daemon/src/transform.rs#L7886-L7887
-[output-identity]: ../../../../../crates/daemon/src/transform.rs#L10233-L10315
-[tail-loop]: ../../../../../crates/daemon/src/transform.rs#L10995-L10999
-[t-fpids]: ../../../../../crates/daemon/src/transform.rs#L13580
-[t-parked]: ../../../../../crates/daemon/src/transform.rs#L13710
-[t-pending]: ../../../../../crates/daemon/src/transform.rs#L20082
-[t-tagcold]: ../../../../../crates/daemon/src/transform.rs#L22421
-[t-poison]: ../../../../../crates/daemon/src/transform.rs#L22490
-[t-interleave]: ../../../../../crates/daemon/src/transform.rs#L22523
-[t-collapsed]: ../../../../../crates/daemon/src/transform.rs#L27272
+[arc-parsed]: ../../../../../crates/daemon/src/lib.rs#L8122
+[expand]: ../../../../../crates/daemon/src/lib.rs#L4158-L4252
+[native-deep]: ../../../../../crates/daemon/src/lib.rs#L4235-L4238
+[store-pc]: ../../../../../crates/daemon/src/lib.rs#L4309-L4352
+[historian-fire]: ../../../../../crates/daemon/src/lib.rs#L5001
+[boundary-call]: ../../../../../crates/daemon/src/lib.rs#L5081
+[assemble]: ../../../../../crates/daemon/src/lib.rs#L5241-L5245
+[native-sidecar]: ../../../../../crates/daemon/src/lib.rs#L12894-L12914
+[encode-full]: ../../../../../crates/daemon/src/lib.rs#L12988-L13031
+[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13033-L13077
+[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13079-L13086
+[native-attach]: ../../../../../crates/daemon/src/lib.rs#L13089-L13101
+[newest-assistant]: ../../../../../crates/daemon/src/lib.rs#L13145-L13150
+[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13322-L13339
+[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14434-L14449
+[segments]: ../../../../../crates/daemon/src/lib.rs#L14455-L14461
+[cached-boundary]: ../../../../../crates/daemon/src/lib.rs#L16573-L16633
+[boundary-filter]: ../../../../../crates/daemon/src/lib.rs#L16595
+[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16635-L16650
+[token-count]: ../../../../../crates/daemon/src/lib.rs#L2035-L2057
+[t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L20651
+[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20961
+[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L21694
+[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L21764
+[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L22236
+[t-dup]: ../../../../../crates/daemon/src/lib.rs#L22280
+[served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L224
+[with-identity]: ../../../../../crates/daemon/src/transform.rs#L226-L233
+[ser-served]: ../../../../../crates/daemon/src/transform.rs#L301-L308
+[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2028
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2030-L2045
+[served-fps]: ../../../../../crates/daemon/src/transform.rs#L2047-L2089
+[normalize]: ../../../../../crates/daemon/src/transform.rs#L2091-L2108
+[lineage-pass]: ../../../../../crates/daemon/src/transform.rs#L2721-L2725
+[apply-head]: ../../../../../crates/daemon/src/transform.rs#L2844-L2874
+[additive]: ../../../../../crates/daemon/src/transform.rs#L2855-L2857
+[shadow]: ../../../../../crates/daemon/src/transform.rs#L2959
+[live]: ../../../../../crates/daemon/src/transform.rs#L2973-L2977
+[ordinal-check]: ../../../../../crates/daemon/src/transform.rs#L2983-L2994
+[tail-clone]: ../../../../../crates/daemon/src/transform.rs#L4002
+[commit-inputs]: ../../../../../crates/daemon/src/transform.rs#L4932-L4942
+[caveman-source]: ../../../../../crates/daemon/src/transform.rs#L5699-L5702
+[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6323-L6352
+[pending-pass]: ../../../../../crates/daemon/src/transform.rs#L6634-L6662
+[tag-entry]: ../../../../../crates/daemon/src/transform.rs#L6790-L6815
+[tag-snapshot]: ../../../../../crates/daemon/src/transform.rs#L6835-L6840
+[load-tags]: ../../../../../crates/daemon/src/transform.rs#L6907-L6965
+[mint-input]: ../../../../../crates/daemon/src/transform.rs#L7164-L7169
+[append-mint]: ../../../../../crates/daemon/src/transform.rs#L7272-L7293
+[taggable]: ../../../../../crates/daemon/src/transform.rs#L7297-L7321
+[active-match]: ../../../../../crates/daemon/src/transform.rs#L7361
+[make-mut]: ../../../../../crates/daemon/src/transform.rs#L7894-L7895
+[output-identity]: ../../../../../crates/daemon/src/transform.rs#L10241-L10323
+[tail-loop]: ../../../../../crates/daemon/src/transform.rs#L11003-L11007
+[t-fpids]: ../../../../../crates/daemon/src/transform.rs#L13588
+[t-parked]: ../../../../../crates/daemon/src/transform.rs#L13976
+[t-pending]: ../../../../../crates/daemon/src/transform.rs#L20348
+[t-tagcold]: ../../../../../crates/daemon/src/transform.rs#L22703
+[t-poison]: ../../../../../crates/daemon/src/transform.rs#L22772
+[t-interleave]: ../../../../../crates/daemon/src/transform.rs#L22805
+[t-collapsed]: ../../../../../crates/daemon/src/transform.rs#L27554
 [flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
 [flatproj]: ../../../../../crates/daemon/src/wire.rs#L115-L128
 [reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L142-L145
@@ -514,15 +514,15 @@ both sides and neither resolved here:
 [meta-clone]: ../../../../../crates/daemon/src/wire.rs#L514
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L622-L685
 [fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L775-L786
-[t-inc]: ../../../../../crates/daemon/src/wire.rs#L1360
-[t-reattach]: ../../../../../crates/daemon/src/wire.rs#L1545
-[hyg-output]: ../../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
-[part-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
-[hygiene]: ../../../../../crates/daemon/src/tail_hygiene.rs#L472-L526
-[hyg-text]: ../../../../../crates/daemon/src/tail_hygiene.rs#L536-L554
-[hyg-input]: ../../../../../crates/daemon/src/tail_hygiene.rs#L555-L565
-[t-hyg-cold]: ../../../../../crates/daemon/src/tail_hygiene.rs#L795
-[t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1104
+[t-inc]: ../../../../../crates/daemon/src/wire.rs#L1378
+[t-reattach]: ../../../../../crates/daemon/src/wire.rs#L1563
+[hyg-output]: ../../../../../crates/daemon/src/tail_hygiene.rs#L572-L591
+[part-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L599-L622
+[hygiene]: ../../../../../crates/daemon/src/tail_hygiene.rs#L566-L620
+[hyg-text]: ../../../../../crates/daemon/src/tail_hygiene.rs#L630-L648
+[hyg-input]: ../../../../../crates/daemon/src/tail_hygiene.rs#L649-L659
+[t-hyg-cold]: ../../../../../crates/daemon/src/tail_hygiene.rs#L889
+[t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1198
 [count-digest]: ../../../../../crates/daemon/src/token_cache.rs#L103-L143
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L293
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L277-L291
@@ -550,4 +550,4 @@ both sides and neither resolved here:
 [serde-features]: ../../../../../Cargo.toml#L45
 [t-segments]: ../../../../../crates/daemon/tests/prepared_output.rs#L34-L54
 [t-seldiff]: ../../../../../crates/daemon/tests/selection_differential.rs#L1-L5
-[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L68-L110
+[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L68-L126

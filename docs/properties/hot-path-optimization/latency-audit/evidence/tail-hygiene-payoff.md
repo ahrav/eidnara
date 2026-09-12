@@ -81,6 +81,13 @@ exclude the user's `docs/agents/issue-tracker.md` edits from build identity.
 The full `candidate.patch` also captures the documentation state at build time;
 its hash is historical, not the hash of this later documentation update.
 
+B is the fixed-slot memo revision. The later session-table revision, which
+refuses over-budget blocks instead of resetting the memo, fingerprints caveman
+units instead of cloning them, and replaces sixteen hashed slots with a
+least-recently-used table behind per-session locks, has not been measured
+under this schedule. Its warm-path work per call is table lookup plus one
+`Arc` clone and per-block validity checks; no new timing is claimed for it.
+
 | Identity | A | B |
 | --- | --- | --- |
 | Executable relative to workspace | `target/hygiene-before/release/deps/hot_path-c149ac66da8b63fb` | `target/hygiene-after/release/deps/hot_path-c149ac66da8b63fb` |
@@ -132,7 +139,7 @@ build/process receipts; do not publish that bundle without secret redaction.
 ## Failure scenario
 
 Removing result construction, substituting a precomputed U/T pair, omitting
-slot hashing/locking, or treating batch p95 as individual latency would claim
+session lookup/locking, or treating batch p95 as individual latency would claim
 a benefit outside the measured boundary. Using the failed original baseline
 or naming the repair commit as the memo implementation would misidentify A/B.
 
@@ -145,11 +152,11 @@ not mean each serialized message is exactly 2 KiB. Projection construction,
 tokenizer initialization, pool construction, and memo priming are outside
 timing. A's token cache already warms during Criterion warmup.
 
-The [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L90-L131)
+The [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
 owns and primes B's pool before the callback. Its
-[wrapper](../../../../../crates/daemon/src/lib.rs#L148-L174) uses the actual
-production slot pool with namespace 0 and session ID `benchmark`. Session
-hashing, slot locking, memo validity checks, bookkeeping, and full measurement
+[wrapper](../../../../../crates/daemon/src/lib.rs#L155-L181) uses the actual
+production memo table with namespace 0 and session ID `benchmark`. Session
+lookup, memo locking, memo validity checks, bookkeeping, and full measurement
 construction/destruction remain inside each timed call, as does loop overhead.
 The fixture has empty core state, no populated tags or caveman units, no
 coverage ordinal, empty protected IDs, and `protected_tags = 20`; U is zero.
@@ -157,9 +164,9 @@ coverage ordinal, empty protected IDs, and `protected_tags = 20`; U is zero.
 This result concerns repeated warm in-process hygiene calls at one synthetic
 input point. It establishes neither production representativeness nor
 concurrent-session, cold-call, delta-ingress, total turn, or session latency.
-Correctness tests demonstrate noncolliding-slot overlap, not contention payoff.
-Collisions can serialize and evict; noncolliding slots can proceed concurrently.
-No memo escapes its slot lock. The 16 MiB plus fixed-container retention bound
+Correctness tests demonstrate that distinct sessions overlap without blocking
+or evicting each other up to the sixteen-session limit, not contention payoff.
+The 16 MiB plus fixed-container retention bound
 and its shared accounting-model limits are documented in
 [B4's retention evidence](hygiene-digest-is-kind-prefixed-part-content.md#q-does-the-bounded-memo-preserve-measurements-and-account-for-retention),
 not measured as peak allocation or RSS here.
@@ -167,7 +174,7 @@ not measured as peak allocation or RSS here.
 ## What a test must construct
 
 Payoff does not replace B4's cold/warm full-result, digest-domain, poisoned-key,
-invalidation, collision, namespace, reset, and retention checks. The
+invalidation, eviction, namespace, reset, and retention checks. The
 [existing-check inventory](../existing-checks.md#shared-input-equivalence)
 retains their unaudited adequacy status. The pre-memo characterization is
 agent-witnessed, transcript-only provenance; no separate characterization

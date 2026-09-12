@@ -24,7 +24,7 @@ calls [`transform_with_projection_cached`][tc-inject] with
 `&self.serialized_outputs`. The first call is at [`:8202`][commit-call].
 Inside that call, `apply_once` commits the store at
 [`commit_transform:4939-4971`][store-commit] and then replaces the
-serialized-output cache at [`:4976-4986`][output-replace]; both are inside
+serialized-output cache at [`:4984-4994`][output-replace]; both are inside
 the closure, so the transform catalog's
 [output-cache record][tc-output] governs their order.
 
@@ -56,7 +56,7 @@ In-memory mutations after `run_transform()` returns, in order:
   retained request.
 
 On the ordinary path there is no `.await` between [`:8202`][commit-call] and
-[`:8461`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
+[`:8462`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
 sit inside the Emergency95 branch ([`:8244-8334`][emergency]), and each is
 followed by another `run_transform()` call, so an abort there leaves the
 first commit's roots inserted and the later bookkeeping skipped.
@@ -110,36 +110,36 @@ the parent's [E1][e1] and [E2][e2] cover route state and charges.
 - Missing evidence: A worker design.
 - Conclusion: needs human input.
 
-[handler]: ../../../../../crates/daemon/src/lib.rs#L7887
-[roots-doc]: ../../../../../crates/daemon/src/lib.rs#L2936-L2939
-[store-pc]: ../../../../../crates/daemon/src/lib.rs#L4302-L4345
-[knows]: ../../../../../crates/daemon/src/lib.rs#L4489-L4536
-[knows-heal]: ../../../../../crates/daemon/src/lib.rs#L4501-L4522
-[guidance-fn]: ../../../../../crates/daemon/src/lib.rs#L4648-L4655
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L4994-L5324
-[boundary-store]: ../../../../../crates/daemon/src/lib.rs#L5148-L5151
-[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5462
-[guidance-pin]: ../../../../../crates/daemon/src/lib.rs#L7632-L7671
-[snapshot-begin]: ../../../../../crates/daemon/src/lib.rs#L8067-L8071
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8115-L8132
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8139-L8193
-[guidance-use]: ../../../../../crates/daemon/src/lib.rs#L8175
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8202
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8209-L8214
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8215-L8223
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8224-L8232
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8244-L8334
-[spawn-fire]: ../../../../../crates/daemon/src/lib.rs#L8353
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8387-L8394
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8398-L8403
-[native-attach]: ../../../../../crates/daemon/src/lib.rs#L8407-L8419
-[trace-complete]: ../../../../../crates/daemon/src/lib.rs#L8436
-[observation]: ../../../../../crates/daemon/src/lib.rs#L8439
-[finish-ready]: ../../../../../crates/daemon/src/lib.rs#L8452-L8461
-[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1799-L1815
-[guidance-meta]: ../../../../../crates/daemon/src/transform.rs#L3990-L3991
-[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4939-L4971
-[output-replace]: ../../../../../crates/daemon/src/transform.rs#L4976-L4986
+[handler]: ../../../../../crates/daemon/src/lib.rs#L7894
+[roots-doc]: ../../../../../crates/daemon/src/lib.rs#L2943-L2946
+[store-pc]: ../../../../../crates/daemon/src/lib.rs#L4309-L4352
+[knows]: ../../../../../crates/daemon/src/lib.rs#L4496-L4543
+[knows-heal]: ../../../../../crates/daemon/src/lib.rs#L4508-L4529
+[guidance-fn]: ../../../../../crates/daemon/src/lib.rs#L4655-L4662
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5001-L5331
+[boundary-store]: ../../../../../crates/daemon/src/lib.rs#L5155-L5158
+[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5469
+[guidance-pin]: ../../../../../crates/daemon/src/lib.rs#L7639-L7678
+[snapshot-begin]: ../../../../../crates/daemon/src/lib.rs#L8074-L8078
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8122-L8139
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8146-L8200
+[guidance-use]: ../../../../../crates/daemon/src/lib.rs#L8182
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8209
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8216-L8221
+[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8222-L8230
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8231-L8239
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8251-L8341
+[spawn-fire]: ../../../../../crates/daemon/src/lib.rs#L8360
+[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8394-L8401
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8405-L8410
+[native-attach]: ../../../../../crates/daemon/src/lib.rs#L8414-L8426
+[trace-complete]: ../../../../../crates/daemon/src/lib.rs#L8443
+[observation]: ../../../../../crates/daemon/src/lib.rs#L8446
+[finish-ready]: ../../../../../crates/daemon/src/lib.rs#L8459-L8468
+[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1807-L1823
+[guidance-meta]: ../../../../../crates/daemon/src/transform.rs#L3998-L3999
+[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4947-L4979
+[output-replace]: ../../../../../crates/daemon/src/transform.rs#L4984-L4994
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955
 [host-close]: ../../../../../crates/host-runtime/src/dispatch.rs#L1239-L1259
 [tc-output]: ../../../daemon/transform/catalog.md#output-cache-replace-trails-the-accepted-commit

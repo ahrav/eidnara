@@ -93,10 +93,11 @@ verification has passed.
 ## Artifact accounting
 
 The refined portfolio contains ten export/recovery, eleven projection/coverage,
-and nine embedding records, each with an evidence file: 25 safety, four
-liveness, and one reachability. Twenty-nine records use `always`; the campaign
-record uses `sometimes`. All are active, proposed-only, `test-only`, and
-unexercised. The maps contain 23/24/16 distinct marker definitions, 63 total,
+and eleven embedding records, each with an evidence file: 26 safety, five
+liveness, and one reachability. Thirty-one records use `always`; the campaign
+record uses `sometimes`. The two bounded-dispatch additions are exercised but
+remain test-only; the original records retain their individual state. The maps
+contain 23/24/18 distinct marker definitions, 65 total,
 with one definition owner per marker. The aggregate marker is included in that
 definition count, not recursively in its required witness matrix.
 

@@ -27,13 +27,13 @@ never of the allocation or the lane that produced them.
   from the same block for their consumers to agree.
 - The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2910-2912`][prefix-call] when a reusable projection exists and
+  [`:2918-2920`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
   blocks with `WireMessage::from_parts`, so a rebuilt shell has no `original`;
   its [doc][reattach-doc] says unknown top-level fields are dropped.
-- The native differential at [`:13316-13333`][native-diff] compares
+- The native differential at [`:13326-13343`][native-diff] compares
   `to_vec(incremental)` with `to_vec(encode_full_native_messages(..))` under
   [`native_attachment_differential_enabled`][gate-native], the same gate shape.
 - [`native_ingress_chunks`][ingress-chunks] shares an output chunk for index
@@ -52,8 +52,8 @@ never of the allocation or the lane that produced them.
 - [`Serialize for ServedMessage`][ser-served] re-serializes the inner
   `WireMessage`, not `canonical_bytes`. The handler avoids that path by taking
   `messages` out of the response before `to_value(response)`
-  ([`:14428-14443`][segments-take]) and writing each through
-  [`PreparedSegment::served`][segment-served] ([`:14448-14454`][segments]),
+  ([`:14432-14447`][segments-take]) and writing each through
+  [`PreparedSegment::served`][segment-served] ([`:14453-14459`][segments]),
   whose `bytes()` returns `canonical_bytes`.
 
 ## Failure scenario
@@ -61,7 +61,7 @@ never of the allocation or the lane that produced them.
 A projector that reuses an ingress `Arc<WireBlock>` but computes `bytes` from
 a different serialization breaks `bytes == to_string(wire)` and every digest
 keyed on it. A chunk-sharing decision by pointer identity diverges from the
-value test at [`:13058`][chunk-eq] for a message equal by value but not by
+value test at [`:13066`][chunk-eq] for a message equal by value but not by
 pointer. A sidecar merge that reorders a repeated mid changes `order`. A
 direct `to_vec(&message)` on a typed shell emits struct field order where the
 `to_value` round trip emits sorted keys, so bytes and `canonical_hash` change
@@ -314,10 +314,17 @@ branch on every message, a path a decoded request never takes because
 [bench corpus helper][bench-ingress] first failed on that shape, then passed
 once the helper round-trips the corpus through `serde_json`. `projection/full`
 measures the canonical-shell rebuild that a cold request pays. A separate
-[`projection/reattached_prefix`][bench-reattached] cell keeps the typed corpus
-and asserts every projected block points into a corpus shell, so it measures the
-share path a reattached prefix takes. `cargo test --bench hot_path` passes with
-both cells. These are shape corrections to the bench input, not measurements.
+[`projection/reattached_prefix`][bench-reattached] cell takes the decoded corpus
+and clears only each message's retained JSON through `mark_modified`, the shell
+shape the projection builder produces on replay. It asserts that every block
+keeps its retained JSON and that every projected block points into a corpus
+shell, so it measures the share path a reattached prefix takes. A typed corpus
+fails the block-retention assertion: `flatten_block` would then clone each typed
+payload instead of replaying its `Value`, a cost no reattached block pays. The
+`hot_path` target declares `required-features = ["bench-internals"]`, so
+`cargo test -p daemon --features bench-internals --locked --bench hot_path`
+exercises both cells and passes. These are shape corrections to the bench input,
+not measurements.
 
 ### Shell metadata preservation and review disposition
 
@@ -548,28 +555,28 @@ latency.
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
 [canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13794
 [canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L252-L279
-[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11811-L11833
+[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11823-L11845
 [canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13939
 [canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L171
 
 [bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
-[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L102-L135
+[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L118-L159
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
 [shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
 [shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L212-L241
-[shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L243-L253
+[shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L263-L273
 [shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1746
 [shell-charge]: ../../../../../crates/daemon/src/wire.rs#L955
 [shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1705
 
-[shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4157
+[shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4164
 [shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
-[shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
-[shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20654
-[shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20873
-[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L71
-[raw-allocation-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20984
+[shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13041-L13093
+[shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20675
+[shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20894
+[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L77-L91
+[raw-allocation-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L21014
 
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
 [flatblock]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L36-L64
@@ -583,16 +590,16 @@ latency.
 [ser-served]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2016
 [assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2031
-[prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
-[sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
-[sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16629
-[ingress-chunks]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13027-L13071
-[chunk-eq]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13058
-[gate-native]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13073-L13080
-[native-diff]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13316-L13333
-[segments-take]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14428-L14443
-[segments]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14448-L14454
-[t-astro]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20954
+[prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2918-L2920
+[sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6360
+[sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16633
+[ingress-chunks]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13029-L13081
+[chunk-eq]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13066
+[gate-native]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13085-L13090
+[native-diff]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13326-L13343
+[segments-take]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14432-L14447
+[segments]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14453-L14459
+[t-astro]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L21223
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73

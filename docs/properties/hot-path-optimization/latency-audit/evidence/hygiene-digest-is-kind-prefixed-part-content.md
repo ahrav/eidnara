@@ -60,25 +60,27 @@ other count.
 
 ## Timing windows and dependencies
 
-The process pool hashes `(store namespace, session ID)` into sixteen fixed
-mutex slots using a pool-owned hash seed. Each slot holds one optional session.
-The lock spans measurement; the memo cannot be checked out or shared through
-an `Arc`. Same-session calls serialize. Noncolliding slots can measure
-concurrently. Colliding sessions serialize on the same slot and evict its
-occupant, causing cold misses without changing measurement semantics.
+The process pool keeps a table of at most sixteen `(store namespace, session
+ID)` entries behind one table lock, which covers only lookup, insertion,
+least-recently-used eviction, and removal. Each session owns its memo behind
+its own lock inside a shared `Arc`, and that lock spans the measurement.
+Same-session calls serialize. Distinct sessions never block each other. A
+seventeenth session evicts the least recently used entry, causing cold misses
+for that session without changing measurement semantics. An in-flight walk
+keeps its evicted memo alive through the `Arc` until it returns; the table no
+longer charges it.
 
-Namespace-aware removal locks the selected slot and checks both identity
-fields. Route invalidation, whose caller names only a session, removes that
-ID across namespaces. Full reset and ID-only removal visit slots in index
-order, releasing each lock before taking the next. These operations are not
-an atomic pool snapshot: concurrent fills can repopulate a cleared slot.
-Every hit still checks the caller's source and caveman state, so repopulation
-does not authorize stale results. No borrowed memo escapes its slot lock.
+Namespace-aware removal drops the entry matching both identity fields. Route
+invalidation, whose caller names only a session, removes that ID across
+namespaces. Full reset clears the table. These operations take the table lock
+once and never wait on a walk. Every hit still checks the caller's source and
+caveman state, so repopulation does not authorize stale results.
 
-A poisoned slot is purged while its guard is held, then `clear_poison` runs.
-Recovery never trusts accounting that a panic may have interrupted. This
-recovers cache reuse after unwinding; it does not recover an aborted process
-or turn a panicking measurement into a successful response.
+A poisoned session memo is replaced with an empty memo while its guard is
+held, its charge is zeroed, then `clear_poison` runs. A poisoned table is
+cleared the same way. Recovery never trusts accounting that a panic may have
+interrupted. This recovers cache reuse after unwinding; it does not recover an
+aborted process or turn a panicking measurement into a successful response.
 W3 owns token-cache key-domain non-aliasing. The TypeScript golden fixes
 aggregate behavior, while the independent digest formula and pre-memo Rust
 characterization fix the hash input and exact measurement output.
@@ -128,31 +130,35 @@ anchors above identify each branch.
   [benchmark ownership][bench]. Live anchors are checked on 2026-09-12.
 - Findings: Each session memo maps block identity to its own kind-prefixed
   digest, kind, and tokens. The projection digest is only an invalidator.
-  Full caveman-unit equality, contextual exclusion, and text-role eligibility
-  also gate reuse. Tag attribution, protection, coverage, reduced eligibility,
-  full result parts, and the content signature are recomputed each call.
-  A borrowed caveman map is built once per walk. The first duplicate key wins,
-  matching the reference scan. Lookup does not repeatedly scan all frozen
-  units or hash caveman payloads. The renderer's `FrozenUnitIndex` also builds
-  reduction and tail-message indexes, so hygiene uses only the map it needs.
-- Retention: Sixteen hashed slots each cap the accounted retained session key
-  and memo heap at 1 MiB after operations. This is not a peak-allocation bound:
-  insertion can allocate before the budget check drops an over-budget map,
-  and the measurement also owns temporary data and result allocations.
-  The declaration adds
-  those caps and `size_of::<OnceLock<HygieneMemos>>()`, which includes the pool
-  hash seed, sixteen slot mutexes, and inline session/map headers. Charges
-  include map buckets, control-group allowance,
-  keys, digest strings, and every retained caveman string capacity. Map charges
-  retain their high-water allocation estimate across partial deletions. Oversized
-  entries bypass retention; a map exceeding its budget is dropped. Empty
-  projections release maps. Occupant mismatch compares namespace and ID before
-  reuse. Different namespaces may occupy different slots; returning to one
-  namespace never selects another namespace's memo. No wire field or persisted
-  schema changes. The resulting bound is 16 MiB plus fixed container storage.
-  Test recomputation independently checks counters but uses the same
-  capacity-to-bucket model as production. It does not measure actual allocator
-  RSS or independently validate hashbrown internals.
+  A length-prefixed SHA-256 fingerprint of the caveman unit, contextual
+  exclusion, and text-role eligibility also gate reuse; one `is_text_role`
+  predicate serves the memo and the measurement branch. Tag attribution,
+  protection, coverage, reduced eligibility, full result parts, and the
+  content signature are recomputed each call. A borrowed caveman map is built
+  once per walk. The first duplicate key wins, matching the reference scan.
+  Lookup does not repeatedly scan all frozen units. The renderer's
+  `FrozenUnitIndex` also builds reduction and tail-message indexes, so hygiene
+  uses only the map it needs.
+- Retention: Each of at most sixteen sessions caps its accounted session key
+  and memo heap at 1 MiB after operations. Admission charges the entry's key
+  and digest capacities plus the bucket allocation the map will hold after the
+  insert, using the same routine as the charge; an entry that would exceed the
+  budget is refused and counted, and the admitted working set is kept. A
+  refused block stays cold; the admitted prefix stays warm on later walks. The
+  memo retains no caveman payload bytes. This is not a peak-allocation bound:
+  the measurement also owns temporary data and result allocations. The
+  declaration adds the per-session caps, each session's table row and shared
+  memo allocation, and `size_of::<OnceLock<HygieneMemos>>()`. Charges include
+  map buckets, control-group allowance, keys, and digest strings. Map charges
+  retain their high-water allocation estimate across partial deletions. Empty
+  projections release maps. Table lookup compares namespace and ID; returning
+  to one namespace never selects another namespace's memo. No wire field or
+  persisted schema changes. The resulting bound is 16 MiB plus fixed container
+  and per-session allocation storage. The module status reports the table's
+  charged bytes, session count, and refused-insert counter under
+  `tail_hygiene_memo`. Test recomputation independently checks counters but
+  uses the same capacity-to-bucket model as production. It does not measure
+  actual allocator RSS or independently validate hashbrown internals.
 - Characterization provenance: Commit
   `d487b5549458796df1820a3a799ffb4bfb7146fa` contains only the release-accessor
   prerequisite repair, not the memo or its characterization test patch. The
@@ -169,26 +175,29 @@ anchors above identify each branch.
   artifact-hash verification is claimed for that characterization.
 - Verification history: The initial memo implementation passed 13 hygiene
   tests, four unchanged `differential_goldens` tests, and the duplicate-tool-use
-  belt and session-recomp reset tests. The fixed-slot revision passes 16
-  hygiene tests, the four
-  unchanged goldens, and session-recomp reset. Its isolated production-transform
-  test observes hit/miss counts of 0/3, then 3/0 for unchanged input, then 2/1
-  after one block edit. A channel barrier proves two noncolliding sessions
-  overlap inside their locks. Collision, namespace A/B/A, panic recovery through
-  use/removal/reset, and repeated oversized multiblock walks have explicit
-  assertions. All sixteen slots are filled near budget and checked against
-  recomputed string capacities, modeled bucket charges, and pool storage.
-  Prune, reinsert, replacement, and reset recompute counters in tests, under
+  belt and session-recomp reset tests. The session-table revision passes 19
+  hygiene tests, the four unchanged goldens, and session-recomp reset. Its
+  isolated production-transform test observes hit/miss counts of 0/3, then 3/0
+  for unchanged input, then 2/1 after one block edit, and asserts that the
+  child process ran exactly one test. A channel barrier proves sixteen
+  distinct sessions hold their memos concurrently and stay warm afterwards.
+  Namespace A/B/A, least-recently-used eviction at the limit, panic recovery
+  through use/removal/reset, over-budget walks that keep a warm prefix, and
+  payload-size-independent retention have explicit assertions. All sixteen
+  sessions are filled past budget and checked against recomputed string
+  capacities, modeled bucket charges, table storage, and the status metrics.
+  Prune, reinsert, replacement, and refusal recompute counters in tests, under
   the accounting-model limitation above.
-  Daemon all-target/all-feature
-  clippy, release all-feature library check, and scoped rustfmt checks pass.
+  Daemon all-target/all-feature clippy and rustfmt checks pass.
   Checks remain unaudited.
 - Historical payoff evidence: The implementation pass did not execute
   benchmarks; the subsequent [frozen local payoff run](tail-hygiene-payoff.md)
   is complete.
   The benchmark creates and primes the same memo owner used by measurement
-  before its callback and timed loop. Per-call slot hashing, locking, lookup,
+  before its callback and timed loop. Per-call table lookup, locking,
   validity, accounting, and full-result construction/drop remain timed. The
+  timed loop measures the fully warm path only; cold walks, edits, and
+  refusals are not timed, and the 2,500-message cell is not reported. The
   empty-core, empty-tag cell does not exercise caveman invalidation or populated
   attribution, and U is zero.
 - Missing evidence: No independently replayable pre-memo characterization
@@ -231,25 +240,25 @@ anchors above identify each branch.
   bundle is read for this update; the older secret-bearing raw bundle is not.
 
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L731-L796
-[token-count]: ../../../../../crates/daemon/src/lib.rs#L2035-L2059
-[hyg-output]: ../../../../../crates/daemon/src/tail_hygiene.rs#L478-L497
-[part-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L505-L528
-[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L520
-[excluded-part]: ../../../../../crates/daemon/src/tail_hygiene.rs#L530-L532
-[hygiene]: ../../../../../crates/daemon/src/tail_hygiene.rs#L722-L879
-[hyg-excluded]: ../../../../../crates/daemon/src/tail_hygiene.rs#L767-L790
-[hyg-text]: ../../../../../crates/daemon/src/tail_hygiene.rs#L792-L803
-[hyg-text-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L798-L799
-[hyg-input]: ../../../../../crates/daemon/src/tail_hygiene.rs#L804-L807
-[hyg-result]: ../../../../../crates/daemon/src/tail_hygiene.rs#L808-L820
-[hyg-result-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L811-L812
-[hyg-media]: ../../../../../crates/daemon/src/tail_hygiene.rs#L821-L836
-[hyg-media-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L823-L824
-[hyg-excluded-kind]: ../../../../../crates/daemon/src/tail_hygiene.rs#L837-L840
-[t-hyg-cold]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1054
-[t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L2027
+[token-count]: ../../../../../crates/daemon/src/lib.rs#L2042-L2066
+[hyg-output]: ../../../../../crates/daemon/src/tail_hygiene.rs#L572-L591
+[part-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L599-L622
+[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
+[excluded-part]: ../../../../../crates/daemon/src/tail_hygiene.rs#L624-L626
+[hygiene]: ../../../../../crates/daemon/src/tail_hygiene.rs#L816-L973
+[hyg-excluded]: ../../../../../crates/daemon/src/tail_hygiene.rs#L861-L885
+[hyg-text]: ../../../../../crates/daemon/src/tail_hygiene.rs#L888-L897
+[hyg-text-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L892-L893
+[hyg-input]: ../../../../../crates/daemon/src/tail_hygiene.rs#L898-L901
+[hyg-result]: ../../../../../crates/daemon/src/tail_hygiene.rs#L902-L914
+[hyg-result-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L905-L906
+[hyg-media]: ../../../../../crates/daemon/src/tail_hygiene.rs#L915-L930
+[hyg-media-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L917-L918
+[hyg-excluded-kind]: ../../../../../crates/daemon/src/tail_hygiene.rs#L931-L934
+[t-hyg-cold]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1148
+[t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L2281
 [count-digest]: ../../../../../crates/daemon/src/token_cache.rs#L103-L143
-[memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L328
-[caller]: ../../../../../crates/daemon/src/transform.rs#L4699-L4713
-[declaration]: ../../../../../crates/daemon/src/lib.rs#L2250-L2269
-[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L137-L175
+[memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L417
+[caller]: ../../../../../crates/daemon/src/transform.rs#L4707-L4721
+[declaration]: ../../../../../crates/daemon/src/lib.rs#L2257-L2276
+[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L161-L199

@@ -483,9 +483,9 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [evlog]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
 [redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [injection]: ../../../../../crates/daemon/src/injection.rs#L195-L230
-[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15311-L15485
-[hostpage]: ../../../../../crates/daemon/src/lib.rs#L735-L736
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9317-L9323
+[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15318-L15492
+[hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9324-L9330
 [t377]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L377
 [t440]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
 [t466]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466

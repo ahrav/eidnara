@@ -8,12 +8,17 @@
 //! outside this disposable database.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
 use retrieval::{BASELINE, ProjectionError};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, StoreError, open_sqlite,
 };
+
+use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The page cache the projection connection is allowed, in KiB.
 pub const CACHE_KIB: u32 = 8 * 1024;
@@ -40,11 +45,39 @@ pub enum SearchProjectionError {
     Projection(#[from] ProjectionError),
     #[error("search.sqlite connection is not in the required state: {0}")]
     Connection(String),
+    #[error("the search projection is quarantined: {}", .0.detail)]
+    Quarantined(Quarantine),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreFailure {
+    Deadline,
+    Rejected,
+    Integrity,
+    Unknown,
+}
+
+pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
+    match error {
+        StoreError::Deadline => StoreFailure::Deadline,
+        StoreError::Baseline(_)
+        | StoreError::FenceCorrupt { .. }
+        | StoreError::FenceMissing
+        | StoreError::FenceExhausted { .. } => StoreFailure::Integrity,
+        StoreError::Fenced { .. } => StoreFailure::Rejected,
+        StoreError::Lease(_)
+        | StoreError::UnsupportedBackend(_)
+        | StoreError::Backend(_)
+        | StoreError::Io(_) => StoreFailure::Unknown,
+    }
 }
 
 pub struct SearchProjection {
     store: SqliteStore,
     path: PathBuf,
+    /// Shares one quarantine among the projection's writers.
+    quarantine: Mutex<Option<Quarantine>>,
+    quarantined: AtomicBool,
 }
 
 impl SearchProjection {
@@ -82,7 +115,12 @@ impl SearchProjection {
             },
         };
         let store = open_sqlite(&descriptor, BASELINE)?;
-        let projection = Self { store, path };
+        let projection = Self {
+            store,
+            path,
+            quarantine: Mutex::new(None),
+            quarantined: AtomicBool::new(false),
+        };
         projection.pin_connection()?;
         projection.verify_connection()?;
         Ok(projection)
@@ -90,6 +128,68 @@ impl SearchProjection {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        if !self.quarantined.load(Ordering::Acquire) {
+            return None;
+        }
+        self.quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The shared quarantine state preserves the first cause so every writer
+    /// returns the same [`Quarantine`].
+    pub(crate) fn enter_quarantine(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        let quarantine = self.publish_quarantine_intent(kind, error);
+        self.synchronize_quarantine(quarantine)
+    }
+
+    pub(crate) fn publish_quarantine_intent(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        let mut state = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quarantine = state
+            .get_or_insert_with(|| Quarantine::new(kind, error))
+            .clone();
+        self.quarantined.store(true, Ordering::Release);
+        quarantine
+    }
+
+    pub(crate) fn synchronize_quarantine(&self, quarantine: Quarantine) -> Quarantine {
+        // Wait for active transactions so their final quarantine checks can roll back their writes.
+        let _ = self.store.with_conn_unfenced(|_| Ok(()));
+        quarantine
+    }
+
+    pub(crate) fn acknowledgement_guard(&self) -> Option<MutexGuard<'_, Option<Quarantine>>> {
+        let state = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.is_some() { None } else { Some(state) }
+    }
+
+    /// Forces quarantine without constructing a storage failure, so tests can
+    /// place the state change at an exact writer boundary.
+    #[cfg(feature = "test-support")]
+    pub fn enter_quarantine_for_test(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        self.enter_quarantine(kind, error)
     }
 
     /// Bounds the page cache and keeps transient sort and index storage in
@@ -192,6 +292,20 @@ impl SearchProjection {
         self.run(f, Access::Write)
     }
 
+    /// [`Self::write`] whose connection and write-lock acquisition end at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when the
+    /// connection or the write lock is still held at `deadline`; nothing was written.
+    pub fn write_within<T>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
+        self.run(f, Access::WriteWithin(deadline))
+    }
+
     /// One query-only read transaction on the same connection; a write inside
     /// it is refused by the store's authorizer.
     pub fn read<T>(
@@ -210,19 +324,36 @@ impl SearchProjection {
         access: Access,
     ) -> Result<T, SearchProjectionError> {
         let mut outcome: Option<Result<T, ProjectionError>> = None;
+        let mut quarantine = None;
         let inner = |conn: &GuardedConn<'_>| -> rusqlite::Result<()> {
+            if !matches!(access, Access::Read)
+                && let Some(found) = self.quarantine()
+            {
+                quarantine = Some(found);
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             let result = f(conn);
             let failed = result.is_err();
             outcome = Some(result);
             if failed {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
+            if !matches!(access, Access::Read)
+                && let Some(found) = self.quarantine()
+            {
+                quarantine = Some(found);
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             Ok(())
         };
         let store_result = match access {
             Access::Write => self.store.with_conn_fenced(inner),
+            Access::WriteWithin(deadline) => self.store.with_conn_fenced_within(deadline, inner),
             Access::Read => self.store.with_conn(inner),
         };
+        if let Some(quarantine) = quarantine {
+            return Err(SearchProjectionError::Quarantined(quarantine));
+        }
         match outcome {
             Some(Ok(value)) => {
                 store_result?;
@@ -242,5 +373,6 @@ impl SearchProjection {
 #[derive(Clone, Copy)]
 enum Access {
     Write,
+    WriteWithin(Instant),
     Read,
 }

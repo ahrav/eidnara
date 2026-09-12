@@ -25,25 +25,25 @@ inside-the-pass invariant; nothing states the outside one.
   result id; then it clones the request once and sets
   `messages[index].ck.meta.synthetic = true` on the clone.
 - Inside [`apply_once`][apply-head] the clone shadows the input:
-  [`:2855-2856`][shadow-first] binds `ingress_req` to the normalized clone or
-  the original, and [`:2951`][shadow] rebinds `req` to the rebased or the
+  [`:2863-2864`][shadow-first] binds `ingress_req` to the normalized clone or
+  the original, and [`:2959`][shadow] rebinds `req` to the rebased or the
   `ingress_req` view, so every later read in the pass sees the flags.
 - The projection is built from `ingress_req.messages`, so
   [`flatten_block`][flatten] copies the normalized flag into
   `FlatBlock.synthetic` and the projection's `message_meta` holds the
   normalized `HarnessMeta` ([`:514`][meta-clone]).
-- The handler binds `parsed` before the transform ([`:8115`][arc-parsed]) and
+- The handler binds `parsed` before the transform ([`:8128`][arc-parsed]) and
   hands that un-normalized value to [`prepare_historian_fire`][historian-fire]
-  at [`:8245-8247`][prepare-call], which calls
+  at [`:8258-8260`][prepare-call], which calls
   [`boundary_messages`][boundary-call] and
   [`assemble_historian_firing`][assemble] with `parsed`. In
   [`cached_boundary_messages`][cached-boundary] the message filter is
-  `!message.ck.meta.synthetic` ([`:16586-16588`][msg-filter]) and the block
-  filter is `!block.synthetic` ([`:16597`][boundary-filter]).
+  `!message.ck.meta.synthetic` ([`:16599-16601`][msg-filter]) and the block
+  filter is `!block.synthetic` ([`:16610`][boundary-filter]).
 - [`store_projection_cache`][store-pc] takes `request: &TransformRequest`
   from the handler; [`attach_native_messages_incremental`][native-attach]
   selects the newest assistant by `!message.ck.meta.synthetic` over
-  `request.messages` ([`:13138-13143`][newest-assistant]).
+  `request.messages` ([`:13151-13156`][newest-assistant]).
 - On a delta turn [`reattach_messages_prefix`][reattach] rebuilds prefix
   shells with `message.meta.clone()` from the projection's `message_meta`
   ([`:181`][reattach-meta]), so a previously normalized message arrives in
@@ -92,7 +92,7 @@ replayed pair ([`warm_cache_...`][t-collapsed]); none compares the two lanes.
 ### Q: Should the historian see the replayed pair as zero blocks or not at all?
 
 - Sources examined: [`cached_boundary_messages`][cached-boundary] filters at
-  [`:16586-16588`][msg-filter] and [`:16597`][boundary-filter]; the
+  [`:16599-16601`][msg-filter] and [`:16610`][boundary-filter]; the
   [reattach meta copy][reattach-meta].
 - Findings: Full-array lane: the message passes the message filter and every
   block fails the block filter, so a zero-block `BoundaryMsg` exists. Delta
@@ -111,28 +111,28 @@ replayed pair ([`warm_cache_...`][t-collapsed]); none compares the two lanes.
 - Conclusion: needs human input.
 
 [tc-synthetic]: ../../../daemon/transform/catalog.md#synthetic-strip-precedes-every-coverage-read
-[normalize]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2083-L2100
-[apply-head]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2836-L2866
-[shadow-first]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2855-L2856
-[shadow]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2951
-[pending-pass]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L6626-L6654
-[t-pending]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L19129
-[t-collapsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L27269-L27270
+[normalize]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2091-L2108
+[apply-head]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2844-L2874
+[shadow-first]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2863-L2864
+[shadow]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2959
+[pending-pass]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L6634-L6662
+[t-pending]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L19395
+[t-collapsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L27551-L27552
 [flatten]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L622-L685
 [meta-clone]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L514
 [reattach]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L146-L187
 [reattach-meta]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L181
-[arc-parsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8115
-[prepare-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8245-L8247
-[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
-[boundary-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5074
-[assemble]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5234-L5238
-[store-pc]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4302-L4345
-[native-attach]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L13082-L13094
-[newest-assistant]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L13138-L13143
-[cached-boundary]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16566-L16626
-[msg-filter]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16586-L16588
-[boundary-filter]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16597
+[arc-parsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8128
+[prepare-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8258-L8260
+[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5001
+[boundary-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5081
+[assemble]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5241-L5245
+[store-pc]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4309-L4352
+[native-attach]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L13095-L13107
+[newest-assistant]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L13151-L13156
+[cached-boundary]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16579-L16639
+[msg-filter]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16599-L16601
+[boundary-filter]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16610
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../../crates/memory-store/src/lib.rs#L145-L161
@@ -198,12 +198,12 @@ and independent reviews belong to the controller. The historical design
 questions above are resolved only as preservation requirements: neither
 observer semantics nor fingerprint identifiers change.
 
-[ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2083-L2132
+[ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2091-L2140
 [message-view]: ../../../../../crates/daemon/src/wire.rs#L378
-[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27077
-[delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23384
-[delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L23117
-[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28343
+[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27359
+[delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23400
+[delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L23133
+[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28625
 
 ## Retention and observer-scope verification
 
@@ -262,6 +262,6 @@ rebase test each passed before the local scan/helper cleanup. After cleanup,
 `cargo clippy -p daemon --lib --tests --locked -- -D warnings` passed.
 These overlap and remain focused checks, not a whole-workspace verdict.
 
-[baseline-normalizer]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/transform.rs#L2083-L2100
-[baseline-projection-input]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/transform.rs#L2855-L2866
+[baseline-normalizer]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/transform.rs#L2091-L2108
+[baseline-projection-input]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/transform.rs#L2863-L2874
 [baseline-projection-meta]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/wire.rs#L505-L519

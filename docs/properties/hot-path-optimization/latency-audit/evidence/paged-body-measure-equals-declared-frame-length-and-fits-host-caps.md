@@ -354,10 +354,10 @@ candidate was not committed and has no immutable source revision.
 [host-generator]: ../../../../../packages/e2e-tests/scripts/serialized-transform-pages.ts
 [host-test]: ../../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
 
-[current-page-check]: ../../../../../crates/daemon/src/lib.rs#L9301-L9323
-[current-parse]: ../../../../../crates/daemon/src/lib.rs#L11805-L11826
-[current-shape]: ../../../../../crates/daemon/src/lib.rs#L12685-L12697
-[prior-record]: https://github.com/ahrav/eidnara/blob/90f75bbe5606c4f6b52ffa3bdc4fe52dcce59253/docs/properties/hot-path-optimization/latency-audit/catalog.md#L1024-L1073
+[current-page-check]: ../../../../../crates/daemon/src/lib.rs#L9308-L9330
+[current-parse]: ../../../../../crates/daemon/src/lib.rs#L11812-L11833
+[current-shape]: ../../../../../crates/daemon/src/lib.rs#L12692-L12704
+[prior-record]: https://github.com/ahrav/eidnara/blob/90f75bbe5606c4f6b52ffa3bdc4fe52dcce59253/docs/properties/hot-path-optimization/latency-audit/catalog.md#L1044-L1093
 
 [paged]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640
 [pagebytes]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L690-L691
@@ -372,9 +372,9 @@ candidate was not committed and has no immutable source revision.
 [encodebody]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/host-client/client.ts#L1515-L1520
 [utf8len]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L184-L193
 [utf8body]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
-[bytecap]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/lib.rs#L15472-L15488
-[hostpage]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/lib.rs#L735-L736
-[hostpagecheck]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/lib.rs#L9310-L9323
+[bytecap]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/lib.rs#L15485-L15501
+[hostpage]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/lib.rs#L742-L743
+[hostpagecheck]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/lib.rs#L9323-L9336
 [t1308]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1308
 [t1371]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1371
 [t1391]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1391
