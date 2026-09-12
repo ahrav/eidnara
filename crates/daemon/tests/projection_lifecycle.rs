@@ -577,7 +577,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
 
     type Corruption = fn(&Path);
-    let corruptions: [(&str, Corruption); 6] = [
+    let corruptions: [(&str, Corruption); 7] = [
         ("truncated", |path: &Path| {
             let mut bytes = fs::read(path).unwrap();
             bytes.truncate(bytes.len() / 2);
@@ -602,6 +602,11 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         ("recovery without authorization", |path: &Path| {
             let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
             value["transition"] = Value::from("AuthorizedRecovery");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }),
+        ("blank consumer", |path: &Path| {
+            let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["consumer"]["consumer_id"] = Value::from(" ");
             fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
     ];

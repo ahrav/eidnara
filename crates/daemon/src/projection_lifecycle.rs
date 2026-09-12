@@ -124,12 +124,16 @@ impl LifecycleIntent {
     }
 }
 
-/// `record` rejects and `read` marks unavailable intents with invalid transition, `authorization_ref`, and cause combinations.
-fn check_authorization(
+/// `record` rejects and `read` marks unavailable intents with a blank consumer or an invalid transition, `authorization_ref`, and cause combination.
+fn check_invariants(
+    consumer_id: &str,
     transition: Transition,
     authorization_ref: Option<&str>,
     cause: Cause,
 ) -> Result<(), IntentRefusal> {
+    if consumer_id.trim().is_empty() {
+        return Err(IntentRefusal::InvalidConsumer);
+    }
     match (transition, authorization_ref, cause) {
         (Transition::AuthorizedRecovery, None, _) => Err(IntentRefusal::MissingAuthorization),
         (_, Some(reference), _) if !valid_authorization_ref(reference) => {
@@ -337,7 +341,8 @@ impl ProjectionLifecycle {
             Ok(intent) if intent.schema != SCHEMA => {
                 ControlState::Unavailable(format!("schema {}", intent.schema))
             }
-            Ok(intent) => match check_authorization(
+            Ok(intent) => match check_invariants(
+                &intent.consumer.consumer_id,
                 intent.transition,
                 intent.authorization_ref.as_deref(),
                 intent.cause,
@@ -360,10 +365,8 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
-        if request.consumer.consumer_id.trim().is_empty() {
-            return Err(IntentRefusal::InvalidConsumer);
-        }
-        check_authorization(
+        check_invariants(
+            &request.consumer.consumer_id,
             request.transition,
             request.authorization_ref.as_deref(),
             request.cause,

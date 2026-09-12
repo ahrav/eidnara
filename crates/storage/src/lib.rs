@@ -1906,6 +1906,8 @@ mod sqlite_backend {
         let _lease = leases
             .acquire(&lease_key(descriptor, &db_file_name)?)
             .map_err(StoreError::Lease)?;
+        // An unfit member refuses the whole family before any member is removed, so a failure never leaves a partial removal behind.
+        refuse_unfit_store_files(path)?;
         for suffix in SQLITE_FAMILY_SUFFIXES {
             let member = PathBuf::from(format!("{}{suffix}", path.display()));
             match std::fs::remove_file(&member) {
@@ -2852,6 +2854,24 @@ mod tests {
         let (root, d) = tmp();
         delete_sqlite_family(&d).expect("nothing to delete");
         assert!(!root.exists());
+    }
+
+    /// A member that is not a regular file refuses the whole deletion before any member is removed.
+    #[test]
+    fn delete_sqlite_family_removes_nothing_when_a_member_is_unfit() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        std::fs::create_dir(format!("{path}-wal")).expect("plant a directory where the WAL goes");
+        let outcome = delete_sqlite_family(&d);
+        assert!(
+            matches!(outcome, Err(StoreError::Baseline(_))),
+            "an unfit member refuses the deletion: {outcome:?}"
+        );
+        assert!(Path::new(path).exists(), "the database is untouched");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A parent that can be written but not opened for reading lets the removals through and fails the directory sync after them.
