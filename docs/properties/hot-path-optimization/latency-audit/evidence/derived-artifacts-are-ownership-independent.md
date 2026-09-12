@@ -367,8 +367,14 @@ Earlier discovery and execution evidence above remains historical.
 
 The [served constructor][canonical-constructor] serializes through
 [serde's formatter hooks][canonical-encoder]. Those hooks record object and
-field byte spans. The copy step orders fields by decoded Rust string keys and
-copies scalar bytes unchanged. It does not build a `Value` tree, reserialize
+field byte spans. The copy step orders fields by Rust string key and
+copies scalar bytes unchanged. A key without a backslash compares as the raw
+bytes between its quotes, which equals its decoded `str` order because serde
+writes non-ASCII unescaped; the quotes are excluded because `"` sorts after a
+space. Only an object with an escaped key decodes its keys. An object already
+in order is not sorted, so a retained-original shell allocates per object,
+not per key ([allocation witness][canonical-allocations]). It does not build
+a `Value` tree, reserialize
 values, change numeric forms, or duplicate the wire schema. Existing wire
 serializers still decide field omissions and whether to replay retained JSON.
 The generic encoder is private; its production entry accepts `WireMessage`,
@@ -395,7 +401,12 @@ both identities. A mismatching positional candidate forces a fresh hash rather
 than a fallback search. An absent position initializes the identity index once
 per message, preserving
 the first candidate for each digest. Repeated served blocks reuse that same
-candidate. Structural comparison is absent only from the absent-index fallback.
+candidate. The digest selects the candidate; the same
+[equality helper][canonical-helper] that guards a positional candidate then
+compares the served block against it and composes the receipt. The digest's
+field list mirrors `WireBlock`'s derived equality by hand across a crate
+boundary, so that re-check, not the digest, is the reuse authority, and a
+reused receipt has one shape in both paths.
 
 The [receipt witness][canonical-receipts] compares this fallback against an
 inline frozen reference from predecessor `e1a0d06a`: positional-first lookup,
@@ -412,8 +423,8 @@ poisoned-receipt assertions prove candidate choice only.
 Scratch lifetime is the constructor call. The positional map holds at most
 one `usize`/borrowed-block pair per projected block; the lazy identity map holds
 at most one 32-byte digest/borrowed-block pair per distinct identity. The
-serializer holds two byte buffers, object/field ranges, and decoded sort keys
-for one object at a time. None escapes into `ServedMessage`. Existing request
+serializer holds two byte buffers and object/field ranges, plus decoded sort
+keys for one escaped-key object at a time. None escapes into `ServedMessage`. Existing request
 ownership and [retained served-message accounting][canonical-retention] remain
 unchanged; no process-local cache or declared retained budget is added. Peak
 scratch usage and latency are not measured by these correctness checks. The
@@ -476,15 +487,70 @@ receipts, including their JSON sidecars, are byte-identical to the parent.
 No benchmark or environment capture runs during this integration. Full
 repository gates remain controller work.
 
-[canonical-constructor]: ../../../../../crates/daemon/src/transform.rs#L164-L227
-[canonical-encoder]: ../../../../../crates/daemon/src/served_json.rs#L112-L141
-[canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L882
+### Review fixes
+
+Base: `c3287f05f98c39ce805d2da8ac204892c654f356`.
+
+Review found two risks in the integrated source. First, the absent-index
+fallback reused a receipt on a digest hit alone, and composed that receipt
+inline as a second copy of the helper's tuple. The digest's field list is a
+hand copy of `WireBlock`'s derived equality from another crate, so a new
+`WireBlock` field would widen `==` and `to_string(block)` but not the digest,
+and the fallback would reuse an unequal block's receipt. Second, the encoder
+decoded every object key into a `String` before sorting, although every object
+that a retained-original shell replays is in canonical order before sorting.
+
+Both fixes were written test-first. The [source guard][canonical-source] now
+requires one `fingerprint_from_projected_wire(block, Some(flat))` call in the
+fallback and forbids `fingerprint_digest(` and `flat.bytes.len()` there; it
+failed on the integrated source with count 0. The
+[allocation witness][canonical-allocations] counts global allocation and
+reallocation events across the served encoder for 1-block and 65-block
+retained-original shells with 12 unescaped keys per block and caps the
+per-block difference at 8; it failed on the integrated source with 19 events
+per block (small shell 32, large shell 1259). After the fixes it measures 4
+events per block (small shell 14, large shell 281). Both shells still equal the
+`to_vec(to_value(message))` reference. The [key-order witness][canonical-keys]
+fixes the raw-byte comparison's two hazards before the encoder changed: quotes
+excluded so `"a"` sorts before `"a b"`, and escaped keys decoded so `"\n"`
+sorts before `"!"` and `\u0001` before `\t`. It passed before and after.
+
+The fallback now routes the digest-selected candidate through the positional
+[equality helper][canonical-helper], which compares `WireBlock` values and
+composes the receipt for both paths. The encoder compares unescaped keys as
+raw bytes between the quotes and skips the sort when the object is already in
+order; only an object with an escaped key decodes its keys. Served bytes,
+candidate precedence, and first-duplicate reuse are unchanged; the encoder's
+[test-support entry][canonical-test-entry] exists only for the allocation
+witness.
+
+Focused checks pass with `cargo test -p daemon --lib --all-features --locked`
+and filters `served_` (18), `canonical` (22), `fingerprint` (11),
+`differential` (8), `native` (35), and
+`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline` (1). Filters
+overlap. `cargo nextest run --profile ci -p daemon --all-targets
+--all-features --locked` passes 1216 tests with 6 configuration skips under
+local nextest 0.9.140. `cargo fmt --all -- --check`, workspace
+all-target/all-feature Clippy with `--locked -- -D warnings`, the
+comment-marker script, `git diff --check`, daemon rustdoc with
+`-D warnings`, `cargo check -p daemon --release --all-features --locked`, and
+`cargo check --workspace --no-default-features --locked` pass. No benchmark
+or environment capture runs here; the allocation counts are event counts, not
+latency.
+
+[canonical-constructor]: ../../../../../crates/daemon/src/transform.rs#L164-L224
+[canonical-encoder]: ../../../../../crates/daemon/src/served_json.rs#L112-L164
+[canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L885
+[canonical-helper]: ../../../../../crates/daemon/src/wire.rs#L871-L880
+[canonical-allocations]: ../../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L68
+[canonical-keys]: ../../../../../crates/daemon/src/served_json.rs#L218
+[canonical-test-entry]: ../../../../../crates/daemon/src/served_json.rs#L116-L119
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
-[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13797
-[canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L255-L282
+[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13794
+[canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L252-L279
 [canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11811-L11833
-[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13942
-[canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L148
+[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13939
+[canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L171
 
 [bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L102-L135
