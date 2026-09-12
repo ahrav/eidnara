@@ -34257,6 +34257,18 @@ mod tests {
         panic!("historian did not return to idle");
     }
 
+    /// `cache_state_scalar_runs` is one handle's lifetime run count, so a count read across
+    /// an eviction undercounts; a test that pins the count requires this function to return
+    /// zero.
+    fn cache_state_scalar_select_evictions(store: &MemoryStore) -> u32 {
+        store
+            .statement_evictions()
+            .into_iter()
+            .filter(|(sql, _)| sql.contains("json_type(meta"))
+            .map(|(_, evictions)| evictions)
+            .sum()
+    }
+
     async fn wait_for_count(value: &AtomicUsize, expected: usize) {
         let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
         while std::time::Instant::now() < deadline {
@@ -37034,10 +37046,12 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let messages = big_messages();
 
+        store.start_statement_reuse_probe();
         let first = call_transform(&handler, messages.clone()).await;
         assert_eq!(first["historian"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
 
+        let scalar_runs_before = store.cache_state_scalar_runs();
         let mut blocked = Box::pin(call_transform_with_usage(
             &handler, messages, 48_000, 50_000,
         ));
@@ -37054,6 +37068,20 @@ mod tests {
 
         assert!(response["action"].is_string());
         assert!(m0_text(&response).contains("autonomous summary"));
+        assert_eq!(
+            cache_state_scalar_select_evictions(&store),
+            0,
+            "the run count is read on one handle"
+        );
+        // The Busy path performs six scalar reads, two more than the inline-only path.
+        assert_eq!(
+            store.cache_state_scalar_runs() - scalar_runs_before,
+            6,
+            "the Emergency95 pass reads the floor after its first commit, the historian phase \
+             and the floor after the rerun that follows the live completion, the historian \
+             phase and the floor after the rerun that follows the inline firing, and the final \
+             floor check"
+        );
         wait_for_idle(&store).await;
     }
 
@@ -37066,13 +37094,12 @@ mod tests {
         let handler = Arc::new(handler);
         let messages = big_messages();
 
+        store.start_statement_reuse_probe();
         let first = call_transform(&handler, messages.clone()).await;
         assert_eq!(first["historian"]["fired"], true);
         wait_for_count(&producer.starts, 1).await;
 
-        // The interleave seam runs between the request's pre-fold transform and `Emergency95` prepare.
-        // By prepare time, the run has published and released its live-map entry.
-        // Only `Complete`'s row-advance check can fold the run.
+        // `Idle` can be published before `live_historian_sessions` releases its entry.
         // The hook also records the foreign-write witness: the row version the transform
         // committed and the row version the publish committed after it, read from the store
         // rather than from the pass's own post-commit read.
@@ -37080,6 +37107,7 @@ mod tests {
         {
             let producer = Arc::clone(&producer);
             let store_for_hook = Arc::clone(&store);
+            let handler_for_hook = Arc::clone(&handler);
             let witness = Arc::clone(&witness);
             *handler
                 .between_transform_and_prepare
@@ -37110,23 +37138,41 @@ mod tests {
                     );
                     std::thread::sleep(Duration::from_millis(10));
                 }
+                while handler_for_hook
+                    .live_historian_sessions
+                    .lock()
+                    .expect("live historian mutex")
+                    .contains_key("ses")
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the published run must release its live-map entry within the hook window"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }));
         }
 
-        store.start_statement_reuse_probe();
+        // The baseline excludes `load_publication_floor_ordinal`'s scalar read.
+        let _ = store.load_publication_floor_ordinal("ses");
         let scalar_runs_before = store.cache_state_scalar_runs();
         let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
         assert!(
             m0_text(&response).contains("autonomous summary"),
             "a fold published between the transform and the live-map check must land in this response"
         );
-        // The pass reads `cache_state` scalars four times: the floor after its first commit,
-        // the historian phase and the floor after the rerun that follows the live completion,
-        // and the final floor check. A fifth read is a bracket that moved.
+        assert_eq!(
+            cache_state_scalar_select_evictions(&store),
+            0,
+            "the run count is read on one handle"
+        );
+        // The pass performs four scalar reads; a fifth indicates an extra publication-floor bracket.
         assert_eq!(
             store.cache_state_scalar_runs() - scalar_runs_before,
             4,
-            "the Emergency95 pass's scalar reads"
+            "the Emergency95 pass reads the floor after its first commit, the historian phase \
+             and the floor after the rerun that follows the inline firing, and the final floor \
+             check; six reads are the Busy path the hook excludes"
         );
         let (transform_committed, published) = witness
             .lock()
