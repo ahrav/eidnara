@@ -431,6 +431,10 @@ mod sqlite_backend {
             f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let guard = self.lock_conn_within(deadline)?;
+            let _exit = MaintenanceExit {
+                conn: &guard,
+                gate: &self.gate,
+            };
             with_busy_timeout_until(&guard, deadline, |conn| {
                 f(&MaintenanceConn::new(conn)).map_err(deadline_on_lock_wait)
             })
@@ -4534,6 +4538,26 @@ mod tests {
         assert_eq!(
             after_second, 2,
             "the first fenced write after each maintenance callback re-pins synchronous=FULL"
+        );
+
+        // The bounded maintenance variant exits maintenance the same way.
+        store
+            .with_conn_unfenced_within(Instant::now() + Duration::from_secs(5), |c| {
+                c.pragma_update(None, "synchronous", "OFF")
+            })
+            .expect("bounded maintenance may lower it");
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('bounded', 'v')", [])
+                    .map(|_| ())
+            })
+            .expect("fenced write after bounded maintenance");
+        let after_bounded: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
+            .expect("read synchronous");
+        assert_eq!(
+            after_bounded, 2,
+            "the first fenced write after a bounded maintenance callback re-pins synchronous=FULL"
         );
 
         store

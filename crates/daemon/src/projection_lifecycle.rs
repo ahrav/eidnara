@@ -409,19 +409,7 @@ impl ProjectionLifecycle {
             staged_seed_digest: None,
             recorded_at: now,
         };
-        // `consumed` grows to `allowance`; the record must still fit once it has.
-        if encode(&LifecycleIntent {
-            episodes: EpisodeAccounting {
-                consumed: request.allowance,
-                ..intent.episodes
-            },
-            ..intent.clone()
-        })?
-        .len() as u64
-            > MAX_RECORD_BYTES
-        {
-            return Err(IntentRefusal::Oversized);
-        }
+        fits_when_exhausted(&intent)?;
         self.replace(&intent)?;
         Ok(Recorded {
             intent,
@@ -456,7 +444,7 @@ impl ProjectionLifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], or [`IntentRefusal::Conflict`] with the recorded attempt when another seed is already pinned.
+    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], [`IntentRefusal::Conflict`] with the recorded attempt when another seed is already pinned, or [`IntentRefusal::Oversized`] when the pinned record would not fit once its allowance is consumed; the record is unchanged in every refused case.
     pub fn pin_seed(
         &self,
         gate: &HookGate,
@@ -478,6 +466,7 @@ impl ProjectionLifecycle {
             None => {}
         }
         intent.staged_seed_digest = Some(digest.to_owned());
+        fits_when_exhausted(&intent)?;
         self.replace(&intent)?;
         Ok(intent)
     }
@@ -569,6 +558,21 @@ impl ProjectionLifecycle {
 
 fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
     serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))
+}
+
+/// `consumed` grows to `allowance`; every write of the record checks that it still fits once it has, so a granted episode is never refused as [`IntentRefusal::Oversized`].
+fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
+    let exhausted = LifecycleIntent {
+        episodes: EpisodeAccounting {
+            consumed: intent.episodes.allowance,
+            ..intent.episodes
+        },
+        ..intent.clone()
+    };
+    if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
+        return Err(IntentRefusal::Oversized);
+    }
+    Ok(())
 }
 
 /// Fields drop in declaration order, so the `flock` is released before `_threads`.

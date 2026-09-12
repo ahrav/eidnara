@@ -655,7 +655,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     let slack = 64 * 1024 - serde_json::to_vec(&expected(&base, 0)).unwrap().len();
     let near_cap = LifecycleRequest {
         attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
-        ..base
+        ..base.clone()
     };
     assert_eq!(
         serde_json::to_vec(&expected(&near_cap, 0)).unwrap().len(),
@@ -666,6 +666,30 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         Err(IntentRefusal::Oversized)
     );
     assert_eq!(lifecycle.read(), ControlState::Absent);
+
+    // A pin is refused when the record with the digest would not fit once `consumed` reaches `allowance`; the record is unchanged and every episode stays consumable.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let digest = "d".repeat(64);
+    let terminal = LifecycleIntent {
+        staged_seed_digest: Some(digest.clone()),
+        ..expected(&base, base.allowance)
+    };
+    // One byte short of fitting with the digest at the terminal size; without the digest it fits.
+    let slack = 64 * 1024 + 1 - serde_json::to_vec(&terminal).unwrap().len();
+    let pin_cap = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
+        ..base.clone()
+    };
+    let recorded = lifecycle.record(&open, &pin_cap, NOW).unwrap();
+    assert_eq!(
+        lifecycle.pin_seed(&open, &digest),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Intent(recorded.intent));
+    for _ in 0..base.allowance {
+        lifecycle.consume_episode(&open, NOW).unwrap();
+    }
 
     // A well-formed record the daemon did not write: a symlink to one.
     let dir = tempfile::tempdir().unwrap();
