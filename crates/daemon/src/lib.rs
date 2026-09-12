@@ -15412,6 +15412,20 @@ impl RequestMethodProbe {
 /// The estimate doubles counted node storage for `Vec` and map growth.
 const VALUE_NODE_SLACK: usize = 2;
 
+/// The decoded `Value` tree and the typed request coexist during `serde_json::from_value`.
+const RETAINED_NODE_COPIES: usize = 2;
+
+const VALUE_NODE_CHARGE_BYTES: usize = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
+
+/// `native_messages` stores `Arc<Value>` handles; their slack charge plus the `Arc` allocation
+/// must not exceed the typed-request node charge.
+const _: () = assert!(
+    std::mem::size_of::<Arc<Value>>() * VALUE_NODE_SLACK
+        + retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+        + std::mem::size_of::<Value>()
+        <= VALUE_NODE_CHARGE_BYTES
+);
+
 /// The fixed headroom covers allocations that do not scale with the body.
 const VALUE_ENVELOPE_BYTES: usize = 4096;
 
@@ -15452,10 +15466,15 @@ fn value_footprint_bound(body: &[u8]) -> Option<usize> {
         }
     }
     nodes
-        .checked_mul(std::mem::size_of::<Value>())?
-        .checked_mul(VALUE_NODE_SLACK)?
+        .checked_mul(VALUE_NODE_CHARGE_BYTES)?
+        .checked_mul(RETAINED_NODE_COPIES)?
         .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
         .checked_add(VALUE_ENVELOPE_BYTES)
+}
+
+#[cfg(feature = "test-support")]
+pub fn value_footprint_bound_for_test(body: &[u8]) -> Option<usize> {
+    value_footprint_bound(body)
 }
 
 /// The failure is permanent when the tree cannot fit the host's resident ceiling at any load.
@@ -18633,7 +18652,7 @@ mod tests {
 
         // An escaped quote does not end the string, so the rest stays inside it.
         let escaped = br#"{"a":"he said \"x,y,z\" ok"}"#;
-        let node_cost = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
+        let node_cost = VALUE_NODE_CHARGE_BYTES * RETAINED_NODE_COPIES;
         assert!(
             value_footprint_bound(escaped).unwrap()
                 < VALUE_ENVELOPE_BYTES + RETAINED_STRING_COPIES * escaped.len() + 4 * node_cost,
