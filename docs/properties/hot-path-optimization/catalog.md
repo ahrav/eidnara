@@ -303,7 +303,17 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No authority-transition comparison runs.
+Exercised: partial - The [storage denial matrix and statement-reuse
+probe](evidence/guarded-callbacks-enforce-current-authority.md#mode-gate-evidence)
+run in `cargo test -p storage`: a warm fenced statement is not re-prepared
+across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, and a
+temp-shadow statement cached before it is refused afterwards; a statement
+prepared under the unrestricted mode is refused in a guarded callback once the
+cache is flushed; a panicking read or fenced callback returns the connection to
+the unrestricted mode and rolls its partial write back; and baseline text with
+a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
+format-marker delete is refused by the store connection's gate. No
+baseline-versus-candidate trace over interleaved facade callers runs.
 Guarantee: Cached statements and reduced callback setup preserve each call's
 current read/write, schema, fencing, and applicable facade authority.
 Check: `always` - Across identical authority-transition traces, baseline and
@@ -321,15 +331,20 @@ Existing check: [Guarded-store checks](existing-checks.md#guarded-store) are
 unaudited and cover cached statements, shadows, and restoration.
 Impact: Setup elision can authorize stale privileges or target shadow objects.
 Open questions:
-- What invalidation evidence makes setup elision safe after maintenance and
-  authority changes? Preparing every statement on every call is not required.
+- The read path's `query_only` toggle expires every cached statement on the
+  connection, and it is the read callback's only write barrier for main and
+  temp alike; `deny_scope_escapes` allows DML on every non-infrastructure
+  table. What replaces it as the read path's write barrier if the toggle is
+  dropped? Owner: the connection-open unit (#430). (needs human input)
 
 ### callback-batching-preserves-observation-boundaries
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No batched-versus-baseline observation trace runs.
+Exercised: partial - The mode-gated authorizer introduces no batching; the
+[snapshot, freshness, and rollback checks](evidence/callback-batching-preserves-observation-boundaries.md#mode-gate-evidence)
+pass unchanged against it. No batched-versus-baseline observation trace runs.
 Guarantee: Callback batching preserves existing snapshot freshness and atomic
 write boundaries rather than merging unrelated operations into one snapshot.
 Check: `always` - Under the same ordered writer schedule, reads within an

@@ -134,6 +134,27 @@ The statement-cache test does not itself prove arbitrary setup elision safe.
 Maintenance, cached authorization, and facade ownership must be tested together
 when their boundaries change; a missing facade scope is legal on nonfacade calls.
 
+Checks added with the mode-gated authorizer (implementation base
+`96709d0ef54bcfad2327878ab96e118fb8ba4969`; links are to the live tree):
+
+| Check | Source condition or assertion | Status |
+| --- | --- | --- |
+| [Statement reuse probe][reuse-probe] | A warm fenced statement reports zero re-prepares across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, the callback reads the new table, and a temp-shadow statement cached before the DDL is refused. | unaudited |
+| [Read-path expiry witness][read-witness] | The `query_only` toggle expires cached statements on each read callback; two fenced callbacks in a row re-prepare nothing. | unaudited |
+| [Temp-database write barrier][temp-write-test] | Temp DDL and temp DML are refused in a read callback and allowed in a fenced one. | unaudited |
+| [Mode restoration after panic][mode-restore-test] | Maintenance regains pragma writes after a panicking read and a panicking fenced callback; `query_only` is restored, the partial write is rolled back, and the next fenced write re-pins `synchronous=FULL`. | unaudited |
+| [Baseline escapes on the store connection][baseline-gate-test] | A pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or format-marker delete in baseline text is refused by the store connection's gate; the pristine file then opens with benign text. | unaudited |
+| [Store statements stay uncached][surface-guard-test] | No fence or durability-pin statement is found in the statement cache after an open. | unaudited |
+| [Unrestricted statements do not reach guarded callbacks][gate-tests] | A fence upsert prepared unrestricted is reused without re-authorization until the cache is flushed, then refused; every `deny_baseline_escapes` denial is reachable; nested mode entry is a debug assertion. | unaudited |
+
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4029-L4113
+[read-witness]: ../../../crates/storage/src/lib.rs#L4120-L4149
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L4156-L4179
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4185-L4237
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4243-L4273
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4280-L4300
+[gate-tests]: ../../../crates/storage/src/lib.rs#L1794-L1896
+
 ## History render
 
 | Check | Source condition or assertion | Status |
