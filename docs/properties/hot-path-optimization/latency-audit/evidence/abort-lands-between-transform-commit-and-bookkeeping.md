@@ -93,17 +93,17 @@ with completion.
 - Missing evidence: A worker design and its completion channel.
 - Conclusion: needs human input.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2908-L2911
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8139-L8193
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8202
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8209-L8214
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8224-L8232
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8244-L8334
-[await-a]: ../../../../../crates/daemon/src/lib.rs#L8263
-[await-b]: ../../../../../crates/daemon/src/lib.rs#L8289
-[await-c]: ../../../../../crates/daemon/src/lib.rs#L8315
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8387
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8398-L8403
+[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2914-L2917
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8145-L8199
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8208
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8215-L8220
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8230-L8238
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8250-L8340
+[await-a]: ../../../../../crates/daemon/src/lib.rs#L8269
+[await-b]: ../../../../../crates/daemon/src/lib.rs#L8295
+[await-c]: ../../../../../crates/daemon/src/lib.rs#L8321
+[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8393
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8404-L8409
 [store-commit]: ../../../../../crates/daemon/src/transform.rs#L4936-L4974
 [load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955

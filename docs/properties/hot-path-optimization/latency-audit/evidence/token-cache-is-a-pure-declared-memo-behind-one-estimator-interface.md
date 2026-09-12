@@ -146,8 +146,8 @@ declaration sum remain outside this change.
 [tc-u32]: ../../../../../crates/daemon/src/token_cache.rs#L135-L137
 [tc-cet]: ../../../../../crates/daemon/src/token_cache.rs#L165-L181
 [th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L264
-[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2236-L2241
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2243-L2257
+[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2242-L2247
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2249-L2263
 [tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1799-L1815
 [hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1857-L1859
 [ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2836-L2845

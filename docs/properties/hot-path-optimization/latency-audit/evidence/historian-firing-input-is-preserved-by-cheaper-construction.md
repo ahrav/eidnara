@@ -102,7 +102,7 @@ test; none exercises a format change across a restart.
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L4006-L4033
-[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4881-L4883
+[fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4887-L4889
 [diff-header]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L100-L113

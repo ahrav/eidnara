@@ -171,7 +171,7 @@ assistant text, a tool call, and a tool result; command input is capped at
 The [cell](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
 constructs the projection and primes B's actual 16-slot pool outside both
 the benchmark callback and `b.iter`. The
-[wrapper](../../../../../crates/daemon/src/lib.rs#L148-L174) uses namespace 0
+[wrapper](../../../../../crates/daemon/src/lib.rs#L154-L180) uses namespace 0
 and session ID `benchmark`. Session hashing, slot locking, memo validity and
 accounting, full measurement construction, and its drop remain inside the
 timed call. A uses the original non-memo wrapper with its warm token cache.

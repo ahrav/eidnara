@@ -9,7 +9,7 @@
 //! A window that carries an artifact deletion is refused, because the descriptor export carries no tombstone for it and acknowledging it would report the deletion as propagated.
 //! An unknown local commit outcome is reconciled from the projection's durable rows.
 //! An unknown acknowledgement outcome is reconciled from the kernel's durable consumer checkpoint.
-//! Integrity and storage failures quarantine the driver, which then refuses further episodes, so no acknowledgement can rest on a projection whose contents are in doubt.
+//! Integrity and storage failures quarantine the projection, so no acknowledgement can rest on a projection whose contents are in doubt.
 
 use std::num::NonZeroUsize;
 
@@ -24,7 +24,10 @@ use retrieval::batch::{
     batch_from_rows, read_checkpoint, row_identities,
 };
 
-use crate::search_projection::{SearchProjection, SearchProjectionError};
+use crate::search_projection::{
+    SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
+};
+pub use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The registered consumer, its capture hold, and the projection identity an episode acts under.
 /// The hold must be the one the projection's durable checkpoint records; the episode refuses any other.
@@ -130,22 +133,6 @@ pub enum Blocked {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuarantineKind {
-    /// Stored rows disagree with what was written or with their own digests.
-    Integrity,
-    /// The projection store failed while running or reading back a batch, so its durable contents cannot be trusted from this side.
-    Storage,
-}
-
-/// The reason the driver stopped trusting the projection; every later episode of this driver returns it unchanged.
-/// `detail` is unredacted backend error text for the operator and must not be forwarded to untrusted sinks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Quarantine {
-    pub kind: QuarantineKind,
-    pub detail: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EpisodeEnd {
     /// Every commit through the captured target is applied and acknowledged.
@@ -167,12 +154,14 @@ pub struct EpisodeReport {
 pub enum CatchUpError {
     #[error("the search projection is quarantined: {}", .0.detail)]
     Quarantined(Quarantine),
+    #[error("the search projection writer was fenced before catch-up")]
+    ProjectionFenced,
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
 
 /// Which reply an episode loses, or which order it violates, so a test can watch the reconciliation and the ordering observation discriminate.
-#[cfg(feature = "test-support")]
+/// Only the test-support entry point can set one; a production build never injects a fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpisodeFault {
     /// The batch commits, then its reply arrives as a store failure whose effect is unknown.
@@ -183,34 +172,11 @@ pub enum EpisodeFault {
     AcknowledgeInsideLocalTransaction,
 }
 
-#[cfg(feature = "test-support")]
-type Fault = Option<EpisodeFault>;
-
-/// A production build has no reply to lose and no order to violate.
-#[cfg(not(feature = "test-support"))]
-#[derive(Clone, Copy, Default)]
-struct Fault;
-
-#[cfg(feature = "test-support")]
-macro_rules! fault {
-    ($fault:expr, $which:ident) => {
-        $fault == Some(EpisodeFault::$which)
-    };
-}
-#[cfg(not(feature = "test-support"))]
-macro_rules! fault {
-    ($fault:expr, $which:ident) => {{
-        let _: Fault = $fault;
-        false
-    }};
-}
-
 /// Runs bounded catch-up episodes for one projection against one kernel.
 pub struct SearchCatchUp<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
-    quarantine: Option<Quarantine>,
-    fault: Fault,
+    fault: Option<EpisodeFault>,
 }
 
 /// Why one step ended the episode: a refusal that moved nothing, or a failure the caller must see.
@@ -242,13 +208,12 @@ impl<'a> SearchCatchUp<'a> {
         Self {
             kernel,
             projection,
-            quarantine: None,
-            fault: Fault::default(),
+            fault: None,
         }
     }
 
-    pub fn quarantine(&self) -> Option<&Quarantine> {
-        self.quarantine.as_ref()
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        self.projection.quarantine()
     }
 
     /// Captures a target, brings the kernel checkpoint up to the durable local prefix, then applies and acknowledges one window at a time until the target is reached or a step refuses.
@@ -257,7 +222,7 @@ impl<'a> SearchCatchUp<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`CatchUpError::Quarantined`] when a stored row contradicts the batch that wrote it, or when the projection store fails and its effect cannot be read back; the driver stays quarantined.
+    /// Returns [`CatchUpError::Quarantined`] when a stored row contradicts the batch that wrote it, or when the projection store fails and its effect cannot be read back; the projection stays quarantined.
     /// Returns [`CatchUpError::Kernel`] when the kernel fails in a way that leaves no durable fact to reconcile against, such as a failed read or a hold extension that did not run.
     pub fn run_episode(
         &mut self,
@@ -266,7 +231,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
-        self.fault = Fault::default();
+        self.fault = None;
         self.run_episode_inner(consumer, bounds, now, observer)
     }
 
@@ -291,8 +256,8 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
-        if let Some(quarantine) = &self.quarantine {
-            return Err(CatchUpError::Quarantined(quarantine.clone()));
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(CatchUpError::Quarantined(quarantine));
         }
         let target = self.kernel.capture_commit_read_target()?;
         let mut report = EpisodeReport {
@@ -446,7 +411,7 @@ impl<'a> SearchCatchUp<'a> {
             Err(SearchProjectionError::Projection(ProjectionError::IdentityMismatch)) => {
                 return Err(Blocked::ProjectionIdentity.into());
             }
-            Err(error) => return Err(self.quarantine_from(error).into()),
+            Err(error) => return Err(self.stop_from_projection_error(error)),
         };
         if checkpoint.hold_id != consumer.hold_id {
             return Err(Blocked::BaselineMismatch {
@@ -469,6 +434,7 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<(), Stop> {
+        self.refuse_if_quarantined()?;
         observer(EpisodeEvent::HoldExtensionRequested { through });
         let hold = self
             .kernel
@@ -502,7 +468,8 @@ impl<'a> SearchCatchUp<'a> {
             Ok(()) => Ok(()),
             // The store returned before COMMIT, so the batch rolled back and nothing of it is durable.
             Err(SearchProjectionError::Projection(error)) => Err(match classify(&error) {
-                Refusal::Admission => Blocked::Admission(error).into(),
+                // A batch writes no vectors, so an operator-repair refusal is unreachable here and, if it ever arrives, is a refusal with nothing durable.
+                Refusal::Admission | Refusal::OperatorRepair => Blocked::Admission(error).into(),
                 Refusal::Identity => Blocked::ProjectionIdentity.into(),
                 Refusal::Integrity => self
                     .enter_quarantine(QuarantineKind::Integrity, &error)
@@ -511,11 +478,29 @@ impl<'a> SearchCatchUp<'a> {
                     .enter_quarantine(QuarantineKind::Storage, &error)
                     .into(),
             }),
+            Err(SearchProjectionError::Quarantined(quarantine)) => {
+                Err(CatchUpError::Quarantined(quarantine).into())
+            }
+            Err(SearchProjectionError::Connection(error)) => Err(self
+                .enter_quarantine(QuarantineKind::Integrity, &error)
+                .into()),
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Integrity =>
+            {
+                Err(self
+                    .enter_quarantine(QuarantineKind::Integrity, &error)
+                    .into())
+            }
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Rejected =>
+            {
+                Err(CatchUpError::ProjectionFenced.into())
+            }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
-            Err(_) => match self.projection.batch_status(&batch) {
+            Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(&batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
                 Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
-                Err(error) => Err(self.quarantine_from(error).into()),
+                Err(error) => Err(self.stop_from_projection_error(error)),
             },
         }
     }
@@ -531,7 +516,8 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), SearchProjectionError> {
         let through = batch.identity.through_commit_seq;
         let kernel = self.kernel;
-        let acknowledge_inside = fault!(self.fault, AcknowledgeInsideLocalTransaction);
+        let acknowledge_inside =
+            self.fault == Some(EpisodeFault::AcknowledgeInsideLocalTransaction);
         let applied = self.projection.write(|conn| {
             retrieval::batch::apply_batch(conn, batch, bounds.batch, now)?;
             observer(EpisodeEvent::LocalStaged { through });
@@ -548,7 +534,7 @@ impl<'a> SearchCatchUp<'a> {
             Ok(())
         });
         observer(EpisodeEvent::LocalReleased { through });
-        if fault!(self.fault, LoseLocalCommitReply) && applied.is_ok() {
+        if self.fault == Some(EpisodeFault::LoseLocalCommitReply) && applied.is_ok() {
             return Err(SearchProjectionError::Store(storage::StoreError::Backend(
                 "database is locked".to_string(),
             )));
@@ -599,18 +585,29 @@ impl<'a> SearchCatchUp<'a> {
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<(), Stop> {
+        self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
-        let mut acknowledged = self.kernel.acknowledge_through_source_hold(
+        let mut acknowledged = self.kernel.acknowledge_through_source_hold_if(
             &consumer.binding,
             &consumer.hold_id,
             through,
             now,
+            || self.projection.acknowledgement_guard(),
         );
-        if fault!(self.fault, LoseAcknowledgementReply) && acknowledged.is_ok() {
+        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply)
+            && matches!(acknowledged, Ok(true))
+        {
             acknowledged = Err(SourceHoldError::Kernel(KernelError::Io));
         }
         match acknowledged {
-            Ok(()) => {}
+            Ok(true) => {}
+            Ok(false) => {
+                let quarantine = self
+                    .projection
+                    .quarantine()
+                    .expect("quarantine intent must record its cause before publication");
+                return Err(CatchUpError::Quarantined(quarantine).into());
+            }
             Err(SourceHoldError::Kernel(error)) if outcome_unknown(error) => {
                 let kernel_checkpoint = self
                     .kernel
@@ -630,14 +627,45 @@ impl<'a> SearchCatchUp<'a> {
         Ok(())
     }
 
-    fn quarantine_from(&mut self, error: SearchProjectionError) -> CatchUpError {
+    fn stop_from_projection_error(&mut self, error: SearchProjectionError) -> Stop {
+        if let SearchProjectionError::Quarantined(quarantine) = &error {
+            return CatchUpError::Quarantined(quarantine.clone()).into();
+        }
+        if matches!(
+            &error,
+            SearchProjectionError::Projection(error) if classify(error) == Refusal::Identity
+        ) {
+            return Blocked::ProjectionIdentity.into();
+        }
+        if matches!(
+            &error,
+            SearchProjectionError::Store(error)
+                if classify_store_failure(error) == StoreFailure::Rejected
+        ) {
+            return CatchUpError::ProjectionFenced.into();
+        }
         let kind = match &error {
             SearchProjectionError::Projection(error) if classify(error) == Refusal::Integrity => {
                 QuarantineKind::Integrity
             }
+            SearchProjectionError::Connection(_) => QuarantineKind::Integrity,
+            SearchProjectionError::Store(error)
+                if classify_store_failure(error) == StoreFailure::Integrity =>
+            {
+                QuarantineKind::Integrity
+            }
             _ => QuarantineKind::Storage,
         };
-        self.enter_quarantine(kind, &error)
+        self.enter_quarantine(kind, &error).into()
+    }
+
+    /// Another writer can quarantine the projection while an episode runs, so
+    /// `refuse_if_quarantined` re-reads shared state.
+    fn refuse_if_quarantined(&self) -> Result<(), Stop> {
+        match self.projection.quarantine() {
+            Some(quarantine) => Err(CatchUpError::Quarantined(quarantine).into()),
+            None => Ok(()),
+        }
     }
 
     fn enter_quarantine(
@@ -645,12 +673,7 @@ impl<'a> SearchCatchUp<'a> {
         kind: QuarantineKind,
         error: &dyn std::fmt::Display,
     ) -> CatchUpError {
-        let quarantine = Quarantine {
-            kind,
-            detail: error.to_string(),
-        };
-        self.quarantine = Some(quarantine.clone());
-        CatchUpError::Quarantined(quarantine)
+        CatchUpError::Quarantined(self.projection.enter_quarantine(kind, error))
     }
 }
 
@@ -677,17 +700,19 @@ fn outcome_unknown(error: KernelError) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Refusal {
+pub(crate) enum Refusal {
     /// The batch was judged and refused before any row was written.
     Admission,
     Identity,
+    /// The input contradicts durable state in a way no automatic retry may resolve.
+    OperatorRepair,
     /// Stored state contradicts the batch or itself.
     Integrity,
     /// A statement failed for a reason the error text alone does not classify.
     Storage,
 }
 
-fn classify(error: &ProjectionError) -> Refusal {
+pub(crate) fn classify(error: &ProjectionError) -> Refusal {
     match error {
         ProjectionError::Occurrence(_)
         | ProjectionError::OverBound { .. }
@@ -698,7 +723,12 @@ fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::MutationConflict
         | ProjectionError::MalformedBatch
         | ProjectionError::BatchOverBound { .. }
-        | ProjectionError::UnknownGeneration { .. } => Refusal::Admission,
+        | ProjectionError::UnknownGeneration { .. }
+        | ProjectionError::RetiredGeneration { .. }
+        | ProjectionError::NoPendingWork { .. } => Refusal::Admission,
+        ProjectionError::InvalidVector { .. } | ProjectionError::VectorConflict { .. } => {
+            Refusal::OperatorRepair
+        }
         ProjectionError::IdentityMismatch => Refusal::Identity,
         // An admitted invalidation names an occurrence at or below the durable checkpoint; a missing row contradicts the applied prefix.
         ProjectionError::UnknownOccurrence { .. }

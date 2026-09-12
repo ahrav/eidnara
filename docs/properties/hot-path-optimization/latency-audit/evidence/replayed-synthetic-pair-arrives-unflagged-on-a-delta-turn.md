@@ -149,7 +149,7 @@ The default-production reachability class and medium confidence remain.
 Test adequacy remains unaudited. No benchmark or measurement campaign ran;
 parent measurement and whole-repository landing gates remain separate.
 
-[witness]: ../../../../../crates/daemon/src/lib.rs#L22859
+[witness]: ../../../../../crates/daemon/src/lib.rs#L22865
 
 ## Third-turn prefix and production-prompt checks
 

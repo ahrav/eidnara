@@ -89,17 +89,17 @@ subject and is not the witness.
   is unit-test-only; a campaign outside that crate needs a new seam, which is
   a specification decision.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2908-L2911
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L4994-L5067
-[prepare-load]: ../../../../../crates/daemon/src/lib.rs#L5013
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8215-L8223
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8224-L8232
-[rerun]: ../../../../../crates/daemon/src/lib.rs#L8264-L8271
-[prepare-b]: ../../../../../crates/daemon/src/lib.rs#L8336-L8338
-[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8358-L8377
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34932
-[t-hook-install]: ../../../../../crates/daemon/src/lib.rs#L34951-L34954
-[t-hook-second]: ../../../../../crates/daemon/src/lib.rs#L35398-L35401
+[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2914-L2917
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5000-L5073
+[prepare-load]: ../../../../../crates/daemon/src/lib.rs#L5019
+[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8221-L8229
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8230-L8238
+[rerun]: ../../../../../crates/daemon/src/lib.rs#L8270-L8277
+[prepare-b]: ../../../../../crates/daemon/src/lib.rs#L8342-L8344
+[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8364-L8383
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34938
+[t-hook-install]: ../../../../../crates/daemon/src/lib.rs#L34957-L34960
+[t-hook-second]: ../../../../../crates/daemon/src/lib.rs#L35404-L35407
 [load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
 [publish]: ../../../../../crates/memory-store/src/lib.rs#L10559
 [publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10762-L10771

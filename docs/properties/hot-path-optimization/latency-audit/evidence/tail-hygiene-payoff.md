@@ -154,7 +154,7 @@ timing. A's token cache already warms during Criterion warmup.
 
 The [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
 owns and primes B's pool before the callback. Its
-[wrapper](../../../../../crates/daemon/src/lib.rs#L148-L174) uses the actual
+[wrapper](../../../../../crates/daemon/src/lib.rs#L154-L180) uses the actual
 production memo table with namespace 0 and session ID `benchmark`. Session
 lookup, memo locking, memo validity checks, bookkeeping, and full measurement
 construction/destruction remain inside each timed call, as does loop overhead.
