@@ -7729,6 +7729,7 @@ impl Handler {
                 .expect("boundary token cache mutex");
             (cache.retained_bytes, cache.sessions.len())
         };
+        let hygiene_memo = tail_hygiene::hygiene_memos().metrics();
         let (
             page_bytes,
             page_count,
@@ -7784,6 +7785,11 @@ impl Handler {
             "boundary_token": {
                 "charged_bytes": boundary_bytes,
                 "entry_count": boundary_count,
+            },
+            "tail_hygiene_memo": {
+                "charged_bytes": hygiene_memo.charged_bytes,
+                "entry_count": hygiene_memo.session_count,
+                "rejected_inserts": hygiene_memo.rejected_inserts,
             },
             "page_coordinator": {
                 "charged_bytes": page_bytes,
@@ -20072,6 +20078,14 @@ mod tests {
         );
         assert_eq!(metrics["native_attach"]["charged_bytes"], 0);
         assert_eq!(metrics["native_attach"]["entry_count"], 0);
+        // The transform populates the process-global memo table shared by other tests, so
+        // the assertions bound the values instead of fixing them.
+        let hygiene_memo = &metrics["tail_hygiene_memo"];
+        assert!(hygiene_memo["entry_count"].as_u64().unwrap() >= 1);
+        let charged = hygiene_memo["charged_bytes"].as_u64().unwrap();
+        assert!(charged > std::mem::size_of::<OnceLock<tail_hygiene::HygieneMemos>>() as u64);
+        assert!(charged <= tail_hygiene::MEMO_RETAINED_BYTES_BOUND as u64);
+        assert!(hygiene_memo["rejected_inserts"].is_u64());
         assert_eq!(metrics["page_coordinator"]["charged_bytes"], 123);
         assert_eq!(metrics["page_coordinator"]["entry_count"], 1);
         assert_eq!(metrics["page_coordinator"]["completed_response_bytes"], 17);

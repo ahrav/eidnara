@@ -544,9 +544,10 @@ Status: active
 Exercised: yes - Cold and warm memo walks match the frozen full-result digest.
 Independent kind-prefixed digest assertions, a poisoned projection token key,
 and content, caveman, context, namespace, reset, and eviction cases pass.
-Fixed-slot collision and poison recovery preserve cold-reference results.
-Noncolliding sessions overlap inside slot locks, and production transforms
-reuse unchanged measurements while recounting only an edited block.
+Least-recently-used eviction and poison recovery preserve cold-reference
+results. Sixteen distinct sessions hold their memos concurrently, over-budget
+walks keep a warm prefix, and production transforms reuse unchanged
+measurements while recounting only an edited block.
 Guarantee: The hygiene digest is a function of the part kind and derived
 content and is never the projection `content_hash`.
 Check: `always` - For every hygiene part, `content_hash ==
@@ -554,19 +555,20 @@ hex(sha256(kind_name ++ "\0" ++ content))` where `content` is the derived
 part string ([caveman-substituted and reminder-stripped text][hyg-text],
 [`to_string(input)`][hyg-input], or [`tool_output_content`][hyg-output]);
 excluded parts hash `"excluded\0" ++ block.bytes` on the pre-match branch
-(`tail_hygiene.rs:767-790`) and the kind-level branch (`:837-840`), and
+(`tail_hygiene.rs:861-885`) and the kind-level branch (`:931-934`), and
 `"excluded\0" ++ content` with the derived empty or drop-sentinel content on
-the text, tool-result, and media branches (`:798-799`, `:811-812`,
-`:823-824`, through `excluded_part` at `:530-532`); the token cache is keyed
+the text, tool-result, and media branches (`:892-893`, `:905-906`,
+`:917-918`, through `excluded_part` at `:624-626`); the token cache is keyed
 by that digest ([`count_with_digest`][count-digest] at
-[`tail_hygiene.rs:520`][th-cwd]); and the measurement is identical with a
+[`tail_hygiene.rs:614`][th-cwd]); and the measurement is identical with a
 cold and a warm memo. `always` because the digest is both the reported
 hash and the cache key on every measured pass.
-Fault/timing angle: Each hashed slot serializes its occupant's measurement
-and eviction. Noncolliding slots run independently. Poison recovery discards
-the occupant and interrupted accounting before clearing poison. Reset walks
-slots one at a time; concurrent fills may repopulate, subject to normal validity.
-A shortcut substitutes
+Fault/timing angle: Each session's own lock serializes that session's
+measurements. The table lock covers only lookup, insertion,
+least-recently-used eviction, and removal, so distinct sessions run
+independently and removal never waits on a walk. Poison recovery replaces the
+memo and its interrupted accounting before clearing poison. A shortcut
+substitutes
 `FlatBlock.content_hash` for the hygiene digest; the two hash different
 inputs (full serialized `WireBlock` versus kind-prefixed derived content), so
 every reported `content_hash` changes and the cache key mixes counts of the
@@ -578,12 +580,13 @@ in text and content variants, media, an excluded reduced block, and a
 caveman-substituted text block; the same input measured twice, then edited
 under the same block ID. Change caveman identity and payload, protection,
 coverage, reduction, role, and synthetic status independently. Interleave
-sessions, force slot collisions, change the store namespace A/B/A, panic during
-a fill, reset, evict, and exceed byte limits with multiple blocks. Fill all
-sixteen slots near budget and recompute their retained-byte counters using the
-same capacity-to-bucket model as production. This checks accounting, not actual
-allocator RSS or hashbrown internals. The 16 MiB plus fixed-container bound is
-post-operation retained storage, not peak allocation.
+sessions, exceed the session limit, change the store namespace A/B/A, panic
+during a fill, reset, evict, and exceed byte limits with multiple blocks. Fill
+all sixteen sessions past budget and recompute their retained-byte counters
+using the same capacity-to-bucket model as production. This checks
+accounting, not actual allocator RSS or hashbrown internals. The 16 MiB plus
+fixed-container bound is post-operation retained storage, not peak
+allocation.
 Confidence: high - [Evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md).
 [`part_measurement`][part-measure] and [`measure_tail_hygiene`][hygiene] are
 source-verified; W3 owns the key-domain non-aliasing clause.
@@ -2548,12 +2551,12 @@ evaluation of this area and its disposition are recorded in
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1731
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1778
 [shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1690
-[hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L478-L497
-[part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L505-L528
-[th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L520
-[hygiene]: ../../../../crates/daemon/src/tail_hygiene.rs#L722-L879
-[hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L792-L803
-[hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L804-L807
+[hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L572-L591
+[part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L599-L622
+[th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L614
+[hygiene]: ../../../../crates/daemon/src/tail_hygiene.rs#L816-L973
+[hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L888-L897
+[hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L898-L901
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L137-L175

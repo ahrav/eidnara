@@ -92,11 +92,15 @@ not the handler.
 | [`hygiene_digest_and_token_key_use_kind_prefixed_content`][t-hyg-key] | A poisoned projection-digest token entry is not reused. The independent text-prefixed digest is the reported hash and token key. | unaudited |
 | [`memo_preserves_each_derived_digest_domain`][t-hyg-domains] | Independent text, input, output, file, and excluded digest formulas match cold and warm memo entries and differ from projection hashes. | unaudited |
 | [`memo_rechecks_caveman_identity_payload_and_context`][t-hyg-invalidates] | Same-ID content edits, caveman identity/payload and first-duplicate selection, tags, protection, coverage, reduction, role, and synthetic status preserve fresh-measurement equality. | unaudited |
-| [`memo_bounds_sessions_bytes_resets_and_oversize_bypass`][t-hyg-bounds] | Interleaving, removal, oversize multiblock walks, and empty projections preserve complete results. Prune, reinsert, replacement, and reset preserve recomputed counters under the production capacity-to-bucket model, not an allocator measurement. | unaudited |
-| [`memo_slot_collisions_namespace_reentry_and_poison_are_cold_misses`][t-hyg-slots] | Forced collision and namespace A/B/A replace mismatched occupants. A panic with torn accounting is recovered by use, namespace removal, ID-only removal, and reset; results equal uncached measurement. | unaudited |
-| [`noncolliding_memo_sessions_overlap_inside_slot_locks`][t-hyg-overlap] | Two noncolliding sessions reach a channel barrier while both slot locks are held. | unaudited |
-| [`all_memo_slots_near_budget_match_independent_retained_accounting`][t-hyg-pool-bound] | All sixteen slots hold near-budget memos. Recomputed string, bucket, and container charges match counters using the same capacity-to-bucket model as production. The bound is 16 MiB plus fixed containers after operations, not peak allocation, allocator RSS, or independently verified hashbrown layout. | unaudited |
-| [`production_transform_reuses_hygiene_memo_and_recounts_only_edited_block`][t-hyg-production] | An isolated process runs the production transform entry: cold 0/3 hits/misses, unchanged 3/0, single-edit 2/1. | unaudited |
+| [`memo_bounds_sessions_bytes_and_refuses_over_budget_blocks`][t-hyg-bounds] | Interleaving, removal, oversize session IDs, over-budget multiblock walks, and empty projections preserve complete results. Prune, reinsert, replacement, and refusal preserve recomputed counters under the production capacity-to-bucket model, not an allocator measurement; refused blocks are counted. | unaudited |
+| [`memo_over_budget_keeps_a_warm_prefix_instead_of_resetting`][t-hyg-prefix] | A projection larger than the budget admits the projection prefix; every later walk hits exactly that prefix and retains the same keys under budget. | unaudited |
+| [`memo_retention_is_independent_of_caveman_payload_size`][t-hyg-payload] | A 16-byte and a 2 MiB caveman payload memoize with identical retained bytes. | unaudited |
+| [`memo_namespaces_are_separate_and_the_least_recently_used_session_is_evicted`][t-hyg-table] | Namespace A/B/A keeps three separate warm memos; namespace and ID-only removal drop only their matches; a seventeenth session evicts the least recently used one while a recently touched one survives. | unaudited |
+| [`poisoned_session_memo_recovers_cold_through_every_path`][t-hyg-poison] | A panic with torn accounting is recovered by use, namespace removal, ID-only removal, and reset; results equal uncached measurement and the table stays under its bound. | unaudited |
+| [`distinct_sessions_neither_block_nor_evict_each_other_up_to_the_limit`][t-hyg-overlap] | Sixteen distinct sessions reach a channel barrier while all hold their memo locks; each stays resident and warm afterwards. | unaudited |
+| [`all_memo_sessions_near_budget_match_independent_retained_accounting`][t-hyg-pool-bound] | All sixteen sessions refuse part of a 4,000-block walk. Recomputed string, bucket, table, and per-session allocation charges match counters and the status metrics using the same capacity-to-bucket model as production. The bound is 16 MiB plus fixed containers after operations, not peak allocation, allocator RSS, or independently verified hashbrown layout. | unaudited |
+| [`production_transform_reuses_hygiene_memo_and_recounts_only_edited_block`][t-hyg-production] | An isolated process runs the production transform entry: cold 0/3 hits/misses, unchanged 3/0, single-edit 2/1; the parent asserts the child ran exactly one test. | unaudited |
+| [`module_status_memory_metrics_match_budget_accounting_and_falsy_semantics`][t-hyg-status] | `status` reports `tail_hygiene_memo` charged bytes, session count, and refused inserts alongside the other retention classes. | unaudited |
 | [`shared_row_iterator_matches_slice_for_protected_legacy_orphan`][t-hyg-iterator] | Arc-row iterator and original slice measurements agree exactly on the frozen orphan fixture with two protected tags; orphan tag 2 has nonzero T and zero U. | unaudited |
 | [selection_differential.rs][t-seldiff] | Optimized selection equals the frozen reference over generated `SelItem`s. | unaudited |
 
@@ -481,16 +485,20 @@ not a claim that no related check exists anywhere in the repository.
 [t-tag-refusal]: ../../../../crates/daemon/src/transform.rs#L11855
 [t-tag-bootstrap]: ../../../../crates/daemon/src/transform.rs#L21448
 [t-tag-protection]: ../../../../crates/daemon/src/transform.rs#L23333
-[t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L1054
-[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L2027
-[t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L2123
-[t-hyg-key]: ../../../../crates/daemon/src/tail_hygiene.rs#L1114
-[t-hyg-domains]: ../../../../crates/daemon/src/tail_hygiene.rs#L1162
-[t-hyg-invalidates]: ../../../../crates/daemon/src/tail_hygiene.rs#L1263
-[t-hyg-bounds]: ../../../../crates/daemon/src/tail_hygiene.rs#L1403
-[t-hyg-slots]: ../../../../crates/daemon/src/tail_hygiene.rs#L1599
-[t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1689
-[t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1721
+[t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L1148
+[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L2281
+[t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L2377
+[t-hyg-key]: ../../../../crates/daemon/src/tail_hygiene.rs#L1208
+[t-hyg-domains]: ../../../../crates/daemon/src/tail_hygiene.rs#L1256
+[t-hyg-invalidates]: ../../../../crates/daemon/src/tail_hygiene.rs#L1357
+[t-hyg-bounds]: ../../../../crates/daemon/src/tail_hygiene.rs#L1497
+[t-hyg-prefix]: ../../../../crates/daemon/src/tail_hygiene.rs#L1629
+[t-hyg-payload]: ../../../../crates/daemon/src/tail_hygiene.rs#L1687
+[t-hyg-table]: ../../../../crates/daemon/src/tail_hygiene.rs#L1757
+[t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1846
+[t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1896
+[t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1961
+[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L19962
 [t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22316
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L137-L175
