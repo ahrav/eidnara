@@ -3195,6 +3195,13 @@ fn prepare_json_content_with(
     prepare_json_content_collecting(input, policy, &mut Vec::new())
 }
 
+/// The prepared text and whether preparation changed a value. When nothing changed the text
+/// is the input, byte for byte; when something changed it is the re-serialized tree.
+struct PreparedJson {
+    text: String,
+    changed: bool,
+}
+
 /// Appends every detection the preparation observed to `detections`, so an audit receipt can
 /// be recorded without scanning the same text a second time.
 fn prepare_json_content_collecting(
@@ -3202,6 +3209,22 @@ fn prepare_json_content_collecting(
     policy: JsonScanPolicy,
     detections: &mut Vec<Detection>,
 ) -> Result<String, MemoryStoreError> {
+    let recorded_before = detections.len();
+    let prepared = prepare_json_content_single_pass(input, policy, detections)?;
+    // A changed value always leaves a detection behind for the audit receipt.
+    debug_assert!(!prepared.changed || detections.len() > recorded_before);
+    Ok(prepared.text)
+}
+
+/// One walk over the parsed tree validates every object key, refuses or substitutes protected
+/// values, records detections, and reports whether any value changed. The unique-name parse
+/// stays ahead of the walk: `serde_json::Value` keeps only the last duplicate, so a walk over
+/// the tree alone would let an earlier duplicate's bytes persist unscanned in clean input.
+fn prepare_json_content_single_pass(
+    input: &str,
+    policy: JsonScanPolicy,
+    detections: &mut Vec<Detection>,
+) -> Result<PreparedJson, MemoryStoreError> {
     ensure_durable_text_bound(input)?;
     fn identity_json_field(key: &str) -> bool {
         matches!(key, "id" | "key" | "locator" | "revision")
@@ -3245,6 +3268,8 @@ fn prepare_json_content_collecting(
         }
     }
 
+    /// Keys of a subtree the walk does not descend into: identity and integrity values are
+    /// judged whole, so their nested object keys are validated here.
     fn validate_json_keys(value: &Value) -> Result<(), MemoryStoreError> {
         match value {
             Value::Array(values) => values.iter().try_for_each(validate_json_keys),
@@ -3274,6 +3299,7 @@ fn prepare_json_content_collecting(
         key: Option<&str>,
         policy: JsonScanPolicy,
         detections: &mut Vec<Detection>,
+        changed: &mut bool,
     ) -> Result<(), MemoryStoreError> {
         if let Some(key) = key.filter(|key| identity_json_field(key) || integrity_json_field(key)) {
             // `api_key` passes `identity_json_field` and matches no `integrity_json_field`
@@ -3293,23 +3319,24 @@ fn prepare_json_content_collecting(
                 if !value.is_object() && !value.is_array() {
                     return validate_existing_value(value);
                 }
-            } else if contains_nonempty_text(value) {
-                let encoded = canonical_json_encode(value)
-                    .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                let redaction = if policy.transaction() {
-                    redact_transaction_durable_text(&encoded)
-                } else {
-                    redact_durable_text(&encoded)
-                };
-                if !redaction.detections.is_empty() || protected_json_key_label(key).is_some() {
-                    return Err(MemoryStoreError::Redaction(
-                        RedactionErrorKind::SecretDetected,
-                    ));
-                }
-                detections.extend(redaction.detections);
-                return Ok(());
             } else {
-                return Ok(());
+                if contains_nonempty_text(value) {
+                    let encoded = canonical_json_encode(value)
+                        .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+                    let redaction = if policy.transaction() {
+                        redact_transaction_durable_text(&encoded)
+                    } else {
+                        redact_durable_text(&encoded)
+                    };
+                    if !redaction.detections.is_empty() || protected_json_key_label(key).is_some() {
+                        return Err(MemoryStoreError::Redaction(
+                            RedactionErrorKind::SecretDetected,
+                        ));
+                    }
+                }
+                // The value is judged whole and not descended, so its nested keys are
+                // validated here.
+                return validate_json_keys(value);
             }
         }
         // Protected-key containers with nested text can expose it under unprotected member keys.
@@ -3331,7 +3358,7 @@ fn prepare_json_content_collecting(
                 };
                 let scanner_found = !redaction.detections.is_empty();
                 detections.extend(redaction.detections);
-                *text = match key.and_then(protected_json_key_label) {
+                let prepared = match key.and_then(protected_json_key_label) {
                     Some(label) if !text.is_empty() => {
                         if !scanner_found {
                             // Protected-key redaction can change a value the value-only
@@ -3348,17 +3375,21 @@ fn prepare_json_content_collecting(
                     }
                     _ => redaction.text,
                 };
+                if prepared != *text {
+                    *text = prepared;
+                    *changed = true;
+                }
             }
             Value::Array(values) => {
                 for value in values {
-                    prepare_value(value, key, policy, detections)?;
+                    prepare_value(value, key, policy, detections, changed)?;
                 }
             }
             Value::Object(fields) => {
                 for (field, value) in fields {
                     ensure_durable_text_bound(field)?;
                     reject_secret_text(field)?;
-                    prepare_value(value, Some(field), policy, detections)?;
+                    prepare_value(value, Some(field), policy, detections, changed)?;
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -3367,14 +3398,20 @@ fn prepare_json_content_collecting(
     }
 
     let mut value: Value = parse_json_with_unique_names(input)?;
-    validate_json_keys(&value)?;
+    #[cfg(debug_assertions)]
     let original = value.clone();
-    prepare_value(&mut value, None, policy, detections)?;
-    if value == original {
-        Ok(input.to_string())
+    let mut changed = false;
+    prepare_value(&mut value, None, policy, detections, &mut changed)?;
+    // The flag must agree with the structural compare it replaces; a mutation site that
+    // forgets to set it would discard its redaction while its detection stays recorded.
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(changed, value != original);
+    let text = if changed {
+        serde_json::to_string(&value).map_err(|error| MemoryStoreError::Serde(error.to_string()))?
     } else {
-        serde_json::to_string(&value).map_err(|error| MemoryStoreError::Serde(error.to_string()))
-    }
+        input.to_string()
+    };
+    Ok(PreparedJson { text, changed })
 }
 
 /// `serde_json::Value` retains only the last duplicate object name, allowing earlier
@@ -15495,6 +15532,61 @@ mod tests {
         assert_eq!(serialized["content"][0]["kind"]["text"], "edited");
         assert_eq!(serialized["content"][1]["sentinel_unknown_field"], "kept");
         assert_eq!(serialized["content"][1]["kind"]["text"], "second");
+    }
+
+    /// One walk decides everything: clean input comes back as the same bytes with
+    /// `changed` false; a substitution flips `changed` and re-serializes. Keys of a subtree
+    /// the walk judges whole, such as an integrity-named container holding only numbers,
+    /// are still validated, so a secret-bearing key there is refused.
+    #[test]
+    fn single_pass_preparation_reports_change_and_validates_unwalked_keys() {
+        // Insignificant whitespace and reverse key order: a re-serializing clean branch
+        // would change the bytes whatever the map implementation.
+        let clean = r#"{"zeta": {"b": 1, "a": "text"}, "alpha": [1, 2]}"#;
+        let prepared = prepare_json_content_single_pass(
+            clean,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(!prepared.changed);
+        assert_eq!(
+            prepared.text, clean,
+            "clean input keeps its key order and bytes"
+        );
+
+        let mut detections = Vec::new();
+        let prepared = prepare_json_content_single_pass(
+            r#"{"note":"password=hunter-two"}"#,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut detections,
+        )
+        .unwrap();
+        assert!(prepared.changed);
+        assert_eq!(prepared.text, r#"{"note":"password=<REDACTED:password>"}"#);
+        assert_eq!(detections.len(), 1);
+
+        let refused = prepare_json_content_single_pass(
+            r#"{"signature":{"password=in-key":1}}"#,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "a secret in a key under an integrity-named container is refused, got {:?}",
+            refused.map(|p| p.text)
+        );
+        let refused = prepare_json_content_single_pass(
+            r#"{"id":{"password=in-key":1}}"#,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "a secret in a key under an identity-named container, which the walk descends, \
+             is refused, got {:?}",
+            refused.map(|p| p.text)
+        );
     }
 
     /// The value-only scanner finds nothing in `{"credential":"fixture"}`, so a receipt built

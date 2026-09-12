@@ -602,6 +602,121 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
     }
 }
 
+/// The `meta` column's byte and receipt contract: clean `meta` is stored as its own
+/// serialization byte for byte with no detection recorded; a secret planted in a nested
+/// map's value is substituted and recorded as exactly one detection on the `meta` scan; a
+/// secret planted in a nested map's key is refused with no row and no receipt, even when an
+/// earlier value in the same document carried a detection.
+#[test]
+fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-meta");
+    let store = MemoryStore::open(&descriptor).unwrap();
+    let stored_meta = |session: &str| -> String {
+        let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+        connection
+            .query_row(
+                "SELECT meta FROM cache_state WHERE session_id = ?1",
+                [session],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let meta_detections = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM scan_detections d JOIN field_scans s ON s.scan_id = d.scan_id \
+                 JOIN scan_owner_copies o ON o.scan_id = s.scan_id WHERE o.field_id = 'meta'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let mut clean = ModuleMeta::default();
+    clean.block_identity_by_mid.insert(
+        "mid-1".to_string(),
+        vec![memory_store::BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: "fp".to_string(),
+        }],
+    );
+    clean.last_render_config = "render-v1".to_string();
+    store
+        .commit("clean", None, &CoreState::empty(), &clean)
+        .unwrap();
+    assert_eq!(
+        stored_meta("clean"),
+        serde_json::to_string(&clean).unwrap(),
+        "clean meta is stored as its serialization, byte for byte"
+    );
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+    assert_eq!(
+        meta_detections(&connection),
+        0,
+        "clean meta records no detection"
+    );
+    drop(connection);
+
+    // A secret under a nested map value is substituted and recorded.
+    let mut planted = ModuleMeta::default();
+    planted.block_identity_by_mid.insert(
+        "mid-1".to_string(),
+        vec![memory_store::BlockIdentity {
+            kind_tag: "password=planted-secret".to_string(),
+            byte_fingerprint: "fp".to_string(),
+        }],
+    );
+    store
+        .commit("planted", None, &CoreState::empty(), &planted)
+        .unwrap();
+    let stored = stored_meta("planted");
+    assert!(!stored.contains("planted-secret"), "{stored}");
+    assert!(stored.contains("password=<REDACTED:password>"), "{stored}");
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+    assert_eq!(
+        meta_detections(&connection),
+        1,
+        "the substitution left exactly one detection on the meta scan"
+    );
+    drop(connection);
+
+    // A secret in a nested map key is refused rather than stored, and a detection an
+    // earlier value produced in the same document leaves no receipt behind.
+    let mut keyed = ModuleMeta {
+        last_render_config: "password=earlier-value".to_string(),
+        ..ModuleMeta::default()
+    };
+    keyed.block_identity_by_mid.insert(
+        "password=key-secret".to_string(),
+        vec![memory_store::BlockIdentity {
+            kind_tag: "text".to_string(),
+            byte_fingerprint: "fp".to_string(),
+        }],
+    );
+    let refused = store
+        .commit("keyed", None, &CoreState::empty(), &keyed)
+        .unwrap_err();
+    assert!(
+        matches!(refused, memory_store::MemoryStoreError::Redaction(_)),
+        "{refused:?}"
+    );
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+    let keyed_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM cache_state WHERE session_id = 'keyed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(keyed_rows, 0, "a refused meta stores nothing");
+    assert_eq!(
+        meta_detections(&connection),
+        1,
+        "a refused meta records no receipt; only the planted session's detection remains"
+    );
+}
+
 #[test]
 fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
     let temp = tempfile::tempdir().unwrap();

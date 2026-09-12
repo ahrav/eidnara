@@ -876,10 +876,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Duplicate names, key-directed substitution, container
-refusal, integrity refusal, and the cache-state policy test exist; none
-covers byte identity of a clean stored `meta` against
-`serde_json::to_string(meta)` or a secret inside a `BTreeMap` key.
+Exercised: yes - Duplicate names, key-directed substitution, container
+refusal, integrity refusal, and the cache-state policy test exist; the
+[single-pass tests](evidence/meta-json-preparation-scans-every-persisted-byte.md#single-pass-evidence)
+add byte identity of a clean stored `meta` against
+`serde_json::to_string(meta)`, a secret in a `block_identity_by_mid` value
+substituted and recorded, and a secret in a `block_identity_by_mid` key
+refused.
 Guarantee: No byte reaches the `meta` column that the scanner did not walk,
 and the audit receipt matches the bytes stored.
 Check: `always` - For the `meta` text handed to [`json_content`][json-content]

@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The single-pass evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -103,28 +105,79 @@ covers byte identity of a clean stored `meta` or a `BTreeMap`-key secret.
 
 [ms-preserved]: ../../../memory-store/catalog.md#preserved-identity-name-does-not-exempt-its-value
 [ms-refused]: ../../../memory-store/catalog.md#refused-durable-write-leaves-no-row-and-no-receipt
-[content-sig]: ../../../../../crates/memory-store/src/lib.rs#L1308
-[bim]: ../../../../../crates/memory-store/src/lib.rs#L1515
-[json-content]: ../../../../../crates/memory-store/src/lib.rs#L2116-L2126
-[record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2133-L2143
-[policy]: ../../../../../crates/memory-store/src/lib.rs#L3077-L3098
-[prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3109-L3287
-[keys]: ../../../../../crates/memory-store/src/lib.rs#L3157-L3170
-[prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3181-L3276
-[refuse-identity]: ../../../../../crates/memory-store/src/lib.rs#L3213-L3217
-[refuse-container]: ../../../../../crates/memory-store/src/lib.rs#L3226-L3233
-[substitute]: ../../../../../crates/memory-store/src/lib.rs#L3243-L3259
-[walk-keys]: ../../../../../crates/memory-store/src/lib.rs#L3266-L3272
-[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3282-L3286
-[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3289-L3290
-[unique]: ../../../../../crates/memory-store/src/lib.rs#L3291-L3372
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
-[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8306-L8315
-[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10057-L10150
-[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15029
-[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15112
-[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15129
-[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15166
-[t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3184
-[serde-features]: ../../../../../Cargo.toml#L45
+[content-sig]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1308
+[bim]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L1515
+[json-content]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L2116-L2126
+[record-scan]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L2133-L2143
+[policy]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3077-L3098
+[prepare-collecting]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3109-L3287
+[keys]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3157-L3170
+[prepare-value]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3181-L3276
+[refuse-identity]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3213-L3217
+[refuse-container]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3226-L3233
+[substitute]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3243-L3259
+[walk-keys]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3266-L3272
+[clean-branch]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3282-L3286
+[unique-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3289-L3290
+[unique]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L3291-L3372
+[load]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6196-L6223
+[commit-meta]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L8306-L8315
+[recomp]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10057-L10150
+[t-keydir]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15029
+[t-dup]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15112
+[t-container]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15129
+[t-preserved]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15166
+[t-cache-redact]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/tests/production_redaction.rs#L606
+[value-compare]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L3184
+[serde-features]: https://github.com/ahrav/eidnara/blob/9132344/Cargo.toml#L45
+
+## Single-pass evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/433)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+[`prepare_json_content_single_pass`][single-pass] keeps the unique-name parse
+ahead of one walk, and the walk does the rest: it validates every object key it
+descends through, refuses or substitutes protected values, records detections,
+and sets a [`changed` flag][changed] when a value is replaced by different
+text. The separate key-validation pass and the clone-and-compare are gone; the
+[clean branch][clean-branch-live] returns the input when nothing changed and
+re-serializes otherwise. The two places the walk judges a subtree whole
+without descending, an identity-named value and an integrity-named value, run
+the [key validation][keys-live] over that subtree, so a secret-bearing key
+under `{"signature": {...}}` or `{"id": {...}}` is still refused. The
+[wrapper][collecting-live] that callers use asserts in debug builds that clean
+output equals the input and that a change left a detection for the receipt.
+
+The order in which a document with two independent faults reports its error
+can differ from the baseline, where every key was validated before any value;
+the outcome on one fault is unchanged and detections gathered before a refusal
+are discarded with the refused write, as before.
+
+The [unit test][unit-live] shows clean input returned byte for byte with
+`changed` false, a substitution with `changed` true and one recorded detection,
+and refusals for a secret-bearing key under an integrity-named and under an
+identity-named container. The [store test][store-live] shows, through
+`commit`, clean `meta` stored equal to `serde_json::to_string` of the value, a
+secret planted in a `block_identity_by_mid` entry's value substituted and
+recorded on the `meta` scan, and a secret planted in a `block_identity_by_mid`
+key refused with no row stored. Duplicate object names remain refused by
+[`parse_json_with_unique_names`][unique-live] and its existing test.
+
+### Focused execution, 2026-09-12
+
+`cargo test -p memory-store --locked` passed 176 tests including the two above;
+`cargo test -p daemon --locked` passed 1012, the two `dreamer_run_task_bounds_*`
+tests failing under full-suite load on the base branch as well and passing in
+isolation.
+
+[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3225-L3410
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3402
+[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3403-L3409
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3275
+[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3219
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3414
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15582
+[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L701

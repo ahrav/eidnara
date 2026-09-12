@@ -190,6 +190,8 @@ not performance measurements or a full-workspace gate.
 | [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` is pinned on open and re-pinned per fenced write. | unaudited |
 | [`meta_scalar_reads_agree_with_the_full_deserialization`][t-scalar] | Each scalar `meta` read equals the full deserialization where it succeeds and fails where it fails on `meta`; a corrupt `core_state` fails only the full load. | unaudited |
 | [`a_steady_pass_loads_the_full_cache_state_row_once_before_the_transform`][t-load-count] | A steady pass runs the full row select once before the transform and once after the commit, split by the interleave hook, on a handle that was never evicted. | unaudited |
+| [`single_pass_preparation_reports_change_and_validates_unwalked_keys`][t-single-pass] | Clean input returns byte-identical with `changed` false; a substitution sets `changed` and records one detection; a secret-bearing key under an integrity- or identity-named container is refused. | unaudited |
+| [`cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nested_key`][t-meta-bytes] | Through `commit`: clean `meta` is stored as its serialization; a nested map value secret is substituted and recorded on the `meta` scan; a nested map key secret is refused with no row. | unaudited |
 | [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
 
 None found: `first_divergence`
@@ -197,8 +199,7 @@ NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
 commits twice; a `pass_trace` write failure beside a successful cache commit;
 a crash between the outbox mark commit and the delete commit; two drainers
 overlapping on one session; outbox ordering across firings, the per-kind
-limit, or the backoff values; byte identity of a clean stored `meta` against
-`serde_json::to_string`; a secret in a `BTreeMap` key of `ModuleMeta`.
+limit, or the backoff values.
 
 Suspiciously quiet: the drain result and every trace result are discarded
 with `let _ =` in the handler, so a regression in either surfaces only
@@ -649,3 +650,5 @@ The two checks above were added with the single-load pass (implementation base
 `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage units);
 their links are to the live tree.
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24716-L24729
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15537-L15582
+[t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L701
