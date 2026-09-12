@@ -145,14 +145,14 @@ fn to_store_user_observation(
 pub struct ChunkSnapshotItem<'a> {
     pub id: &'a str,
     pub kind: &'a str,
-    pub bytes: &'a str,
+    pub byte_len: usize,
 }
 
 /// The fingerprint omits content bytes so diagnostics retain item-level fields.
 pub fn compute_chunk_fingerprint(items: &[ChunkSnapshotItem<'_>]) -> String {
     items
         .iter()
-        .map(|item| format!("{}:{}:{}", item.id, item.kind, item.bytes.len()))
+        .map(|item| format!("{}:{}:{}", item.id, item.kind, item.byte_len))
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -3923,32 +3923,31 @@ mod tests {
 
     #[test]
     fn chunk_fingerprint_uses_id_kind_and_byte_length() {
-        let a = compute_chunk_fingerprint(&[
+        let fingerprint = compute_chunk_fingerprint(&[
             ChunkSnapshotItem {
                 id: "m1",
                 kind: "user",
-                bytes: "abc",
+                byte_len: 3,
             },
             ChunkSnapshotItem {
                 id: "m2",
                 kind: "assistant",
-                bytes: "å",
+                byte_len: 2,
             },
         ]);
-        let b = compute_chunk_fingerprint(&[
-            ChunkSnapshotItem {
-                id: "m1",
-                kind: "user",
-                bytes: "xyz",
-            },
-            ChunkSnapshotItem {
-                id: "m2",
-                kind: "assistant",
-                bytes: "ø",
-            },
-        ]);
-        assert_eq!(a, b, "same ids/kinds/byte lengths fingerprint the same");
-        assert_eq!(a, "m1:user:3|m2:assistant:2");
+        assert_eq!(fingerprint, "m1:user:3|m2:assistant:2");
+        for (bytes, byte_len) in [("", 0), ("🙂", 4), ("e\u{301}", 3), ("中文", 6)] {
+            assert_eq!(bytes.len(), byte_len);
+            assert_eq!(
+                compute_chunk_fingerprint(&[ChunkSnapshotItem {
+                    id: "m:|",
+                    kind: "text",
+                    byte_len: bytes.len(),
+                }]),
+                format!("m:|:text:{byte_len}")
+            );
+        }
+        assert_eq!(compute_chunk_fingerprint(&[]), "");
     }
 
     #[test]

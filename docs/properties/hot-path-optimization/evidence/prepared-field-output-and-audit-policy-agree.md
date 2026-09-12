@@ -10,13 +10,13 @@ the metadata used to describe that result in durable audit rows.
 
 ## Evidence trail
 
-- [memory-store/lib.rs:2204-2243][prepare] selects the scanner by layer, refuses
+- [memory-store/lib.rs:2289-2328][prepare] selects the scanner by layer, refuses
   detected NewIdentity input, chooses output, checks its bound, then appends.
-- [2350-2424][audit] writes detector provenance, detection count/labels, field
+- [2435-2509][audit] writes detector provenance, detection count/labels, field
   owners, and the policy action without reading retained redacted text.
-- [3428-3494][units] applies durable and transaction preparation to core units.
-  Production callers include [8306][durable-call] and [8921-8931][transaction-call].
-- [18171-18212][test] compares preserved identity output with substituted content
+- [3550-3616][units] applies durable and transaction preparation to core units.
+  Production callers include [8618][durable-call] and [9233-9243][transaction-call].
+- [18826-18867][test] compares preserved identity output with substituted content
   and their persisted actions. It remains unaudited.
 
 ## Failure scenario
@@ -60,9 +60,9 @@ No six-policy experiment runs here; this record is not exercised.
 - Conclusion: The matrix and output rules are resolved; fixture selection
   remains unresolved for `/testing:test-strategy`.
 
-[prepare]: ../../../../crates/memory-store/src/lib.rs#L2204-L2243
-[audit]: ../../../../crates/memory-store/src/lib.rs#L2350-L2424
-[units]: ../../../../crates/memory-store/src/lib.rs#L3428-L3494
-[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8306
-[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L8921-L8931
-[test]: ../../../../crates/memory-store/src/lib.rs#L18171-L18212
+[prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
+[audit]: ../../../../crates/memory-store/src/lib.rs#L2435-L2509
+[units]: ../../../../crates/memory-store/src/lib.rs#L3550-L3616
+[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8618
+[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L9233-L9243
+[test]: ../../../../crates/memory-store/src/lib.rs#L18826-L18867

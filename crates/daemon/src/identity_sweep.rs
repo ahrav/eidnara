@@ -7,6 +7,7 @@ use std::num::NonZeroUsize;
 use host_runtime::synapse::SynapseComponent;
 use kernel::applicability::EvalBudget;
 use retrieval::identity_sweep::{Candidate, candidates, presence, reclaim};
+use tokio_util::sync::CancellationToken;
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
 use crate::search_writer::{Quarantine, QuarantineKind};
@@ -41,6 +42,7 @@ pub struct IdentitySweeper<'a> {
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
     cursor: Option<String>,
+    invalidated: Option<CancellationToken>,
     lose_reclaim_reply: bool,
 }
 
@@ -59,8 +61,23 @@ impl<'a> IdentitySweeper<'a> {
             projection,
             synapse,
             cursor,
+            invalidated: None,
             lose_reclaim_reply: false,
         }
+    }
+
+    /// Ends the sweep where the budget would when `invalidated` is cancelled: the grant the sweep runs under was revoked.
+    pub fn cancelled_by(mut self, invalidated: CancellationToken) -> Self {
+        self.invalidated = Some(invalidated);
+        self
+    }
+
+    fn ended(&self, budget: &EvalBudget) -> bool {
+        budget.is_exhausted()
+            || self
+                .invalidated
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
     }
 
     /// Where the next selection resumes: the job identifier the last full page ended at, or `None` once a pass over the table is complete. A caller that builds a sweeper per sweep threads this through [`Self::resuming`] so held identities at the head cannot starve those behind them.
@@ -77,7 +94,7 @@ impl<'a> IdentitySweeper<'a> {
     /// Inspects at most `max_jobs` job rows and reclaims finished, unreferenced identities that no holder protects.
     /// Selection advances past every inspected row, even on candidate-free pages, and wraps after a short page.
     /// Keeping `cursor` across calls prevents live or held rows from starving later identities.
-    /// The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves the selected page and cursor unchanged for the next sweep, and the report says the budget ended it.
+    /// The budget, and the grant token when one is attached, is checked before selection and again before the write: an exhausted budget selects nothing, or leaves the selected page and cursor unchanged for the next sweep, and the report says the budget ended it.
     ///
     /// # Errors
     ///
@@ -90,7 +107,7 @@ impl<'a> IdentitySweeper<'a> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SweepError::Quarantined(quarantine));
         }
-        if budget.is_exhausted() {
+        if self.ended(budget) {
             return Ok(SweepReport {
                 budget_exhausted: true,
                 ..SweepReport::default()
@@ -121,7 +138,7 @@ impl<'a> IdentitySweeper<'a> {
             self.cursor = next_cursor;
             return Ok(report);
         }
-        if budget.is_exhausted() {
+        if self.ended(budget) {
             // The cursor stays before this page: nothing in it was reclaimed, so the next sweep selects it again. No delete ran, so no candidate is a survivor of one.
             report.budget_exhausted = true;
             return Ok(report);

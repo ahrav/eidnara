@@ -106,10 +106,11 @@ fn lease_key(descriptor: &StorageDescriptor, db_file_name: &str) -> Result<Lease
 mod sqlite_backend {
     use super::*;
     use std::{
+        collections::HashSet,
         ffi::c_int,
         ops::{Deref, DerefMut},
         path::{Path, PathBuf},
-        sync::{Mutex, MutexGuard},
+        sync::{Arc, Mutex, MutexGuard},
         thread::{self, ThreadId},
         time::{Duration, Instant},
     };
@@ -167,9 +168,20 @@ mod sqlite_backend {
         conn: Mutex<Connection>,
         holder: Mutex<Option<ThreadId>>,
         epoch: u64,
+        /// The connection's only authorizer reads this gate; a callback switches its mode
+        /// rather than installing a policy.
+        gate: Arc<AuthorityGate>,
         // Declared after `conn` so the connection closes before the lease unlocks;
         // `None` is reserved for `for_test`.
         _lease: Option<HeldFileLease>,
+    }
+
+    /// A connection together with the gate its authorizer reads. [`AuthorityGate::install`]
+    /// is the only constructor, so a store cannot pair a connection with a gate that no
+    /// authorizer consults.
+    pub(crate) struct ClaimedConnection {
+        pub(crate) conn: Connection,
+        gate: Arc<AuthorityGate>,
     }
 
     /// Dropping the guard clears the holder record before the connection lock releases.
@@ -210,11 +222,56 @@ mod sqlite_backend {
         /// epochs, a state the OS lock prevents constructing through `open_sqlite`.
         #[cfg(test)]
         pub(crate) fn for_test(conn: Connection, epoch: u64) -> Self {
+            let claimed =
+                AuthorityGate::install(conn).expect("the test connection accepts the gate");
+            Self::over(claimed, epoch, None)
+        }
+
+        /// Starts recording statement-cache reuse; an earlier recording is discarded.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn start_statement_reuse_probe(&self) {
+            self.gate.lock().statement_probe = Some(std::collections::BTreeMap::new());
+        }
+
+        /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
+        /// how many times the current handle ran after the probe first saw it. SQLite counts
+        /// a run per step sequence ended by a reset and keeps the count across in-place
+        /// re-preparation, so a never-evicted text's count is the number of times the
+        /// connection ran it since arming; a re-created handle counts from zero. Empty when
+        /// the probe was never started.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn statement_runs(&self) -> std::collections::BTreeMap<String, i32> {
+            self.gate
+                .lock()
+                .statement_probe
+                .iter()
+                .flat_map(|probe| probe.iter())
+                .map(|(sql, reuse)| (sql.clone(), (reuse.last_runs - reuse.baseline_runs).max(0)))
+                .collect()
+        }
+
+        /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
+        /// how many times the statement cache handed out a re-created handle after a
+        /// returned handle of that key had run. Every key prepared appears; a cache sized
+        /// for the hot set shows zero for each. Empty when the probe was never started.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn statement_evictions(&self) -> std::collections::BTreeMap<String, u32> {
+            self.gate
+                .lock()
+                .statement_probe
+                .iter()
+                .flat_map(|probe| probe.iter())
+                .map(|(sql, reuse)| (sql.clone(), reuse.evictions))
+                .collect()
+        }
+
+        fn over(claimed: ClaimedConnection, epoch: u64, lease: Option<HeldFileLease>) -> Self {
             SqliteStore {
-                conn: Mutex::new(conn),
+                conn: Mutex::new(claimed.conn),
                 holder: Mutex::new(None),
                 epoch,
-                _lease: None,
+                gate: claimed.gate,
+                _lease: lease,
             }
         }
 
@@ -228,19 +285,19 @@ mod sqlite_backend {
             Ok(self.guard(conn))
         }
 
-        /// Acquires the connection by polling until `deadline` rather than blocking past the caller's budget.
+        /// Acquires the connection by polling until `deadline` rather than blocking past the caller's budget; a deadline that has already passed is refused before the first attempt.
         fn lock_conn_within(&self, deadline: Instant) -> Result<ConnGuard<'_>, StoreError> {
             self.refuse_reentry()?;
             loop {
+                if Instant::now() >= deadline {
+                    return Err(StoreError::Deadline);
+                }
                 match self.conn.try_lock() {
                     Ok(conn) => return Ok(self.guard(conn)),
                     Err(std::sync::TryLockError::Poisoned(poisoned)) => {
                         return Ok(self.guard(poisoned.into_inner()));
                     }
                     Err(std::sync::TryLockError::WouldBlock) => {}
-                }
-                if Instant::now() >= deadline {
-                    return Err(StoreError::Deadline);
                 }
                 thread::sleep(CONN_ACQUIRE_POLL);
             }
@@ -287,13 +344,41 @@ mod sqlite_backend {
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let mut guard = self.lock_conn()?;
+            let guard = self.lock_conn()?;
+            self.read_on(guard, f)
+        }
+
+        /// [`Self::with_conn`] whose connection acquisition ends at `deadline`.
+        ///
+        /// The connection is polled rather than awaited, and a deadline that has already passed
+        /// is refused without acquiring it. Once the transaction is open the read is unbounded,
+        /// as in [`Self::with_conn`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline` or
+        /// the deadline has passed; otherwise as [`Self::with_conn`].
+        pub fn with_conn_within<T>(
+            &self,
+            deadline: Instant,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            self.read_on(guard, f)
+        }
+
+        fn read_on<T>(
+            &self,
+            mut guard: ConnGuard<'_>,
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
             let tx = guard
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
-            // `scope` is declared after `tx` so its authorizer clears before `tx` issues `ROLLBACK` during unwinding.
-            let scope = CallbackScope::read_only(&tx)?;
-            let out = f(&GuardedConn::new(&tx)).map_err(|e| StoreError::Backend(e.to_string()));
+            // `scope` is declared after `tx` so its mode leaves before `tx` issues `ROLLBACK` during unwinding.
+            let scope = CallbackScope::read_only(&tx, &self.gate)?;
+            let out = f(&GuardedConn::new(&tx, &self.gate))
+                .map_err(|e| StoreError::Backend(e.to_string()));
             let restored = scope.release();
             // Finishing the read transaction releases its snapshot; there is nothing to
             // commit.
@@ -317,6 +402,10 @@ mod sqlite_backend {
             f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
             let guard = self.lock_conn()?;
+            let _exit = MaintenanceExit {
+                conn: &guard,
+                gate: &self.gate,
+            };
             f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
         }
 
@@ -383,7 +472,7 @@ mod sqlite_backend {
             let tx = match deadline {
                 None => {
                     precheck_fence(conn, self.epoch)?;
-                    pin_fence_durability(conn)?;
+                    self.gate.pin_durability_once(conn, None)?;
                     rusqlite::Transaction::new_unchecked(
                         conn,
                         rusqlite::TransactionBehavior::Immediate,
@@ -391,15 +480,15 @@ mod sqlite_backend {
                     .map_err(|e| StoreError::Backend(e.to_string()))?
                 }
                 Some(deadline) => {
-                    prepare_fenced_within(conn, self.epoch, deadline)?;
+                    prepare_fenced_within(conn, &self.gate, self.epoch, deadline)?;
                     begin_immediate_within(conn, deadline)?
                 }
             };
 
             claim_fence(&tx, self.epoch)?;
 
-            let scope = CallbackScope::writable(&tx)?;
-            let out = f(&GuardedConn::new(&tx));
+            let scope = CallbackScope::writable(&tx, &self.gate)?;
+            let out = f(&GuardedConn::new(&tx, &self.gate));
             // The callback error outranks a release error: losing the reason the
             // write failed is worse than losing the scope-release failure.
             let released = scope.release();
@@ -428,15 +517,14 @@ mod sqlite_backend {
     /// Bounds each fence operation by the budget that remains when it starts.
     fn prepare_fenced_within(
         conn: &Connection,
+        gate: &AuthorityGate,
         holder_epoch: u64,
         deadline: Instant,
     ) -> Result<(), StoreError> {
         with_busy_timeout_until(conn, deadline, |conn| {
             precheck_fence_via(conn, holder_epoch, deadline_on_lock_wait)
         })?;
-        with_busy_timeout_until(conn, deadline, |conn| {
-            pin_fence_durability_via(conn, deadline_on_lock_wait)
-        })
+        gate.pin_durability_once(conn, Some(deadline))
     }
 
     /// Runs one potentially blocking statement under the caller's remaining wait budget.
@@ -495,19 +583,76 @@ mod sqlite_backend {
         }
     }
 
-    /// A callback that holds `&Connection` can call `Connection::authorizer` and replace
-    /// the guard installed for it, because that method takes `&self`. No authorizer,
-    /// pragma, or statement rule can survive that, so a guarded callback receives this
-    /// handle instead: it forwards ordinary statements and omits authorizer control,
-    /// pragma writes, statement batches, and transaction control.
-    pub struct GuardedConn<'a> {
+    /// Everything the connection derived before a maintenance callback is discarded when
+    /// the callback ends, including by unwinding: the maintenance path is unrestricted, so
+    /// the schema, the temp objects, the durability pragmas, and the statement cache may
+    /// all have changed. The authorizer runs at prepare time and a cached statement is not
+    /// re-authorized on reuse, so nothing prepared under the unrestricted mode may remain in
+    /// the cache when a guarded callback runs.
+    struct MaintenanceExit<'a> {
         conn: &'a Connection,
+        gate: &'a AuthorityGate,
     }
 
-    /// [`SqliteStore::with_conn_unfenced`] must reach pragmas and statement batches, but
-    /// an authorizer installed through it would be cleared by the next guarded callback's
-    /// scope, silently dropping the caller's access policy. Authorizer control therefore
-    /// stays out of both handles, which leaves the store the only installer.
+    impl Drop for MaintenanceExit<'_> {
+        fn drop(&mut self) {
+            self.conn.flush_prepared_statement_cache();
+            self.gate.forget_after_maintenance();
+        }
+    }
+
+    /// `Connection::authorizer` takes `&self`, so a callback holding `&Connection` could
+    /// replace the gate installed by [`SqliteStore`]. `GuardedConn` omits authorizer
+    /// control, pragma writes, statement batches, and transaction control.
+    pub struct GuardedConn<'a> {
+        conn: &'a Connection,
+        #[cfg(any(test, feature = "test-support"))]
+        gate: &'a AuthorityGate,
+    }
+
+    /// A statement from the connection's cache, returned to it on drop. Dereferences to the
+    /// prepared statement.
+    pub struct CachedStatement<'a> {
+        inner: rusqlite::CachedStatement<'a>,
+        /// The armed probe and the cache key, so the run count can be recorded when the
+        /// statement returns to the cache.
+        #[cfg(any(test, feature = "test-support"))]
+        probe: Option<(&'a AuthorityGate, String)>,
+    }
+
+    impl<'a> Deref for CachedStatement<'a> {
+        type Target = rusqlite::Statement<'a>;
+
+        fn deref(&self) -> &rusqlite::Statement<'a> {
+            &self.inner
+        }
+    }
+
+    impl<'a> DerefMut for CachedStatement<'a> {
+        fn deref_mut(&mut self) -> &mut rusqlite::Statement<'a> {
+            &mut self.inner
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    impl Drop for CachedStatement<'_> {
+        fn drop(&mut self) {
+            if let Some((gate, sql)) = &self.probe {
+                gate.record_statement_return(sql, &self.inner);
+            }
+        }
+    }
+
+    /// Bytes the SQLite library holds through its allocator, across every connection in
+    /// the process, so an assertion on a delta must leave room for concurrent connections.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn library_memory_used() -> i64 {
+        // SAFETY: `sqlite3_memory_used` takes no pointers and reads no Rust-managed memory.
+        unsafe { rusqlite::ffi::sqlite3_memory_used() }
+    }
+
+    /// Reaches pragmas and statement batches but not the authorizer, so a maintenance
+    /// callback cannot replace the gate installed by [`SqliteStore`].
     pub struct MaintenanceConn<'a> {
         conn: &'a Connection,
     }
@@ -602,18 +747,30 @@ mod sqlite_backend {
                 .create_scalar_function(name, argument_count, flags, function)
         }
 
-        /// A cached statement lives at most one callback: installing a callback scope
-        /// sets an authorizer, and SQLite expires every prepared statement when an
-        /// authorizer is set. Size the cache for the distinct statements a single
-        /// callback issues rather than for the store's whole hot-query set.
+        /// Statements cached inside a fenced callback survive to the next fenced callback,
+        /// because a mode switch expires nothing. A read callback's `query_only` toggle is a
+        /// flag pragma, which expires every statement on the connection, and a foreign
+        /// main-schema change stales each cached statement's schema cookie so it is
+        /// re-prepared on its next run. Size the cache for the distinct statements of the
+        /// longest run of fenced callbacks.
+        ///
+        /// Only a guarded callback may populate the cache: [`MaintenanceConn`] exposes no
+        /// cached preparation, the store's own statements are uncached, and the cache is
+        /// flushed when a maintenance callback ends, whether it returns or panics.
         pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
             self.conn.set_prepared_statement_cache_capacity(capacity);
         }
     }
 
     impl<'a> GuardedConn<'a> {
-        fn new(conn: &'a Connection) -> Self {
-            Self { conn }
+        fn new(conn: &'a Connection, gate: &'a AuthorityGate) -> Self {
+            #[cfg(not(any(test, feature = "test-support")))]
+            let _ = gate;
+            Self {
+                conn,
+                #[cfg(any(test, feature = "test-support"))]
+                gate,
+            }
         }
 
         /// # Errors
@@ -648,15 +805,16 @@ mod sqlite_backend {
         /// A cached write meets `query_only` in a read callback, and a cached pragma
         /// write meets the authorizer, as uncached statements do.
         ///
-        /// Installing the scope expires every prepared statement on the connection.
-        /// Each callback re-prepares statements on first use. The cache saves work only
-        /// when one callback runs the same `sql` more than once.
-        ///
         /// # Errors
         ///
         /// Returns the SQLite error from preparing `sql`.
-        pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'a>> {
-            self.conn.prepare_cached(sql)
+        pub fn prepare_cached(&self, sql: &str) -> rusqlite::Result<CachedStatement<'a>> {
+            let inner = self.conn.prepare_cached(sql)?;
+            Ok(CachedStatement {
+                #[cfg(any(test, feature = "test-support"))]
+                probe: self.gate.record_statement_handout(sql, &inner),
+                inner,
+            })
         }
 
         pub fn last_insert_rowid(&self) -> i64 {
@@ -676,6 +834,299 @@ mod sqlite_backend {
         }
     }
 
+    enum ConnectionMode {
+        /// The rest state: store-issued statements and [`SqliteStore::with_conn_unfenced`]
+        /// callbacks. Statements prepared here never enter the statement cache.
+        Unrestricted,
+        /// A [`SqliteStore::with_conn`] or [`SqliteStore::with_conn_fenced`] callback:
+        /// `deny_scope_escapes` applies with the main-schema names of the snapshot taken at
+        /// callback entry. The two callback kinds share one prepare-time policy, so a
+        /// statement one of them cached may run in the other; `query_only` separates them
+        /// at step time.
+        Guarded(Arc<SchemaSnapshot>),
+        /// The baseline DDL applied to a pristine file: `deny_baseline_escapes` applies.
+        Baseline,
+    }
+
+    /// The main-schema facts a guarded callback needs, keyed on the header schema version
+    /// and the pager data version. Every main-schema DDL on any connection bumps the schema
+    /// version. The schema version is a stored header field, so a foreign connection could
+    /// write it back; that write is a commit, and every foreign commit moves the data
+    /// version, which is computed by the pager and stored nowhere. On this connection
+    /// defensive mode refuses `PRAGMA schema_version = N` and `writable_schema = ON`.
+    struct SchemaSnapshot {
+        key: SchemaKey,
+        /// Lower-cased main-schema names; a temp object under one of them would capture the
+        /// writes a callback believes it makes to the store.
+        main_names: HashSet<String>,
+        /// Infrastructure-named objects in the main and temp schemas at scan time, tagged
+        /// with schema and type. A guarded callback cannot create a temp object under an
+        /// infrastructure name, and the maintenance path discards the snapshot, so the
+        /// temp half is compared only when the schema version moved.
+        infrastructure: Vec<String>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct SchemaKey {
+        schema_version: i64,
+        data_version: i64,
+    }
+
+    impl SchemaKey {
+        /// Both pragmas read the current transaction's page one, so inside a transaction
+        /// the key names the schema that transaction sees.
+        fn read(conn: &Connection) -> Result<Self, StoreError> {
+            Ok(Self {
+                schema_version: schema_version(conn)?,
+                data_version: conn
+                    .query_row("PRAGMA data_version", [], |row| row.get(0))
+                    .map_err(|e| StoreError::Backend(e.to_string()))?,
+            })
+        }
+    }
+
+    /// A snapshot above this size is used for its callback but not retained, so the
+    /// per-connection retention this crate adds stays within the declared bound. A consumer
+    /// baseline whose names exceed the bound rescans on every callback.
+    pub const SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND: usize = 64 * 1024;
+
+    impl SchemaSnapshot {
+        /// Reads the key and scans inside the caller's transaction, so the key names the
+        /// schema the scan saw.
+        fn scan(conn: &Connection) -> Result<Self, StoreError> {
+            Ok(Self {
+                key: SchemaKey::read(conn)?,
+                main_names: main_schema_names(conn)?,
+                infrastructure: infrastructure_objects(conn)?,
+            })
+        }
+
+        /// Heap the snapshot retains: hashbrown holds seven entries per eight buckets and
+        /// sizes to a power of two, each bucket an inline `String` plus one control byte.
+        fn retained_bytes(&self) -> usize {
+            const ARC_COUNTS: usize = 2 * std::mem::size_of::<usize>();
+            const HASHBROWN_TRAILING_GROUP_AND_PADDING_BOUND: usize = 32;
+            let buckets = (self.main_names.capacity() * 8 / 7).next_power_of_two();
+            ARC_COUNTS
+                + std::mem::size_of::<Self>()
+                + buckets * (std::mem::size_of::<String>() + 1)
+                + HASHBROWN_TRAILING_GROUP_AND_PADDING_BOUND
+                + self.main_names.iter().map(String::capacity).sum::<usize>()
+                + self.infrastructure.capacity() * std::mem::size_of::<String>()
+                + self
+                    .infrastructure
+                    .iter()
+                    .map(String::capacity)
+                    .sum::<usize>()
+        }
+    }
+
+    fn schema_version(conn: &Connection) -> Result<i64, StoreError> {
+        conn.query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    struct GateState {
+        mode: ConnectionMode,
+        /// Discarded by the maintenance path.
+        schema: Option<Arc<SchemaSnapshot>>,
+        /// Whether `pin_fence_durability` has run on the connection since open or since the
+        /// last maintenance callback, which may have lowered what it pinned.
+        durability_pinned: bool,
+        /// Armed by a test through [`SqliteStore::start_statement_reuse_probe`]; `None`
+        /// costs one load per cached preparation. Per cache key: the highest run count a
+        /// returned handle carried, and how many handouts with no runs followed a return
+        /// that had run. That sequence means the statement cache re-created the handle; a
+        /// handle that was prepared and never stepped keeps a zero run count without an
+        /// eviction.
+        #[cfg(any(test, feature = "test-support"))]
+        statement_probe: Option<std::collections::BTreeMap<String, StatementReuse>>,
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[derive(Clone, Copy)]
+    struct StatementReuse {
+        /// `last_runs` records the run count a handle reported when it last returned to the cache.
+        last_runs: i32,
+        /// `baseline_runs` records the run count the handle carried when the probe first saw
+        /// it, so runs before arming are not reported; a re-created handle starts at zero.
+        baseline_runs: i32,
+        evictions: u32,
+    }
+
+    /// `sqlite3_set_authorizer` with a non-null hook expires every prepared statement, so the
+    /// store installs its hook once, at open, and callbacks switch the mode the hook reads.
+    /// The same state carries the per-connection caches the maintenance path invalidates.
+    ///
+    /// The lock is uncontended: the hook runs on the thread preparing a statement, and that
+    /// thread holds the store's connection lock while it switches the mode. The hook holds
+    /// the lock while it evaluates a policy, so a policy must not prepare a statement, and
+    /// no method holds the lock across a statement.
+    struct AuthorityGate {
+        state: Mutex<GateState>,
+    }
+
+    impl AuthorityGate {
+        fn install(conn: Connection) -> Result<ClaimedConnection, StoreError> {
+            // Defensive mode refuses the statements that rewrite schema state without DDL:
+            // `PRAGMA writable_schema = ON`, `PRAGMA schema_version = N`, and
+            // `PRAGMA journal_mode = OFF`.
+            conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            let gate = Arc::new(Self {
+                state: Mutex::new(GateState {
+                    mode: ConnectionMode::Unrestricted,
+                    schema: None,
+                    durability_pinned: false,
+                    #[cfg(any(test, feature = "test-support"))]
+                    statement_probe: None,
+                }),
+            });
+            let hook = Arc::clone(&gate);
+            conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                hook.authorize(context)
+            }))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+            Ok(ClaimedConnection { conn, gate })
+        }
+
+        fn lock(&self) -> MutexGuard<'_, GateState> {
+            self.state.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        fn authorize(
+            &self,
+            context: rusqlite::hooks::AuthContext<'_>,
+        ) -> rusqlite::hooks::Authorization {
+            match &self.lock().mode {
+                ConnectionMode::Unrestricted => rusqlite::hooks::Authorization::Allow,
+                ConnectionMode::Guarded(snapshot) => {
+                    deny_scope_escapes(context, &snapshot.main_names)
+                }
+                ConnectionMode::Baseline => deny_baseline_escapes(context),
+            }
+        }
+
+        /// Holds are not nested: the connection lock serializes callbacks, and the store
+        /// enters a mode only from the rest state.
+        fn enter(&self, mode: ConnectionMode) -> ModeHold<'_> {
+            let mut state = self.lock();
+            assert!(
+                matches!(state.mode, ConnectionMode::Unrestricted),
+                "a mode was entered while another mode was held"
+            );
+            state.mode = mode;
+            ModeHold { gate: self }
+        }
+
+        /// The retained snapshot when its key still matches, otherwise a fresh scan that is
+        /// retained when it fits the declared bound. The lock is released before every
+        /// statement, because the authorizer takes it during prepare.
+        fn schema_snapshot(&self, conn: &Connection) -> Result<Arc<SchemaSnapshot>, StoreError> {
+            let key = SchemaKey::read(conn)?;
+            let retained = self.lock().schema.clone();
+            if let Some(snapshot) = retained.as_ref().filter(|snapshot| snapshot.key == key) {
+                return Ok(Arc::clone(snapshot));
+            }
+            let snapshot = Arc::new(SchemaSnapshot::scan(conn)?);
+            // SQLite expires cached statements and reloads its parsed schema only on a cookie change.
+            if retained.is_none_or(|retained| {
+                retained.key.schema_version == key.schema_version
+                    && retained.main_names != snapshot.main_names
+            }) {
+                conn.flush_prepared_statement_cache();
+                conn.execute_batch("PRAGMA writable_schema = RESET")
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
+            }
+            // The retained snapshot must match the policy under which cached statements
+            // were prepared, so an unretained snapshot clears the retained snapshot.
+            self.lock().schema = (snapshot.retained_bytes()
+                <= SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND)
+                .then(|| Arc::clone(&snapshot));
+            Ok(snapshot)
+        }
+
+        /// Pins durability unless the pin has held since open or since the last maintenance
+        /// callback. Guarded callbacks cannot touch the durability pragmas, `synchronous`
+        /// is connection-local, and another connection cannot leave WAL while this one
+        /// holds the database open, so the pin holds until the maintenance path runs.
+        fn pin_durability_once(
+            &self,
+            conn: &Connection,
+            deadline: Option<Instant>,
+        ) -> Result<(), StoreError> {
+            if self.lock().durability_pinned {
+                return Ok(());
+            }
+            match deadline {
+                Some(deadline) => with_busy_timeout_until(conn, deadline, |conn| {
+                    pin_fence_durability_via(conn, deadline_on_lock_wait)
+                })?,
+                None => pin_fence_durability(conn)?,
+            }
+            self.lock().durability_pinned = true;
+            Ok(())
+        }
+
+        /// SQLite keeps the run count on a handle it re-prepares in place, so a handle with
+        /// no runs after a returned handle of the same key had run is a handle the
+        /// statement cache re-created. The key is trimmed as the cache trims it. Returns
+        /// the probe reference the statement records its return against, when armed.
+        #[cfg(any(test, feature = "test-support"))]
+        fn record_statement_handout<'g>(
+            &'g self,
+            sql: &str,
+            statement: &rusqlite::Statement<'_>,
+        ) -> Option<(&'g AuthorityGate, String)> {
+            let runs = statement.get_status(rusqlite::StatementStatus::Run);
+            let mut state = self.lock();
+            let probe = state.statement_probe.as_mut()?;
+            let key = sql.trim().to_string();
+            let reuse = probe.entry(key.clone()).or_insert(StatementReuse {
+                last_runs: runs,
+                baseline_runs: runs,
+                evictions: 0,
+            });
+            if runs == 0 && reuse.last_runs > 0 {
+                reuse.evictions += 1;
+                reuse.baseline_runs = 0;
+            }
+            Some((self, key))
+        }
+
+        #[cfg(any(test, feature = "test-support"))]
+        fn record_statement_return(&self, key: &str, statement: &rusqlite::Statement<'_>) {
+            let runs = statement.get_status(rusqlite::StatementStatus::Run);
+            let mut state = self.lock();
+            if let Some(reuse) = state
+                .statement_probe
+                .as_mut()
+                .and_then(|probe| probe.get_mut(key))
+            {
+                reuse.last_runs = runs;
+            }
+        }
+
+        /// The maintenance path is unrestricted, so it may have changed the schema, the
+        /// temp objects, or the durability pragmas; nothing derived before it is trusted.
+        fn forget_after_maintenance(&self) {
+            let mut state = self.lock();
+            state.schema = None;
+            state.durability_pinned = false;
+        }
+    }
+
+    /// Returns the gate to [`ConnectionMode::Unrestricted`] on drop, including on unwind.
+    struct ModeHold<'g> {
+        gate: &'g AuthorityGate,
+    }
+
+    impl Drop for ModeHold<'_> {
+        fn drop(&mut self) {
+            self.gate.lock().mode = ConnectionMode::Unrestricted;
+        }
+    }
+
     /// The connection is shared by reads, fenced writes, and maintenance, so
     /// a callback that keeps the full capability of the connection can leave the scope it
     /// was given: any pragma write reconfigures every later statement, and transaction
@@ -684,14 +1135,15 @@ mod sqlite_backend {
     /// restores them even when the callback unwinds, because a poisoned lock is recovered
     /// and hands the same connection to the next caller.
     struct CallbackScope<'c> {
-        /// `None` once released, so `Drop` never repeats a release whose failure
+        /// `None` once left, so `Drop` never repeats a release whose failure
         /// [`Self::release`] already reported.
-        conn: Option<&'c Connection>,
+        active: Option<(&'c Connection, ModeHold<'c>)>,
         /// The `query_only` value to restore: `Some(prior)` when the scope switched it on
         /// for a read, `None` when the scope left it alone.
         query_only_before: Option<bool>,
-        /// Infrastructure-named schema objects at install, compared again at release.
-        infrastructure_before: Vec<String>,
+        /// The snapshot the callback runs under; its infrastructure objects are compared
+        /// again at release when the schema version moved.
+        snapshot: Arc<SchemaSnapshot>,
     }
 
     /// Every main- or temp-schema object whose name is an infrastructure table name,
@@ -764,7 +1216,7 @@ mod sqlite_backend {
 
     impl<'c> CallbackScope<'c> {
         /// Denies writes as well as the escapes, for a callback that must not mutate.
-        fn read_only(conn: &'c Connection) -> Result<Self, StoreError> {
+        fn read_only(conn: &'c Connection, gate: &'c AuthorityGate) -> Result<Self, StoreError> {
             let prior: bool = conn
                 .query_row("PRAGMA query_only", [], |row| row.get(0))
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -772,51 +1224,60 @@ mod sqlite_backend {
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             // A failure between the pragma and the finished scope would leave the shared
             // connection read-only with no guard to restore it.
-            Self::install(conn, Some(prior)).inspect_err(|_| {
+            Self::install(conn, gate, Some(prior)).inspect_err(|_| {
                 let _ = Self::restore(conn, Some(prior));
             })
         }
 
         /// Denies the escapes only, for a callback inside a fence-checked transaction.
-        fn writable(conn: &'c Connection) -> Result<Self, StoreError> {
-            Self::install(conn, None)
+        fn writable(conn: &'c Connection, gate: &'c AuthorityGate) -> Result<Self, StoreError> {
+            Self::install(conn, gate, None)
         }
 
         fn install(
             conn: &'c Connection,
+            gate: &'c AuthorityGate,
             query_only_before: Option<bool>,
         ) -> Result<Self, StoreError> {
-            let infrastructure_before = infrastructure_objects(conn)?;
-            let main_names = main_schema_names(conn)?;
+            let snapshot = gate.schema_snapshot(conn)?;
             // The authorizer denies a callback from creating a shadow, but maintenance
             // through `with_conn_unfenced` may already have left one on this connection,
             // and a callback's unqualified statement would resolve to it instead of the
-            // store's object.
-            if let Some(shadow) = temp_shadow_of(conn, &main_names)? {
+            // store's object. The temp schema is normally empty and has no version to key
+            // on, so this scan stays uncached.
+            if let Some(shadow) = temp_shadow_of(conn, &snapshot.main_names)? {
                 return Err(StoreError::Backend(format!(
                     "temporary object `{shadow}` shadows the store's `{shadow}` on this \
                      connection; drop it before running a callback"
                 )));
             }
-            let scope = Self {
-                conn: Some(conn),
+            Ok(Self {
+                active: Some((
+                    conn,
+                    gate.enter(ConnectionMode::Guarded(Arc::clone(&snapshot))),
+                )),
                 query_only_before,
-                infrastructure_before,
-            };
-            conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-                deny_scope_escapes(context, &main_names)
-            }))
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-            Ok(scope)
+                snapshot,
+            })
         }
 
-        /// Reports a failed release to the caller, which `Drop` cannot do.
+        /// Reports a failed release to the caller, which `Drop` cannot do. The infrastructure
+        /// refusal is the primary error; a failed `query_only` restore is appended to it.
         fn release(mut self) -> Result<(), StoreError> {
-            match self.conn.take() {
-                Some(conn) => {
-                    let unchanged =
-                        Self::require_infrastructure_unchanged(conn, &self.infrastructure_before);
-                    Self::restore(conn, self.query_only_before).and(unchanged)
+            let Some((conn, _)) = self.active.as_ref() else {
+                return Ok(());
+            };
+            let unchanged = Self::require_infrastructure_unchanged(conn, &self.snapshot);
+            with_cleanup_failure(unchanged, self.leave())
+        }
+
+        /// Leaves the guarded mode, then restores `query_only`, in that order: the guarded
+        /// policy denies the restoring pragma write.
+        fn leave(&mut self) -> Result<(), StoreError> {
+            match self.active.take() {
+                Some((conn, hold)) => {
+                    drop(hold);
+                    Self::restore(conn, self.query_only_before)
                 }
                 None => Ok(()),
             }
@@ -824,17 +1285,22 @@ mod sqlite_backend {
 
         /// `AuthAction::AlterTable` reports the source name, so a rename cannot be judged
         /// when it is authorized: a table the callback created and renamed to an
-        /// infrastructure name is trusted by the next fence claim. The set of
-        /// infrastructure-named objects in the main and temp schemas is compared before
-        /// and after the callback, before its transaction commits.
+        /// infrastructure name is trusted by the next fence claim. Every main-schema
+        /// change bumps the schema version, so an unchanged version leaves the snapshot's
+        /// infrastructure objects standing; a changed one is rescanned and compared before
+        /// the callback's transaction commits.
         fn require_infrastructure_unchanged(
             conn: &Connection,
-            before: &[String],
+            snapshot: &SchemaSnapshot,
         ) -> Result<(), StoreError> {
+            if schema_version(conn)? == snapshot.key.schema_version {
+                return Ok(());
+            }
             let after = infrastructure_objects(conn)?;
-            if after != before {
+            if after != snapshot.infrastructure {
                 return Err(StoreError::Backend(format!(
-                    "the callback changed the infrastructure schema objects from {before:?} to {after:?}"
+                    "the callback changed the infrastructure schema objects from {:?} to {after:?}",
+                    snapshot.infrastructure
                 )));
             }
             Ok(())
@@ -843,25 +1309,19 @@ mod sqlite_backend {
         /// Puts `query_only` back to the value the scope found, so a connection that
         /// maintenance left read-only stays read-only.
         fn restore(conn: &Connection, query_only_before: Option<bool>) -> Result<(), StoreError> {
-            let cleared = conn.authorizer(
-                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-            );
-            let unlocked = match query_only_before {
-                Some(prior) => conn.pragma_update(None, "query_only", prior),
+            match query_only_before {
+                Some(prior) => conn.pragma_update(None, "query_only", prior).map_err(|e| {
+                    StoreError::Backend(format!("failed to release the callback scope: {e}"))
+                }),
                 None => Ok(()),
-            };
-            cleared.and(unlocked).map_err(|e| {
-                StoreError::Backend(format!("failed to release the callback scope: {e}"))
-            })
+            }
         }
     }
 
     impl Drop for CallbackScope<'_> {
         fn drop(&mut self) {
-            if let Some(conn) = self.conn.take() {
-                // Drop ignores cleanup errors because it cannot return them.
-                let _ = Self::restore(conn, self.query_only_before);
-            }
+            // Drop ignores cleanup errors because it cannot return them.
+            let _ = self.leave();
         }
     }
 
@@ -1182,14 +1642,8 @@ mod sqlite_backend {
             .map_err(StoreError::Lease)?;
         let epoch = lease.epoch();
 
-        let conn = open_claimed(&path, &expected, inspected, epoch)?;
-
-        Ok(SqliteStore {
-            conn: Mutex::new(conn),
-            holder: Mutex::new(None),
-            epoch,
-            _lease: Some(lease),
-        })
+        let claimed = open_claimed(&path, &expected, inspected, epoch)?;
+        Ok(SqliteStore::over(claimed, epoch, Some(lease)))
     }
 
     /// Opens the read-write connection for `epoch`, which the lease has already issued,
@@ -1204,18 +1658,20 @@ mod sqlite_backend {
         expected: &ExpectedIdentity,
         inspected: Option<FileIdentity>,
         epoch: u64,
-    ) -> Result<Connection, StoreError> {
+    ) -> Result<ClaimedConnection, StoreError> {
         // Owner-only from creation: SQLite gives sidecars the database file's mode.
         create_database_file_owner_only(Path::new(path)).map_err(StoreError::Io)?;
         // `SQLITE_OPEN_NOFOLLOW` closes the window between the owner-only creation and this
         // open, so a symlink swapped in between is refused rather than followed.
-        let mut conn = Connection::open_with_flags(
+        let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Installed before the first statement, so no later install expires one.
+        let ClaimedConnection { mut conn, gate } = AuthorityGate::install(conn)?;
         // SQLite has opened the file but read nothing: WAL recovery happens on the first
         // read and the close-time checkpoint only after the WAL was opened. A file swapped
         // in since the inspection is refused here, before either can happen. The window
@@ -1244,7 +1700,7 @@ mod sqlite_backend {
         // A VFS that cannot switch to WAL answers the pragma with the unchanged
         // mode; the fence claim must not commit under a journal mode every later
         // fenced write would reject.
-        pin_fence_durability(&conn)?;
+        gate.pin_durability_once(&conn, None)?;
         // The busy timeout makes transient locks wait rather than fail, and
         // foreign-key enforcement is enabled.
         conn.busy_timeout(BUSY_TIMEOUT)
@@ -1256,12 +1712,12 @@ mod sqlite_backend {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         if state == FileState::Pristine {
-            expected.apply(&tx)?;
+            expected.apply(&tx, &gate)?;
         }
         claim_fence_strict(&tx, epoch, state)?;
         tx.commit()
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        Ok(conn)
+        Ok(ClaimedConnection { conn, gate })
     }
 
     /// SQLite URI for `path` with `immutable=1`: the connection takes no locks, reads no
@@ -1502,7 +1958,12 @@ mod sqlite_backend {
         Ok(())
     }
 
+    /// The store's own fence statements run under the unrestricted mode and never through
+    /// the statement cache: a cached statement is not re-authorized on reuse, so one prepared
+    /// unrestricted could hand a guarded callback the fence upsert.
     const FENCE_EPOCH_SQL: &str = "SELECT epoch FROM fence WHERE id = 0";
+    pub(crate) const FENCE_CLAIM_SQL: &str = "INSERT INTO fence (id, epoch) VALUES (0, ?1) \
+         ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch";
 
     /// The fence epoch, or `None` when the row is absent. The caller guarantees that the
     /// `fence` table exists; only the transaction that initializes a pristine file may see
@@ -1638,6 +2099,27 @@ mod sqlite_backend {
             })
         }
 
+        /// The identity `consumer` would present with every check of
+        /// [`Self::for_baseline`] skipped: the scratch authorizer, the infrastructure
+        /// redefinition comparison, the temporary-object count, and the infrastructure hook
+        /// scan. A test uses it to hand [`open_claimed`] a baseline whose escapes only the
+        /// store connection's gate refuses.
+        #[cfg(test)]
+        pub(crate) fn unchecked_for_test(consumer: &str) -> Result<Self, StoreError> {
+            let text = format!("{STORE_BASELINE}\n{consumer}");
+            let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let scratch =
+                Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
+            scratch
+                .execute_batch(&text)
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+            Ok(Self {
+                text,
+                digest,
+                objects: schema_inventory(&scratch)?,
+            })
+        }
+
         /// Classifies an existing file on a read-only connection and returns the fence
         /// epoch it stores, or zero for a missing or pristine file, together with the
         /// identity of the inspected file so the read-write open can be checked against it.
@@ -1749,10 +2231,19 @@ mod sqlite_backend {
             }
         }
 
-        /// Applies the baseline to a pristine file inside the caller's transaction.
-        fn apply(&self, tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-            tx.execute_batch(&self.text)
-                .map_err(|e| StoreError::Backend(e.to_string()))?;
+        /// Applies the baseline to a pristine file inside the caller's transaction. The DDL
+        /// runs under [`ConnectionMode::Baseline`]; the marker and version writes that
+        /// follow are the store's own and run under the maintenance mode.
+        fn apply(
+            &self,
+            tx: &rusqlite::Transaction<'_>,
+            gate: &AuthorityGate,
+        ) -> Result<(), StoreError> {
+            let applied = {
+                let _baseline = gate.enter(ConnectionMode::Baseline);
+                tx.execute_batch(&self.text)
+            };
+            applied.map_err(|e| StoreError::Backend(e.to_string()))?;
             tx.pragma_update(None, "application_id", APPLICATION_ID)
                 .map_err(|e| StoreError::Backend(e.to_string()))?;
             tx.pragma_update(None, "user_version", USER_VERSION)
@@ -1877,11 +2368,7 @@ mod sqlite_backend {
         holder_epoch_sql: i64,
     ) -> Result<(), StoreError> {
         let rows = tx
-            .execute(
-                "INSERT INTO fence (id, epoch) VALUES (0, ?1) \
-                 ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch",
-                rusqlite::params![holder_epoch_sql],
-            )
+            .execute(FENCE_CLAIM_SQL, rusqlite::params![holder_epoch_sql])
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         // A trigger running `RAISE(IGNORE)` reports success with zero changed
         // rows; proceeding without the persisted epoch would break fencing.
@@ -1906,19 +2393,365 @@ mod sqlite_backend {
     fn decode_fence_epoch(epoch: i64) -> Result<u64, StoreError> {
         u64::try_from(epoch).map_err(|_| StoreError::FenceCorrupt { db_epoch: epoch })
     }
+
+    #[cfg(test)]
+    mod gate_tests {
+        use super::*;
+
+        fn gated_memory_store() -> ClaimedConnection {
+            let conn = Connection::open_in_memory().expect("in-memory connection");
+            conn.execute_batch(STORE_BASELINE).expect("store baseline");
+            conn.execute_batch("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);")
+                .expect("consumer table");
+            AuthorityGate::install(conn).expect("install the gate")
+        }
+
+        fn guarded(conn: &Connection) -> ConnectionMode {
+            ConnectionMode::Guarded(Arc::new(SchemaSnapshot::scan(conn).expect("snapshot")))
+        }
+
+        /// The authorizer runs at prepare time, so a statement cached under the unrestricted
+        /// mode would run inside a guarded callback with the unrestricted verdict. Flushing
+        /// the cache at the end of the unrestricted work forces a re-prepare, which the
+        /// guarded policy refuses.
+        #[test]
+        fn an_unrestricted_cached_statement_does_not_reach_a_guarded_callback() {
+            let ClaimedConnection { conn, gate } = gated_memory_store();
+            conn.prepare_cached(FENCE_CLAIM_SQL)
+                .expect("prepare under the unrestricted mode")
+                .execute([7])
+                .expect("the store's own claim runs unrestricted");
+            conn.flush_prepared_statement_cache();
+            let hold = gate.enter(guarded(&conn));
+            let refused = conn.prepare_cached(FENCE_CLAIM_SQL).map(|_| ());
+            assert!(
+                matches!(&refused, Err(e) if e.to_string().contains("not authorized")),
+                "the guarded mode re-authorizes the flushed statement, got {refused:?}"
+            );
+            drop(hold);
+            let epoch: i64 = conn
+                .query_row(FENCE_EPOCH_SQL, [], |row| row.get(0))
+                .expect("read the fence");
+            assert_eq!(epoch, 7, "the refused statement changed nothing");
+        }
+
+        /// Without the flush the cached handle is handed back without re-authorization;
+        /// this pins the hazard the flush exists for.
+        #[test]
+        fn an_unflushed_unrestricted_statement_is_reused_without_re_authorization() {
+            let ClaimedConnection { conn, gate } = gated_memory_store();
+            conn.prepare_cached(FENCE_CLAIM_SQL)
+                .expect("prepare under the unrestricted mode")
+                .execute([7])
+                .expect("unrestricted claim");
+            let hold = gate.enter(guarded(&conn));
+            let reused = conn
+                .prepare_cached(FENCE_CLAIM_SQL)
+                .and_then(|mut statement| statement.execute([8]));
+            drop(hold);
+            assert!(
+                reused.is_ok(),
+                "a cached statement runs without re-authorization, got {reused:?}"
+            );
+        }
+
+        /// Every denial `deny_baseline_escapes` makes is reachable through the gate, and a
+        /// trigger on `fence` is not among them: the identity check refuses it instead.
+        #[test]
+        fn the_baseline_mode_denies_each_escape_and_allows_plain_ddl() {
+            let ClaimedConnection { conn, gate } = gated_memory_store();
+            let hold = gate.enter(ConnectionMode::Baseline);
+            for escape in [
+                "PRAGMA writable_schema = ON",
+                "PRAGMA wal_checkpoint",
+                "ATTACH DATABASE ':memory:' AS other",
+                "DETACH DATABASE other",
+                "BEGIN",
+                "SAVEPOINT s",
+                "INSERT INTO fence (id, epoch) VALUES (0, 1)",
+                "UPDATE fence SET epoch = 2",
+                "DELETE FROM fence",
+                "INSERT INTO format_marker (id, baseline_sha256) VALUES (0, '')",
+                "DELETE FROM format_marker",
+            ] {
+                let denied = conn.execute_batch(escape);
+                assert!(
+                    matches!(&denied, Err(e) if e.to_string().contains("not authorized")),
+                    "`{escape}` must be denied under the baseline mode, got {denied:?}"
+                );
+            }
+            conn.execute_batch(
+                "CREATE TABLE plain (x); CREATE INDEX plain_x ON plain (x); \
+                 CREATE TRIGGER fence_hook AFTER INSERT ON fence BEGIN SELECT 1; END;",
+            )
+            .expect("plain DDL and an infrastructure trigger pass the baseline mode");
+            drop(hold);
+        }
+
+        /// The snapshot is reused while both versions stand, replaced once the schema
+        /// version moves, and discarded by the maintenance exit whatever the key.
+        #[test]
+        fn the_schema_snapshot_is_keyed_on_the_schema_and_data_versions() {
+            let ClaimedConnection { conn, gate } = gated_memory_store();
+            let first = gate.schema_snapshot(&conn).expect("scan");
+            let again = gate.schema_snapshot(&conn).expect("reuse");
+            assert!(
+                Arc::ptr_eq(&first, &again),
+                "an unchanged key reuses the snapshot"
+            );
+            assert!(first.main_names.contains("kv"));
+
+            conn.execute_batch("ALTER TABLE kv RENAME TO renamed;")
+                .expect("rename bumps the schema version");
+            let rescanned = gate.schema_snapshot(&conn).expect("rescan");
+            assert!(!Arc::ptr_eq(&first, &rescanned));
+            assert_ne!(rescanned.key.schema_version, first.key.schema_version);
+            assert!(rescanned.main_names.contains("renamed"));
+            assert!(!rescanned.main_names.contains("kv"));
+
+            gate.forget_after_maintenance();
+            let after_maintenance = gate.schema_snapshot(&conn).expect("scan");
+            assert!(
+                !Arc::ptr_eq(&rescanned, &after_maintenance),
+                "maintenance discards the snapshot even at an unchanged key"
+            );
+        }
+
+        /// Defensive mode neutralizes the two statements that would move schema state under
+        /// the key without DDL, on this connection.
+        #[test]
+        fn the_claimed_connection_refuses_schema_rewrites_without_ddl() {
+            let ClaimedConnection { conn, .. } = gated_memory_store();
+            let version = schema_version(&conn).expect("version");
+            conn.execute_batch(&format!("PRAGMA schema_version = {}", version + 7))
+                .expect("defensive mode turns the write into a no-op rather than an error");
+            assert_eq!(
+                schema_version(&conn).expect("version"),
+                version,
+                "the schema version write did not land"
+            );
+            conn.execute_batch("PRAGMA writable_schema = ON")
+                .expect("the pragma statement itself is accepted");
+            let direct = conn.execute(
+                "UPDATE sqlite_schema SET name = 'fence2' WHERE name = 'kv'",
+                [],
+            );
+            assert!(
+                direct.is_err(),
+                "writable_schema is a no-op under defensive mode"
+            );
+        }
+
+        /// A rename another connection commits moves both halves of the key; a commit that
+        /// writes the old schema version back still moves the data version, so the
+        /// snapshot is rescanned either way.
+        #[test]
+        fn a_foreign_commit_that_restores_the_schema_version_still_moves_the_key() {
+            let dir = std::env::temp_dir().join(format!("storage-key-{}", unique_nanos()));
+            std::fs::create_dir_all(&dir).expect("dir");
+            let path = dir.join("store.db");
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(STORE_BASELINE).expect("baseline");
+            conn.execute_batch("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);")
+                .expect("consumer table");
+            conn.execute_batch("PRAGMA journal_mode = WAL")
+                .expect("wal");
+            let ClaimedConnection { conn, gate } = AuthorityGate::install(conn).expect("gate");
+            let first = gate.schema_snapshot(&conn).expect("scan");
+
+            let raw = Connection::open(&path).expect("second connection");
+            raw.execute_batch(&format!(
+                "ALTER TABLE kv RENAME TO kv2; PRAGMA schema_version = {};",
+                first.key.schema_version
+            ))
+            .expect("rename, then write the old schema version back");
+            drop(raw);
+
+            let rescanned = gate.schema_snapshot(&conn).expect("scan");
+            assert_eq!(rescanned.key.schema_version, first.key.schema_version);
+            assert_ne!(rescanned.key.data_version, first.key.data_version);
+            assert!(
+                rescanned.main_names.contains("kv2"),
+                "the forged version did not keep the stale names"
+            );
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// A snapshot larger than the declared bound serves its callback and is not kept.
+        /// The bound is compared against an independent lower estimate of the heap the
+        /// collections own.
+        #[test]
+        fn a_snapshot_above_the_retained_bound_is_not_kept() {
+            let ClaimedConnection { conn, gate } = gated_memory_store();
+            let wide_name = "w".repeat(200);
+            let tables = SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND / 200 + 2;
+            let ddl: String = (0..tables)
+                .map(|i| format!("CREATE TABLE {wide_name}{i} (x);"))
+                .collect();
+            conn.execute_batch(&ddl).expect("wide schema");
+            let first = gate.schema_snapshot(&conn).expect("scan");
+            let floor = tables * (200 + std::mem::size_of::<String>() + 1);
+            assert!(
+                first.retained_bytes() >= floor,
+                "{} < {floor}",
+                first.retained_bytes()
+            );
+            assert!(first.retained_bytes() > SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND);
+            let again = gate.schema_snapshot(&conn).expect("scan again");
+            assert!(
+                !Arc::ptr_eq(&first, &again),
+                "an oversized snapshot is not retained"
+            );
+        }
+
+        /// The release comparison is satisfied by an unchanged schema version and compares
+        /// the infrastructure objects otherwise: a moved version with the same objects
+        /// passes, a moved version with a new infrastructure-named object is refused.
+        #[test]
+        fn the_release_comparison_rescans_only_when_the_schema_version_moved() {
+            let ClaimedConnection { conn, .. } = gated_memory_store();
+            let snapshot = SchemaSnapshot::scan(&conn).expect("scan");
+            CallbackScope::require_infrastructure_unchanged(&conn, &snapshot)
+                .expect("an unchanged version passes without a rescan");
+            conn.execute_batch("CREATE TABLE unrelated (x);")
+                .expect("bump the version without touching infrastructure");
+            CallbackScope::require_infrastructure_unchanged(&conn, &snapshot)
+                .expect("a moved version with the same infrastructure objects passes");
+            conn.execute_batch("CREATE TEMP VIEW fence AS SELECT 0 AS id, 0 AS epoch;")
+                .expect("a temp view under the infrastructure name");
+            let refused = CallbackScope::require_infrastructure_unchanged(&conn, &snapshot);
+            assert!(
+                matches!(&refused, Err(StoreError::Backend(m)) if m.contains("infrastructure schema objects")),
+                "a moved version with a new infrastructure object is refused, got {refused:?}"
+            );
+        }
+
+        /// The durability pin runs once per connection: a lowered `synchronous` that no
+        /// maintenance callback caused is not re-pinned by a fenced write, and the first
+        /// fenced write after maintenance re-pins. The lowering below is reachable only
+        /// through the raw connection; the per-write pin is traded for that assumption,
+        /// which the guarded policy and WAL's locking uphold.
+        #[test]
+        fn the_durability_pin_runs_once_per_connection_until_maintenance() {
+            let root = std::env::temp_dir().join(format!("storage-pin-{}", unique_nanos()));
+            std::fs::create_dir_all(&root).expect("store directory");
+            let path = root.join("store.db").to_string_lossy().into_owned();
+            let expected = ExpectedIdentity::for_baseline(
+                "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+            )
+            .expect("identity");
+            let claimed = open_claimed(&path, &expected, None, 1).expect("open");
+            claimed
+                .conn
+                .pragma_update(None, "synchronous", "OFF")
+                .expect("lower on the raw connection");
+            let store = SqliteStore::over(claimed, 1, None);
+            let synchronous = |store: &SqliteStore| -> i64 {
+                store
+                    .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
+                    .expect("read synchronous")
+            };
+            store
+                .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('a', '1')", []))
+                .expect("fenced write");
+            assert_eq!(
+                synchronous(&store),
+                0,
+                "the fenced write did not re-run the pin"
+            );
+            store.with_conn_unfenced(|_| Ok(())).expect("maintenance");
+            store
+                .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('b', '2')", []))
+                .expect("fenced write after maintenance");
+            assert_eq!(
+                synchronous(&store),
+                2,
+                "the first fenced write after maintenance re-pins FULL"
+            );
+            drop(store);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// A maintenance callback that unwinds still discards the pin and the snapshot:
+        /// the shadow it left is refused, and the next fenced write re-pins.
+        #[test]
+        fn a_panicking_maintenance_callback_still_invalidates_the_connection_caches() {
+            let root = std::env::temp_dir().join(format!("storage-unwind-{}", unique_nanos()));
+            std::fs::create_dir_all(&root).expect("store directory");
+            let path = root.join("store.db").to_string_lossy().into_owned();
+            let expected = ExpectedIdentity::for_baseline(
+                "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);",
+            )
+            .expect("identity");
+            let claimed = open_claimed(&path, &expected, None, 1).expect("open");
+            let store = SqliteStore::over(claimed, 1, None);
+            store
+                .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get::<_, i64>(0)))
+                .expect("retain a snapshot");
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                store.with_conn_unfenced(|c| -> rusqlite::Result<()> {
+                    c.pragma_update(None, "synchronous", "OFF")?;
+                    c.execute_batch("CREATE TEMP TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)")?;
+                    panic!("maintenance panics after lowering durability and leaving a shadow")
+                })
+            }));
+            assert!(panicked.is_err());
+            assert!(
+                !store.gate.lock().durability_pinned,
+                "the unwind re-armed the pin"
+            );
+            assert!(
+                store.gate.lock().schema.is_none(),
+                "the unwind discarded the snapshot"
+            );
+            let refused = store.with_conn(|c| c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)));
+            assert!(
+                matches!(&refused, Err(StoreError::Backend(m)) if m.contains("shadows")),
+                "the shadow the panicking maintenance left is refused, got {refused:?}"
+            );
+            store
+                .with_conn_unfenced(|c| c.execute_batch("DROP TABLE temp.kv"))
+                .expect("drop the shadow");
+            store
+                .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('a', '1')", []))
+                .expect("fenced write");
+            let synchronous: i64 = store
+                .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
+                .expect("read synchronous");
+            assert_eq!(
+                synchronous, 2,
+                "the fenced write after the unwind re-pinned FULL"
+            );
+            drop(store);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        #[should_panic(expected = "another mode was held")]
+        fn entering_a_mode_while_one_is_held_is_a_programming_error() {
+            let ClaimedConnection { gate, .. } = gated_memory_store();
+            let _outer = gate.enter(ConnectionMode::Baseline);
+            let _inner = gate.enter(ConnectionMode::Baseline);
+        }
+    }
 }
 
+#[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
+pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
 pub use sqlite_backend::{
-    APPLICATION_ID, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn, STORE_BASELINE,
-    SchemaObject, SqliteStore, USER_VERSION, delete_sqlite_family, open_sqlite, schema_inventory,
+    APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
+    SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
+    delete_sqlite_family, open_sqlite, schema_inventory,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::sqlite_backend::{
-        ExpectedIdentity, FileState, InspectionCopy, before_next_busy_wait_for_test, claim_fence,
-        claim_fence_strict, create_database_file_owner_only, immutable_uri, open_claimed,
+        ClaimedConnection, ExpectedIdentity, FileState, InspectionCopy,
+        before_next_busy_wait_for_test, claim_fence, claim_fence_strict,
+        create_database_file_owner_only, immutable_uri, open_claimed,
     };
     use super::*;
     use std::path::Path;
@@ -2539,7 +3372,8 @@ mod tests {
         );
         drop(raw);
 
-        let conn = open_claimed(path, &expected, None, 11).expect("a newer epoch opens");
+        let ClaimedConnection { conn, .. } =
+            open_claimed(path, &expected, None, 11).expect("a newer epoch opens");
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .expect("read journal mode");
@@ -3672,7 +4506,7 @@ mod tests {
             .expect("read synchronous");
         assert_eq!(
             after_second, 2,
-            "every fenced write re-pins synchronous=FULL"
+            "the first fenced write after each maintenance callback re-pins synchronous=FULL"
         );
 
         store
@@ -4162,6 +4996,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bounded_read_refuses_an_expired_deadline_even_when_the_connection_is_free() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let expired = Instant::now() - Duration::from_millis(1);
+        let ran = std::cell::Cell::new(false);
+        let r = store.with_conn_within(expired, |_| {
+            ran.set(true);
+            Ok(())
+        });
+        assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
+        assert!(!ran.get(), "the callback ran past its deadline");
+        store
+            .with_conn_within(Instant::now() + Duration::from_secs(5), |c| {
+                c.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            })
+            .expect("a live deadline reads");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_bounded_fenced_write_stops_at_its_deadline_before_begin_runs() {
         let (root, d) = tmp();
         let store = open_sqlite(&d, KV_BASELINE).expect("open");
@@ -4370,6 +5225,722 @@ mod tests {
             matches!(&r, Err(StoreError::Backend(m)) if m.contains("not authorized")),
             "a cached pragma write must be denied in the read scope, got {r:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// SQLite counts a re-prepare on the statement handle whenever a step finds the
+    /// statement expired or its schema cookie stale; the counter accumulates on the handle
+    /// the cache keeps, so zero means the cached program has run only as first prepared.
+    fn reprepare_count(statement: &rusqlite::Statement<'_>) -> i32 {
+        statement.get_status(rusqlite::StatementStatus::RePrepare)
+    }
+
+    const CACHED_INSERT: &str = "INSERT INTO kv (k, v) VALUES (?1, ?2)";
+    const CACHED_TEMP_SHADOW: &str = "CREATE TEMP TABLE late (x)";
+
+    /// The mode gate installs nothing per call, so a statement cached by one fenced
+    /// callback runs unchanged in the next. A schema change on another connection is
+    /// still observed: the next callback snapshots the main-schema names at entry, and a
+    /// stale schema cookie forces the cached statement to re-prepare against that policy.
+    #[test]
+    fn a_warm_fenced_statement_survives_across_store_calls_until_the_schema_changes() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_INSERT)?.execute(["a", "1"]))
+            .expect("warm the statement");
+        let (reprepared, after_temp_ddl) = store
+            .with_conn_fenced(|tx| {
+                let mut statement = tx.prepare_cached(CACHED_INSERT)?;
+                statement.execute(["b", "2"])?;
+                let reprepared = reprepare_count(&statement);
+                // Temp DDL expires every statement on the connection, so the insert's next
+                // run re-prepares once here and the count after the foreign DDL must exceed
+                // it.
+                tx.execute("CREATE TEMP TABLE scratch (x)", [])?;
+                tx.execute("DROP TABLE temp.scratch", [])?;
+                statement.execute(["b2", "2"])?;
+                // Prepared after that DDL and never run, so the cached program is valid,
+                // and `late` is not yet a main-schema name, so the guarded policy allows it.
+                // Only the foreign DDL below can stale it.
+                tx.prepare_cached(CACHED_TEMP_SHADOW)?;
+                Ok((reprepared, reprepare_count(&statement)))
+            })
+            .expect("the second fenced call");
+        assert_eq!(
+            reprepared, 0,
+            "the warm statement ran in the second fenced call without a re-prepare \
+             (bundled SQLite 3.51.3: `synchronous` and `journal_mode` emit no expiry)"
+        );
+        assert!(
+            after_temp_ddl >= 1,
+            "temp DDL expires statements, got {after_temp_ddl}"
+        );
+
+        // The store holds no transaction between callbacks, so the second connection's
+        // DDL cannot contend. The file no longer matches the baseline after this, so the
+        // store must not be reopened in this test.
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        raw.execute_batch("CREATE TABLE late (x);")
+            .expect("DDL on the second connection");
+        drop(raw);
+
+        let (reprepared, late_rows) = store
+            .with_conn_fenced(|tx| {
+                let mut statement = tx.prepare_cached(CACHED_INSERT)?;
+                statement.execute(["c", "3"])?;
+                let late_rows: i64 = tx.query_row("SELECT COUNT(*) FROM late", [], |r| r.get(0))?;
+                Ok((reprepare_count(&statement), late_rows))
+            })
+            .expect("the fenced call after the foreign DDL");
+        assert!(
+            reprepared > after_temp_ddl,
+            "the foreign DDL forced a re-prepare of the warm statement, got {reprepared} \
+             after {after_temp_ddl}"
+        );
+        assert_eq!(
+            late_rows, 0,
+            "the callback reads the table the foreign DDL created"
+        );
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the cached temp-shadow statement is re-authorized against the new main-schema \
+             names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("temp schema count");
+        assert_eq!(temp_late, 0, "the denied statement created no temp shadow");
+        let rows: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(rows, 4);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Main-schema DDL on another connection bumps the header schema version, so the next
+    /// callback rescans its snapshot: a temp shadow of the new name is denied and the old
+    /// name is free. The temp scan is uncached, so a shadow that maintenance leaves is
+    /// still refused.
+    #[test]
+    fn a_rename_through_a_second_connection_is_observed_by_the_next_callback() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get::<_, i64>(0)))
+            .expect("warm the snapshot");
+        let denied = store.with_conn_fenced(|tx| tx.execute("CREATE TEMP TABLE kv (x)", []));
+        assert!(
+            matches!(&denied, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "a temp shadow of `kv` is denied before the rename, got {denied:?}"
+        );
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        raw.execute_batch("ALTER TABLE kv RENAME TO kv_renamed;")
+            .expect("rename on the second connection");
+        drop(raw);
+
+        let denied =
+            store.with_conn_fenced(|tx| tx.execute("CREATE TEMP TABLE kv_renamed (x)", []));
+        assert!(
+            matches!(&denied, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the next callback denies a temp shadow of the renamed table, got {denied:?}"
+        );
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("CREATE TEMP TABLE kv (x)", [])?;
+                tx.execute("DROP TABLE temp.kv", []).map(|_| ())
+            })
+            .expect("the old name no longer shadows anything after the rescan");
+
+        store
+            .with_conn_unfenced(|c| c.execute_batch("CREATE TEMP TABLE kv_renamed (x)"))
+            .expect("maintenance leaves a shadow of the renamed table");
+        let refused = store.with_conn(|c| c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)));
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("shadows")),
+            "the uncached temp scan still refuses the shadow, got {refused:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The page-cache, temporary-store, and memory-map pragmas belong to the connection-open
+    /// path; a guarded callback of either kind is denied them, and a denied pragma leaves
+    /// the value the maintenance path set.
+    #[test]
+    fn guarded_callbacks_are_denied_the_connection_resource_pragmas() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_unfenced(|c| {
+                c.pragma_update(None, "cache_size", -512)?;
+                c.pragma_update(None, "temp_store", "MEMORY")?;
+                c.pragma_update(None, "mmap_size", 0)
+            })
+            .expect("the open path owns the resource pragmas");
+        for (pragma, value) in [
+            ("cache_size", "-8"),
+            ("temp_store", "FILE"),
+            ("mmap_size", "65536"),
+        ] {
+            let read = store.with_conn(|c| c.execute(&format!("PRAGMA {pragma} = {value}"), []));
+            assert!(
+                matches!(&read, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "a read callback is denied `PRAGMA {pragma}`, got {read:?}"
+            );
+            let fenced =
+                store.with_conn_fenced(|tx| tx.execute(&format!("PRAGMA {pragma} = {value}"), []));
+            assert!(
+                matches!(&fenced, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "a fenced callback is denied `PRAGMA {pragma}`, got {fenced:?}"
+            );
+        }
+        let (cache_size, temp_store, mmap_size): (i64, i64, i64) = store
+            .with_conn(|c| {
+                Ok((
+                    c.query_row("PRAGMA cache_size", [], |r| r.get(0))?,
+                    c.query_row("PRAGMA temp_store", [], |r| r.get(0))?,
+                    c.query_row("PRAGMA mmap_size", [], |r| r.get(0))?,
+                ))
+            })
+            .expect("reading the pragmas stays allowed");
+        assert_eq!((cache_size, temp_store, mmap_size), (-512, 2, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A handle with no runs handed out after a returned handle of its key had run means
+    /// the cache re-created it. A cache sized below the working set churns, a cache sized
+    /// for it does not.
+    #[test]
+    fn statement_evictions_are_counted_per_text() {
+        let sequence = [
+            "SELECT 1", "SELECT 2", "SELECT 1", "SELECT 3", "SELECT 2", "SELECT 1",
+        ];
+        let run_sequence = |store: &SqliteStore| {
+            store
+                .with_conn_fenced(|tx| {
+                    for text in sequence {
+                        tx.prepare_cached(text)?
+                            .query_row([], |r| r.get::<_, i64>(0))?;
+                    }
+                    Ok(())
+                })
+                .expect("run the sequence")
+        };
+        let size = |store: &SqliteStore, capacity: usize| {
+            store
+                .with_conn_unfenced(|c| {
+                    c.set_prepared_statement_cache_capacity(capacity);
+                    Ok(())
+                })
+                .expect("size the cache")
+        };
+
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 2);
+        store.start_statement_reuse_probe();
+        run_sequence(&store);
+        let churned = store.statement_evictions();
+        // Capacity two under the sequence: `SELECT 1` is evicted by `SELECT 3` and
+        // re-created at the end; `SELECT 2` is evicted by the second `SELECT 1` and
+        // re-created before its second run.
+        assert_eq!(
+            churned,
+            std::collections::BTreeMap::from([
+                ("SELECT 1".to_string(), 1),
+                ("SELECT 2".to_string(), 1),
+                ("SELECT 3".to_string(), 0),
+            ]),
+            "the undersized cache re-created every revisited statement once"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 3);
+        store.start_statement_reuse_probe();
+        run_sequence(&store);
+        run_sequence(&store);
+        let fitted = store.statement_evictions();
+        assert_eq!(fitted.len(), 3);
+        assert!(
+            fitted.values().all(|evictions| *evictions == 0),
+            "a fitted cache re-creates no handle, got {fitted:?}"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A replacement handle returned without running carries no run evidence, so
+        // handing the same handle out again is reuse, not another re-creation.
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        size(&store, 1);
+        store.start_statement_reuse_probe();
+        store
+            .with_conn_fenced(|tx| {
+                for text in ["SELECT 1", "SELECT 2"] {
+                    tx.prepare_cached(text)?
+                        .query_row([], |r| r.get::<_, i64>(0))?;
+                }
+                for _ in 0..2 {
+                    drop(tx.prepare_cached("SELECT 1")?);
+                }
+                Ok(())
+            })
+            .expect("run the unstepped reuse");
+        assert_eq!(
+            store.statement_evictions().get("SELECT 1"),
+            Some(&1),
+            "the unstepped reuse of the re-created handle is not an eviction"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// SQLite keeps a handle's run count from before the probe was armed; the probe reports
+    /// only the runs after arming.
+    #[test]
+    fn statement_runs_count_from_the_probe_start_not_the_handle_creation() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let run = |store: &SqliteStore| {
+            store
+                .with_conn_fenced(|tx| {
+                    tx.prepare_cached("SELECT 1")?
+                        .query_row([], |r| r.get::<_, i64>(0))?;
+                    Ok(())
+                })
+                .expect("run SELECT 1");
+        };
+        run(&store);
+        store.start_statement_reuse_probe();
+        run(&store);
+        assert_eq!(
+            store.statement_runs().get("SELECT 1"),
+            Some(&1),
+            "the run before the probe started is not counted"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The read path's `query_only` toggle is a flag pragma; SQLite expires every prepared
+    /// statement on the connection for each flag pragma, so a read callback re-prepares
+    /// what it cached and stales what fenced callbacks cached. Removing the toggle is the
+    /// open question of the connection-open unit; this pins the behavior it would change.
+    #[test]
+    fn a_read_callback_still_expires_cached_statements_through_query_only() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        const COUNT: &str = "SELECT COUNT(*) FROM kv";
+        let count_reprepares = |c: &GuardedConn<'_>| -> rusqlite::Result<i32> {
+            let mut statement = c.prepare_cached(COUNT)?;
+            statement.query_row([], |r| r.get::<_, i64>(0))?;
+            Ok(reprepare_count(&statement))
+        };
+        let observed = [
+            store.with_conn(count_reprepares).expect("read"),
+            store.with_conn(count_reprepares).expect("read"),
+            store.with_conn_fenced(count_reprepares).expect("fenced"),
+            store.with_conn_fenced(count_reprepares).expect("fenced"),
+        ];
+        assert_eq!(observed[0], 0, "first use of the statement");
+        assert!(
+            observed[1] >= 1,
+            "the read toggle expired it, got {observed:?}"
+        );
+        assert!(
+            observed[2] > observed[1],
+            "the read release expired it, got {observed:?}"
+        );
+        assert_eq!(
+            observed[3], observed[2],
+            "two fenced calls in a row re-prepare nothing, got {observed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `query_only` is the read path's only write barrier and applies to every database on
+    /// the connection, so temp writes are refused in a read callback and allowed in a
+    /// fenced one. Removing the toggle would change this; the connection-open unit owns
+    /// that question.
+    #[test]
+    fn a_read_callback_cannot_write_the_temp_database_but_a_fenced_callback_can() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let refused = store.with_conn(|c| c.execute("CREATE TEMP TABLE scratch (x)", []));
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "temp DDL must be refused in a read callback, got {refused:?}"
+        );
+        store
+            .with_conn_unfenced(|c| c.execute_batch("CREATE TEMP TABLE scratch (x)"))
+            .expect("maintenance creates a temp table that shadows nothing");
+        let refused = store.with_conn(|c| c.execute("INSERT INTO scratch VALUES (1)", []));
+        assert!(
+            matches!(&refused, Err(StoreError::Backend(m)) if m.contains("readonly")),
+            "a temp write must be refused in a read callback, got {refused:?}"
+        );
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO scratch VALUES (1)", [])?;
+                tx.execute("DROP TABLE temp.scratch", []).map(|_| ())
+            })
+            .expect("a fenced callback may write the temp database");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A stuck guarded mode would deny maintenance its pragma writes, so a successful
+    /// lowering after each panic shows the mode returned to the rest state; the fenced
+    /// write then re-pins durability as it does after any maintenance.
+    #[test]
+    fn a_panicking_callback_restores_the_unrestricted_mode() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+
+        let read_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn(|c| -> rusqlite::Result<()> {
+                c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get::<_, i64>(0))?;
+                panic!("read callback panics after a statement")
+            })
+        }));
+        assert!(read_panicked.is_err());
+        let query_only: bool = store
+            .with_conn_unfenced(|c| c.query_row("PRAGMA query_only", [], |r| r.get(0)))
+            .expect("read the pragma");
+        assert!(!query_only, "the panicking read restored query_only");
+        store
+            .with_conn_unfenced(|c| c.pragma_update(None, "synchronous", "OFF"))
+            .expect("maintenance is unrestricted again after a panicking read");
+
+        let write_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_fenced(|tx| -> rusqlite::Result<()> {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('partial', '1')", [])?;
+                panic!("write callback panics after a statement")
+            })
+        }));
+        assert!(write_panicked.is_err());
+        store
+            .with_conn_unfenced(|c| c.pragma_update(None, "synchronous", "OFF"))
+            .expect("maintenance is unrestricted again after a panicking fenced write");
+        let partial: i64 = store
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM kv WHERE k = 'partial'", [], |r| {
+                    r.get(0)
+                })
+            })
+            .expect("count");
+        assert_eq!(partial, 0, "the panicking fenced callback rolled back");
+
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('after', '1')", [])
+                    .map(|_| ())
+            })
+            .expect("fenced write");
+        let synchronous: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
+            .expect("read synchronous");
+        assert_eq!(
+            synchronous, 2,
+            "the fenced write re-pinned synchronous=FULL"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The scratch check in `for_baseline` refuses these texts first; this test bypasses
+    /// it so the store connection's own gate is the refusing party, and shows the refusal
+    /// leaves the file pristine for a later good open.
+    #[test]
+    fn baseline_application_is_denied_its_escapes_on_the_store_connection() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        std::fs::create_dir_all(&root).expect("store directory");
+        for escape in [
+            "PRAGMA writable_schema = ON;",
+            "ATTACH DATABASE ':memory:' AS other;",
+            "BEGIN;",
+            "SAVEPOINT s;",
+            "INSERT INTO fence (id, epoch) VALUES (0, 999);",
+            "DELETE FROM format_marker;",
+        ] {
+            let text = format!("{KV_BASELINE}\n{escape}");
+            let expected = ExpectedIdentity::unchecked_for_test(&text).expect("unchecked identity");
+            let result = open_claimed(&path, &expected, None, 1);
+            assert!(
+                matches!(&result, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+                "`{escape}` must be denied by the baseline mode, got {:?}",
+                result.map(|_| ())
+            );
+        }
+        let benign = ExpectedIdentity::unchecked_for_test(KV_BASELINE).expect("identity");
+        let ClaimedConnection { conn, .. } =
+            open_claimed(&path, &benign, None, 1).expect("the refusals left the file pristine");
+        let epoch: i64 = conn
+            .query_row("SELECT epoch FROM fence WHERE id = 0", [], |row| row.get(0))
+            .expect("the benign baseline applied and the fence was claimed");
+        assert_eq!(epoch, 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fence statements the store issues under the unrestricted mode never enter the
+    /// statement cache: a cached statement is not re-authorized on reuse, so a cached fence
+    /// upsert would let a guarded callback rewrite the epoch. A statement retrieved from
+    /// the cache keeps its run count; zero runs means the store never cached it.
+    #[test]
+    fn the_store_never_caches_its_own_fence_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        std::fs::create_dir_all(&root).expect("store directory");
+        let expected = ExpectedIdentity::for_baseline(KV_BASELINE).expect("identity");
+        let ClaimedConnection { conn, .. } = open_claimed(&path, &expected, None, 1).expect("open");
+        for sql in [
+            super::sqlite_backend::FENCE_CLAIM_SQL,
+            "SELECT epoch FROM fence WHERE id = 0",
+            "PRAGMA synchronous = FULL",
+        ] {
+            let statement = conn.prepare_cached(sql).expect("prepare");
+            assert_eq!(
+                statement.get_status(rusqlite::StatementStatus::Run),
+                0,
+                "`{sql}` was found in the statement cache with prior runs"
+            );
+        }
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Main DDL on the store's own connection leaves a cached temp-DDL statement valid, so
+    /// the maintenance flush is the only step that forces its re-authorization, and a
+    /// panicking maintenance callback must not skip that flush. The warm-up prepares without
+    /// executing so no temp object exists for the entry scan to notice and no temp DDL
+    /// expires the cache.
+    #[test]
+    fn a_panicking_maintenance_callback_still_flushes_the_statement_cache() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement without running it");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_unfenced(|c| -> rusqlite::Result<()> {
+                c.execute_batch("CREATE TABLE late (x)")?;
+                panic!("maintenance panics after main DDL")
+            })
+        }));
+        assert!(panicked.is_err());
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the cached temp-shadow statement must be re-authorized against the new \
+             main-schema names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Leaving WAL takes an exclusive lock on the database file, and a WAL-mode connection
+    /// keeps its shared lock between transactions, so a second connection cannot switch the
+    /// journal mode while the store holds the database open. The once-per-connection pin
+    /// relies on this.
+    #[test]
+    fn a_second_connection_cannot_leave_wal_while_the_store_holds_the_database_open() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('a', '1')", []))
+            .expect("fenced write pins the connection");
+
+        let raw = rusqlite::Connection::open(sqlite_path(&d)).expect("second connection");
+        raw.busy_timeout(Duration::from_millis(200))
+            .expect("short wait");
+        let attempt = raw.query_row("PRAGMA journal_mode = DELETE", [], |r| {
+            r.get::<_, String>(0)
+        });
+        assert!(
+            matches!(&attempt, Ok(mode) if mode.eq_ignore_ascii_case("wal"))
+                || matches!(&attempt, Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy),
+            "the second connection left WAL: {attempt:?}"
+        );
+        drop(raw);
+
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('b', '2')", []))
+            .expect("fenced write without re-running the pin");
+        let mode: String = store
+            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
+            .expect("read journal_mode");
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode is {mode}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A foreign connection can add a main table and write the old schema version back, so
+    /// every cached statement's schema cookie still matches and SQLite reuses it without a
+    /// re-prepare. The data version still moves the key, so the rescan that installs the
+    /// new policy must discard the statements prepared under the old one.
+    #[test]
+    fn a_rescan_under_an_unchanged_schema_version_discards_cached_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement without running it");
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        let version: i64 = raw
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .expect("schema version");
+        raw.execute_batch(&format!(
+            "CREATE TABLE late (x); PRAGMA schema_version = {version};"
+        ))
+        .expect("DDL, then write the old schema version back");
+        drop(raw);
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the cached temp-shadow statement must be re-authorized against the rescanned \
+             main-schema names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Restoring the old `schema_version` after renaming `kv` leaves SQLite's parsed schema
+    /// stale: SQLite still resolves `kv` and omits `kv2` even though `sqlite_schema` lists
+    /// `kv2`. The rescan must reload the parsed schema.
+    #[test]
+    fn a_rescan_under_an_unchanged_schema_version_reloads_the_parsed_schema() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('a', '1')", []))
+            .expect("resolve kv on this connection");
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        let version: i64 = raw
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .expect("schema version");
+        raw.execute_batch(&format!(
+            "ALTER TABLE kv RENAME TO kv2; PRAGMA schema_version = {version};"
+        ))
+        .expect("rename, then write the old schema version back");
+        drop(raw);
+
+        let outcome = store.with_conn_fenced(|tx| {
+            let old = tx.execute("INSERT INTO kv VALUES ('b', '2')", []);
+            tx.execute("INSERT INTO kv2 VALUES ('c', '3')", [])?;
+            Ok(old)
+        });
+        let old = outcome.expect("the callback resolves the renamed table");
+        assert!(
+            matches!(&old, Err(e) if e.to_string().contains("no such table")),
+            "the old name no longer resolves on this connection, got {old:?}"
+        );
+        let rows: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv2", [], |r| r.get(0)))
+            .expect("count through the renamed table");
+        assert_eq!(rows, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An oversized snapshot serves its callback without being retained, so the retained
+    /// snapshot can predate the policy that authorized the cached statements. A foreign
+    /// change that keeps that later cookie must still flush them.
+    #[test]
+    fn a_rescan_after_an_unretained_policy_discards_cached_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get::<_, i64>(0)))
+            .expect("retain the baseline snapshot");
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        let wide_name = "w".repeat(200);
+        let ddl: String = (0..SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND / 200 + 2)
+            .map(|i| format!("CREATE TABLE {wide_name}{i} (x);"))
+            .collect();
+        raw.execute_batch(&ddl).expect("oversized schema");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement under the unretained policy");
+        let version: i64 = raw
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .expect("schema version");
+        raw.execute_batch(&format!(
+            "CREATE TABLE late (x); PRAGMA schema_version = {version};"
+        ))
+        .expect("DDL, then write the schema version the store last saw back");
+        drop(raw);
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the statement cached under the unretained policy must be re-authorized, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
         let _ = std::fs::remove_dir_all(&root);
     }
 

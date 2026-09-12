@@ -11,6 +11,8 @@ description = "Backend mechanics (baseline open, single-writer lease, epoch fenc
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite", "dep:sha2"]
+# Statement-cache observation for sibling crates' tests; never in production builds.
+test-support = []
 
 [dependencies]
 storage-types = { workspace = true }

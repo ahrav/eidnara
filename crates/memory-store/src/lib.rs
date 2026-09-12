@@ -460,6 +460,91 @@ pub enum MediaKind {
 /// store identity `storage::open_sqlite` checks on every open.
 const BASELINE: &str = include_str!("../baseline.sql");
 
+/// Bytes of page cache the store connection holds; `PRAGMA cache_size` is derived from
+/// this and the file's measured page size, so a file with a different page size holds the
+/// same bytes. The daemon counts this budget in its retained-resident declaration. The
+/// budget is declared, not measured; the W1 measurement contract owns its effect.
+pub const PAGE_CACHE_BUDGET_BYTES: i64 = 16 * 1024 * 1024;
+/// Bytes of the database file SQLite may map instead of reading into the page cache,
+/// capped by the library's compile-time maximum. Mapped pages are file-backed and
+/// reclaimable; the daemon still counts this budget in its retained-resident declaration.
+pub const MMAP_BUDGET_BYTES: i64 = 64 * 1024 * 1024;
+/// Prepared statements the connection keeps. Statements survive across fenced callbacks, so
+/// the cache must hold the whole hot set rather than one callback's statements. The crate
+/// prepares about 55 distinct literal texts through `prepare_cached`; nine sites format
+/// their text, and the `IN (...)` placeholder lists among them vary with the input shape,
+/// so the population is sampled by the daemon's steady-pass probe rather than counted.
+/// The kernel store uses 128 for a comparable set.
+pub const STATEMENT_CACHE_CAPACITY: usize = 128;
+
+/// What the connection-open path measured and set. Sizing is derived from these values,
+/// not from assumed defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionProfile {
+    /// `PRAGMA page_size` of the opened file.
+    pub page_size: i64,
+    /// `PRAGMA cache_size` in pages: the page-cache budget divided by the page size.
+    pub cache_pages: i64,
+    /// `PRAGMA mmap_size` as the library reports it after the budget was applied; zero when
+    /// the library was compiled without memory-mapped I/O.
+    pub mmap_bytes: i64,
+    /// `MAX_MMAP_SIZE` from `PRAGMA compile_options`; zero when the library was compiled
+    /// without memory-mapped I/O.
+    pub compile_max_mmap_bytes: i64,
+}
+
+impl ConnectionProfile {
+    /// Reads the file's page size and the library's compile options, applies the budgets
+    /// derived from them, and reads back what took effect. A library without the
+    /// `MAX_MMAP_SIZE` option is refused rather than silently left unmapped. `temp_store`
+    /// stays at its default: SQLite spills a sorter past `cache_size` only to a file-backed
+    /// temp store.
+    fn apply(conn: &storage::MaintenanceConn<'_>) -> rusqlite::Result<Self> {
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        if !(512..=65_536).contains(&page_size) || page_size.count_ones() != 1 {
+            return Err(rusqlite::Error::UserFunctionError(
+                format!("page_size {page_size} is not a power of two between 512 and 65536").into(),
+            ));
+        }
+        let mut options = conn.prepare("PRAGMA compile_options")?;
+        let compile_max_mmap_bytes = options
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .find_map(|option| {
+                option
+                    .strip_prefix("MAX_MMAP_SIZE=")
+                    .and_then(parse_compile_option_int)
+            })
+            .ok_or_else(|| {
+                rusqlite::Error::UserFunctionError(
+                    "compile option MAX_MMAP_SIZE is missing; the memory-map budget cannot be applied"
+                        .into(),
+                )
+            })?;
+        conn.pragma_update(None, "cache_size", PAGE_CACHE_BUDGET_BYTES / page_size)?;
+        conn.pragma_update(
+            None,
+            "mmap_size",
+            MMAP_BUDGET_BYTES.min(compile_max_mmap_bytes),
+        )?;
+        Ok(Self {
+            page_size,
+            cache_pages: conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
+            mmap_bytes: conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
+            compile_max_mmap_bytes,
+        })
+    }
+}
+
+/// Compile options print integers as decimal or as `0x`-prefixed hexadecimal.
+fn parse_compile_option_int(text: &str) -> Option<i64> {
+    match text.strip_prefix("0x") {
+        Some(hex) => i64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
 /// Sentinel row_version meaning "no row present" (COALESCE default inside the txn).
 const NO_ROW: i64 = -1;
 const MAX_DURABLE_TEXT_BYTES: usize = 512 * 1024;
@@ -1955,6 +2040,9 @@ struct PreparedWrite {
     scans: Vec<PreparedFieldScan>,
     domain_owners: Vec<PreparedDomainOwner>,
     existing_scan_links: BTreeSet<PreparedExistingScanLink>,
+    /// Set by a write whose audit rows may be omitted when every scan preserved an existing
+    /// identity and found nothing; every other write records its clean scans.
+    skip_audit_when_only_clean_identities: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2000,7 +2088,16 @@ impl PreparedWrite {
             scans: Vec::new(),
             domain_owners: Vec::new(),
             existing_scan_links: BTreeSet::new(),
+            skip_audit_when_only_clean_identities: false,
         }
+    }
+
+    /// Lets this write omit its audit rows when every scan preserved an existing identity
+    /// and found nothing. Such a scan substitutes no byte, refuses nothing, and carries no
+    /// detection; its rows would state only that the identity was read again. A write that
+    /// wants the receipt anyway, as the authority and lineage writes do, leaves this unset.
+    fn skip_audit_when_only_clean_identities(&mut self) {
+        self.skip_audit_when_only_clean_identities = true;
     }
 
     fn domain_owner(
@@ -2042,6 +2139,44 @@ impl PreparedWrite {
                 scan.owners.push(owner.clone());
             }
         }
+    }
+
+    /// Leaves `domain_owners` unchanged, so scans prepared later keep the default owners;
+    /// `persisted_owners` includes each owner a scan names.
+    fn reassign_scans_in(
+        &mut self,
+        range: std::ops::Range<usize>,
+        scope_kind: &'static str,
+        scope_key: impl Into<String>,
+        owner_key: impl Into<String>,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+        let owner = PreparedDomainOwner {
+            scope_kind,
+            scope_key: scope_key.into(),
+            owner_key: owner_key.into(),
+        };
+        for scan in &mut self.scans[range] {
+            scan.owners = vec![owner.clone()];
+        }
+    }
+
+    /// Default owners first, then distinct owners named by scans or existing-scan links.
+    fn persisted_owners(&self) -> Vec<PreparedDomainOwner> {
+        let mut owners = self.domain_owners.clone();
+        let named = self
+            .scans
+            .iter()
+            .flat_map(|scan| scan.owners.iter())
+            .chain(self.existing_scan_links.iter().map(|link| &link.owner));
+        for owner in named {
+            if !owners.contains(owner) {
+                owners.push(owner.clone());
+            }
+        }
+        owners
     }
 
     fn link_existing_scans(
@@ -2288,9 +2423,22 @@ impl ActiveWriteTransaction<'_> {
             .domain_owner(scope_kind, scope_key, owner_key);
     }
 
+    /// Writes the audit rows for the prepared scans. A write that opted in through
+    /// [`PreparedWrite::skip_audit_when_only_clean_identities`] records nothing when every
+    /// scan preserved an existing identity and found nothing; any substituting, rejecting,
+    /// or detecting scan keeps the whole write's rows.
     fn persist_audit(&self) -> rusqlite::Result<()> {
         let prepared = self.prepared.borrow();
         if prepared.scans.is_empty() {
+            return Ok(());
+        }
+        let preserve_only_and_clean = prepared.scans.iter().all(|scan| {
+            scan.detection_action == "preserve" && scan.redaction.detections.is_empty()
+        });
+        if prepared.skip_audit_when_only_clean_identities
+            && preserve_only_and_clean
+            && prepared.existing_scan_links.is_empty()
+        {
             return Ok(());
         }
         if prepared.domain_owners.is_empty() {
@@ -2298,7 +2446,8 @@ impl ActiveWriteTransaction<'_> {
                 MemoryStoreError::Serde("scan audit write has no domain owner".to_string()),
             )));
         }
-        let mut domain_owner_ids = Vec::with_capacity(prepared.domain_owners.len());
+        let owners = prepared.persisted_owners();
+        let mut domain_owner_ids = Vec::with_capacity(owners.len());
         {
             let mut insert_scope = self.tx.prepare_cached(
                 "INSERT OR IGNORE INTO scan_owner_scopes(
@@ -2318,11 +2467,11 @@ impl ActiveWriteTransaction<'_> {
                 "SELECT domain_owner_id FROM scan_domain_owners
                   WHERE owner_scope_id = ?1 AND owner_kind = ?2 AND owner_key = ?3",
             )?;
-            for owner in &prepared.domain_owners {
+            for owner in &owners {
                 let private_scope_key = active_scan_private_key(owner.scope_kind, &owner.scope_key);
                 let private_owner_key =
                     active_scan_private_key(prepared.owner_kind, &owner.owner_key);
-                let proposed_scope_id = opaque_sqlite_id(self.tx)?;
+                let proposed_scope_id = opaque_id()?;
                 insert_scope.execute(params![
                     proposed_scope_id,
                     owner.scope_kind,
@@ -2332,7 +2481,7 @@ impl ActiveWriteTransaction<'_> {
                     .query_row(params![owner.scope_kind, private_scope_key], |row| {
                         row.get(0)
                     })?;
-                let proposed_owner_id = opaque_sqlite_id(self.tx)?;
+                let proposed_owner_id = opaque_id()?;
                 insert_owner.execute(params![
                     proposed_owner_id,
                     owner_scope_id,
@@ -2346,7 +2495,7 @@ impl ActiveWriteTransaction<'_> {
                 domain_owner_ids.push((owner.clone(), domain_owner_id));
             }
         }
-        let batch_id = opaque_sqlite_id(self.tx)?;
+        let batch_id = opaque_id()?;
         self.tx
             .prepare_cached(
                 "INSERT INTO scan_batches(scan_batch_id,owner_kind,created_at_ms)
@@ -2381,7 +2530,7 @@ impl ActiveWriteTransaction<'_> {
                     )),
                 )));
             }
-            let scan_id = opaque_sqlite_id(self.tx)?;
+            let scan_id = opaque_id()?;
             insert_scan.execute(params![
                 scan_id,
                 batch_id,
@@ -2400,7 +2549,7 @@ impl ActiveWriteTransaction<'_> {
                         )))
                     })?;
                 insert_copy.execute(params![
-                    opaque_sqlite_id(self.tx)?,
+                    opaque_id()?,
                     scan_id,
                     domain_owner_id,
                     prepared.owner_kind,
@@ -2467,9 +2616,18 @@ fn persisted_detection_labels(detections: &[Detection]) -> Vec<&str> {
 
 const MAX_PERSISTED_DETECTION_LABELS: usize = 64;
 
-fn opaque_sqlite_id(tx: &GuardedConn<'_>) -> rusqlite::Result<String> {
-    tx.prepare_cached("SELECT lower(hex(randomblob(16)))")?
-        .query_row([], |row| row.get(0))
+/// Thirty-two lowercase hex characters from sixteen random bytes, the shape every audit
+/// identifier column checks. Generated in Rust so an audit write spends no statement on an
+/// identifier; the per-row link copy below keeps SQLite's `randomblob` because it needs one
+/// value per selected row.
+fn opaque_id() -> rusqlite::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(format!(
+            "random source unavailable for an audit identifier: {error}"
+        ))))
+    })?;
+    Ok(hex_digest(bytes))
 }
 
 /// Deletes the audit rows that lost their last owner, restricted to `scan_ids`.
@@ -2482,42 +2640,51 @@ fn prune_retired_active_scan_audit(
     retired_scans: &[(String, String)],
     owner_scope_id: &str,
 ) -> rusqlite::Result<()> {
-    for (scan_id, _) in retired_scans {
-        tx.execute(
+    if !retired_scans.is_empty() {
+        let scan_ids = json_id_array(retired_scans.iter().map(|(scan_id, _)| scan_id.as_str()))?;
+        tx.prepare_cached(
             "DELETE FROM field_scans
-              WHERE scan_id = ?1
+              WHERE scan_id IN (SELECT value FROM json_each(?1))
                 AND NOT EXISTS (
                     SELECT 1 FROM scan_owner_copies
                      WHERE scan_owner_copies.scan_id = field_scans.scan_id
                 )",
-            params![scan_id],
+        )?
+        .execute(params![scan_ids])?;
+        let batch_ids = json_id_array(
+            retired_scans
+                .iter()
+                .map(|(_, batch_id)| batch_id.as_str())
+                .collect::<BTreeSet<_>>(),
         )?;
-    }
-    let mut pruned_batches = BTreeSet::new();
-    for (_, batch_id) in retired_scans {
-        if !pruned_batches.insert(batch_id) {
-            continue;
-        }
-        tx.execute(
+        tx.prepare_cached(
             "DELETE FROM scan_batches
-              WHERE scan_batch_id = ?1
+              WHERE scan_batch_id IN (SELECT value FROM json_each(?1))
                 AND NOT EXISTS (
                     SELECT 1 FROM field_scans
                      WHERE field_scans.scan_batch_id = scan_batches.scan_batch_id
                 )",
-            params![batch_id],
-        )?;
+        )?
+        .execute(params![batch_ids])?;
     }
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM scan_owner_scopes
           WHERE owner_scope_id = ?1
             AND NOT EXISTS (
                 SELECT 1 FROM scan_domain_owners
                  WHERE scan_domain_owners.owner_scope_id = scan_owner_scopes.owner_scope_id
             )",
-        params![owner_scope_id],
-    )?;
+    )?
+    .execute(params![owner_scope_id])?;
     Ok(())
+}
+
+fn json_id_array<'a>(ids: impl IntoIterator<Item = &'a str>) -> rusqlite::Result<String> {
+    serde_json::to_string(&ids.into_iter().collect::<Vec<_>>()).map_err(|error| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(
+            error.to_string(),
+        )))
+    })
 }
 
 /// Retires the domain owners in one scope, optionally narrowed to an owner kind and key,
@@ -2531,12 +2698,11 @@ fn retire_active_scan_domain_owners(
 ) -> rusqlite::Result<()> {
     let private_scope_key = active_scan_private_key(scope_kind, scope_key);
     let owner_scope_id: Option<String> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT owner_scope_id FROM scan_owner_scopes
               WHERE scope_kind = ?1 AND scope_key = ?2",
-            params![scope_kind, private_scope_key],
-            |row| row.get(0),
-        )
+        )?
+        .query_row(params![scope_kind, private_scope_key], |row| row.get(0))
         .optional()?;
     let Some(owner_scope_id) = owner_scope_id else {
         return Ok(());
@@ -2563,13 +2729,13 @@ fn retire_active_scan_domain_owners(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM scan_domain_owners
           WHERE owner_scope_id = ?1
             AND (?2 IS NULL OR owner_kind = ?2)
             AND (?3 IS NULL OR owner_key = ?3)",
-        params![owner_scope_id, owner_kind, private_owner_key],
-    )?;
+    )?
+    .execute(params![owner_scope_id, owner_kind, private_owner_key])?;
     prune_retired_active_scan_audit(tx, &retired_scans, &owner_scope_id)
 }
 
@@ -2600,6 +2766,120 @@ fn retire_active_scan_scope(
     retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
 }
 
+/// Keeps the newest `keep` history-owner receipts for `field_ids` in the session's scope
+/// and prunes the scans that lost their last owner. Both write families that append to the
+/// rings register the history key, so their owners are read together. Rowid order is
+/// insertion order among the surviving rows because SQLite assigns each new rowid above
+/// every existing one.
+fn evict_history_receipts_beyond(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    field_ids: &[&str],
+    keep: usize,
+) -> rusqlite::Result<()> {
+    let owner_keys = json_id_array(
+        [
+            DurableWriteFamily::CacheState.owner_kind(),
+            DurableWriteFamily::TransformDiagnostics.owner_kind(),
+        ]
+        .iter()
+        .map(|kind| active_scan_private_key(kind, CACHE_STATE_HISTORY_OWNER_KEY))
+        .collect::<Vec<_>>()
+        .iter()
+        .map(String::as_str),
+    )?;
+    let owners: Vec<(String, String)> = tx
+        .prepare_cached(
+            "SELECT owners.owner_scope_id, owners.domain_owner_id
+               FROM scan_domain_owners owners
+               JOIN scan_owner_scopes scopes USING(owner_scope_id)
+              WHERE scopes.scope_kind = 'session' AND scopes.scope_key = ?1
+                AND owners.owner_key IN (SELECT value FROM json_each(?2))",
+        )?
+        .query_map(
+            params![active_scan_private_key("session", session_id), owner_keys],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some((owner_scope_id, _)) = owners.first().cloned() else {
+        return Ok(());
+    };
+    let evicted = tx
+        .prepare_cached(
+            "SELECT copies.owner_copy_id, copies.scan_id, scans.scan_batch_id
+               FROM scan_owner_copies copies
+               JOIN field_scans scans USING(scan_id)
+              WHERE copies.domain_owner_id IN (SELECT value FROM json_each(?1))
+                AND copies.field_id IN (SELECT value FROM json_each(?2))
+              ORDER BY copies.rowid DESC LIMIT -1 OFFSET ?3",
+        )?
+        .query_map(
+            params![
+                json_id_array(owners.iter().map(|(_, id)| id.as_str()))?,
+                json_id_array(field_ids.iter().copied())?,
+                i64::try_from(keep).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if evicted.is_empty() {
+        return Ok(());
+    }
+    tx.prepare_cached(
+        "DELETE FROM scan_owner_copies
+          WHERE owner_copy_id IN (SELECT value FROM json_each(?1))",
+    )?
+    .execute(params![json_id_array(
+        evicted.iter().map(|(copy_id, _, _)| copy_id.as_str())
+    )?])?;
+    let retired = evicted
+        .into_iter()
+        .map(|(_, scan_id, batch_id)| (scan_id, batch_id))
+        .collect::<Vec<_>>();
+    prune_retired_active_scan_audit(tx, &retired, &owner_scope_id)
+}
+
+/// Markers kept per store; the oldest is dropped past this many.
+#[cfg(any(test, feature = "test-support"))]
+const DUE_SIDE_CHANNEL_MARKER_CAP: usize = 64;
+
+/// A drain that found due outbox rows for one kind before delivering them.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueSideChannelMarker {
+    pub kind: String,
+    pub pending_rows: usize,
+    pub now_ms: i64,
+}
+
+/// Owner of the scans the latest accepted pass recorded for the fields it replaces in
+/// `cache_state` and `pass_trace`. One key rather than one per row version: other writers
+/// bump `row_version` without passing through `commit_transform`, and a key they never
+/// register could not be retired by the next pass, so the next pass retires this owner
+/// whatever wrote the row it replaces.
+const CACHE_STATE_PASS_OWNER_KEY: &str = "cache_state_pass";
+
+/// Distinct from the `cache_state` key so legacy rows stay separable from live ones.
+const CACHE_STATE_RETAINED_OWNER_KEY: &str = "cache_state_retained";
+
+/// Owner of the receipts the eviction below scans on every commit: the two history rings,
+/// the fingerprint, and the divergence. Cumulative overlay and root receipts stay under
+/// [`CACHE_STATE_RETAINED_OWNER_KEY`], so the scan is bounded by the rings, not by the
+/// session's accumulated overlays; the owner index covers `domain_owner_id` only.
+const CACHE_STATE_HISTORY_OWNER_KEY: &str = "cache_state_history";
+
+/// Mirrors the `256` and `255` literals in the `commit_transform` UPSERT.
+const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
+
+/// The receipt field ids of the two writers that append to `scheduler_history`.
+const OBSERVATION_RING_FIELDS: &[&str] = &["scheduler_observation", "scheduler_history"];
+
 fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
     for part in parts {
@@ -2618,9 +2898,9 @@ fn active_scan_private_key(kind: &str, value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn hex_digest(bytes: [u8; 32]) -> String {
+fn hex_digest<const N: usize>(bytes: [u8; N]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(64);
+    let mut output = String::with_capacity(N * 2);
     for byte in bytes {
         output.push(char::from(HEX[usize::from(byte >> 4)]));
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
@@ -3104,6 +3384,13 @@ fn prepare_json_content_with(
     prepare_json_content_collecting(input, policy, &mut Vec::new())
 }
 
+/// The prepared text and whether preparation changed a value. When nothing changed the text
+/// is the input, byte for byte; when something changed it is the re-serialized tree.
+struct PreparedJson {
+    text: String,
+    changed: bool,
+}
+
 /// Appends every detection the preparation observed to `detections`, so an audit receipt can
 /// be recorded without scanning the same text a second time.
 fn prepare_json_content_collecting(
@@ -3111,6 +3398,22 @@ fn prepare_json_content_collecting(
     policy: JsonScanPolicy,
     detections: &mut Vec<Detection>,
 ) -> Result<String, MemoryStoreError> {
+    let recorded_before = detections.len();
+    let prepared = prepare_json_content_single_pass(input, policy, detections)?;
+    // A changed value always leaves a detection behind for the audit receipt.
+    debug_assert!(!prepared.changed || detections.len() > recorded_before);
+    Ok(prepared.text)
+}
+
+/// One walk over the parsed tree validates every object key, refuses or substitutes protected
+/// values, records detections, and reports whether any value changed. The unique-name parse
+/// stays ahead of the walk: `serde_json::Value` keeps only the last duplicate, so a walk over
+/// the tree alone would let an earlier duplicate's bytes persist unscanned in clean input.
+fn prepare_json_content_single_pass(
+    input: &str,
+    policy: JsonScanPolicy,
+    detections: &mut Vec<Detection>,
+) -> Result<PreparedJson, MemoryStoreError> {
     ensure_durable_text_bound(input)?;
     fn identity_json_field(key: &str) -> bool {
         matches!(key, "id" | "key" | "locator" | "revision")
@@ -3154,6 +3457,8 @@ fn prepare_json_content_collecting(
         }
     }
 
+    /// Keys of a subtree the walk does not descend into: identity and integrity values are
+    /// judged whole, so their nested object keys are validated here.
     fn validate_json_keys(value: &Value) -> Result<(), MemoryStoreError> {
         match value {
             Value::Array(values) => values.iter().try_for_each(validate_json_keys),
@@ -3183,6 +3488,7 @@ fn prepare_json_content_collecting(
         key: Option<&str>,
         policy: JsonScanPolicy,
         detections: &mut Vec<Detection>,
+        changed: &mut bool,
     ) -> Result<(), MemoryStoreError> {
         if let Some(key) = key.filter(|key| identity_json_field(key) || integrity_json_field(key)) {
             // `api_key` passes `identity_json_field` and matches no `integrity_json_field`
@@ -3202,23 +3508,24 @@ fn prepare_json_content_collecting(
                 if !value.is_object() && !value.is_array() {
                     return validate_existing_value(value);
                 }
-            } else if contains_nonempty_text(value) {
-                let encoded = canonical_json_encode(value)
-                    .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                let redaction = if policy.transaction() {
-                    redact_transaction_durable_text(&encoded)
-                } else {
-                    redact_durable_text(&encoded)
-                };
-                if !redaction.detections.is_empty() || protected_json_key_label(key).is_some() {
-                    return Err(MemoryStoreError::Redaction(
-                        RedactionErrorKind::SecretDetected,
-                    ));
-                }
-                detections.extend(redaction.detections);
-                return Ok(());
             } else {
-                return Ok(());
+                if contains_nonempty_text(value) {
+                    let encoded = canonical_json_encode(value)
+                        .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+                    let redaction = if policy.transaction() {
+                        redact_transaction_durable_text(&encoded)
+                    } else {
+                        redact_durable_text(&encoded)
+                    };
+                    if !redaction.detections.is_empty() || protected_json_key_label(key).is_some() {
+                        return Err(MemoryStoreError::Redaction(
+                            RedactionErrorKind::SecretDetected,
+                        ));
+                    }
+                }
+                // The value is judged whole and not descended, so its nested keys are
+                // validated here.
+                return validate_json_keys(value);
             }
         }
         // Protected-key containers with nested text can expose it under unprotected member keys.
@@ -3240,7 +3547,7 @@ fn prepare_json_content_collecting(
                 };
                 let scanner_found = !redaction.detections.is_empty();
                 detections.extend(redaction.detections);
-                *text = match key.and_then(protected_json_key_label) {
+                let prepared = match key.and_then(protected_json_key_label) {
                     Some(label) if !text.is_empty() => {
                         if !scanner_found {
                             // Protected-key redaction can change a value the value-only
@@ -3257,17 +3564,21 @@ fn prepare_json_content_collecting(
                     }
                     _ => redaction.text,
                 };
+                if prepared != *text {
+                    *text = prepared;
+                    *changed = true;
+                }
             }
             Value::Array(values) => {
                 for value in values {
-                    prepare_value(value, key, policy, detections)?;
+                    prepare_value(value, key, policy, detections, changed)?;
                 }
             }
             Value::Object(fields) => {
                 for (field, value) in fields {
                     ensure_durable_text_bound(field)?;
                     reject_secret_text(field)?;
-                    prepare_value(value, Some(field), policy, detections)?;
+                    prepare_value(value, Some(field), policy, detections, changed)?;
                 }
             }
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -3276,14 +3587,20 @@ fn prepare_json_content_collecting(
     }
 
     let mut value: Value = parse_json_with_unique_names(input)?;
-    validate_json_keys(&value)?;
+    #[cfg(debug_assertions)]
     let original = value.clone();
-    prepare_value(&mut value, None, policy, detections)?;
-    if value == original {
-        Ok(input.to_string())
+    let mut changed = false;
+    prepare_value(&mut value, None, policy, detections, &mut changed)?;
+    // The flag must agree with the structural compare it replaces; a mutation site that
+    // forgets to set it would discard its redaction while its detection stays recorded.
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(changed, value != original);
+    let text = if changed {
+        serde_json::to_string(&value).map_err(|error| MemoryStoreError::Serde(error.to_string()))?
     } else {
-        serde_json::to_string(&value).map_err(|error| MemoryStoreError::Serde(error.to_string()))
-    }
+        input.to_string()
+    };
+    Ok(PreparedJson { text, changed })
 }
 
 /// `serde_json::Value` retains only the last duplicate object name, allowing earlier
@@ -4539,6 +4856,13 @@ struct HistorianSideChannelOutboxId {
     item_index: usize,
 }
 
+/// A due outbox row's payload, parsed before its delivery transaction begins.
+enum SideChannelCandidate {
+    Event(HistorianEventCandidate),
+    Primer(HistorianPrimerCandidate),
+    UserObservation(HistorianUserMemoryCandidate),
+}
+
 enum AbandonHistorianTxnOutcome {
     Unchanged,
     Committed(u64),
@@ -4580,6 +4904,34 @@ const CACHE_STATE_META_SELECT: &str =
     "SELECT row_version, meta FROM cache_state WHERE session_id = ?1";
 const CACHE_STATE_FULL_SELECT: &str =
     "SELECT row_version, core_state, meta FROM cache_state WHERE session_id = ?1";
+
+/// Which `cache_state` row projection a statement-probe counter names.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheStateSelect {
+    Meta,
+    Full,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl CacheStateSelect {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Meta => CACHE_STATE_META_SELECT,
+            Self::Full => CACHE_STATE_FULL_SELECT,
+        }
+    }
+}
+/// One `meta` field by SQL JSON extraction. `json_valid(meta, 1)` is the strict RFC 8259
+/// check: SQLite's parser accepts JSON5 that serde refuses, so a lenient parse must not
+/// stand in for the full load's failure. `json_type(meta)` is the top-level type: strict JSON
+/// that is not an object (`null`, a number, an array) deserializes to no `ModuleMeta`, and
+/// every path into it reads as absent, so it is refused before any field default applies.
+/// `json_type(meta, path)` distinguishes an absent path (SQL NULL, the serde default) from a
+/// JSON `null` (the type text `null`); `->>` yields the unquoted SQL value. Text that is not
+/// JSON at all fails the statement.
+const CACHE_STATE_META_SCALAR_SELECT: &str = "SELECT json_valid(meta, 1), json_type(meta), \
+     json_type(meta, ?2), meta ->> ?2 FROM cache_state WHERE session_id = ?1";
 
 /// Column list every `stored_compartment_from_row` reader selects, in the
 /// positional order that mapper reads. All compartment SELECTs interpolate
@@ -5010,6 +5362,7 @@ impl<'a> FacadeMutationTxn<'a> {
 
 pub struct MemoryStore {
     inner: SqliteStore,
+    connection_profile: ConnectionProfile,
     // Distinguishes independent stores in the process-local tag baseline cache. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
@@ -5031,6 +5384,19 @@ pub struct MemoryStore {
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
+    /// Kinds whose next delivery fails after the target insert and before the outbox
+    /// retirement, inside the delivery transaction, so the rollback of both is observable.
+    #[cfg(any(test, feature = "test-support"))]
+    historian_side_channel_crash_after_insert_once: Mutex<BTreeSet<String>>,
+    /// One entry per drain that found due rows for a kind: the kind, the pending rows read,
+    /// and the drain's `now_ms`, recorded before delivery runs.
+    #[cfg(any(test, feature = "test-support"))]
+    due_side_channel_markers: Mutex<Vec<DueSideChannelMarker>>,
+    /// Makes the next `trace_pass_received` fail inside its transaction, before the
+    /// UPSERT, so a caller's independence from the breadcrumb can be shown on a healthy
+    /// store.
+    #[cfg(any(test, feature = "test-support"))]
+    pass_trace_receive_fail_once: std::sync::atomic::AtomicBool,
     /// Makes the next `authority_project_for_route` fail as a backend error,
     /// so a caller's store-failure branch can be exercised on a healthy store.
     #[cfg(any(test, feature = "test-support"))]
@@ -5296,6 +5662,45 @@ impl MemoryStore {
         self.tag_cache_namespace
     }
 
+    /// What the connection-open path measured and set on this store's connection.
+    pub fn connection_profile(&self) -> &ConnectionProfile {
+        &self.connection_profile
+    }
+
+    /// Starts recording statement-cache reuse on the store's connection.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_statement_reuse_probe(&self) {
+        self.inner.start_statement_reuse_probe();
+    }
+
+    /// Per SQL text prepared through the statement cache since the probe started, how many
+    /// times the cache handed out a re-created handle after that text had already run.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn statement_evictions(&self) -> std::collections::BTreeMap<String, u32> {
+        self.inner.statement_evictions()
+    }
+
+    /// How many times the connection has run `select` through the statement cache.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cache_state_load_runs(&self, select: CacheStateSelect) -> i32 {
+        self.inner
+            .statement_runs()
+            .get(select.sql().trim())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many times the statement cache re-created the `select` handle after it had run;
+    /// zero means [`Self::cache_state_load_runs`] counted one handle.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cache_state_load_evictions(&self, select: CacheStateSelect) -> u32 {
+        self.inner
+            .statement_evictions()
+            .get(select.sql().trim())
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, MemoryStoreError> {
         let inner = open_sqlite(descriptor, BASELINE)?;
         let note_caller_project = Arc::new(Mutex::new(None::<NoteCallerScope>));
@@ -5306,7 +5711,7 @@ impl MemoryStore {
         // The baseline's triggers call these functions; SQLite resolves them when a
         // trigger fires, so registering after the baseline is applied is sound, and the
         // same connection must expose them before the first guarded write is possible.
-        inner.with_conn_unfenced(move |conn| {
+        let connection_profile = inner.with_conn_unfenced(move |conn| {
             conn.create_scalar_function(
                 "note_caller_project",
                 0,
@@ -5412,10 +5817,12 @@ impl MemoryStore {
                         .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
                 },
             )?;
-            Ok(())
+            conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+            ConnectionProfile::apply(conn)
         })?;
         let store = MemoryStore {
             inner,
+            connection_profile,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             note_caller_project,
             facade_authority_scope,
@@ -5430,6 +5837,12 @@ impl MemoryStore {
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            historian_side_channel_crash_after_insert_once: Mutex::new(BTreeSet::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            due_side_channel_markers: Mutex::new(Vec::new()),
+            #[cfg(any(test, feature = "test-support"))]
+            pass_trace_receive_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             authority_route_read_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
@@ -5908,6 +6321,37 @@ impl MemoryStore {
             .insert(kind.to_string());
     }
 
+    /// Makes the next `trace_pass_received` fail inside its transaction, before its UPSERT.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_pass_trace_receive_for_test(&self) {
+        self.pass_trace_receive_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every drain that found due outbox rows for a kind, in order: the marker the C6
+    /// record names, recorded from the outbox read before delivery ran.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn due_side_channel_markers(&self) -> Vec<DueSideChannelMarker> {
+        self.due_side_channel_markers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Makes the next delivery of `kind` fail between its target insert and its outbox
+    /// retirement, inside the delivery transaction.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn crash_next_historian_side_channel_after_insert_for_test(&self, kind: &str) {
+        assert!(
+            HISTORIAN_SIDE_CHANNEL_KINDS.contains(&kind),
+            "unknown historian side-channel kind: {kind}"
+        );
+        self.historian_side_channel_crash_after_insert_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(kind.to_string());
+    }
+
     /// The next `authority_project_for_route` returns a backend error instead
     /// of reading the ledger; every call after it reads normally.
     #[cfg(any(test, feature = "test-support"))]
@@ -6222,6 +6666,126 @@ impl MemoryStore {
         }
     }
 
+    /// Returns default metadata for an absent row; invalid `meta` JSON returns
+    /// [`MemoryStoreError::Serde`]. `core_state` is neither read nor validated, so a row
+    /// whose core is corrupt still answers here where [`Self::load`] fails.
+    pub fn load_meta(&self, session_id: &str) -> Result<ModuleMeta, MemoryStoreError> {
+        let meta_json = self.inner.with_conn(|conn| {
+            conn.prepare_cached(CACHE_STATE_META_SELECT)?
+                .query_row(params![session_id], |r| r.get::<_, String>(1))
+                .optional()
+        })?;
+        match meta_json {
+            None => Ok(ModuleMeta::default()),
+            Some(meta_json) => {
+                serde_json::from_str(&meta_json).map_err(|e| MemoryStoreError::Serde(e.to_string()))
+            }
+        }
+    }
+
+    /// One `meta` field read by SQL JSON extraction, decoded by `decode` from the JSON type
+    /// text and the unquoted SQL value. An absent row or an absent path passes `None`, so
+    /// `decode` applies the serde default; a JSON `null` passes `Some(("null", Null))`.
+    /// `meta` that is not a strict JSON object is refused before `decode` runs, as the full load
+    /// refuses it.
+    ///
+    /// A scalar read is per field where the full load is per row: a row whose other fields
+    /// the full load refuses, or whose `core_state` is corrupt, still answers here. Every
+    /// caller either follows a full load of the same row in the same request or is about
+    /// to fail on that row itself.
+    fn load_meta_scalar<T>(
+        &self,
+        session_id: &str,
+        path: &str,
+        decode: impl FnOnce(Option<(String, rusqlite::types::Value)>) -> Result<T, MemoryStoreError>,
+    ) -> Result<T, MemoryStoreError> {
+        let row = self.inner.with_conn(|conn| {
+            conn.prepare_cached(CACHE_STATE_META_SCALAR_SELECT)?
+                .query_row(params![session_id, path], |row| {
+                    let strict: bool = row.get(0)?;
+                    let top: Option<String> = row.get(1)?;
+                    let field = match row.get::<_, Option<String>>(2)? {
+                        Some(kind) => Some((kind, row.get::<_, rusqlite::types::Value>(3)?)),
+                        None => None,
+                    };
+                    Ok((strict, top, field))
+                })
+                .optional()
+        })?;
+        match row {
+            None => decode(None),
+            Some((false, _, _)) => Err(MemoryStoreError::Serde(
+                "meta is not strict JSON; the full load refuses this row".to_string(),
+            )),
+            Some((true, top, _)) if top.as_deref() != Some("object") => {
+                Err(MemoryStoreError::Serde(format!(
+                    "meta is a JSON {}, not an object; the full load refuses this row",
+                    top.unwrap_or_default()
+                )))
+            }
+            Some((true, _, field)) => decode(field),
+        }
+    }
+
+    /// `meta.revert_epoch` without deserializing the row: absent is `0`, the serde default;
+    /// a JSON `null`, a boolean, a float, a string, or a negative integer is refused as serde
+    /// refuses it. SQLite hands an integer above `i64::MAX` back as a float, so such an
+    /// epoch is refused here where serde would accept it; an epoch is a small counter.
+    pub fn load_revert_epoch(&self, session_id: &str) -> Result<u64, MemoryStoreError> {
+        self.load_meta_scalar(session_id, "$.revert_epoch", |field| match field {
+            None => Ok(ModuleMeta::default().revert_epoch),
+            Some((kind, rusqlite::types::Value::Integer(epoch)))
+                if kind == "integer" && epoch >= 0 =>
+            {
+                Ok(epoch as u64)
+            }
+            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                "revert_epoch is a JSON {kind}, expected an unsigned integer that fits i64"
+            ))),
+        })
+    }
+
+    /// `meta.historian.state` without deserializing the row: absent is `Idle`, the serde
+    /// default; an unknown variant or a non-string is refused as serde refuses it. A
+    /// `historian` that is not an object also reads as absent here, because the path has
+    /// no object to descend, where the full load refuses the row.
+    pub fn load_historian_phase(
+        &self,
+        session_id: &str,
+    ) -> Result<HistorianPhase, MemoryStoreError> {
+        self.load_meta_scalar(session_id, "$.historian.state", |field| match field {
+            None => Ok(HistorianPhase::default()),
+            Some((kind, rusqlite::types::Value::Text(state))) if kind == "text" => {
+                serde_json::from_value(serde_json::Value::String(state))
+                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))
+            }
+            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                "historian.state is a JSON {kind}, expected a string"
+            ))),
+        })
+    }
+
+    /// `meta.publication_floor_ordinal` without deserializing the row: absent and JSON
+    /// `null` are both `None`, as serde decodes an optional field; any other non-integer
+    /// is refused, and an integer above `i64::MAX` is refused as in
+    /// [`Self::load_revert_epoch`].
+    pub fn load_publication_floor_ordinal(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<u64>, MemoryStoreError> {
+        self.load_meta_scalar(session_id, "$.publication_floor_ordinal", |field| match field {
+            None | Some((_, rusqlite::types::Value::Null)) => Ok(None),
+            Some((kind, rusqlite::types::Value::Integer(floor)))
+                if kind == "integer" && floor >= 0 =>
+            {
+                Ok(Some(floor as u64))
+            }
+            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                "publication_floor_ordinal is a JSON {kind}, expected an unsigned integer or null"
+            ))),
+        })
+    }
+
     /// Load cache state and non-tag render overlays from one SQLite read transaction.
     /// No-write passes use this snapshot as their read linearization point; tag payloads use the
     /// separately validated module baseline so a stable pass does not stream every source blob.
@@ -6490,12 +7054,22 @@ impl MemoryStore {
         let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
         write.domain_owner("session", session_id, "pass_trace");
         write.existing_identity("session_id", session_id)?;
+        // Existing clean `session_id` values skip the audit.
+        write.skip_audit_when_only_clean_identities();
         let flagged = write.recorded_detections(&["session_id"]);
+        #[cfg(any(test, feature = "test-support"))]
+        let fail_upsert = self
+            .pass_trace_receive_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
-            // A clean identity skips this query, so the ordinary pass pays one UPSERT.
-            // A detected one is only tolerable when the session is already keyed by it;
-            // a trace breadcrumb must not be what introduces a secret-bearing session.
+            #[cfg(any(test, feature = "test-support"))]
+            if fail_upsert {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    MemoryStoreError::Serde("injected pass-trace receive failure".to_string()),
+                )));
+            }
+            // Reject a detected `session_id` unless `cache_state` already contains it.
             if flagged {
                 let known: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM cache_state WHERE session_id = ?1)",
@@ -6510,6 +7084,19 @@ impl MemoryStore {
                         .map_err(|error| {
                             rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                         })?;
+                }
+            } else {
+                let known: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pass_trace WHERE session_id = ?1)
+                         OR EXISTS(SELECT 1 FROM cache_state WHERE session_id = ?1)",
+                    params![session_id],
+                    |row| row.get(0),
+                )?;
+                if !known {
+                    coordinated
+                        .prepared
+                        .borrow_mut()
+                        .skip_audit_when_only_clean_identities = false;
                 }
             }
             tx.prepare_cached(
@@ -6550,6 +7137,15 @@ impl MemoryStore {
         write.domain_owner("session", session_id, "pass_trace");
         write.existing_identity("session_id", session_id)?;
         let observation_json = write.content("scheduler_history", &observation_json)?;
+        // The observation joins the ring `commit_transform` also appends to, so its receipt
+        // shares that ring's owner and eviction.
+        let ring_scan = write.scans.len() - 1;
+        write.reassign_scans_in(
+            ring_scan..ring_scan + 1,
+            "session",
+            session_id,
+            CACHE_STATE_HISTORY_OWNER_KEY,
+        );
         let flagged = write.recorded_detections(&["session_id"]);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
@@ -6625,6 +7221,12 @@ impl MemoryStore {
                     observation_json,
                     interesting_json
                 ],
+            )?;
+            evict_history_receipts_beyond(
+                tx,
+                session_id,
+                OBSERVATION_RING_FIELDS,
+                PASS_TRACE_HISTORY_RING_LEN - 1,
             )?;
             Ok(WriteDisposition::Applied(()))
         })?;
@@ -8176,7 +8778,17 @@ impl MemoryStore {
     ) -> Result<u64, MemoryStoreError> {
         ensure_durable_text_bound(session_id)?;
         let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
-        write.domain_owner("session", session_id, "cache_state");
+        // `row_version` uses SQLite's signed `i64` range; reject values whose successor
+        // would overflow or equal `NO_ROW`.
+        let next = request
+            .expected
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|next| i64::try_from(*next).is_ok())
+            .ok_or_else(|| {
+                MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
+            })?;
+        write.domain_owner("session", session_id, CACHE_STATE_PASS_OWNER_KEY);
         // Record the scan without deciding on it. Whether this `session_id` is a new
         // identity is settled by the row this transaction actually finds, because a
         // `delete_session` landing after an out-of-transaction existence read would leave a
@@ -8216,12 +8828,27 @@ impl MemoryStore {
         let canonical_project_root = project_root
             .filter(|root| !root.is_empty())
             .map(|root| canonical_root(root).to_string_lossy().into_owned());
-        if let Some(project_root) = canonical_project_root.as_deref() {
-            write.identity("project_root", project_root)?;
-        }
-        if let Some(fingerprint) = scheduler_full_array_fingerprint {
-            write.identity("scheduler_full_array_fingerprint", fingerprint)?;
-        }
+        // A root the session already stores keeps its earlier receipt, so this scan joins
+        // the retained owner only when the write inserts the root.
+        let root_scan = canonical_project_root
+            .as_deref()
+            .map(|project_root| {
+                write.identity("project_root", project_root)?;
+                Ok::<_, MemoryStoreError>(write.scans.len() - 1)
+            })
+            .transpose()?;
+        // The fingerprint is stored only inside a `scheduler_interesting` entry, so its scan
+        // joins the retained owner only when that entry is written.
+        let fingerprint_scan = scheduler_full_array_fingerprint
+            .map(|fingerprint| {
+                write.identity("scheduler_full_array_fingerprint", fingerprint)?;
+                Ok::<_, MemoryStoreError>(write.scans.len() - 1)
+            })
+            .transpose()?;
+        let retained_scans_start = write.scans.len();
+        // The divergence is the first scan past `retained_scans_start`; it moves to the
+        // history owner below because a later divergence replaces it.
+        let divergence_scan = first_divergence.map(|_| retained_scans_start);
         let first_divergence = first_divergence
             .map(|value| {
                 write.json_content(
@@ -8278,6 +8905,7 @@ impl MemoryStore {
                 })
             })
             .transpose()?;
+        let retained_scans = retained_scans_start..write.scans.len();
         let max_seen_ordinal = max_seen_ordinal
             .map(|ordinal| {
                 i64::try_from(ordinal).map_err(|_| {
@@ -8313,6 +8941,7 @@ impl MemoryStore {
             &meta_json,
             JsonScanPolicy::DurablePreserveIdentities,
         )?;
+        let history_scans_start = write.scans.len();
         let scheduler_observation_json = scheduler_observation
             .map(serialize_scheduler_observation)
             .transpose()?
@@ -8324,15 +8953,6 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
-        // `row_version` uses SQLite's signed `i64` range; reject values whose successor
-        // would overflow or equal `NO_ROW`.
-        let next = expected
-            .unwrap_or(0)
-            .checked_add(1)
-            .filter(|next| i64::try_from(*next).is_ok())
-            .ok_or_else(|| {
-                MemoryStoreError::Serde("expected row_version exceeds i64".to_string())
-            })?;
         let scheduler_interesting_json = scheduler_observation
             .filter(|_| {
                 scheduler_pass_is_interesting(
@@ -8360,6 +8980,21 @@ impl MemoryStore {
                 )
             })
             .transpose()?;
+        let history_scans = history_scans_start..write.scans.len();
+        // Stored only when the interesting entry is written and the fingerprint fits the
+        // diagnostic bound that `from_observation` applies; otherwise the scan is the live
+        // pass's alone.
+        let fingerprint_stored = scheduler_interesting_json.is_some()
+            && scheduler_full_array_fingerprint
+                .is_some_and(|fingerprint| fingerprint.len() <= MAX_FULL_ARRAY_FINGERPRINT_BYTES);
+        if let (true, Some(fingerprint_scan)) = (fingerprint_stored, fingerprint_scan) {
+            write.reassign_scans_in(
+                fingerprint_scan..fingerprint_scan + 1,
+                "session",
+                session_id,
+                CACHE_STATE_HISTORY_OWNER_KEY,
+            );
+        }
         // The accepted cache row version is a stable identity for the pass that produced the
         // divergence. Overlay timestamps are the request clock when available; direct callers
         // that omit one still receive a real commit timestamp.
@@ -8369,6 +9004,27 @@ impl MemoryStore {
         } else {
             current_time_ms()
         };
+        // These bytes stay stored after the next pass, so their scans outlive the pass owner.
+        write.reassign_scans_in(
+            retained_scans,
+            "session",
+            session_id,
+            CACHE_STATE_RETAINED_OWNER_KEY,
+        );
+        write.reassign_scans_in(
+            history_scans,
+            "session",
+            session_id,
+            CACHE_STATE_HISTORY_OWNER_KEY,
+        );
+        if let Some(divergence_scan) = divergence_scan {
+            write.reassign_scans_in(
+                divergence_scan..divergence_scan + 1,
+                "session",
+                session_id,
+                CACHE_STATE_HISTORY_OWNER_KEY,
+            );
+        }
 
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
@@ -8411,6 +9067,18 @@ impl MemoryStore {
                 }
             }
 
+            // Every check that can turn this transaction into a replay has passed. The pass
+            // that wrote the row this one replaces has settled, so its scans no longer
+            // describe stored bytes; this pass's scans are persisted after the writes.
+            if current != NO_ROW {
+                retire_active_scan_domain_owner(
+                    tx,
+                    "session",
+                    session_id,
+                    DurableWriteFamily::CacheState.owner_kind(),
+                    CACHE_STATE_PASS_OWNER_KEY,
+                )?;
+            }
             // INSERT-or-UPDATE in the same fenced txn (bootstrap has no row to UPDATE).
             tx.execute(
                 "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
@@ -8492,7 +9160,51 @@ impl MemoryStore {
                      scheduler_interesting_json
                  ],
             )?;
+            // The UPSERT above dropped the oldest ring entry once the ring was full and
+            // replaced `last_divergence`; the receipts for those bytes go with them, before
+            // this pass's receipts are persisted. Only `commit_transform` appends interesting
+            // entries, so fingerprint receipts and fingerprint-bearing entries share one
+            // order: the receipts kept are the entries still stored, less this pass's own,
+            // which is persisted after this block.
+            let mut evictions: Vec<(&[&str], usize)> = Vec::with_capacity(4);
+            if scheduler_observation_json.is_some() {
+                evictions.push((OBSERVATION_RING_FIELDS, PASS_TRACE_HISTORY_RING_LEN - 1));
+            }
+            if scheduler_interesting_json.is_some() {
+                evictions.push((&["scheduler_interesting"], PASS_TRACE_HISTORY_RING_LEN - 1));
+                let stored_fingerprints: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history)
+                      WHERE session_id = ?1
+                        AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
+                    params![session_id],
+                    |row| row.get(0),
+                )?;
+                let keep = usize::try_from(stored_fingerprints)
+                    .unwrap_or(0)
+                    .saturating_sub(usize::from(fingerprint_stored));
+                evictions.push((&["scheduler_full_array_fingerprint"], keep));
+            }
+            if first_divergence.is_some() {
+                evictions.push((&["first_divergence"], 0));
+            }
+            for (field_ids, keep) in evictions {
+                evict_history_receipts_beyond(tx, session_id, field_ids, keep)?;
+            }
             if let Some(project_root) = canonical_project_root.as_deref() {
+                let stored: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM transform_session_roots
+                                    WHERE session_id = ?1 AND project_root = ?2)",
+                    params![session_id, project_root],
+                    |row| row.get(0),
+                )?;
+                if let (false, Some(root_scan)) = (stored, root_scan) {
+                    coordinated.prepared.borrow_mut().reassign_scans_in(
+                        root_scan..root_scan + 1,
+                        "session",
+                        session_id,
+                        CACHE_STATE_RETAINED_OWNER_KEY,
+                    );
+                }
                 // Durable root lineage is committed with the cache CAS, so a restart cannot
                 // authenticate a root that never produced the accepted session state.
                 tx.execute(
@@ -10801,8 +11513,10 @@ impl MemoryStore {
     }
 
     /// Drain due historian side-channel work without coupling any target table to another.
-    /// A successful target write marks the outbox row delivered in the same transaction; the
-    /// acknowledgement row is deleted only after that commit, so restart replay is idempotent.
+    /// A successful target write retires the outbox row in the same fenced transaction,
+    /// guarded by the row still being pending, so a row is delivered exactly once whether a
+    /// second drainer runs beside this one or the process restarts between drains. Rows an
+    /// earlier build marked delivered without deleting are swept first when any exist.
     pub fn drain_historian_side_channels(
         &self,
         session_id: &str,
@@ -10823,15 +11537,28 @@ impl MemoryStore {
                 now_ms,
                 per_kind_limit.min(HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND),
             )?;
+            #[cfg(any(test, feature = "test-support"))]
+            if !rows.is_empty() {
+                let mut markers = self
+                    .due_side_channel_markers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if markers.len() == DUE_SIDE_CHANNEL_MARKER_CAP {
+                    markers.remove(0);
+                }
+                markers.push(DueSideChannelMarker {
+                    kind: kind.to_string(),
+                    pending_rows: rows.len(),
+                    now_ms,
+                });
+            }
             for row in rows {
                 result.attempted += 1;
-                match self.deliver_historian_side_channel(&row, now_ms) {
-                    Ok(()) => {
-                        result.succeeded += 1;
-                        if let Err(error) = self.delete_delivered_historian_side_channel(&row) {
-                            bookkeeping_error.get_or_insert(error);
-                        }
-                    }
+                match self.deliver_historian_side_channel(&row) {
+                    Ok(true) => result.succeeded += 1,
+                    // Another drainer retired the row after this one read it; nothing was
+                    // delivered here and nothing is due.
+                    Ok(false) => {}
                     Err(error) => {
                         result.failed += 1;
                         if let Err(record_error) =
@@ -10914,11 +11641,12 @@ impl MemoryStore {
         })?)
     }
 
+    /// Delivers one due row. `Ok(false)` means another drainer retired the row first, so
+    /// this transaction rolled back and delivered nothing.
     fn deliver_historian_side_channel(
         &self,
         row: &HistorianSideChannelOutboxRow,
-        now_ms: i64,
-    ) -> Result<(), MemoryStoreError> {
+    ) -> Result<bool, MemoryStoreError> {
         #[cfg(any(test, feature = "test-support"))]
         if self
             .historian_side_channel_fail_once
@@ -10932,44 +11660,67 @@ impl MemoryStore {
             )));
         }
 
-        match row.id.kind.as_str() {
-            "event" => {
-                let candidate: HistorianEventCandidate = serde_json::from_str(&row.payload_json)
-                    .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                self.inner.with_conn_fenced(|tx| {
-                    insert_historian_events_tx(
-                        tx,
-                        &row.session_id,
-                        std::slice::from_ref(&candidate),
-                    )?;
-                    mark_historian_side_channel_delivered_tx(tx, row, now_ms)
-                })?;
-            }
-            "primer" => {
-                let candidate: HistorianPrimerCandidate =
-                    serde_json::from_str(&row.payload_json)
-                        .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                self.inner.with_conn_fenced(|tx| {
-                    insert_historian_primer_tx(tx, &candidate)?;
-                    mark_historian_side_channel_delivered_tx(tx, row, now_ms)
-                })?;
-            }
-            "user_observation" => {
-                let candidate: HistorianUserMemoryCandidate =
-                    serde_json::from_str(&row.payload_json)
-                        .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
-                self.inner.with_conn_fenced(|tx| {
-                    insert_historian_user_observation_tx(tx, &candidate)?;
-                    mark_historian_side_channel_delivered_tx(tx, row, now_ms)
-                })?;
-            }
+        #[cfg(any(test, feature = "test-support"))]
+        let crash_after_insert = self
+            .historian_side_channel_crash_after_insert_once
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&row.id.kind);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let crash_after_insert = false;
+
+        // Parsing runs before the write lock is taken; the target insert and the outbox
+        // retirement commit together or not at all.
+        let parse_error = |error: serde_json::Error| MemoryStoreError::Serde(error.to_string());
+        let candidate = match row.id.kind.as_str() {
+            "event" => SideChannelCandidate::Event(
+                serde_json::from_str(&row.payload_json).map_err(parse_error)?,
+            ),
+            "primer" => SideChannelCandidate::Primer(
+                serde_json::from_str(&row.payload_json).map_err(parse_error)?,
+            ),
+            "user_observation" => SideChannelCandidate::UserObservation(
+                serde_json::from_str(&row.payload_json).map_err(parse_error)?,
+            ),
             other => {
                 return Err(MemoryStoreError::Serde(format!(
                     "unknown historian side-channel kind {other:?}"
                 )));
             }
+        };
+        let deliver = |tx: &GuardedConn<'_>| -> rusqlite::Result<()> {
+            match &candidate {
+                SideChannelCandidate::Event(candidate) => insert_historian_events_tx(
+                    tx,
+                    &row.session_id,
+                    std::slice::from_ref(candidate),
+                )?,
+                SideChannelCandidate::Primer(candidate) => {
+                    insert_historian_primer_tx(tx, candidate)?
+                }
+                SideChannelCandidate::UserObservation(candidate) => {
+                    insert_historian_user_observation_tx(tx, candidate)?
+                }
+            }
+            if crash_after_insert {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    MemoryStoreError::Serde(format!(
+                        "injected historian {} crash between delivery and retirement",
+                        row.id.kind
+                    )),
+                )));
+            }
+            retire_historian_side_channel_tx(tx, row)
+        };
+        match self.inner.with_conn_fenced(deliver) {
+            Ok(()) => Ok(true),
+            Err(StoreError::Backend(message))
+                if message.contains(SIDE_CHANNEL_ROW_ALREADY_RETIRED) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 
     fn record_historian_side_channel_failure(
@@ -11013,39 +11764,29 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Rows marked delivered but not deleted come only from a store file written before
+    /// delivery and retirement shared one transaction. A read decides whether the fenced
+    /// delete runs, so a store without such rows pays no durable write here.
     fn delete_delivered_historian_side_channels(
         &self,
         session_id: &str,
     ) -> Result<(), MemoryStoreError> {
+        let marked: bool = self.inner.with_conn(|conn| {
+            conn.prepare_cached(
+                "SELECT EXISTS(
+                     SELECT 1 FROM historian_side_channel_outbox
+                      WHERE session_id = ?1 AND delivered_at_ms IS NOT NULL)",
+            )?
+            .query_row(params![session_id], |row| row.get(0))
+        })?;
+        if !marked {
+            return Ok(());
+        }
         self.inner.with_conn_fenced(|tx| {
             tx.execute(
                 "DELETE FROM historian_side_channel_outbox
                   WHERE session_id = ?1 AND delivered_at_ms IS NOT NULL",
                 params![session_id],
-            )?;
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    fn delete_delivered_historian_side_channel(
-        &self,
-        row: &HistorianSideChannelOutboxRow,
-    ) -> Result<(), MemoryStoreError> {
-        self.inner.with_conn_fenced(|tx| {
-            tx.execute(
-                "DELETE FROM historian_side_channel_outbox
-                  WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
-                    AND source_start = ?4 AND source_end = ?5 AND item_index = ?6
-                    AND delivered_at_ms IS NOT NULL",
-                params![
-                    row.session_id,
-                    row.id.firing_seq as i64,
-                    row.id.kind,
-                    row.id.source_start as i64,
-                    row.id.source_end as i64,
-                    row.id.item_index as i64,
-                ],
             )?;
             Ok(())
         })?;
@@ -13736,17 +14477,24 @@ fn enqueue_historian_side_channels_tx(
     Ok(())
 }
 
-fn mark_historian_side_channel_delivered_tx(
+/// The error a delivery returns when its outbox row was retired by another drainer between
+/// the due read and the delivery; the transaction rolls back and the drain counts nothing.
+const SIDE_CHANNEL_ROW_ALREADY_RETIRED: &str = "historian side-channel row already retired";
+
+/// Retires one pending outbox row inside the delivery transaction. The `delivered_at_ms IS
+/// NULL` predicate is the row-still-pending guard: a concurrent drainer that retired the row
+/// first leaves nothing to delete, the error rolls this transaction's target insert back,
+/// and the row is delivered once. The payload predicate keeps a handle read before a
+/// session reset from consuming a row re-issued under the same key with other bytes.
+fn retire_historian_side_channel_tx(
     tx: &GuardedConn<'_>,
     row: &HistorianSideChannelOutboxRow,
-    now_ms: i64,
 ) -> rusqlite::Result<()> {
     let changed = tx.execute(
-        "UPDATE historian_side_channel_outbox
-            SET delivered_at_ms = ?7, last_attempt_at_ms = ?7, last_error = NULL
+        "DELETE FROM historian_side_channel_outbox
           WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
             AND source_start = ?4 AND source_end = ?5 AND item_index = ?6
-            AND delivered_at_ms IS NULL",
+            AND delivered_at_ms IS NULL AND payload_json = ?7",
         params![
             row.session_id,
             row.id.firing_seq as i64,
@@ -13754,11 +14502,13 @@ fn mark_historian_side_channel_delivered_tx(
             row.id.source_start as i64,
             row.id.source_end as i64,
             row.id.item_index as i64,
-            now_ms,
+            row.payload_json,
         ],
     )?;
     if changed != 1 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            MemoryStoreError::Serde(SIDE_CHANNEL_ROW_ALREADY_RETIRED.to_string()),
+        )));
     }
     Ok(())
 }
@@ -15001,6 +15751,333 @@ mod tests {
         MemoryStore::test_descriptor(dir, "eidnara-test")
     }
 
+    /// Every scalar read agrees with the full deserialization on the rows the full load
+    /// accepts, and fails on its own field where the full load fails: absent keys take the
+    /// serde default, a JSON `null`, boolean, string, or negative under an unsigned field
+    /// is refused, an unknown enum variant is refused, JSON5, malformed text, and strict JSON
+    /// that is not an object fail. The
+    /// recorded divergences: a corrupt `core_state` and a sibling field's corruption fail
+    /// only the full load; a `historian` that is not an object reads as absent; an epoch
+    /// above `i64::MAX` fails only the scalar read.
+    #[test]
+    fn meta_scalar_reads_agree_with_the_full_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let empty_core = serde_json::to_string(&CoreState::empty()).unwrap();
+        // Every variant starts from a serializable default so only the field under test
+        // differs from what the full load accepts.
+        let meta_with = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+            let mut value = serde_json::to_value(ModuleMeta::default()).unwrap();
+            edit(value.as_object_mut().unwrap());
+            value.to_string()
+        };
+        let rows: Vec<(&str, String, String)> = vec![
+            (
+                "absent",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.remove("revert_epoch");
+                    m.remove("historian");
+                    m.remove("publication_floor_ordinal");
+                }),
+            ),
+            (
+                "valid",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), 7.into());
+                    m.insert("historian".into(), serde_json::json!({"state": "firing"}));
+                    m.insert("publication_floor_ordinal".into(), 42.into());
+                }),
+            ),
+            (
+                "floor-null",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("publication_floor_ordinal".into(), serde_json::Value::Null);
+                }),
+            ),
+            (
+                "epoch-null",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), serde_json::Value::Null);
+                }),
+            ),
+            (
+                "epoch-negative",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), (-1).into());
+                }),
+            ),
+            (
+                "epoch-text",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), "7".into());
+                }),
+            ),
+            (
+                "phase-unknown",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("historian".into(), serde_json::json!({"state": "dreaming"}));
+                }),
+            ),
+            (
+                "epoch-boolean",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), true.into());
+                }),
+            ),
+            (
+                "floor-boolean",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("publication_floor_ordinal".into(), true.into());
+                }),
+            ),
+            (
+                "epoch-above-i64",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), (i64::MAX as u64 + 1).into());
+                }),
+            ),
+            (
+                "historian-null",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("historian".into(), serde_json::Value::Null);
+                }),
+            ),
+            (
+                "historian-scalar",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("historian".into(), 5.into());
+                }),
+            ),
+            (
+                "meta-json5",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), 5.into());
+                })
+                .replacen('"', "'", 2),
+            ),
+            (
+                "meta-malformed",
+                empty_core.clone(),
+                "{not json".to_string(),
+            ),
+            ("meta-null", empty_core.clone(), "null".to_string()),
+            ("meta-array", empty_core.clone(), "[]".to_string()),
+            ("meta-number", empty_core.clone(), "5".to_string()),
+            (
+                "core-malformed",
+                "{not json".to_string(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), 3.into());
+                }),
+            ),
+        ];
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                for (session, core, meta) in &rows {
+                    conn.execute(
+                        "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                         VALUES (?1, 1, ?2, ?3, 0)",
+                        params![session, core, meta],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        for (session, _, _) in &rows {
+            let session = *session;
+            let full = store.load(session);
+            let meta = store.load_meta(session);
+            let epoch = store.load_revert_epoch(session);
+            let phase = store.load_historian_phase(session);
+            let floor = store.load_publication_floor_ordinal(session);
+            // The meta-only load succeeds for `core-malformed` because it does not
+            // deserialize `core_state`; every other row decides both loads alike.
+            match (&full, &meta) {
+                (Ok(loaded), Ok(meta)) => assert_eq!(*meta, loaded.meta, "{session}"),
+                (Err(_), Err(_)) => {}
+                (Err(_), Ok(meta)) if session == "core-malformed" => {
+                    assert_eq!(
+                        meta.revert_epoch, 3,
+                        "{session}: meta does not touch core_state"
+                    );
+                }
+                (full, meta) => panic!("{session}: full {full:?} vs meta {meta:?}"),
+            }
+            if session == "epoch-above-i64" {
+                // SQLite returns the integer as a float, so only the scalar read refuses it.
+                assert!(full.is_ok() && epoch.is_err(), "{session}: {epoch:?}");
+                continue;
+            }
+            match full {
+                Ok(loaded) => {
+                    assert_eq!(epoch.unwrap(), loaded.meta.revert_epoch, "{session}");
+                    assert_eq!(phase.unwrap(), loaded.meta.historian.state, "{session}");
+                    assert_eq!(
+                        floor.unwrap(),
+                        loaded.meta.publication_floor_ordinal,
+                        "{session}"
+                    );
+                }
+                Err(_) if session == "core-malformed" => {
+                    assert_eq!(epoch.unwrap(), 3, "a scalar read does not touch core_state");
+                }
+                Err(_) => {
+                    // The failing field's read fails; a sibling field's read is per field
+                    // and still answers, which the full load's per-row refusal does not.
+                    let failing = match session {
+                        "epoch-null" | "epoch-negative" | "epoch-text" | "epoch-boolean" => {
+                            assert!(phase.is_ok() && floor.is_ok(), "{session}: siblings answer");
+                            epoch.is_err()
+                        }
+                        "floor-boolean" => floor.is_err(),
+                        "phase-unknown" => {
+                            assert!(epoch.is_ok(), "{session}: siblings answer");
+                            phase.is_err()
+                        }
+                        "historian-null" | "historian-scalar" => {
+                            // `$.historian.state` has no object to descend, so the path is
+                            // absent here while the full load refuses the non-object.
+                            assert_eq!(phase.unwrap(), HistorianPhase::Idle, "{session}");
+                            true
+                        }
+                        "meta-json5" | "meta-malformed" | "meta-null" | "meta-array"
+                        | "meta-number" => epoch.is_err() && phase.is_err() && floor.is_err(),
+                        other => panic!("unexpected full-load failure for {other}"),
+                    };
+                    assert!(
+                        failing,
+                        "{session}: the scalar read fails where the full load fails"
+                    );
+                }
+            }
+        }
+        let never_seen = store.load("never-seen").unwrap();
+        assert_eq!(
+            store.load_revert_epoch("never-seen").unwrap(),
+            never_seen.meta.revert_epoch
+        );
+        assert_eq!(
+            store.load_historian_phase("never-seen").unwrap(),
+            never_seen.meta.historian.state
+        );
+        assert_eq!(
+            store.load_publication_floor_ordinal("never-seen").unwrap(),
+            never_seen.meta.publication_floor_ordinal
+        );
+    }
+
+    /// A cache that fits its working set re-creates no full-select handle; a cache of one,
+    /// alternating the full select with another cached statement, re-creates it before its
+    /// second run. The resize precedes the probe because leaving the maintenance path
+    /// flushes the cache.
+    #[test]
+    fn cache_state_full_load_counters_key_on_the_prepared_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.set_prepared_statement_cache_capacity(1);
+                Ok(())
+            })
+            .unwrap();
+        store.start_statement_reuse_probe();
+        store.load("ses").unwrap();
+        store.load("ses").unwrap();
+        assert_eq!(store.cache_state_load_runs(CacheStateSelect::Full), 2);
+        assert_eq!(
+            store.cache_state_load_evictions(CacheStateSelect::Full),
+            0,
+            "one statement fits a cache of one"
+        );
+
+        store.load_meta("ses").unwrap();
+        store.load("ses").unwrap();
+        assert_eq!(store.cache_state_load_runs(CacheStateSelect::Meta), 1);
+        assert_eq!(
+            store.cache_state_load_evictions(CacheStateSelect::Full),
+            1,
+            "the cache of one re-created the full select between its runs"
+        );
+    }
+
+    #[test]
+    fn the_connection_profile_is_derived_from_the_page_size_and_compile_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let profile = store.connection_profile();
+        assert_eq!(
+            profile.cache_pages * profile.page_size,
+            PAGE_CACHE_BUDGET_BYTES,
+            "the page cache holds the budget in pages of the measured size, got {profile:?}"
+        );
+        assert_eq!(
+            profile.mmap_bytes,
+            MMAP_BUDGET_BYTES.min(profile.compile_max_mmap_bytes),
+            "the map is the budget capped by the compile-time maximum, got {profile:?}"
+        );
+        let (cache_size, mmap_size): (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
+                    conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            (cache_size, mmap_size),
+            (profile.cache_pages, profile.mmap_bytes)
+        );
+    }
+
+    /// SQLite bounds a sorter's in-memory list at `cache_size` pages and spills excess rows
+    /// to the temp store only when the temp store uses files; with the temp store in memory
+    /// every sorted row stays in the heap. A read callback sorting four budgets of rows
+    /// retains about one budget when the bound applies.
+    #[test]
+    fn a_transient_sort_past_the_page_cache_budget_spills_instead_of_growing_the_heap() {
+        const PAYLOAD_BYTES: i64 = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rows = 4 * PAGE_CACHE_BUDGET_BYTES / PAYLOAD_BYTES;
+        let retained = store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?1)
+                     SELECT payload FROM (SELECT n, randomblob(?2) AS payload FROM seq)
+                      ORDER BY (n * 7919) % 10007, n",
+                )?;
+                let before = storage::library_memory_used();
+                let mut sorted = statement.query(params![rows, PAYLOAD_BYTES])?;
+                sorted.next()?.expect("the sort yields its first row");
+                Ok(storage::library_memory_used() - before)
+            })
+            .unwrap();
+        assert!(
+            retained <= 2 * PAGE_CACHE_BUDGET_BYTES,
+            "sorting {} bytes retained {retained} bytes; the sorter did not spill at the {} byte page-cache budget",
+            rows * PAYLOAD_BYTES,
+            PAGE_CACHE_BUDGET_BYTES
+        );
+    }
+
     /// Editing one block through the accessors re-encodes that block and leaves the
     /// sibling's ingress bytes, including an unknown field, as they arrived.
     #[test]
@@ -15021,6 +16098,100 @@ mod tests {
         assert_eq!(serialized["content"][0]["kind"]["text"], "edited");
         assert_eq!(serialized["content"][1]["sentinel_unknown_field"], "kept");
         assert_eq!(serialized["content"][1]["kind"]["text"], "second");
+    }
+
+    /// One walk decides everything: clean input comes back as the same bytes with
+    /// `changed` false; a substitution flips `changed` and re-serializes. Keys of a subtree
+    /// the walk judges whole, such as an integrity-named container holding only numbers,
+    /// are still validated, so a secret-bearing key there is refused.
+    #[test]
+    fn single_pass_preparation_reports_change_and_validates_unwalked_keys() {
+        // Insignificant whitespace and reverse key order: a re-serializing clean branch
+        // would change the bytes whatever the map implementation.
+        let clean = r#"{"zeta": {"b": 1, "a": "text"}, "alpha": [1, 2]}"#;
+        let prepared = prepare_json_content_single_pass(
+            clean,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(!prepared.changed);
+        assert_eq!(
+            prepared.text, clean,
+            "clean input keeps its key order and bytes"
+        );
+
+        let mut detections = Vec::new();
+        let prepared = prepare_json_content_single_pass(
+            r#"{"note":"password=hunter-two"}"#,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut detections,
+        )
+        .unwrap();
+        assert!(prepared.changed);
+        assert_eq!(prepared.text, r#"{"note":"password=<REDACTED:password>"}"#);
+        assert_eq!(detections.len(), 1);
+
+        let refused = prepare_json_content_single_pass(
+            r#"{"signature":{"password=in-key":1}}"#,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "a secret in a key under an integrity-named container is refused, got {:?}",
+            refused.map(|p| p.text)
+        );
+        let refused = prepare_json_content_single_pass(
+            r#"{"id":{"password=in-key":1}}"#,
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "a secret in a key under an identity-named container, which the walk descends, \
+             is refused, got {:?}",
+            refused.map(|p| p.text)
+        );
+    }
+
+    /// Refusal after scanning a substituted value leaves the detection in the caller-provided
+    /// vector.
+    #[test]
+    fn a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector() {
+        // Object members are walked in `serde_json::Map` order, so the value entry's key
+        // sorts before the refusing key.
+        let mut keyed = ModuleMeta::default();
+        keyed.block_identity_by_mid.insert(
+            "a-mid".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "password=earlier-value".to_string(),
+                byte_fingerprint: "fp".to_string(),
+            }],
+        );
+        keyed.block_identity_by_mid.insert(
+            "password=key-secret".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "fp".to_string(),
+            }],
+        );
+        let mut detections = Vec::new();
+        let refused = prepare_json_content_collecting(
+            &serde_json::to_string(&keyed).unwrap(),
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut detections,
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            detections.len(),
+            1,
+            "the earlier value must be scanned before the key refuses, so the caller holds a \
+             detection it must not record"
+        );
     }
 
     /// The value-only scanner finds nothing in `{"credential":"fixture"}`, so a receipt built
@@ -15444,6 +16615,924 @@ mod tests {
 
     /// A "nothing happened" commit: every optional effect empty. Tests
     /// override only the fields they exercise via struct update.
+    fn scan_audit_rows(store: &MemoryStore) -> (i64, i64) {
+        store
+            .inner
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row("SELECT COUNT(*) FROM field_scans", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM scan_owner_copies", [], |row| {
+                        row.get(0)
+                    })?,
+                ))
+            })
+            .unwrap()
+    }
+
+    /// Copies per owner within the session scope, as `(owner_kind, copies)` sorted.
+    fn owner_copy_counts(store: &MemoryStore, session_id: &str) -> Vec<(String, i64)> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT o.owner_kind, COUNT(*) FROM scan_owner_copies c \
+                     JOIN scan_domain_owners o ON o.domain_owner_id = c.domain_owner_id \
+                     JOIN scan_owner_scopes s ON s.owner_scope_id = o.owner_scope_id \
+                     WHERE s.scope_kind = 'session' AND s.scope_key = ?1 \
+                     GROUP BY o.domain_owner_id ORDER BY o.owner_kind, COUNT(*)",
+                )?;
+                let rows = statement
+                    .query_map([active_scan_private_key("session", session_id)], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap()
+    }
+
+    /// The scans a pass records for the fields it replaces are retired when the next pass
+    /// settles over them, so the audit rows for a session do not grow with the pass count,
+    /// also when another writer bumped the row version between passes; the scans for
+    /// cumulative overlay rows stay under the shared owner and remain.
+    #[test]
+    fn settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = publishing_meta();
+        let mut expected = None;
+        let mut steady = None;
+        for pass in 0..6u64 {
+            let version = store
+                .commit_transform("ses", base_commit(expected, &core, &meta))
+                .unwrap();
+            expected = Some(version);
+            let rows = scan_audit_rows(&store);
+            assert!(
+                rows.0 > 0,
+                "a pass records scans for the fields it replaces"
+            );
+            match steady {
+                None => steady = Some(rows),
+                Some(steady) => assert_eq!(
+                    rows, steady,
+                    "pass {pass}: the retired pass's rows keep the count flat"
+                ),
+            }
+        }
+        let steady_before_publish = steady.unwrap();
+        let steady = steady_before_publish;
+        assert_eq!(
+            owner_copy_counts(&store, "ses"),
+            vec![("cache_state".to_string(), steady.1)],
+            "one live pass owner holds every copy"
+        );
+
+        // A historian publish bumps the row version without passing through a pass; the
+        // next pass still retires the previous pass's scans and the publish's own remain.
+        let published = store
+            .publish_historian_chunk(HistorianPublishRequest {
+                session_id: "ses",
+                expected_row_version: expected,
+                expected_revert_epoch: 0,
+                predicate: &publish_predicate(),
+                project_path: "git:proj",
+                compartments: &[publish_compartment()],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                raw_chunk_messages: None,
+            })
+            .unwrap();
+        let after_publish = scan_audit_rows(&store);
+        assert!(
+            after_publish.0 > steady.0,
+            "the publish records its own scans"
+        );
+        let mut expected = Some(published.row_version);
+        let mut after_publish_steady = None;
+        for pass in 0..3u64 {
+            let version = store
+                .commit_transform("ses", base_commit(expected, &core, &meta))
+                .unwrap();
+            expected = Some(version);
+            let rows = scan_audit_rows(&store);
+            match after_publish_steady {
+                None => {
+                    assert_eq!(
+                        rows, after_publish,
+                        "the pass after the publish retires the previous pass, not the publish"
+                    );
+                    after_publish_steady = Some(rows);
+                }
+                Some(steady) => assert_eq!(
+                    rows, steady,
+                    "pass {pass} after the publish: the count stays flat"
+                ),
+            }
+        }
+        let steady = after_publish_steady.unwrap();
+
+        let mint = [TagMintInput {
+            block_id: "block-1".to_string(),
+            kind: "message".to_string(),
+            token_count: 3,
+            source_bytes: b"tagged source".to_vec(),
+        }];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    overlays: TransformOverlayBatch {
+                        tag_mints: &mint,
+                        created_at_ms: 1,
+                        ..TransformOverlayBatch::default()
+                    },
+                    ..base_commit(expected, &core, &meta)
+                },
+            )
+            .unwrap();
+        let with_overlay = scan_audit_rows(&store);
+        assert!(
+            with_overlay.0 > steady.0,
+            "the tag mint's scans are added, got {with_overlay:?} after {steady:?}"
+        );
+        let tag_receipts = field_scan_ids(
+            &store,
+            "ses",
+            &["tag_block_id", "tag_kind", "tag_source_bytes"],
+        );
+        assert_eq!(
+            tag_receipts.len(),
+            3,
+            "one receipt per tag field, got {tag_receipts:?}"
+        );
+        store
+            .commit_transform("ses", base_commit(Some(version), &core, &meta))
+            .unwrap();
+        assert_eq!(
+            scan_audit_rows(&store),
+            with_overlay,
+            "the overlay scans remain while the later pass settles"
+        );
+        assert_eq!(
+            field_scan_ids(
+                &store,
+                "ses",
+                &["tag_block_id", "tag_kind", "tag_source_bytes"]
+            ),
+            tag_receipts,
+            "the same tag receipts survive the pass that retired the previous pass owner"
+        );
+        let tags: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM tags WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(tags, 1, "the cumulative overlay row remains");
+        let overlay_copies = with_overlay.1 - steady.1;
+        let publish_copies = after_publish.1 - steady_before_publish.1;
+        let mut counts = owner_copy_counts(&store, "ses");
+        counts.sort();
+        let mut want = vec![
+            ("cache_state".to_string(), overlay_copies),
+            ("cache_state".to_string(), steady_before_publish.1),
+            ("historian_side_channels".to_string(), publish_copies),
+        ];
+        want.sort();
+        assert_eq!(
+            counts, want,
+            "the shared overlay owner, the live pass owner, and the publish owner hold \
+             exactly their own copies"
+        );
+    }
+
+    /// A pass that loses the compartment-generation check replays without touching the
+    /// audit: the live pass's scan rows still describe the stored bytes.
+    #[test]
+    fn a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let version = store
+            .commit_transform("ses", base_commit(None, &core, &meta))
+            .unwrap();
+        let live = scan_audit_rows(&store);
+        assert!(live.0 > 0);
+        let error = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    compartment_max_seq: Some(7),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, MemoryStoreError::CasConflict { .. }));
+        assert_eq!(
+            scan_audit_rows(&store),
+            live,
+            "the losing pass retired nothing"
+        );
+        assert_eq!(
+            owner_copy_counts(&store, "ses"),
+            vec![("cache_state".to_string(), live.1)]
+        );
+    }
+
+    /// The receive that introduces a session into `pass_trace` is the only durable write
+    /// for that identity until the pass commits or rejects, so it keeps its receipt.
+    #[test]
+    fn the_first_receive_for_a_new_session_records_its_identity_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let before = scan_audit_rows(&store);
+        store.trace_pass_received("fresh", 1).unwrap();
+        let introduced = scan_audit_rows(&store);
+        assert_eq!(
+            introduced,
+            (before.0 + 1, before.1 + 1),
+            "the introducing receive records one zero-finding scan and one owner copy"
+        );
+        store.trace_pass_received("fresh", 2).unwrap();
+        assert_eq!(
+            scan_audit_rows(&store),
+            introduced,
+            "a receive for a session pass_trace already keys records nothing"
+        );
+    }
+
+    /// The pass-trace receive write is one statement when the session identity is clean:
+    /// a preserved identity with no detection records no audit row.
+    #[test]
+    fn a_clean_pass_trace_receive_records_no_scan_audit_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let before = scan_audit_rows(&store);
+        store.trace_pass_received("ses", 1).unwrap();
+        store.trace_pass_received("ses", 2).unwrap();
+        assert_eq!(
+            scan_audit_rows(&store),
+            before,
+            "a clean receive leaves the audit alone"
+        );
+        let received: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT receive_count FROM pass_trace WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(received, 2);
+        // A detected identity on a known session is preserved and still audited.
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at) \
+             VALUES ('password=legacy', 1, ?1, ?2, 0)",
+            params![
+                serde_json::to_string(&CoreState::empty()).unwrap(),
+                serde_json::to_string(&ModuleMeta::default()).unwrap()
+            ],
+        )
+        .unwrap();
+        drop(raw);
+        store.trace_pass_received("password=legacy", 3).unwrap();
+        assert!(
+            scan_audit_rows(&store).0 > before.0,
+            "a detected identity keeps its audit row"
+        );
+    }
+
+    /// The `(field_id, scan_id)` pairs the session scope holds for `field_ids`.
+    fn field_scan_ids(
+        store: &MemoryStore,
+        session_id: &str,
+        field_ids: &[&str],
+    ) -> std::collections::BTreeSet<(String, String)> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT c.field_id, c.scan_id FROM scan_owner_copies c \
+                     JOIN scan_domain_owners o ON o.domain_owner_id = c.domain_owner_id \
+                     JOIN scan_owner_scopes s ON s.owner_scope_id = o.owner_scope_id \
+                     WHERE s.scope_kind = 'session' AND s.scope_key = ?1",
+                )?;
+                let rows = statement
+                    .query_map([active_scan_private_key("session", session_id)], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows
+                    .into_iter()
+                    .filter(|(field, _)| field_ids.contains(&field.as_str()))
+                    .collect())
+            })
+            .unwrap()
+    }
+
+    fn field_copy_counts(
+        store: &MemoryStore,
+        session_id: &str,
+        field_ids: &[&str],
+    ) -> std::collections::BTreeMap<String, i64> {
+        store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT c.field_id, COUNT(*) FROM scan_owner_copies c \
+                     JOIN scan_domain_owners o ON o.domain_owner_id = c.domain_owner_id \
+                     JOIN scan_owner_scopes s ON s.owner_scope_id = o.owner_scope_id \
+                     WHERE s.scope_kind = 'session' AND s.scope_key = ?1 \
+                     GROUP BY c.field_id",
+                )?;
+                let rows = statement
+                    .query_map([active_scan_private_key("session", session_id)], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(field_ids
+                    .iter()
+                    .map(|field| {
+                        let count = rows
+                            .iter()
+                            .find(|(id, _)| id == field)
+                            .map_or(0, |(_, count)| *count);
+                        ((*field).to_string(), count)
+                    })
+                    .collect())
+            })
+            .unwrap()
+    }
+
+    /// `transform_session_roots`, the `scheduler_history` ring, and `last_divergence` hold
+    /// bytes from earlier passes, so their receipts must outlive the pass owner.
+    #[test]
+    fn retained_pass_fields_keep_their_scan_receipts_across_the_next_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let retained = [
+            "project_root",
+            "scheduler_observation",
+            "scheduler_interesting",
+            "first_divergence",
+        ];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-a"),
+                    first_divergence: Some("{\"where\":\"m1\"}"),
+                    scheduler_observation: Some(&observation),
+                    scheduler_applied_reductions: true,
+                    ..base_commit(None, &core, &meta)
+                },
+            )
+            .unwrap();
+        let first = field_copy_counts(&store, "ses", &retained);
+        assert!(
+            retained.iter().all(|field| first[*field] == 1),
+            "the first pass records one receipt per retained field, got {first:?}"
+        );
+        let meta_before = field_copy_counts(&store, "ses", &["meta"])["meta"];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-b"),
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap();
+        let (roots, history_len, last_divergence): (i64, i64, Option<String>) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM transform_session_roots WHERE session_id = 'ses'), \
+                            (SELECT json_array_length(scheduler_history) FROM pass_trace \
+                              WHERE session_id = 'ses'), \
+                            (SELECT last_divergence FROM pass_trace WHERE session_id = 'ses')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(roots, 2, "both roots stay stored");
+        assert_eq!(history_len, 2, "both observations stay stored");
+        assert!(
+            last_divergence.is_some_and(|value| value.contains("m1")),
+            "the first pass's divergence stays readable"
+        );
+        let second = field_copy_counts(&store, "ses", &retained);
+        assert_eq!(
+            second["project_root"], 2,
+            "every stored root keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            second["scheduler_observation"], 2,
+            "every stored observation keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            second["scheduler_interesting"], 1,
+            "the stored interesting observation keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            second["first_divergence"], 1,
+            "the divergence still readable as last_divergence keeps its receipt, got {second:?}"
+        );
+        assert_eq!(
+            field_copy_counts(&store, "ses", &["meta"])["meta"],
+            meta_before,
+            "the replaced meta keeps one live receipt"
+        );
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-b"),
+                    first_divergence: Some("{\"where\":\"m2\"}"),
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap();
+        let third = field_copy_counts(&store, "ses", &retained);
+        assert_eq!(third["project_root"], 3, "got {third:?}");
+        assert_eq!(third["scheduler_observation"], 3, "got {third:?}");
+    }
+
+    /// A root the session already stores and a divergence that replaces `last_divergence`
+    /// add no stored bytes, so their receipts do not accumulate across passes.
+    #[test]
+    fn re_observed_roots_and_replaced_divergences_keep_one_retained_receipt_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let fields = ["project_root", "first_divergence"];
+        let mut version = None;
+        for pass in 0..5 {
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            project_root: Some("/root-a"),
+                            first_divergence: Some("{\"where\":\"m1\"}"),
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+            let counts = field_copy_counts(&store, "ses", &fields);
+            // The retained receipt for the stored root plus, from the second pass on, the
+            // live pass's own scan of it, which the next pass retires.
+            let live_root_scans = i64::from(pass > 0);
+            assert_eq!(
+                (counts["project_root"], counts["first_divergence"]),
+                (1 + live_root_scans, 1),
+                "pass {pass}: one retained receipt for the stored root and one for the readable divergence, got {counts:?}"
+            );
+        }
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    project_root: Some("/root-b"),
+                    ..base_commit(version, &core, &meta)
+                },
+            )
+            .unwrap();
+        let counts = field_copy_counts(&store, "ses", &fields);
+        assert_eq!(
+            (counts["project_root"], counts["first_divergence"]),
+            (2, 1),
+            "a second stored root adds its receipt; the divergence keeps its one, got {counts:?}"
+        );
+    }
+
+    /// A fingerprint is stored only inside a `scheduler_interesting` entry, so a pass that
+    /// writes none leaves its fingerprint scan under the pass owner.
+    #[test]
+    fn a_fingerprint_without_an_interesting_entry_keeps_no_retained_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let mut version = None;
+        for pass in 0..5 {
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            scheduler_observation: Some(&observation),
+                            scheduler_full_array_fingerprint: Some("fp-1"),
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+            let counts = field_copy_counts(&store, "ses", &field);
+            assert_eq!(
+                counts["scheduler_full_array_fingerprint"], 1,
+                "pass {pass}: only the live pass's scan of an unstored fingerprint, got {counts:?}"
+            );
+        }
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    scheduler_full_array_fingerprint: Some("fp-1"),
+                    scheduler_applied_reductions: true,
+                    ..base_commit(version, &core, &meta)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+            1,
+            "a fingerprint stored inside an interesting entry keeps one retained receipt"
+        );
+    }
+
+    /// A fingerprint receipt leaves with the interesting entry that stores it, whether or
+    /// not the entry that evicts it carries a fingerprint of its own.
+    #[test]
+    fn a_fingerprint_receipt_is_evicted_with_its_interesting_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let mut version = None;
+        for pass in 0..=PASS_TRACE_HISTORY_RING_LEN {
+            // Only the first pass stores a fingerprint; the ring then fills with entries
+            // without one until the first entry is evicted.
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            scheduler_observation: Some(&observation),
+                            scheduler_applied_reductions: true,
+                            scheduler_full_array_fingerprint: (pass == 0).then_some("fp-first"),
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+        }
+        let (stored, receipts): (i64, i64) = (
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history) \
+                         WHERE session_id = 'ses' \
+                           AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap(),
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+        );
+        assert_eq!(stored, 0, "the fingerprint-bearing entry left the ring");
+        assert_eq!(
+            receipts, stored,
+            "no receipt outlives the entry that stored its fingerprint"
+        );
+    }
+
+    /// A fingerprint longer than the diagnostic bound is scanned but not stored, so it earns
+    /// no history receipt and evicts none.
+    #[test]
+    fn an_oversized_fingerprint_neither_keeps_nor_evicts_a_history_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    scheduler_applied_reductions: true,
+                    scheduler_full_array_fingerprint: Some("fp-short"),
+                    ..base_commit(None, &core, &meta)
+                },
+            )
+            .unwrap();
+        let first = field_scan_ids(&store, "ses", &field);
+        assert_eq!(first.len(), 1);
+        let oversized = "f".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES + 1);
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    scheduler_applied_reductions: true,
+                    scheduler_full_array_fingerprint: Some(&oversized),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap();
+        let after = field_scan_ids(&store, "ses", &field);
+        assert!(
+            after.is_superset(&first),
+            "the stored fingerprint's receipt survives an oversized one, got {after:?} after {first:?}"
+        );
+        assert_eq!(
+            after.len(),
+            2,
+            "the oversized fingerprint's scan stays as the live pass's receipt only"
+        );
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(Some(version + 1), &core, &meta)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            field_scan_ids(&store, "ses", &field),
+            first,
+            "the next pass retires the oversized fingerprint's pass-owned receipt"
+        );
+    }
+
+    /// `trace_pass_stable` and `commit_transform` append to the same observation ring, so a
+    /// commit's receipt leaves when stable passes push its entry out.
+    #[test]
+    fn observation_receipts_follow_the_ring_across_both_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let fields = ["scheduler_observation", "scheduler_history"];
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(None, &core, &meta)
+                },
+            )
+            .unwrap();
+        let commit_receipt = field_scan_ids(&store, "ses", &fields);
+        assert_eq!(commit_receipt.len(), 1);
+        for _ in 0..PASS_TRACE_HISTORY_RING_LEN {
+            store
+                .trace_pass_stable("ses", &observation, None, None)
+                .unwrap();
+        }
+        let history_len: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT json_array_length(scheduler_history) FROM pass_trace \
+                     WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(history_len, PASS_TRACE_HISTORY_RING_LEN as i64);
+        let receipts = field_scan_ids(&store, "ses", &fields);
+        assert_eq!(
+            receipts.len(),
+            PASS_TRACE_HISTORY_RING_LEN,
+            "one receipt per stored ring entry across both writers"
+        );
+        assert!(
+            receipts.is_disjoint(&commit_receipt),
+            "the commit's receipt left with its evicted entry"
+        );
+    }
+
+    /// A drainer that read a row before it was retired, the session reset, and the key
+    /// re-issued for a new payload must not deliver its stale payload or consume the new row.
+    #[test]
+    fn a_stale_delivery_does_not_retire_a_re_created_outbox_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let old_payload = serde_json::to_string(&HistorianEventCandidate {
+            kind: "old".into(),
+            at_compartment: Some(1),
+            compartment_id: Some(0),
+            fields_json: "{}".into(),
+            created_at: 1,
+            harness: "module".into(),
+        })
+        .unwrap();
+        let new_payload = old_payload.replace("\"old\"", "\"new\"");
+        let insert = |payload: &str| {
+            store
+                .inner
+                .with_conn_fenced(|tx| {
+                    tx.execute(
+                        "INSERT INTO historian_side_channel_outbox(session_id, firing_seq, kind, \
+                         source_start, source_end, item_index, payload_json, created_at_ms) \
+                         VALUES ('ses', 1, 'event', 1, 2, 0, ?1, 1)",
+                        params![payload],
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+        };
+        insert(&old_payload);
+        let stale = store
+            .load_due_historian_side_channels("ses", "event", i64::MAX, 32)
+            .unwrap()
+            .remove(0);
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "DELETE FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        insert(&new_payload);
+        let delivered = store.deliver_historian_side_channel(&stale).unwrap();
+        assert!(
+            !delivered,
+            "the stale handle reports the row as already retired"
+        );
+        assert_eq!(
+            store.load_compartment_events("ses").unwrap().len(),
+            0,
+            "the stale payload is not delivered"
+        );
+        let pending = store
+            .load_due_historian_side_channels("ses", "event", i64::MAX, 32)
+            .unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|row| row.payload_json.as_str())
+                .collect::<Vec<_>>(),
+            vec![new_payload.as_str()],
+            "the re-created row stays pending with its own payload"
+        );
+    }
+
+    /// A malformed side-channel payload fails before the delivery takes the write lock.
+    #[test]
+    fn side_channel_payloads_are_parsed_before_the_fenced_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let row = HistorianSideChannelOutboxRow {
+            session_id: "ses".to_string(),
+            id: HistorianSideChannelOutboxId {
+                firing_seq: 1,
+                kind: "event".to_string(),
+                source_start: 0,
+                source_end: 1,
+                item_index: 0,
+            },
+            payload_json: "{not json".to_string(),
+            attempt_count: 0,
+        };
+        let writer = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let error = store.deliver_historian_side_channel(&row).unwrap_err();
+        let elapsed = started.elapsed();
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(
+            matches!(error, MemoryStoreError::Serde(_)),
+            "a parse failure is reported as such, got {error:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the parse failed without waiting on the held write lock, took {elapsed:?}"
+        );
+    }
+
+    /// The `pass_trace` history rings drop their oldest entry past 256, so a receipt for an
+    /// evicted entry describes bytes no longer stored; the retained receipts for each ring
+    /// field stay equal to the ring length once the ring is full.
+    #[test]
+    fn retained_history_receipts_are_evicted_with_their_ring_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let fields = ["scheduler_observation", "scheduler_interesting"];
+        let mut version = None;
+        for pass in 0..PASS_TRACE_HISTORY_RING_LEN + 40 {
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            scheduler_observation: Some(&observation),
+                            scheduler_applied_reductions: true,
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+            let (history_len, interesting_len): (i64, i64) = store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT json_array_length(scheduler_history), \
+                                json_array_length(scheduler_interesting_history) \
+                           FROM pass_trace WHERE session_id = 'ses'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap();
+            let counts = field_copy_counts(&store, "ses", &fields);
+            assert_eq!(
+                (
+                    counts["scheduler_observation"],
+                    counts["scheduler_interesting"]
+                ),
+                (history_len, interesting_len),
+                "pass {pass}: one retained receipt per stored ring entry, got {counts:?}"
+            );
+        }
+        let (scans, copies): (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM field_scans), \
+                            (SELECT COUNT(*) FROM scan_owner_copies)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        let ring = i64::try_from(PASS_TRACE_HISTORY_RING_LEN).unwrap();
+        assert!(
+            scans <= 2 * ring + 8 && copies <= 2 * ring + 8,
+            "audit rows stay bounded by the two full rings plus the live pass, got {scans} scans and {copies} copies"
+        );
+    }
+
     fn base_commit<'a>(
         expected: Option<u64>,
         core: &'a CoreState,
@@ -18780,6 +20869,177 @@ mod tests {
                 .pending_count,
             0
         );
+    }
+
+    /// Delivery and retirement share one fenced transaction: a crash injected between them
+    /// rolls both back, the row stays pending, and the next drain delivers it once. Two
+    /// drainers over the same due rows deliver each row once, because the retirement's
+    /// row-still-pending guard fails the second drainer's transaction. Every drain that
+    /// found a due row records the C6 marker before delivering.
+    /// A delivery whose crash lands after the target insert rolls the insert back with the
+    /// retirement, so the row stays pending; a drainer holding rows another drainer
+    /// already retired delivers none of them a second time.
+    #[test]
+    fn a_crash_between_delivery_and_retirement_redelivers_once_under_concurrent_drainers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+            store.fail_next_historian_side_channel_for_test(kind);
+        }
+        let event = HistorianEventCandidate {
+            kind: "trajectory_correction".into(),
+            at_compartment: Some(1),
+            compartment_id: Some(0),
+            fields_json: "{\"detail\":\"fixed\"}".into(),
+            created_at: 123,
+            harness: "module".into(),
+        };
+        let primer = HistorianPrimerCandidate {
+            project_path: "git:proj".into(),
+            session_id: "ses".into(),
+            question: "How is publication recovered?".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            source_start_message_id: "m10".into(),
+            source_end_message_id: "m20".into(),
+            source_message_time: 123,
+            created_at: 123,
+        };
+        let observation = HistorianUserMemoryCandidate {
+            content: "The user prefers explicit recovery semantics.".into(),
+            session_id: "ses".into(),
+            source_compartment_start: Some(10),
+            source_compartment_end: Some(20),
+            created_at: 123,
+        };
+        let expected = store.load("ses").unwrap().row_version;
+        store
+            .publish_historian_chunk(HistorianPublishRequest {
+                session_id: "ses",
+                expected_row_version: expected,
+                expected_revert_epoch: 0,
+                predicate: &publish_predicate(),
+                project_path: "git:proj",
+                compartments: &[publish_compartment()],
+                events: std::slice::from_ref(&event),
+                primer_candidates: std::slice::from_ref(&primer),
+                user_memory_candidates: std::slice::from_ref(&observation),
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                raw_chunk_messages: None,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            3,
+            "the inline drain failed every kind, so three rows are pending"
+        );
+
+        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+            store.crash_next_historian_side_channel_after_insert_for_test(kind);
+        }
+        let crashed = store
+            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .unwrap();
+        assert_eq!(
+            (crashed.attempted, crashed.succeeded, crashed.failed),
+            (3, 0, 3)
+        );
+        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 0);
+        assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 0);
+        assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 0);
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            3,
+            "the crash rolled the inserts back and left every row pending"
+        );
+
+        // A second drainer read its due rows before the first drainer delivered them.
+        let stale: Vec<HistorianSideChannelOutboxRow> = HISTORIAN_SIDE_CHANNEL_KINDS
+            .iter()
+            .flat_map(|kind| {
+                store
+                    .load_due_historian_side_channels("ses", kind, i64::MAX, 32)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(stale.len(), 3);
+        // One delivery called directly retires its row inside its own transaction: the row
+        // is absent as soon as the call returns, before any drain-side cleanup could run,
+        // which the baseline's mark-then-delete would not have shown at this point.
+        let first = &stale[0];
+        assert!(store.deliver_historian_side_channel(first).unwrap());
+        let first_kind_rows: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM historian_side_channel_outbox \
+                     WHERE session_id = 'ses' AND kind = ?1",
+                    params![first.id.kind],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            first_kind_rows, 0,
+            "the delivered {} row is gone before any drain runs",
+            first.id.kind
+        );
+        let drained = store
+            .drain_historian_side_channels("ses", i64::MAX, 32)
+            .unwrap();
+        assert_eq!(
+            (drained.attempted, drained.succeeded, drained.failed),
+            (2, 2, 0)
+        );
+        for row in &stale {
+            assert!(
+                !store.deliver_historian_side_channel(row).unwrap(),
+                "the stale {} row was retired first, so its delivery rolls back",
+                row.id.kind
+            );
+        }
+        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
+        assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 1);
+        assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .historian_side_channel_status("ses")
+                .unwrap()
+                .pending_count,
+            0,
+            "the outbox is empty after the drain"
+        );
+        let outbox_rows: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(outbox_rows, 0, "delivered rows are retired, not marked");
+
+        let markers = store.due_side_channel_markers();
+        for kind in HISTORIAN_SIDE_CHANNEL_KINDS {
+            assert!(
+                markers
+                    .iter()
+                    .any(|marker| marker.kind == kind && marker.pending_rows == 1),
+                "a drain found a due {kind} row before delivering, got {markers:?}"
+            );
+        }
     }
 
     #[test]
@@ -22512,6 +24772,34 @@ mod shadow_tests {
         let prepared = write.transaction_content("content", &fitting).unwrap();
         assert_eq!(prepared.len(), MAX_DURABLE_TEXT_BYTES);
         assert!(prepared.ends_with("password=<REDACTED:password>"));
+    }
+
+    /// Reassignment changes only the selected scans; a scan prepared afterwards keeps the
+    /// default owners because `domain_owners` is not widened.
+    #[test]
+    fn reassigning_a_scan_range_leaves_later_scans_under_the_default_owner() {
+        let mut write = PreparedWrite::new(DurableWriteFamily::CacheState);
+        write.domain_owner("session", "ses", "pass");
+        write.existing_identity("first", "one").unwrap();
+        write.reassign_scans_in(0..1, "session", "ses", "retained");
+        write.existing_identity("second", "two").unwrap();
+        let owner_keys = |scan: &PreparedFieldScan| {
+            scan.owners
+                .iter()
+                .map(|owner| owner.owner_key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(owner_keys(&write.scans[0]), vec!["retained"]);
+        assert_eq!(owner_keys(&write.scans[1]), vec!["pass"]);
+        assert_eq!(
+            write
+                .domain_owners
+                .iter()
+                .map(|owner| owner.owner_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pass"],
+            "the reassigned owner is not a default owner"
+        );
     }
 
     fn apply_state_sync_sections(

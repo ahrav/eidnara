@@ -17,13 +17,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+getrandom = { workspace = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [features]
 # Public seed helpers for sibling crates' tests (the daemon composes over this
 # store and needs to populate it). Gated so the writers never ship in
 # production builds.
-test-support = []
+test-support = ["storage/test-support"]
 
 [dev-dependencies]
 # Self dev-dependency so integration tests see the `test-support` fixtures.

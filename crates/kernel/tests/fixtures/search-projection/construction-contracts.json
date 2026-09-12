@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "identity_contract_version": "search-projection-identity-v2",
+  "identity_contract_version": "search-projection-identity-v3",
   "ticket": "https://github.com/ahrav/eidnara/issues/352",
   "tuple_encoding": {
     "version_byte": 2,
@@ -218,7 +218,9 @@
       "embedding_model",
       "projection_policy_version",
       "identity_contract_version",
-      "limit_manifest_protocol_version"
+      "limit_manifest_protocol_version",
+      "vector_dimension",
+      "generation_epoch"
     ],
     "entry_points": [
       "startup",

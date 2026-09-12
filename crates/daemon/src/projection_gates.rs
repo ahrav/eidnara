@@ -97,18 +97,29 @@ pub enum EntryPoint {
     Startup,
     Reload,
     Dispatch,
+    Explicit,
 }
 
 impl EntryPoint {
-    pub const ALL: [EntryPoint; 3] = [Self::Startup, Self::Reload, Self::Dispatch];
+    pub const ALL: [EntryPoint; 4] = [Self::Startup, Self::Reload, Self::Dispatch, Self::Explicit];
+
+    /// The contract's name for the entry point.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Reload => "reload",
+            Self::Dispatch => "dispatch",
+            Self::Explicit => "explicit",
+        }
+    }
 }
 
+/// The gates a denial names. The capability gate denies through [`Denial::Unsupported`], which names the harness and capability instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
     ClassCoverage,
     Freshness,
     Resource,
-    Capability,
     BothHarness,
 }
 
@@ -127,16 +138,28 @@ pub struct InvalidationIdentity {
 }
 
 impl From<&ProjectionIdentity> for InvalidationIdentity {
+    // Destructured without `..` so a field added to the projection identity is an explicit include-or-exclude decision here rather than a silent exclusion from invalidation.
     fn from(identity: &ProjectionIdentity) -> Self {
+        let ProjectionIdentity {
+            schema_version,
+            kernel_incarnation_id: _,
+            projection_policy_version,
+            identity_contract_version,
+            limit_manifest_protocol_version,
+            embedding_model,
+            tokenizer_fingerprint,
+            vector_dimension,
+            generation_epoch,
+        } = identity;
         Self {
-            schema_version: identity.schema_version,
-            tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
-            embedding_model: identity.embedding_model.clone(),
-            projection_policy_version: identity.projection_policy_version.clone(),
-            identity_contract_version: identity.identity_contract_version.clone(),
-            limit_manifest_protocol_version: identity.limit_manifest_protocol_version.clone(),
-            vector_dimension: identity.vector_dimension,
-            generation_epoch: identity.generation_epoch,
+            schema_version: *schema_version,
+            tokenizer_fingerprint: tokenizer_fingerprint.clone(),
+            embedding_model: embedding_model.clone(),
+            projection_policy_version: projection_policy_version.clone(),
+            identity_contract_version: identity_contract_version.clone(),
+            limit_manifest_protocol_version: limit_manifest_protocol_version.clone(),
+            vector_dimension: *vector_dimension,
+            generation_epoch: *generation_epoch,
         }
     }
 }
@@ -351,11 +374,11 @@ pub struct ResourceEvidence {
     pub decoded_heap_high_water_bytes: u64,
 }
 
-/// One harness's full-path run under one identity.
+/// One harness's full-path run under one identity. A failed run carries no text: the denial names the harness and the campaign record holds the cause (CC11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HarnessRun {
     Passed { identity: InvalidationIdentity },
-    Failed { reason: String },
+    Failed,
 }
 
 /// Everything the gates read, gathered under `identity`.
@@ -363,15 +386,13 @@ pub enum HarnessRun {
 pub struct Evidence {
     pub identity: InvalidationIdentity,
     pub coverage: Option<ProjectionCoverage>,
-    /// The kernel tip when `coverage` was taken.
-    pub kernel_tip: i64,
     pub resource: Option<ResourceEvidence>,
     /// `(harness, capability)` to what the harness proved.
     pub capabilities: BTreeMap<(String, String), CapabilityEvidence>,
     pub harness_runs: BTreeMap<String, HarnessRun>,
 }
 
-/// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes; `Failed` carries the harness's own reason.
+/// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes, never content.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Denial {
     #[error("no manifest is installed")]
@@ -405,8 +426,6 @@ pub enum Denial {
 pub struct Admission {
     pub hook: ProjectionHook,
     pub entry: EntryPoint,
-    pub protocol_version: String,
-    pub identity: InvalidationIdentity,
     pub invalidated: CancellationToken,
 }
 
@@ -459,7 +478,14 @@ impl EvidenceEvaluator {
         hook: ProjectionHook,
         coverage: &ProjectionCoverage,
     ) -> Result<(), Denial> {
-        if InvalidationIdentity::from(&coverage.report.identity) != self.current {
+        // The report carries the projection identity it was read under and the registered generation its counts were taken for; a report for an older generation still names the current identity, so both are bound.
+        let generation = &coverage.report.generation;
+        if InvalidationIdentity::from(&coverage.report.identity) != self.current
+            || generation.embedding_model != self.current.embedding_model
+            || generation.tokenizer_fingerprint != self.current.tokenizer_fingerprint
+            || generation.vector_dimension != self.current.vector_dimension
+            || generation.generation_epoch != self.current.generation_epoch
+        {
             return Err(Denial::EvidenceIdentity);
         }
         for class in hook.classes() {
@@ -478,11 +504,12 @@ impl EvidenceEvaluator {
         Ok(())
     }
 
+    // The tip is the one the coverage packet was judged at, so the lag describes that observation and not a tip read elsewhere.
     fn freshness(&self, coverage: &ProjectionCoverage) -> Result<(), Denial> {
         let max = self.limit("catchup_lag_commits")?;
-        let lag = self
-            .evidence
-            .kernel_tip
+        let lag = coverage
+            .kernel_snapshot
+            .tip
             .checked_sub(coverage.report.checkpoint.checkpoint_commit_seq)
             .ok_or(Denial::Failed(
                 Gate::Freshness,
@@ -547,11 +574,8 @@ impl EvidenceEvaluator {
             match self.evidence.harness_runs.get(harness) {
                 Some(HarnessRun::Passed { identity }) if *identity == self.current => {}
                 Some(HarnessRun::Passed { .. }) => return Err(Denial::EvidenceIdentity),
-                Some(HarnessRun::Failed { reason }) => {
-                    return Err(Denial::Failed(
-                        Gate::BothHarness,
-                        format!("{harness}: {reason}"),
-                    ));
+                Some(HarnessRun::Failed) => {
+                    return Err(Denial::Failed(Gate::BothHarness, harness.to_owned()));
                 }
                 None => return Err(Denial::Missing(Gate::BothHarness)),
             }
@@ -579,12 +603,6 @@ pub struct HookGate {
     state: Mutex<GateState>,
     #[cfg(feature = "test-support")]
     ledger: Mutex<Vec<LedgerEntry>>,
-}
-
-impl Default for HookGate {
-    fn default() -> Self {
-        Self::closed()
-    }
 }
 
 impl HookGate {
@@ -628,7 +646,7 @@ impl HookGate {
             .clone()
     }
 
-    /// Judges every hook in `hooks` at `entry` under one gate state and admits only when all pass. A poisoned gate denies as a closed one does.
+    /// Admits all hooks at `entry` when each judge succeeds under the same gate state. A poisoned gate denies as a closed one does, and so does an empty request.
     ///
     /// # Errors
     ///
@@ -638,6 +656,9 @@ impl HookGate {
         hooks: &[ProjectionHook],
         entry: EntryPoint,
     ) -> Result<Vec<Admission>, Denial> {
+        if hooks.is_empty() {
+            return Err(Denial::NoManifest);
+        }
         let state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
         let verdicts: Vec<Result<Admission, Denial>> = hooks
             .iter()
@@ -648,8 +669,6 @@ impl HookGate {
                 Ok(Admission {
                     hook: *hook,
                     entry,
-                    protocol_version: evaluator.manifest.protocol_version.clone(),
-                    identity: evaluator.current.clone(),
                     invalidated: state.invalidated.clone(),
                 })
             })
