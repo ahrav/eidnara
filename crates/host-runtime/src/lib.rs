@@ -61,9 +61,9 @@ pub use connection_file::{
 #[cfg(feature = "test-support")]
 pub use control::host_status_response_json;
 pub use handler::{
-    BindOutcome, BlockingWorkFailed, HealthReport, HealthStatus, HostHandler, InitError,
-    ManifestSnapshot, OutputBuffer, RequestCtx, RequestOutcome, ResourceDeclaration, RouteClass,
-    RouteHandle, RouteIdentity, RouteTarget, StreamClosed, TargetKind,
+    BindOutcome, BlockingWorkFailed, CancelSignal, HealthReport, HealthStatus, HostHandler,
+    InitError, ManifestSnapshot, OutputBuffer, RequestCtx, RequestOutcome, ResourceDeclaration,
+    RouteClass, RouteHandle, RouteIdentity, RouteTarget, StreamClosed, TargetKind,
 };
 pub use instance::{
     CONNECTION_FILE_NAME, InstanceError, MANAGED_DIR_NAME, RUNTIME_DIR_NAME, data_dir_path,

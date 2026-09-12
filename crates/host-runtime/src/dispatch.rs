@@ -892,11 +892,7 @@ pub async fn dispatch_request<H: HostHandler>(
                 &gen_task,
                 route,
                 corr,
-                Terminal::Error {
-                    code: CODE_CANCELLED.to_owned(),
-                    message: "request cancelled".to_owned(),
-                    retry_after_ms: None,
-                },
+                cancelled_terminal(),
             )
             .await;
             remove_pending(&gen_task, key);
@@ -958,11 +954,7 @@ pub async fn dispatch_request<H: HostHandler>(
                     &gen_task,
                     route,
                     corr,
-                    Terminal::Error {
-                        code: CODE_CANCELLED.to_owned(),
-                        message: "request cancelled".to_owned(),
-                        retry_after_ms: None,
-                    },
+                    cancelled_terminal(),
                 )
                 .await;
             }
@@ -1045,6 +1037,14 @@ fn remove_pending(generation: &GenerationCore, key: PendingKey) {
         .lock()
         .expect("pending lock")
         .remove(&key);
+}
+
+fn cancelled_terminal() -> Terminal {
+    Terminal::Error {
+        code: CODE_CANCELLED.to_owned(),
+        message: "request cancelled".to_owned(),
+        retry_after_ms: None,
+    }
 }
 
 pub async fn open_route<H: HostHandler>(
@@ -1236,7 +1236,7 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
             aborts,
             tracker,
         } => {
-            let keys: Vec<PendingKey> = generation
+            let entries: Vec<(PendingKey, Arc<Settlement>)> = generation
                 .pending
                 .lock()
                 .expect("pending lock")
@@ -1244,7 +1244,7 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                 .filter(|(key, _)| key.0 == handle.channel && key.1 == handle.epoch)
                 .map(|(key, entry)| {
                     entry.cancel.cancel();
-                    *key
+                    (*key, Arc::clone(&entry.settlement))
                 })
                 .collect();
 
@@ -1271,11 +1271,27 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                     );
                     return false;
                 }
+                // An aborted dispatch task never reaches its own `settle`; `settle` is
+                // first-terminal-wins, so a request settled before the abort is left alone.
+                for (key, settlement) in &entries {
+                    if settlement.is_settled() {
+                        continue;
+                    }
+                    settle(
+                        settlement,
+                        &shared.egress_budget,
+                        &generation,
+                        handle,
+                        key.2,
+                        cancelled_terminal(),
+                    )
+                    .await;
+                }
             }
             {
                 let mut pending = generation.pending.lock().expect("pending lock");
-                for key in keys {
-                    pending.remove(&key);
+                for (key, _) in &entries {
+                    pending.remove(key);
                 }
             }
             true

@@ -56,8 +56,8 @@ gap, not proof of liveness failure. No witness runs here; checks are unaudited.
   is BLOCKED. Default-production reachability describes the existing callback
   lifecycle, whose witness must extend to owned physical work if execution moves.
 
-[start]: ../../../../crates/host-runtime/src/dispatch.rs#L857-L934
-[cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L937-L954
-[close]: ../../../../crates/host-runtime/src/dispatch.rs#L1226-L1268
+[start]: ../../../../crates/host-runtime/src/dispatch.rs#L857-L931
+[cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L944-L960
+[close]: ../../../../crates/host-runtime/src/dispatch.rs#L1227-L1298
 [test]: ../../../../crates/host-runtime/tests/dispatch.rs#L356-L449
-[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L1110-L1166
+[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L1156-L1212

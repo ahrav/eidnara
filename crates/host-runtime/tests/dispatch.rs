@@ -897,6 +897,52 @@ async fn blocking_work_held_past_the_route_close_budget_is_fatal_not_cleaned_up(
     );
 }
 
+#[tokio::test]
+async fn blocking_work_released_after_the_dispatch_abort_still_settles_cancelled() {
+    let host = TestHost::start_with(|config| {
+        config.timing.route_close_budget = Duration::from_millis(400);
+    })
+    .await;
+    let release = ReleaseOnDrop(&host);
+    let (mut client, channel, epoch, corr) =
+        start_held_blocking_work(&host, "close-late", "blocking_hold", 1).await;
+
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .expect("route goodbye");
+    // `release` keeps the blocking work held after the route-close budget aborts dispatch.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        host.handler.route_gones().is_empty(),
+        "route-gone ran while the blocking work was still held"
+    );
+    assert_eq!(host.handler.blocking_charges_released(), 0);
+    drop(release);
+
+    let (_, frame) = client
+        .frames_until_corr(corr, BUDGET)
+        .await
+        .expect("terminal for the request whose dispatch task was aborted");
+    assert_eq!(frame.error_code(), "cancelled");
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let gones = host.handler.route_gones();
+        if gones.iter().any(|handle| handle.channel == channel) {
+            assert_eq!(
+                gones.iter().filter(|h| h.channel == channel).count(),
+                1,
+                "route-gone must fire once"
+            );
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(host.handler.blocking_charges_released(), 1);
+    host.shutdown_gracefully().await;
+}
+
 /// A panic inside the blocking work reports through the request as the handler's internal
 /// error and releases the charge the closure held; the process-level redaction is checked by
 /// the subprocess test.

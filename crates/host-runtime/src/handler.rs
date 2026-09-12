@@ -481,6 +481,33 @@ impl std::fmt::Display for BlockingWorkFailed {
 
 impl std::error::Error for BlockingWorkFailed {}
 
+/// Hides the `CancellationToken` methods that can cancel or derive request tokens, so a
+/// handler cannot settle its own request as cancelled.
+///
+/// ```compile_fail
+/// fn no_cancel(signal: host_runtime::CancelSignal) { signal.cancel(); }
+/// ```
+///
+/// ```compile_fail
+/// fn no_guard(signal: host_runtime::CancelSignal) { let _ = signal.drop_guard(); }
+/// ```
+#[derive(Clone, Debug)]
+pub struct CancelSignal {
+    token: CancellationToken,
+}
+
+impl CancelSignal {
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// The future resolves when the host requests cancellation; it borrows nothing, so a task
+    /// that outlives the handler can hold it.
+    pub fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {
+        self.token.clone().cancelled_owned()
+    }
+}
+
 impl RequestCtx {
     /// The future resolves when the host requests cancellation.
     /// The request may still complete because the host's first-terminal-wins arbiter selects the outcome.
@@ -494,9 +521,12 @@ impl RequestCtx {
 
     /// A handle on this request's cancellation that owns no borrow, for work that runs where
     /// `cancelled()` cannot be awaited: a blocking closure checks it at its safe points, since
-    /// the host cannot stop a thread that has started.
-    pub fn cancel_token(&self) -> CancellationToken {
-        self.cancel.clone()
+    /// the host cannot stop a thread that has started. The handle observes only; the host is
+    /// the sole party that cancels a request.
+    pub fn cancel_signal(&self) -> CancelSignal {
+        CancelSignal {
+            token: self.cancel.clone(),
+        }
     }
 
     /// Reserves capacity and its resident-byte charge before allocating output.
@@ -552,7 +582,7 @@ impl RequestCtx {
     ///
     /// The work is submitted when this is called, on the calling runtime, not when the future
     /// is first polled; calling it off the runtime panics. Nothing can stop the thread once it
-    /// has started, so `work` must terminate on its own or observe [`cancel_token`] at its
+    /// has started, so `work` must terminate on its own or observe [`cancel_signal`] at its
     /// safe points, and work held past the route-close budget follows the host's fatal path
     /// rather than cleanup. The handler task is the caller this is built for: work entered
     /// from a task that outlives it, after the cancel arm has waited on the request ledger,
@@ -561,7 +591,7 @@ impl RequestCtx {
     /// The refusal reads the fence before entering the work, so an offer that races the
     /// fence's own drain by a few instructions can still slip past it.
     ///
-    /// [`cancel_token`]: RequestCtx::cancel_token
+    /// [`cancel_signal`]: RequestCtx::cancel_signal
     pub fn run_blocking<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,

@@ -70,6 +70,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [`route_close_waits_for_the_request_blocking_work`][t-close-work] | Goodbye during held blocking work runs no route-gone until the work is released, then the `cancelled` terminal, exactly one route-gone, and one release. | unaudited |
 | [`route_close_waits_for_blocking_work_the_handler_did_not_await`][t-detached-work] | A handler answers without awaiting its work; route-gone still waits for the work, and the charge releases once. | unaudited |
 | [`blocking_work_held_past_the_route_close_budget_is_fatal_not_cleaned_up`][t-fatal-work] | Work held past a shortened route-close budget produces no route-gone and a lifecycle-fatal shutdown. | unaudited |
+| [`blocking_work_released_after_the_dispatch_abort_still_settles_cancelled`][t-late-work] | Work released after the close aborted the dispatch task, inside the post-abort budget, still yields the `cancelled` terminal, one route-gone, one release, and a graceful shutdown. | unaudited |
 | [`a_blocking_work_panic_settles_as_one_internal_error`][t-panic-work] | A panic inside `run_blocking` settles as one `internal_error` terminal and releases the held charge once. | unaudited |
 | [`blocking_work_panic_payload_is_redacted_from_process_stderr`][t-stderr-work] | A child process panicking inside `run_blocking` writes the fixed diagnostic and not the payload to stderr. | unaudited |
 | [Output reservation][output-reservation] | Concurrent output is reserved before allocation. | unaudited |
@@ -289,8 +290,8 @@ that no related check exists anywhere in the repository.
 [row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
 [byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L823-L855
-[handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L873-L934
-[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
+[handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L873-L931
+[close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1234-L1298
 [reservations]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L513-L550
 [saturation-test]: ../../../crates/host-runtime/tests/dispatch.rs#L294
 [cancel-test]: ../../../crates/host-runtime/tests/dispatch.rs#L357
@@ -347,19 +348,20 @@ that no related check exists anywhere in the repository.
 [parse-admission]: ../../../crates/daemon/src/lib.rs#L11805-L11826
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
-[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1110-L1166
+[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1156-L1212
 [stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L503
 [handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725-L776
 [t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781-L825
 [t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830-L866
 [t-fatal-work]: ../../../crates/host-runtime/tests/dispatch.rs#L871-L898
-[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L904-L938
+[t-late-work]: ../../../crates/host-runtime/tests/dispatch.rs#L901-L944
+[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L950-L984
 [t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610-L612
-[output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L988
-[egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1064
-[reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1248
-[general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1345
+[output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L1034
+[egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1110
+[reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1294
+[general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1391
 [request-cap]: ../../../crates/daemon/src/lib.rs#L18568
 [parse-nodes]: ../../../crates/daemon/src/lib.rs#L18628
 [parse-copies]: ../../../crates/daemon/src/lib.rs#L18647
