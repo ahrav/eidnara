@@ -754,9 +754,10 @@ mod tests {
     };
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
+    use std::sync::Arc;
 
-    fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> IngressMessage {
-        IngressMessage {
+    fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
+        Arc::new(IngressMessage {
             mid: mid.to_string(),
             ordinal,
             ck: WireMessage::from_parts(
@@ -766,10 +767,10 @@ mod tests {
                 ProviderExtras::new(),
                 HarnessMeta::default(),
             ),
-        }
+        })
     }
 
-    fn text(mid: &str, ordinal: u64, value: &str) -> IngressMessage {
+    fn text(mid: &str, ordinal: u64, value: &str) -> Arc<IngressMessage> {
         message(
             mid,
             ordinal,
@@ -1029,7 +1030,7 @@ mod tests {
         )
     }
 
-    fn fixture_message(input: &HygieneFixtureMessage) -> IngressMessage {
+    fn fixture_message(input: &HygieneFixtureMessage) -> Arc<IngressMessage> {
         let blocks = input
             .blocks
             .iter()
@@ -1073,7 +1074,7 @@ mod tests {
             })
             .map(WireBlock::bare)
             .collect();
-        IngressMessage {
+        Arc::new(IngressMessage {
             mid: input.mid.clone(),
             ordinal: input.ordinal,
             ck: WireMessage::from_parts(
@@ -1086,7 +1087,7 @@ mod tests {
                     ..HarnessMeta::default()
                 },
             ),
-        }
+        })
     }
 
     fn fixture_tag(input: &HygieneFixtureTag) -> TagRow {
@@ -1194,10 +1195,11 @@ mod tests {
             &HashSet::new(),
         );
         let mut reasoning_mutant = base.clone();
-        *reasoning_mutant[1].ck.content_mut()[0].kind_mut() = BlockKind::Reasoning {
-            text: "different private".repeat(20_000),
-            signature: Some("different signature".repeat(2_000)),
-        };
+        *Arc::make_mut(&mut reasoning_mutant[1]).ck.content_mut()[0].kind_mut() =
+            BlockKind::Reasoning {
+                text: "different private".repeat(20_000),
+                signature: Some("different signature".repeat(2_000)),
+            };
         let reasoning_measured = measure_tail_hygiene(
             &project_messages(&reasoning_mutant).unwrap(),
             &CoreState::empty(),
