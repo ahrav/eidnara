@@ -2477,8 +2477,8 @@ evaluation of this area and its disposition are recorded in
 [hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L536-L554
 [hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L555-L565
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
-[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L267-L307
-[sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L283-L305
+[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L272-L312
+[sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
 [segment-served]: ../../../../crates/daemon/src/dispatch.rs#L50-L72
@@ -2697,7 +2697,7 @@ evaluation of this area and its disposition are recorded in
 [soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6315
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L23721
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L23973
-[sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
+[sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [native-sharing]: ../../../../crates/daemon/src/lib.rs#L20638
 [native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20857
 [native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L20968

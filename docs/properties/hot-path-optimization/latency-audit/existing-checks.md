@@ -405,7 +405,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-native-reject]: ../../../../crates/daemon/src/lib.rs#L22014
 [t-vacuity]: ../../../../crates/daemon/src/lib.rs#L21943
 [t-dup]: ../../../../crates/daemon/src/lib.rs#L22531
-[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2078
+[t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22143
 [t-poison]: ../../../../crates/daemon/src/transform.rs#L22212
 [t-interleave]: ../../../../crates/daemon/src/transform.rs#L22245

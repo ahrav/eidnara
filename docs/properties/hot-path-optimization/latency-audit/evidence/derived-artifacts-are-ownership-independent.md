@@ -152,10 +152,12 @@ native implementation.
   ingress chunks or the full request snapshot. The request wire decoder also
   owns `Arc<Value>` values. JSON fields and serialization remain unchanged.
 - [Shared decode][shared-decode] borrows parts and retains each envelope in
-  `HarnessMessageMeta::raw` through an `Arc` clone. The value-slice decoder
-  keeps its entry interface and delegates to that same decoder. Full-native
-  encoding reads the shared request values without materializing a value
-  array. Pi adapts to the common sidecar field without changing its output.
+  `HarnessMessageMeta::raw` through an `Arc` clone. It is the only compiled
+  production decoder; the value-slice adapters that wrap owned fixtures in
+  fresh `Arc`s are test-only, so no shipped path can reintroduce that copy.
+  Full-native encoding reads the shared request values without materializing
+  a value array. Pi adapts to the common sidecar field without changing its
+  output.
 - [Ingress accounting][shared-ingress] retains the value-equality test when
   sharing an encoded chunk. An unequal encoded output cannot become the raw
   ingress prefix. Request accounting uses request allocation sizes, not the
@@ -239,7 +241,7 @@ controller rerun after these edits; earlier execution evidence above remains
 historical.
 
 [shared-expansion]: ../../../../../crates/daemon/src/lib.rs#L4157
-[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L56
+[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
 [shared-ingress]: ../../../../../crates/daemon/src/lib.rs#L13028-L13080
 [shared-replay-check]: ../../../../../crates/daemon/src/lib.rs#L20638
 [shared-ingress-check]: ../../../../../crates/daemon/src/lib.rs#L20857
