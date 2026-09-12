@@ -440,7 +440,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`preserved_json_identities_do_not_exempt_integrity_fields_credential_names_or_nested_values`][t-preserved] | identity preservation limited to structural scalar names | unaudited |
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | commit redacts core payload, preserves legacy ids, refuses integrity secret in meta | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | new-versus-existing session decided inside the fenced transaction | unaudited |
-| [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` pinned on open and re-pinned by the first fenced write after a maintenance callback | unaudited |
+| [`a_read_callback_cannot_lower_fence_durability`][t-sync] | `synchronous=FULL` pinned on open and re-pinned by the first fenced write after a maintenance callback | unaudited |
 
 None found:
 
@@ -641,4 +641,4 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15166
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15309
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L4097
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L4131-L4196

@@ -365,7 +365,7 @@ that no related check exists anywhere in the repository.
 [upload-discard]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1397
 [reentry-guard]: ../../../crates/storage/src/lib.rs#L240-L277
 [fenced-guard]: ../../../crates/storage/src/lib.rs#L370-L434
-[checkpoint-test]: ../../../crates/storage/src/lib.rs#L5538
+[checkpoint-test]: ../../../crates/storage/src/lib.rs#L4437
 [persist-test]: ../../../crates/storage/src/lib.rs#L3333
 [read-write-test]: ../../../crates/storage/src/lib.rs#L4084
 [maintenance-test]: ../../../crates/storage/src/lib.rs#L4437
@@ -373,7 +373,7 @@ that no related check exists anywhere in the repository.
 [stale-precheck]: ../../../crates/storage/src/lib.rs#L2924
 [negative-fence]: ../../../crates/storage/src/lib.rs#L5631
 [handover-test]: ../../../crates/storage/src/lib.rs#L2924
-[equal-epoch]: ../../../crates/storage/src/lib.rs#L2924
+[equal-epoch]: ../../../crates/storage/src/lib.rs#L3754
 [core-branches]: ../../../crates/cache-stability/src/lib.rs#L221-L287
 [soft-producer]: ../../../crates/daemon/src/transform.rs#L4455-L4507
 [newest-tier]: ../../../crates/daemon/src/decay_render.rs#L384
