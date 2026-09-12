@@ -24,6 +24,15 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 pub const CACHE_KIB: u32 = 8 * 1024;
 /// Pages SQLite may hold in memory for one transient index or sort.
 const TEMP_STORE_MEMORY: &str = "MEMORY";
+/// The suffixes SQLite appends to a database's whole file name for its write-ahead log, shared-memory index, and rollback journal.
+pub const JOURNAL_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// `path` with `suffix` appended to its whole file name, as SQLite names a database's sidecars; `Path::with_extension` would replace the extension instead.
+pub fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
 
 /// What the opened connection was verified to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +235,28 @@ impl SearchProjection {
         self.store
             .with_conn_unfenced(|conn| conn.pragma_update(None, pragma, value))
             .expect("pragma update");
+    }
+
+    /// Closes the connection and returns the path with the database lease still held, so nothing else opens the file until the lease is dropped.
+    pub fn close(self) -> (PathBuf, Option<lease::HeldFileLease>) {
+        let SearchProjection { store, path, .. } = self;
+        (path, store.close())
+    }
+
+    /// Runs `PRAGMA wal_checkpoint(TRUNCATE)` outside any transaction and returns SQLite's `(busy, wal_frames, checkpointed_frames)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] when the connection is unavailable or the pragma fails; [`StoreError::Deadline`] inside it when `deadline` passed before the checkpoint returned.
+    pub fn checkpoint_truncate(
+        &self,
+        deadline: Instant,
+    ) -> Result<(i64, i64, i64), SearchProjectionError> {
+        Ok(self.store.with_conn_unfenced_within(deadline, |conn| {
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+        })?)
     }
 
     /// Reads the connection state and refuses anything but a crash-safe,

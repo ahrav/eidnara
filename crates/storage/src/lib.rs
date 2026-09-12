@@ -219,6 +219,13 @@ mod sqlite_backend {
             self.epoch
         }
 
+        /// Closes the connection and keeps the database lease. While the returned lease is held, no other store can open the file, so a closed database stays exactly as the close left it.
+        pub fn close(self) -> Option<HeldFileLease> {
+            let SqliteStore { conn, _lease, .. } = self;
+            drop(conn);
+            _lease
+        }
+
         /// Construct a store over an open connection without acquiring a lease.
         ///
         /// Tests use this to model stale and replacement connections at different
@@ -410,6 +417,30 @@ mod sqlite_backend {
                 gate: &self.gate,
             };
             f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
+        }
+
+        /// Limits the connection-lock wait and SQLite's busy wait of one unfenced callback to
+        /// `deadline`. The connection lock is polled until `deadline`; the busy timeout is set to
+        /// the remaining time for `f` and restored to the standing busy timeout afterward.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline`, when
+        /// no time remains before `f` runs, or when the statement ends with `SQLITE_BUSY` or
+        /// `SQLITE_LOCKED`; [`StoreError::Backend`] for any other failure of `f`.
+        pub fn with_conn_unfenced_within<T>(
+            &self,
+            deadline: Instant,
+            f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            let _exit = MaintenanceExit {
+                conn: &guard,
+                gate: &self.gate,
+            };
+            with_busy_timeout_until(&guard, deadline, |conn| {
+                f(&MaintenanceConn::new(conn)).map_err(deadline_on_lock_wait)
+            })
         }
 
         /// Run a closure inside an epoch-fenced write transaction. The write is
@@ -1727,7 +1758,7 @@ mod sqlite_backend {
     /// `-wal`, and creates no sidecar. Every byte outside the unreserved ASCII set is
     /// percent-encoded, so `%`, `?`, `#`, spaces, and each byte of a non-ASCII name reach
     /// SQLite's decoder as the bytes the filesystem holds.
-    pub(crate) fn immutable_uri(path: &Path) -> String {
+    pub fn immutable_uri(path: &Path) -> String {
         let mut out = String::from("file:");
         for byte in path.as_os_str().as_encoded_bytes() {
             match byte {
@@ -2748,7 +2779,7 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    delete_sqlite_family, open_sqlite, schema_inventory,
+    delete_sqlite_family, immutable_uri, open_sqlite, schema_inventory,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -4556,6 +4587,26 @@ mod tests {
         assert_eq!(
             after_second, 2,
             "the first fenced write after each maintenance callback re-pins synchronous=FULL"
+        );
+
+        // The bounded maintenance variant exits maintenance the same way.
+        store
+            .with_conn_unfenced_within(Instant::now() + Duration::from_secs(5), |c| {
+                c.pragma_update(None, "synchronous", "OFF")
+            })
+            .expect("bounded maintenance may lower it");
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('bounded', 'v')", [])
+                    .map(|_| ())
+            })
+            .expect("fenced write after bounded maintenance");
+        let after_bounded: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
+            .expect("read synchronous");
+        assert_eq!(
+            after_bounded, 2,
+            "the first fenced write after a bounded maintenance callback re-pins synchronous=FULL"
         );
 
         store

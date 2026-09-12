@@ -571,6 +571,21 @@ impl GenerationStore {
         meta: &StageMeta,
         protected: &BTreeSet<String>,
     ) -> Result<String, GenerationError> {
+        let digest = self.stage(sources, meta, protected)?;
+        self.replace_profile(&digest)?;
+        self.verify_named_identity()?;
+        Ok(digest)
+    }
+
+    /// Stages and publishes the generation directory under its digest without touching the current profile. Nothing selects the staged generation, and `prune` reclaims it unless the caller names its digest in `protected`; a repeated staging of the same bytes finds the valid occupant and publishes nothing twice. The caller holds `transaction.lock`, as for every mutation of the store.
+    ///
+    /// The method returns `InsufficientStorage`, `UnsupportedStateSchema`, and `NativePayloadInvalid` as [`Self::stage_and_promote`] does.
+    pub fn stage(
+        &self,
+        sources: &[SourceSpec],
+        meta: &StageMeta,
+        protected: &BTreeSet<String>,
+    ) -> Result<String, GenerationError> {
         // A quarantined profile blocks mutation because its references are uncertain.
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
@@ -611,7 +626,7 @@ impl GenerationStore {
             let _ = remove_tree(&self.generations_fd, &temp_name);
             return Err(err);
         }
-        self.replace_profile(&digest)?;
+        // A tree renamed away during the copy holds the published object detached from the named store; the digest must not be reported for it.
         self.verify_named_identity()?;
         Ok(digest)
     }
@@ -1387,6 +1402,12 @@ mod tests {
         }];
         assert!(matches!(
             store.stage_and_promote(&successor, &meta(), &BTreeSet::new()),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "lifecycle store was replaced under the mutator"
+            })
+        ));
+        assert!(matches!(
+            store.stage(&successor, &meta(), &BTreeSet::new()),
             Err(GenerationError::NativePayloadInvalid {
                 detail: "lifecycle store was replaced under the mutator"
             })
