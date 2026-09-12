@@ -312,6 +312,12 @@ impl Corpus {
 
     /// Three domains (the memory domain, another, and one merely named after it), one project scope, the search consumer, and the claim consumer.
     fn seed(&self) {
+        self.seed_kernel();
+        ClaimMaterializer::register(&self.kernel, NOW).unwrap();
+    }
+
+    /// Omits the claim consumer registration so callers can create decisions before it.
+    fn seed_kernel(&self) {
         self.kernel
             .commit(intent("seed"), |envelope| {
                 for (domain, name) in [
@@ -348,7 +354,6 @@ impl Corpus {
                 Ok(String::new())
             })
             .unwrap();
-        ClaimMaterializer::register(&self.kernel, NOW).unwrap();
     }
 
     /// Inserts one admitted decision.
@@ -1172,6 +1177,124 @@ fn domain_name_is_not_an_input() {
     .unwrap()
     .occurrence_id;
     assert!(!recomputed_ids.contains(&with_name));
+}
+
+/// Revoking an approval retires its published descriptors.
+#[test]
+fn approval_revocation_retires_descriptors() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "approval",
+        MEMORY,
+        "adr_accepted",
+        1,
+        "Accept the ADR.",
+        "It was reviewed.",
+    ));
+    let report = corpus.materialize();
+    assert_eq!(report.published, 2, "{report:?}");
+    corpus
+        .kernel
+        .commit(intent("revoke:approval"), |envelope| {
+            envelope.revoke_approval("approval", "the ADR was withdrawn")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (0, 2), "{report:?}");
+    assert!(corpus.inventory().is_empty());
+    assert_eq!(corpus.checkpoint(), Some(report.target));
+}
+
+/// The kernel accepts a decision object id the source-identity encoding refuses. Such a decision is an exclusion on insert and a no-op on retire; the episode reaches its target both times.
+#[test]
+fn malformed_object_id_is_excluded_on_insert_and_ignored_on_retire() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let long = "x".repeat(600);
+    let seeds = [
+        Seed::scoped(
+            "tab\tbed",
+            MEMORY,
+            "PROJECT_RULES",
+            1,
+            "Control character.",
+            "In the id.",
+        ),
+        Seed {
+            object: &long,
+            domain: MEMORY,
+            kind: "PROJECT_RULES",
+            revision: 1,
+            summary: "Over the length bound.",
+            rationale: "",
+            scoped: true,
+        },
+    ];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let report = corpus.materialize();
+    assert_eq!(report.published, 0, "{report:?}");
+    assert_eq!(
+        report.exclusions,
+        seeds
+            .iter()
+            .map(|seed| (seed.object.to_string(), ClaimExclusion::MalformedIdentity))
+            .collect::<Vec<_>>()
+    );
+    assert!(corpus.inventory().is_empty());
+    for seed in seeds {
+        corpus.retire(seed.object);
+    }
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (0, 0), "{report:?}");
+    assert_eq!(corpus.checkpoint(), Some(report.target));
+}
+
+/// Registration acknowledges through its own commit: decisions committed before it are not walked, a decision after it is, and a repeated registration replays without moving the checkpoint back or forward.
+#[test]
+fn registration_starts_after_its_own_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    corpus.decide(Seed::scoped(
+        "before",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        "Committed before registration.",
+        "",
+    ));
+    ClaimMaterializer::register(&corpus.kernel, NOW).unwrap();
+    let registered_at = corpus.kernel.tip().unwrap();
+    assert_eq!(corpus.checkpoint(), Some(registered_at));
+    let report = corpus.materialize();
+    assert_eq!(
+        (report.published, report.commits_consumed),
+        (0, 0),
+        "{report:?}"
+    );
+    assert!(corpus.inventory().is_empty());
+
+    corpus.decide(Seed::scoped(
+        "after",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        "Committed after registration.",
+        "",
+    ));
+    let report = corpus.materialize();
+    assert_eq!(report.published, 2, "{report:?}");
+    let advanced = corpus.checkpoint();
+    assert!(advanced > Some(registered_at));
+
+    ClaimMaterializer::register(&corpus.kernel, NOW + 1).unwrap();
+    assert_eq!(corpus.checkpoint(), advanced);
 }
 
 /// A subject and decision naming different objects, or a non-decision registry row, are refused rather than mapped.

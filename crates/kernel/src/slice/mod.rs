@@ -8,7 +8,10 @@ use super::Sensitivity;
 
 pub use alignment::{ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot};
 pub use read::{DecisionRow, ObservationRow, SliceSnapshot};
-pub use write::DECISION_CHANGE_KINDS;
+pub use write::{
+    APPROVAL_REVOKE_KIND, DECISION_CHANGE_KINDS, DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND,
+    DECISION_INSERT_KIND, DECISION_RETIRE_KIND,
+};
 
 pub(crate) use alignment::{rebuild_alignment_tx, rebuild_alignment_with_writer};
 

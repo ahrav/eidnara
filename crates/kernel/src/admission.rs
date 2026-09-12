@@ -10,7 +10,7 @@ use super::envelope::{
 use super::object_write;
 use super::redaction::{identity, record, redact};
 use super::scope::Dimension;
-use super::slice::{DecisionSpec, DecisionWriteOutcome};
+use super::slice::{APPROVAL_REVOKE_KIND, DecisionSpec, DecisionWriteOutcome};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 use crate::CachedSql;
 use crate::current_time_ms;
@@ -1328,7 +1328,7 @@ impl Envelope<'_> {
         });
         self.changes.push(PendingChange {
             object: invalidated,
-            kind: "approval_revoke",
+            kind: APPROVAL_REVOKE_KIND,
             replaced_object_id: None,
             redactions: vec![("reason".to_string(), revocation_reason)],
             audit: Some(revocation_audit),

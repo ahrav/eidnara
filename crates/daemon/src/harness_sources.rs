@@ -406,6 +406,8 @@ pub enum PublishError {
 
 const PRODUCER: &str = "eidnara-daemon/harness-sources";
 const CAUSE: &str = "source publication";
+/// Leads every request-digest input. The digest is persisted in the descriptor receipt under a key that does not change with it, so a layout change is a new tag, made deliberately, and never a silent reinterpretation of stored receipts.
+const REQUEST_DIGEST_FORMAT: &str = "source-request.v1";
 
 /// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
 pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
@@ -713,6 +715,7 @@ impl SourcePublisher<'_> {
     fn request_digest(&self, unit: &SourceUnit) -> String {
         let mut bytes = Vec::new();
         for part in [
+            REQUEST_DIGEST_FORMAT,
             unit.text.as_str(),
             self.domain_id,
             self.scope_id.unwrap_or_default(),

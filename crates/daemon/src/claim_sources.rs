@@ -2,14 +2,18 @@
 //!
 //! Identity is the decision's object id and canonical source revision. The memory domain is selected by its stable id, never its name.
 //!
-//! The materializer consumes the kernel commit log as a registered outbox consumer: the next episode resumes from the durable checkpoint, publication replays by receipt, and retiring an already-retired descriptor is a no-op. Correction and retirement retire the predecessor's descriptors before the successor's are published, so no snapshot serves both revisions; the retirements reach the projection as tombstones through the shared export. The checkpoint advances only after every decision of a page has been published or retired.
+//! The materializer consumes the kernel commit log as a registered outbox consumer: the next episode resumes from the durable checkpoint, publication replays by receipt, and retiring an already-retired descriptor is a no-op. Correction, retirement, and approval revocation retire the predecessor's descriptors before any successor's are published, so no snapshot serves both revisions; the retirements reach the projection as tombstones through the shared export. The checkpoint advances only after every decision of a page has been published or retired.
+//!
+//! A descriptor's admission records the decision's admission classes as they stood in the publishing transaction, with the decision as `trigger_object_id`. The materializer consumes decision registry rows only; an admission-only disposition of the decision (quarantine, rejection, contradiction, staleness) is recorded on the decision and not on its descriptors, so a reader that must honor it resolves eligibility through the decision the descriptor names.
 
 use kernel::source_identity::{
-    Occurrence, OccurrenceClass, encode_preserving_span, identity_digest,
+    Occurrence, OccurrenceClass, OccurrenceRefusal, encode_preserving_span, identity_digest,
 };
 use kernel::{
-    CommitIntent, CommitPageBounds, DecisionRow, KernelError, KernelStore, ObjectRow,
-    ProviderEgress, Sensitivity, descriptor_object_id,
+    APPROVAL_REVOKE_KIND, CommitIntent, CommitPageBounds, DECISION_CHANGE_KINDS,
+    DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND, DECISION_INSERT_KIND, DECISION_RETIRE_KIND,
+    DecisionRow, KernelError, KernelStore, ObjectRow, ProviderEgress, Sensitivity,
+    descriptor_object_id,
 };
 use serde::Deserialize;
 
@@ -24,6 +28,11 @@ use crate::memory_render::is_positive_memory_category;
 pub const CLAIM_CONSUMER: &str = "claim-sources";
 
 const PRODUCER: &str = "eidnara-daemon/claim-sources";
+
+const _: () = assert!(
+    DECISION_CHANGE_KINDS.len() == 5,
+    "apply_change names a disposition for each decision change kind"
+);
 
 /// The registry facts of one decision that its occurrences are keyed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +70,8 @@ pub enum ClaimExclusion {
     NegativeCategory,
     /// A decision without a project scope serves no project; publishing it would retain bytes and queue work no read can reach.
     Unscoped,
+    /// The object id is not a well-formed source-identity value, so the kernel refuses every descriptor keyed by it; none exists to publish or retire.
+    MalformedIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -106,6 +117,10 @@ pub fn claim_units(
         return Err(KernelError::InvalidInput);
     }
     let mut out = ClaimUnits::default();
+    if descriptor_ids(subject).is_err() {
+        out.exclusions.push(ClaimExclusion::MalformedIdentity);
+        return Ok(out);
+    }
     if decision.scope_id.is_none() {
         out.exclusions.push(ClaimExclusion::Unscoped);
         return Ok(out);
@@ -138,7 +153,11 @@ pub fn claim_units(
 }
 
 /// Every descriptor object id the subject could have published, whether or not each representation existed, from the kernel's own identity encoding.
-fn descriptor_ids(subject: &ClaimSubject) -> Vec<String> {
+///
+/// # Errors
+///
+/// Returns the refusal when `subject.object_id` is not a well-formed identity value.
+fn descriptor_ids(subject: &ClaimSubject) -> Result<Vec<String>, OccurrenceRefusal> {
     let revision = subject.revision.to_string();
     REPRESENTATIONS
         .iter()
@@ -149,9 +168,8 @@ fn descriptor_ids(subject: &ClaimSubject) -> Vec<String> {
                 revision: &revision,
                 representation: representation.as_str(),
                 span: None,
-            })
-            .expect("a registry object id and revision are well-formed identity values");
-            descriptor_object_id(&encoded.lineage_id, &revision)
+            })?;
+            Ok(descriptor_object_id(&encoded.lineage_id, &revision))
         })
         .collect()
 }
@@ -276,13 +294,13 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// Registers the consumer at the kernel tip. A repeated call replays the receipt.
+    /// Registers the consumer and acknowledges through the registration commit, so the first episode starts after every commit that preceded registration; decisions committed before it are not materialized. A repeated call replays the receipt and acknowledges nothing the checkpoint has already passed.
     ///
     /// # Errors
     ///
-    /// Returns the kernel's error when the registration commit fails.
+    /// Returns the kernel's error when the registration commit or its acknowledgement fails.
     pub fn register(kernel: &KernelStore, now: i64) -> Result<(), KernelError> {
-        kernel.commit(
+        let receipt = kernel.commit(
             CommitIntent {
                 producer: PRODUCER.to_owned(),
                 operation_key: format!("register:{CLAIM_CONSUMER}"),
@@ -295,6 +313,13 @@ impl<'a> ClaimMaterializer<'a> {
                 Ok(String::new())
             },
         )?;
+        // The kernel registers a consumer at the oldest retained outbox commit. A replayed receipt carries the first registration's commit, so the guard keeps a later call from moving an advanced checkpoint.
+        let checkpoint = kernel
+            .outbox_consumer_checkpoint(CLAIM_CONSUMER)?
+            .ok_or(KernelError::NotFound)?;
+        if checkpoint < receipt.commit_seq {
+            kernel.acknowledge_outbox(CLAIM_CONSUMER, receipt.commit_seq, now)?;
+        }
         Ok(())
     }
 
@@ -389,7 +414,7 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// An event append changes no text and produces nothing; every other kind must be one this materializer names.
+    /// An event append changes no text and produces nothing; an approval revocation invalidates the decision and retires like a retirement; every other kind must be one this materializer names.
     fn apply_change(
         &self,
         row: &kernel::OutboxEntry,
@@ -404,7 +429,7 @@ impl<'a> ClaimMaterializer<'a> {
             })?;
         let kind = change.change_kind.as_str();
         match kind {
-            "decision_insert" | "decision_correct" => {
+            DECISION_INSERT_KIND | DECISION_CORRECT_KIND => {
                 if let Some(replaced) = change.replaced_object_id {
                     self.retire_decision(&replaced, commit_seq, report)?;
                 }
@@ -416,8 +441,10 @@ impl<'a> ClaimMaterializer<'a> {
                 };
                 self.publish_decision(&subject, commit_seq, now, report)
             }
-            "decision_retire" => self.retire_decision(&row.object_id, commit_seq, report),
-            "decision_event_append" => Ok(()),
+            DECISION_RETIRE_KIND | APPROVAL_REVOKE_KIND => {
+                self.retire_decision(&row.object_id, commit_seq, report)
+            }
+            DECISION_EVENT_APPEND_KIND => Ok(()),
             _ => Err(ClaimBlocked::UnknownChangeKind {
                 object_id: row.object_id.clone(),
                 commit_seq,
@@ -485,7 +512,10 @@ impl<'a> ClaimMaterializer<'a> {
             }
             .into());
         };
-        let ids = descriptor_ids(&ClaimSubject::from_object(&state.object)?);
+        // An identity the encoding refuses was refused at publication too, so no descriptor of it exists.
+        let Ok(ids) = descriptor_ids(&ClaimSubject::from_object(&state.object)?) else {
+            return Ok(());
+        };
         let receipt = self.kernel.commit(
             CommitIntent {
                 producer: PRODUCER.to_owned(),
