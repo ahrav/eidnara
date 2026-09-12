@@ -199,6 +199,7 @@ through the direct-host fixture; all unaudited.
 Impact: A refused body can leave route or staging state behind, or an
 admitted body can hold more resident bytes than it charged.
 Open questions:
+
 - Does the context module owe a `retry_after_ms` on `queue_full` as Synapse
   does under [§7.5.1][wire751]? [`RequestOutcome::error`][outcome] sends
   none today. (needs human input)
@@ -275,6 +276,7 @@ JSON on either lane, or exactly 32 MiB; all unaudited.
 Impact: A body can be misrouted, admitted under the wrong cap, or decode
 differently depending on which lane carried it.
 Open questions:
+
 - Is last-wins on duplicate top-level keys a contract or an accident of the
   `Value` round trip? Synapse rejects duplicates ([§7.5.1][wire751]); the
   context module has no written rule. (needs human input)
@@ -443,6 +445,7 @@ scratch, not retained cache entries. All checks remain unaudited for adequacy.
 Impact: Output identity, served fingerprints, token caches, tag mint, and the
 plugin's replay source can drift from the message values.
 Open questions:
+
 - Is the release-build `assert_eq!` panic under
   `EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL` and
   `EIDNARA_NATIVE_ATTACHMENT_DIFFERENTIAL` the intended production contract
@@ -566,6 +569,7 @@ all unaudited.
 Impact: A speculative or stale row changes which tags are treated as active
 on the next pass.
 Open questions:
+
 - The transform commit uses [`write.bytes("tag_source_bytes", ..)`][mint-prepared],
   whose [content policy][tag-content-policy] substitutes detected secrets.
   The older evidence cites the separate tag-mint API. How should unconditional
@@ -761,6 +765,7 @@ pinning; none found for narrow-read equivalence; all unaudited.
 Impact: A no-fire reason is never persisted, a rerun trigger disappears, a
 stale projection-cache entry is selected, or a historian veto is cleared.
 Open questions:
+
 - Which of the three pre-commit loads (epoch, `historian_active`, snapshot)
   may share one snapshot? Merging them removes a window in which the epoch is
   read before a concurrent recut; the specification should state whether
@@ -832,6 +837,7 @@ list seven pass-trace tests and the identity gate; all unaudited.
 Impact: Rejected and stable passes disappear from status and health, or a
 diagnostic write starts rolling back state commits.
 Open questions:
+
 - Is under-counting rejected passes an acceptable semantic change, or must
   the receive breadcrumb keep a home on the reject and stable paths? Existing
   tests encode `receive_count == reject_count` after rejects. (needs human
@@ -951,6 +957,7 @@ unaudited.
 Impact: A secret persists in `meta` under a shadowed duplicate name, or the
 audit receipt and stored bytes disagree.
 Open questions:
+
 - Must a redacted `meta` keep today's alphabetical key order, or is any
   deserializable form acceptable? No reader depends on order. (needs human
   input)
@@ -1185,6 +1192,7 @@ wrapper, overrides, and spread positional binds; all unaudited for adequacy.
 Impact: A pass is treated as mid-turn when it is not, or a cached statement
 executes against a closed connection.
 Open questions:
+
 - Whether a collapsed query's plan depends on an index that exists in
   OpenCode's schema is unresolved, needs the pinned OpenCode schema; every
   fixture declares only `id TEXT PRIMARY KEY`.
@@ -1242,6 +1250,7 @@ hook, and real-host corpus; all unaudited.
 Impact: A frame declares a length it does not emit, or a page the plugin
 accepted is refused by the host with `buffer_overflow`.
 Open questions:
+
 - Which supported runtime can execute the TypeScript path through an actual
   native channel on this host? The tested Bun and Node capability probes
   refuse startup.
@@ -1299,6 +1308,7 @@ unaudited for independent adequacy review.
 Impact: Untrusted text forges log lines, or the log is redirected through a
 symlink.
 Open questions:
+
 - Provider error bodies and model output reach the log unredacted; the CLI
   redacts on export. Is that the intended boundary, or must the plugin
   redact before write? (needs human input)
@@ -1389,6 +1399,7 @@ sub-page releases, and punch-failure quarantine; all unaudited.
 Impact: A relocation of punching silently changes the residency bound, or a
 new residency check is added with nothing to test it against.
 Open questions:
+
 - Does the specification intend a physical residency bound at all, or only to
   preserve the admission bound and the per-ring dead-byte bound? (needs human
   input)
@@ -1498,6 +1509,7 @@ cover the deadline arm, quarantine at ring level, and the owned-arm
 Impact: A response that won settlement closes the connection for every
 in-flight request, or source bytes outlive the charge that admitted them.
 Open questions:
+
 - Is a connection close the intended outcome for a serializer failure on a
   settled response, or must the direct path preserve the owned path's
   request-scoped `encode_failed` terminal? (needs human input)
@@ -1586,6 +1598,7 @@ route at the cap; all unaudited.
 Impact: A counter that lags admits bytes over the cap, or a refusal leaves a
 reservation behind.
 Open questions:
+
 - The daemon maps `Capacity` to [`StoreBusy`][busy], a retryable class, while
   the only production paths that lower usage are failed-ingest cleanup and
   startup recovery ([`run_staging_maintenance`][maintenance] and
@@ -1643,6 +1656,7 @@ cancelled walk, and the retired live reservation; all unaudited.
 Impact: A durable counter silently diverges from the disk and either refuses
 valid ingests or admits over the cap.
 Open questions:
+
 - Is the walk retained as a periodic or startup reconciliation, and what is
   the fail-closed action on `counter != walk`: refuse ingest, latch the CAS
   failure ([`latch_cas_failure`][latch]), or adopt the walk value? (needs
@@ -1742,6 +1756,7 @@ records a daemon measurement or compares two builds; all unaudited.
 Impact: A latency change ships with no comparable artifact, so a regression
 and an improvement are indistinguishable.
 Open questions:
+
 - Which size class is "production-shaped": the bench header's 1_400 or the
   fixture's 2_500 messages? (needs human input)
 - Does the specification adopt an `evidence.rs`-style manifest for the daemon,
@@ -1795,6 +1810,7 @@ unaudited.
 Impact: A relocated stage reports zero or a fragment and reads as an
 improvement.
 Open questions:
+
 - Are the stage fields a contract with the plugin, or free to change with the
   plugin's log line? (needs human input)
 
@@ -1851,6 +1867,7 @@ for SOFT, tag/nudge accounting, and serialization; all unaudited.
 Impact: A rendered byte or budget decision changes, or the resident-memory
 declaration undercounts a cache.
 Open questions:
+
 - Is there any measured lock contention at HEAD? The comment is conditional;
   the audit should measure before sharding.
 - Accounting scope is resolved: tag and nudge counts use the existing cache;
@@ -1906,6 +1923,7 @@ pinned constants, window placement, and the single-path test; all unaudited.
 Impact: A secret the current scan redacts persists, and old and new audit
 rows become indistinguishable.
 Open questions:
+
 - Is bounding wanted at all, given the redaction windows already cap one scan
   at `MAX_REDACTABLE_BYTES`? (needs human input)
 - A per-rule proof that every match contains an anchor or is keyword-bound
@@ -2002,6 +2020,7 @@ Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the Vixie test, the extreme-instant test, and the golden; all unaudited.
 Impact: A scheduled task fires at the wrong instant or never.
 Open questions:
+
 - Should validation reject calendar-impossible dates instead? That is a
   config-acceptance change outside a latency change. (needs human input)
 
@@ -2051,6 +2070,7 @@ cache and cannot exercise this record.
 Impact: An edit is ignored for the life of the daemon, or a project tier
 reads another project's cached values.
 Open questions:
+
 - The doc at [config.rs:266-267][eff-warn-doc] says tier read failures are
   reported on every load so a long-running daemon keeps surfacing them; a
   merged cache silences the repeat. Keep that behavior? (needs human input)
@@ -2105,6 +2125,7 @@ structures.
 Impact: The next pass carries a stale guidance line or a stale projection
 cache entry after a relocated transform is aborted mid-bookkeeping.
 Open questions:
+
 - What owns and joins any proposed off-worker transform work? This is the
   parent's E1 question and remains unresolved. (needs human input)
 
@@ -2221,6 +2242,7 @@ exist at HEAD.
 Existing check: none found.
 Impact: W8 passes without the window ever opening.
 Open questions:
+
 - Which abort events can a future worker expose without equating waiter
   cancellation with completion? This is the parent's E3 question. (needs
   human input)
@@ -2305,6 +2327,7 @@ Impact: A panic message or payload built from request bytes, or a backtrace
 naming them, reaches stderr unredacted; a relocated transform also settles
 with a different terminal than today.
 Open questions:
+
 - Which terminal is the contract for a worker-thread panic: the host's
   `internal_error`, or the kernel routes' documented
   `{"kind":"unavailable","reason":"store_unavailable"}` response? A relocated
@@ -2598,7 +2621,6 @@ evaluation of this area and its disposition are recorded in
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6835-L6860
 [tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3034-L3035
 [tag-protection]: ../../../../crates/daemon/src/transform.rs#L3696-L3709
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6880-L6885
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6958-L7020
 [mint-input]: ../../../../crates/daemon/src/transform.rs#L7220-L7225
 [append-mint]: ../../../../crates/daemon/src/transform.rs#L7327-L7350
@@ -2629,7 +2651,6 @@ evaluation of this area and its disposition are recorded in
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L137-L175
-[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
@@ -2720,12 +2741,6 @@ evaluation of this area and its disposition are recorded in
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L300-L357
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
-[pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
-[pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
-[numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
-[bodyvalid]: ../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L494-L501
-[encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
-[utf8body]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
 [sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
 [log-gate-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
@@ -2733,8 +2748,6 @@ evaluation of this area and its disposition are recorded in
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[hostpage]: ../../../../crates/daemon/src/lib.rs#L735-L736
-[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9317-L9323
 
 [agents]: ../../../../crates/shm-transport/AGENTS.md
 [arena-const]: ../../../../crates/shm-transport/src/arena.rs#L4-L7
@@ -2859,7 +2872,6 @@ evaluation of this area and its disposition are recorded in
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L23910
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21123
 [serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L27724
-[tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
 [radius-window]: ../../../../crates/secret-scanner/src/evaluator.rs#L266-L297
