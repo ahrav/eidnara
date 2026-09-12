@@ -899,12 +899,13 @@ at [`commit_transform`][commit-meta], the stored bytes are either
 byte-identical to `serde_json::to_string(meta)` when no substitution occurred
 (the [unchanged-input branch][clean-branch]) or the serialization of the
 redacted tree; a duplicate object name at any depth refuses the write; every
-object key is bound-checked and scanned ([`validate_json_keys`][keys]); a
-detected value under an identity or integrity key refuses; a protected key
-with a container value refuses; a protected scalar substitutes and records a
-detection ([`record_observed_scan`][record-scan]); and the recorded scan for
-field `meta` carries the same detections as the walk observed. `always`
-because every committing pass runs this path.
+object key is bound-checked and scanned, in the [object arm][walk-keys] of
+the walk for containers it descends and by [`validate_json_keys`][keys] for a
+subtree it judges whole; a detected value under an identity or integrity key
+refuses; a protected key with a container value refuses; a protected scalar
+substitutes and records a detection ([`record_observed_scan`][record-scan]);
+and the recorded scan for field `meta` carries the same detections as the
+walk observed. `always` because every committing pass runs this path.
 Fault/timing angle: A single-pass redaction streams input and returns the
 original bytes for an unchanged prefix while a later duplicate name shadows
 an earlier value, which is the bypass the [comment][unique-doc] on
@@ -917,6 +918,7 @@ level and nested; a secret in a `BTreeMap` key such as
 object; a clean `meta` compared byte-for-byte with the stored column.
 Confidence: high - [Evidence](evidence/meta-json-preparation-scans-every-persisted-byte.md).
 The [policy][policy], [`prepare_json_content_collecting`][prepare-collecting],
+[`prepare_json_content_single_pass`][single-pass],
 [`prepare_value`][prepare-value], and the clean branch are source-verified;
 every reader deserializes and the transform compares values
 ([`next_meta != loaded.meta`][value-compare]), so no reader depends on byte
@@ -2651,17 +2653,19 @@ evaluation of this area and its disposition are recorded in
 [rejected]: ../../../../crates/memory-store/src/lib.rs#L6691-L6744
 [sched-history]: ../../../../crates/memory-store/src/lib.rs#L6792-L6825
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L767-L784
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8306-L8315
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8569-L8578
 [commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8427-L8494
-[json-content]: ../../../../crates/memory-store/src/lib.rs#L2116-L2126
-[record-scan]: ../../../../crates/memory-store/src/lib.rs#L2133-L2143
-[policy]: ../../../../crates/memory-store/src/lib.rs#L3077-L3098
-[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3109-L3287
-[keys]: ../../../../crates/memory-store/src/lib.rs#L3157-L3170
-[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3181-L3276
-[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3282-L3286
-[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3289-L3290
-[unique]: ../../../../crates/memory-store/src/lib.rs#L3291-L3372
+[json-content]: ../../../../crates/memory-store/src/lib.rs#L2207-L2217
+[record-scan]: ../../../../crates/memory-store/src/lib.rs#L2224-L2234
+[policy]: ../../../../crates/memory-store/src/lib.rs#L3168-L3189
+[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3207-L3217
+[single-pass]: ../../../../crates/memory-store/src/lib.rs#L3223-L3415
+[keys]: ../../../../crates/memory-store/src/lib.rs#L3273-L3286
+[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3297-L3398
+[walk-keys]: ../../../../crates/memory-store/src/lib.rs#L3388-L3394
+[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3409-L3414
+[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3417-L3418
+[unique]: ../../../../crates/memory-store/src/lib.rs#L3419-L3500
 [recomp]: ../../../../crates/memory-store/src/lib.rs#L10057-L10150
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1387-L1388
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1503-L1504
