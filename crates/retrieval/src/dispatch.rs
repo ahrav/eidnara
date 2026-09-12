@@ -232,6 +232,7 @@ pub struct DispatchCandidate {
     pub source_revision: i64,
     pub source_artifact_digest: String,
     pub created_at: i64,
+    pub readiness: CandidateReadiness,
 }
 
 impl DispatchCandidate {
@@ -243,40 +244,60 @@ impl DispatchCandidate {
     }
 }
 
-const ELIGIBLE_JOB_CANDIDATES_SQL: &str =
-    "SELECT j.job_id,j.occurrence_id,j.generation_id,o.source_object_id,o.revision,
-            o.source_artifact_digest,j.created_at
-       FROM embedding_jobs AS j INDEXED BY idx_embedding_jobs_open_order
-       JOIN occurrences AS o ON o.occurrence_id=j.occurrence_id
-      WHERE j.state IN ('pending','admitted') AND j.stop_reason IS NULL
-        AND ((j.state='pending' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?1))
-             OR (j.state='admitted' AND j.host_job_id IS NOT NULL))
-      ORDER BY j.created_at,j.job_id LIMIT ?2";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateReadiness {
+    Ready,
+    Deferred { until: i64 },
+}
 
-const ELIGIBLE_JOB_CANDIDATES_AFTER_SQL: &str =
+const OPEN_JOB_CANDIDATES_SQL: &str =
     "SELECT j.job_id,j.occurrence_id,j.generation_id,o.source_object_id,o.revision,
-            o.source_artifact_digest,j.created_at
+            o.source_artifact_digest,j.created_at,j.state,j.next_attempt_at,j.host_job_id
        FROM embedding_jobs AS j INDEXED BY idx_embedding_jobs_open_order
-       JOIN occurrences AS o ON o.occurrence_id=j.occurrence_id
-      WHERE j.state IN ('pending','admitted') AND j.stop_reason IS NULL
-        AND ((j.state='pending' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?1))
-             OR (j.state='admitted' AND j.host_job_id IS NOT NULL))
-        AND (j.created_at,j.job_id)>(?2,?3)
-      ORDER BY j.created_at,j.job_id LIMIT ?4";
+        LEFT JOIN occurrences AS o ON o.occurrence_id=j.occurrence_id
+       WHERE j.state IN ('pending','admitted') AND j.stop_reason IS NULL
+       ORDER BY j.created_at,j.job_id LIMIT ?1";
 
-fn candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<DispatchCandidate> {
+const OPEN_JOB_CANDIDATES_AFTER_SQL: &str =
+    "SELECT j.job_id,j.occurrence_id,j.generation_id,o.source_object_id,o.revision,
+            o.source_artifact_digest,j.created_at,j.state,j.next_attempt_at,j.host_job_id
+       FROM embedding_jobs AS j INDEXED BY idx_embedding_jobs_open_order
+        LEFT JOIN occurrences AS o ON o.occurrence_id=j.occurrence_id
+       WHERE j.state IN ('pending','admitted') AND j.stop_reason IS NULL
+        AND (j.created_at,j.job_id)>(?1,?2)
+       ORDER BY j.created_at,j.job_id LIMIT ?3";
+
+fn candidate(row: &rusqlite::Row<'_>, now: i64) -> Result<DispatchCandidate, ProjectionError> {
+    let state: String = row.get(7)?;
+    let next_attempt_at: Option<i64> = row.get(8)?;
+    let host_job_id: Option<String> = row.get(9)?;
+    let readiness = match state.as_str() {
+        "pending" => match next_attempt_at {
+            Some(until) if until > now => CandidateReadiness::Deferred { until },
+            _ => CandidateReadiness::Ready,
+        },
+        "admitted" if host_job_id.is_some() => CandidateReadiness::Ready,
+        _ => return Err(ProjectionError::CorruptRow),
+    };
     Ok(DispatchCandidate {
         job_id: row.get(0)?,
         occurrence_id: row.get(1)?,
         generation_id: row.get(2)?,
-        source_object_id: row.get(3)?,
-        source_revision: row.get(4)?,
-        source_artifact_digest: row.get(5)?,
+        source_object_id: row
+            .get::<_, Option<String>>(3)?
+            .ok_or(ProjectionError::CorruptRow)?,
+        source_revision: row
+            .get::<_, Option<i64>>(4)?
+            .ok_or(ProjectionError::CorruptRow)?,
+        source_artifact_digest: row
+            .get::<_, Option<String>>(5)?
+            .ok_or(ProjectionError::CorruptRow)?,
         created_at: row.get(6)?,
+        readiness,
     })
 }
 
-pub fn eligible_job_candidates(
+pub fn open_job_candidates(
     conn: &GuardedConn<'_>,
     cursor: Option<&DispatchCursor>,
     limit: NonZeroUsize,
@@ -284,38 +305,33 @@ pub fn eligible_job_candidates(
 ) -> Result<Vec<DispatchCandidate>, ProjectionError> {
     let limit = i64::try_from(limit.get()).unwrap_or(i64::MAX);
     let mut statement = conn.prepare(if cursor.is_some() {
-        ELIGIBLE_JOB_CANDIDATES_AFTER_SQL
+        OPEN_JOB_CANDIDATES_AFTER_SQL
     } else {
-        ELIGIBLE_JOB_CANDIDATES_SQL
+        OPEN_JOB_CANDIDATES_SQL
     })?;
-    let rows = match cursor {
-        Some(cursor) => statement.query_map(
-            params![now, cursor.created_at, cursor.job_id, limit],
-            candidate,
-        )?,
-        None => statement.query_map(params![now, limit], candidate)?,
+    let mut rows = match cursor {
+        Some(cursor) => statement.query(params![cursor.created_at, cursor.job_id, limit])?,
+        None => statement.query([limit])?,
     };
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next()? {
+        candidates.push(candidate(row, now)?);
+    }
+    Ok(candidates)
 }
 
-pub fn dispatch_jobs(
+pub fn dispatch_job(
     conn: &GuardedConn<'_>,
-    job_ids: &[String],
+    job_id: &str,
     now: i64,
-) -> Result<Vec<DispatchJob>, ProjectionError> {
-    let mut job_statement = conn.prepare(
-        "SELECT occurrence_id,generation_id,state,attempts,episode_allowance,episode_deadline,
+) -> Result<Option<DispatchJob>, ProjectionError> {
+    let row = conn
+        .query_row(
+            "SELECT occurrence_id,generation_id,state,attempts,episode_allowance,episode_deadline,
                 host_job_id,episode_id,next_attempt_at,stop_reason
-         FROM embedding_jobs WHERE job_id=?1",
-    )?;
-    let mut generation_statement = conn.prepare(
-        "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
-         FROM vector_generations WHERE generation_id=?1",
-    )?;
-    let mut jobs = Vec::with_capacity(job_ids.len());
-    for job_id in job_ids {
-        let row = job_statement
-            .query_row([job_id], |row| {
+             FROM embedding_jobs WHERE job_id=?1",
+            [job_id],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -328,25 +344,30 @@ pub fn dispatch_jobs(
                     row.get::<_, Option<i64>>(8)?,
                     row.get::<_, Option<String>>(9)?,
                 ))
-            })
-            .optional()?;
-        let Some((
-            occurrence_id,
-            generation_id,
-            state,
-            attempts,
-            allowance,
-            deadline,
-            host_job_id,
-            episode_id,
-            next_attempt_at,
-            stop_reason,
-        )) = row
-        else {
-            continue;
-        };
-        let generation = generation_statement
-            .query_row([&generation_id], |row| {
+            },
+        )
+        .optional()?;
+    let Some((
+        occurrence_id,
+        generation_id,
+        state,
+        attempts,
+        allowance,
+        deadline,
+        host_job_id,
+        episode_id,
+        next_attempt_at,
+        stop_reason,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let generation = conn
+        .query_row(
+            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
+             FROM vector_generations WHERE generation_id=?1",
+            [&generation_id],
+            |row| {
                 let epoch: i64 = row.get(3)?;
                 Ok(VectorGeneration {
                     generation_id: generation_id.clone(),
@@ -355,41 +376,32 @@ pub fn dispatch_jobs(
                     vector_dimension: row.get(2)?,
                     generation_epoch: epoch.unsigned_abs(),
                 })
-            })
-            .optional()?
-            .ok_or(ProjectionError::CorruptRow)?;
-        let occurrence_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM occurrences WHERE occurrence_id=?1)",
-            [&occurrence_id],
-            |row| row.get(0),
-        )?;
-        if !occurrence_exists {
-            return Err(ProjectionError::CorruptRow);
-        }
-        let eligible = stop_reason.is_none()
-            && ((state == "pending" && next_attempt_at.is_none_or(|retry| retry <= now))
-                || (state == "admitted" && host_job_id.is_some()));
-        if !eligible {
-            continue;
-        }
-        let occurrence =
-            crate::read_occurrence(conn, &occurrence_id)?.ok_or(ProjectionError::CorruptRow)?;
-        jobs.push(DispatchJob {
-            job_id: job_id.clone(),
-            occurrence_id: occurrence.occurrence_id,
-            generation,
-            payload_id: occurrence.payload_id,
-            source_object_id: occurrence.source_object_id,
-            revision: occurrence.revision,
-            source_artifact_digest: occurrence.source_artifact_digest,
-            text: String::from_utf8(occurrence.bytes).map_err(|_| ProjectionError::CorruptRow)?,
-            state,
-            attempts,
-            episode: Episode::from_columns(episode_id, allowance, deadline)?,
-            host_job_id,
-        });
+            },
+        )
+        .optional()?
+        .ok_or(ProjectionError::CorruptRow)?;
+    let eligible = stop_reason.is_none()
+        && ((state == "pending" && next_attempt_at.is_none_or(|retry| retry <= now))
+            || (state == "admitted" && host_job_id.is_some()));
+    if !eligible {
+        return Ok(None);
     }
-    Ok(jobs)
+    let occurrence =
+        crate::read_occurrence(conn, &occurrence_id)?.ok_or(ProjectionError::CorruptRow)?;
+    Ok(Some(DispatchJob {
+        job_id: job_id.to_owned(),
+        occurrence_id: occurrence.occurrence_id,
+        generation,
+        payload_id: occurrence.payload_id,
+        source_object_id: occurrence.source_object_id,
+        revision: occurrence.revision,
+        source_artifact_digest: occurrence.source_artifact_digest,
+        text: String::from_utf8(occurrence.bytes).map_err(|_| ProjectionError::CorruptRow)?,
+        state,
+        attempts,
+        episode: Episode::from_columns(episode_id, allowance, deadline)?,
+        host_job_id,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -667,13 +679,14 @@ pub fn job_ledger(
 
 #[cfg(test)]
 mod tests {
-    use super::{ELIGIBLE_JOB_CANDIDATES_AFTER_SQL, ELIGIBLE_JOB_CANDIDATES_SQL};
+    use super::{OPEN_JOB_CANDIDATES_AFTER_SQL, OPEN_JOB_CANDIDATES_SQL};
     use rusqlite::{Connection, StatementStatus, params};
 
     #[test]
-    fn eligible_identity_query_avoids_sorting_the_due_backlog() {
+    fn open_identity_query_bounds_due_and_deferred_backlogs() {
         let mut measured = Vec::new();
         let mut keyset_measured = Vec::new();
+        let mut deferred_measured = Vec::new();
         for count in [1_024, 16_384] {
             let conn = Connection::open_in_memory().unwrap();
             conn.execute_batch(crate::BASELINE).unwrap();
@@ -698,11 +711,11 @@ mod tests {
                  FROM occurrences",
                 [count],
             ).unwrap();
-            let mut statement = conn.prepare(ELIGIBLE_JOB_CANDIDATES_SQL).unwrap();
+            let mut statement = conn.prepare(OPEN_JOB_CANDIDATES_SQL).unwrap();
             let plan = conn
-                .prepare(&format!("EXPLAIN QUERY PLAN {ELIGIBLE_JOB_CANDIDATES_SQL}"))
+                .prepare(&format!("EXPLAIN QUERY PLAN {OPEN_JOB_CANDIDATES_SQL}"))
                 .unwrap()
-                .query_map(params![100, 1], |row| row.get::<_, String>(3))
+                .query_map([1], |row| row.get::<_, String>(3))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
@@ -716,7 +729,7 @@ mod tests {
                 "query plan sorts: {plan:?}"
             );
             let ids = statement
-                .query_map(params![100, 1], |row| row.get::<_, String>(0))
+                .query_map([1], |row| row.get::<_, String>(0))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
@@ -724,9 +737,9 @@ mod tests {
             let sorts = statement.get_status(StatementStatus::Sort);
             let steps = statement.get_status(StatementStatus::VmStep);
             measured.push((count, sorts, steps));
-            let mut after = conn.prepare(ELIGIBLE_JOB_CANDIDATES_AFTER_SQL).unwrap();
+            let mut after = conn.prepare(OPEN_JOB_CANDIDATES_AFTER_SQL).unwrap();
             let after_ids = after
-                .query_map(params![100, 0, format!("{:05}", count - 1), 1], |row| {
+                .query_map(params![0, format!("{:05}", count - 1), 1], |row| {
                     row.get::<_, String>(0)
                 })
                 .unwrap()
@@ -739,33 +752,23 @@ mod tests {
                 after.get_status(StatementStatus::VmStep),
             ));
 
-            for (offset, state, retry, host, stop) in [
-                (0, "admitted", None, Some("host"), None),
-                (1, "pending", Some(101), None, None),
-                (2, "embedded", None, None, None),
-                (3, "pending", None, None, Some("stopped")),
-                (4, "admitted", None, None, None),
-                (5, "pending", Some(100), None, None),
-            ] {
-                conn.execute(
-                    "UPDATE embedding_jobs SET state=?2,next_attempt_at=?3,host_job_id=?4,stop_reason=?5 WHERE job_id=?1",
-                    params![format!("{:05}", count-offset), state, retry, host, stop],
-                ).unwrap();
-            }
-            for (now, offsets) in [(100, vec![0, 5, 7, 6]), (101, vec![1, 0])] {
-                let actual = statement
-                    .query_map(params![now, offsets.len() as i64], |row| {
-                        row.get::<_, String>(0)
-                    })
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap();
-                let expected: Vec<_> = offsets
-                    .into_iter()
-                    .map(|offset| format!("{:05}", count - offset))
-                    .collect();
-                assert_eq!(actual, expected);
-            }
+            conn.execute(
+                "UPDATE embedding_jobs SET next_attempt_at=101 WHERE state='pending'",
+                [],
+            )
+            .unwrap();
+            let mut deferred = conn.prepare(OPEN_JOB_CANDIDATES_SQL).unwrap();
+            let deferred_ids = deferred
+                .query_map([1], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(deferred_ids, [format!("{:05}", count - 1)]);
+            deferred_measured.push((
+                count,
+                deferred.get_status(StatementStatus::Sort),
+                deferred.get_status(StatementStatus::VmStep),
+            ));
         }
         assert!(
             measured
@@ -783,6 +786,16 @@ mod tests {
         assert!(
             keyset_measured[1].2 <= keyset_measured[0].2 * 2,
             "{keyset_measured:?}"
+        );
+        assert!(
+            deferred_measured
+                .iter()
+                .all(|(_, sorts, steps)| *sorts == 0 && *steps < 128),
+            "deferred backlog must be bounded by the open-row page: {deferred_measured:?}"
+        );
+        assert!(
+            deferred_measured[1].2 <= deferred_measured[0].2 * 2,
+            "{deferred_measured:?}"
         );
     }
 
@@ -810,22 +823,22 @@ mod tests {
         .unwrap();
 
         let first = conn
-            .prepare(ELIGIBLE_JOB_CANDIDATES_SQL)
+            .prepare(OPEN_JOB_CANDIDATES_SQL)
             .unwrap()
-            .query_map(params![0, 2], |row| row.get::<_, String>(0))
+            .query_map([2], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(first, ["a", "b"]);
-        let mut after = conn.prepare(ELIGIBLE_JOB_CANDIDATES_AFTER_SQL).unwrap();
+        let mut after = conn.prepare(OPEN_JOB_CANDIDATES_AFTER_SQL).unwrap();
         let second = after
-            .query_map(params![0, 1, "b", 2], |row| row.get::<_, String>(0))
+            .query_map(params![1, "b", 2], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(second, ["c", "d"]);
         let third = after
-            .query_map(params![0, 2, "d", 2], |row| row.get::<_, String>(0))
+            .query_map(params![2, "d", 2], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
@@ -833,10 +846,10 @@ mod tests {
 
         let plan = conn
             .prepare(&format!(
-                "EXPLAIN QUERY PLAN {ELIGIBLE_JOB_CANDIDATES_AFTER_SQL}"
+                "EXPLAIN QUERY PLAN {OPEN_JOB_CANDIDATES_AFTER_SQL}"
             ))
             .unwrap()
-            .query_map(params![0, 1, "b", 2], |row| row.get::<_, String>(3))
+            .query_map(params![1, "b", 2], |row| row.get::<_, String>(3))
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();

@@ -22,16 +22,17 @@ cardinality mismatch silently drop work.
   does not poison valid candidates in the same page.
 - `exact_verdicts` returns `KernelError::AdmissionPolicy` unless the kernel
   verdict count exactly matches the number of valid candidates.
-- Selected rows are hydrated after all candidate reads and kernel judgments.
+- Selected rows are hydrated and driven one at a time after candidate reads and
+  kernel judgments, so one pass never retains every selected payload at once.
 - Missing or newly ineligible selected jobs are skipped; missing generation or
   occurrence relationships remain `ProjectionError::CorruptRow`.
 - Terminal requests are passed to one `SearchProjection::write_within` closure.
 - The closure applies every `obsolete_embedding` call in one transaction.
 - Stop events are emitted only for `Obsoletion::Marked`; `AlreadyTerminal` and
   `NoJob` are no-ops.
-- If the terminal write reply is lost, reconciliation emits one stop event for
-  each candidate whose durable job state is exactly `obsolete`. It does not
-  invent events for open or unrelated terminal states.
+- If the terminal write reply is lost, reconciliation uses durable state only to
+  decide whether the pass remains blocked. It emits no stop event because the
+  durable state cannot attribute another writer's transition to this pass.
 - A write-lock deadline returns `Blocked::SearchDeadline` without quarantine.
 
 ## Failure scenario
@@ -47,10 +48,11 @@ Silently zipping a short verdict vector instead drops the unmatched suffix.
 
 ## Timing windows and dependencies
 
-Candidate reads, kernel judgment, and selected-row hydration complete before the
-terminal transaction starts. Storage failures in that phase cannot leave a
-terminal disposition uncertain. Once terminal writing starts, the transaction
-and its deadline own the uncertainty boundary.
+Candidate reads and kernel judgment complete before the terminal transaction
+starts. Storage failures in that phase cannot leave a terminal disposition
+uncertain. Once terminal writing starts, the transaction and its deadline own
+the uncertainty boundary. Selected rows are then hydrated and driven one at a
+time after confirmed terminal writes.
 
 Projection obsoletion does not cancel an already held host job. Synapse job,
 byte, and retention limits bound that local residue until normal eviction.
@@ -71,7 +73,7 @@ byte, and retention limits bound that local residue until normal eviction.
 9. Supply a mismatched verdict count to the release-path helper and assert
    `AdmissionPolicy`.
 10. Lose a successful terminal write reply and assert reconciliation observes
-    the durable `obsolete` state and emits the matching stop event exactly once.
+    the durable `obsolete` state without emitting an attributed stop event.
 
 ## Investigation log
 
@@ -89,5 +91,6 @@ byte, and retention limits bound that local residue until normal eviction.
 - Findings: Only `Marked` emits. `AlreadyTerminal` and `NoJob` emit nothing.
 - Missing evidence: A direct concurrent `NoJob` integration race is not
   isolated, though the outcome branch is explicit.
-- Conclusion: Resolved for confirmed and lost-reply writes; direct `NoJob` race
+- Conclusion: Resolved for confirmed writes. Unknown writes reconcile progress
+  without claiming which writer performed the transition; direct `NoJob` race
   coverage remains useful.

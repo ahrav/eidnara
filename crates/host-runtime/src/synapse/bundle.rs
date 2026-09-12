@@ -436,22 +436,20 @@ fn canonical_key_shape() -> String {
 }
 
 /// The worst retained charge for one completed job, computed by the runtime rule on the largest item shape.
-fn max_retained_job_bytes(limits: &SynapseLimits) -> u64 {
-    let item_lens = std::iter::repeat_n(
-        (jobs::MAX_ITEM_ID_BYTES, jobs::CONTENT_SHA256_BYTES),
-        limits.max_batch_items,
-    );
-    u64::try_from(jobs::retained_input_bytes(
+fn max_retained_job_bytes(limits: &SynapseLimits) -> Option<u64> {
+    jobs::max_retained_input_bytes(
         canonical_key_shape().len(),
-        item_lens,
-    ))
-    .expect("one job's retained charge fits u64")
+        limits.max_batch_items,
+        jobs::MAX_ITEM_ID_BYTES,
+        jobs::CONTENT_SHA256_BYTES,
+    )
+    .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
 pub(crate) fn max_retained_input_bytes(limits: &SynapseLimits) -> Option<u64> {
     u64::try_from(limits.max_retained_jobs)
         .ok()?
-        .checked_mul(max_retained_job_bytes(limits))
+        .checked_mul(max_retained_job_bytes(limits)?)
 }
 
 /// The worst `embed.result` request charge, computed by the runtime rule on maximal decoded fields.
@@ -642,6 +640,9 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
             "combined local input capacity exceeds the permit limit",
         ));
     }
+    local_inputs
+        .checked_add(limits.max_retained_result_bytes)
+        .ok_or_else(|| err("combined local input and retained result capacity overflows"))?;
     Ok(())
 }
 
@@ -1363,7 +1364,6 @@ mod tests {
         let limits = SynapseLimits {
             max_batch_items: 150,
             max_batch_text_bytes: 1024 * 1024,
-            max_retained_result_bytes: u64::MAX,
             ..SynapseLimits::default()
         };
         let error = validate_test_serving(&manifest, &limits)
@@ -1373,7 +1373,6 @@ mod tests {
         let limits = SynapseLimits {
             max_batch_items: 150,
             max_batch_text_bytes: 1024 * 1024,
-            max_retained_result_bytes: u64::MAX,
             max_retained_jobs: 32,
             ..SynapseLimits::default()
         };

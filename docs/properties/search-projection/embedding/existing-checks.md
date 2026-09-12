@@ -13,9 +13,12 @@ not refreshed by this document.
 
 The bounded-dispatch update adds two catalog records after this pinned inventory.
 Its checks are `project_scan_cursor_advances_across_more_than_two_wrong_scope_pages`,
+`deferred_row_is_revisited_when_its_retry_becomes_due`,
 `max_jobs_bounds_terminal_dispositions`,
-`malformed_candidate_is_obsoleted_without_poisoning_valid_work`, and
-`terminal_search_deadline_preserves_the_candidate_for_retry` in
+`malformed_candidate_is_obsoleted_without_poisoning_valid_work`,
+`terminal_search_deadline_preserves_the_candidate_for_retry`,
+`selected_jobs_are_hydrated_only_when_they_are_driven`, and
+`unknown_terminal_commit_emits_no_attributed_stop` in
 `crates/daemon/tests/embedding_dispatch.rs`, plus
 `eligibility_cardinality_mismatch_is_a_release_error` in the dispatcher module.
 

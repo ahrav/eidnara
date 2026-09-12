@@ -216,8 +216,9 @@ Reachability: test-only - no production RP2.1 durable pending source or driver
 exists; `crates/host-runtime/src/synapse/jobs.rs:162-196` is process-local state.
 Status: active
 Exercised: partial - the dispatcher covers durable pending admission, lost charge
-replies, capacity refusal, and a recovery episode replacing a submitted episode
-before charge. A production caller and crash-spanning acceptance trace are absent.
+replies, capacity refusal, a recovery episode replacing a submitted episode
+before charge, and the post-charge crash/reopen window. A production caller,
+the submission-before-charge crash window, and full acceptance trace are absent.
 Guarantee: Every product batch dispatch is backed by durable pending work and
 uses the existing JobTable admission and result-lifetime authority. The durable
 attempt charge applies only to the episode identity submitted as the host item.
@@ -241,8 +242,11 @@ P1 line 109 and P2 line 54 name the ownership; JobTable reuse is source-verified
 Existing check: `admission_full_and_lost_replies_never_charge_twice` in
 `crates/daemon/tests/embedding_dispatch.rs` covers local capacity and charge
 reconciliation. `admission_charge_is_fenced_to_the_submitted_episode` at
-`crates/retrieval/tests/batches.rs:1540-1610` covers the A-to-B recovery race in
-one serialized transaction. No crash-spanning durable-to-process trace exists.
+`crates/retrieval/tests/batches.rs:1541-1613` covers the A-to-B recovery race in
+one serialized transaction. `crash_after_charge_reopens_state_and_accounting_together`
+in `crates/daemon/tests/embedding_dispatch.rs` kills a child after the durable
+charge, reopens the projection with a fresh host, and completes under the same
+episode. The submission-before-charge crash window remains uncovered.
 Impact: Required work disappears on restart or duplicate routing/lease machinery
 acquires conflicting ownership and resource accounting.
 Open questions:
@@ -468,34 +472,44 @@ Reachability: test-only - `EmbeddingDispatcher::run_pass` has integration-test
 callers, but no caller under `crates/daemon/src` outside its own definition.
 Status: active
 Exercised: yes - a durable queue with 2,048 older WrongScope rows ahead of one
-eligible row is processed across repeated passes by one dispatcher.
+eligible row is processed across repeated passes by one dispatcher. A deferred
+row is also revisited when its retry becomes due, and a failed terminal write
+leaves its candidate visible for retry.
 Guarantee: One dispatch pass judges at most two pages of at most 1,024 candidates
-each and persists its cursor only after the pass succeeds. The persistent cursor
-advances only over the consecutive processed WrongScope prefix before the first
-actionable row. It freezes before that action, resets at the ordered tail or when
-the project or destination binding changes, and therefore makes the next pass
-revisit an unresolved eligible, admitted, or terminal row.
+each. Before the first action, the dispatcher-retained cursor advances over each
+consecutive deferred or WrongScope row and records the earliest deferred retry.
+The cursor freezes before the first action, so an unresolved eligible, admitted,
+or terminal row remains visible. Scanning resets to the ordered beginning at the
+tail, when the project or destination binding changes, or when `now >= revisit_at`.
+Ordinary cursor progress commits only after terminal writes and selected-job
+drives succeed. A binding or revisit reset may be retained before a later failure,
+but that reset only moves scanning to the beginning and cannot skip work.
 Check: `always` - each pass reads no more than two keyset pages and each kernel
 call receives at most `MAX_ELIGIBILITY_CANDIDATES`; after every successful pass,
-the next pass starts strictly after the last consecutive WrongScope candidate
-before the first action, or at the beginning after tail wrap or a binding change.
-An actionable row remains visible until its durable state leaves the open-row
-keyspace. Under a fixed finite WrongScope prefix and successful passes, later
-eligible work cannot starve.
+the next pass starts strictly after the last consecutive deferred or WrongScope
+candidate before the first action, or at the beginning after tail wrap, a binding
+change, or a due deferred retry. An actionable row remains visible until its
+durable state leaves the open-row keyspace. Under a fixed finite WrongScope prefix
+and successful passes, later eligible work cannot starve.
 Fault/timing angle: More than two full pages belong to another project. A failed
-terminal write must leave the cursor uncommitted so the unresolved candidate is
-retried rather than skipped.
+terminal write must leave ordinary cursor progress uncommitted so the unresolved
+candidate is retried rather than skipped. A foreign-project deferred retry can
+reset scanning and cause bounded prefix retraversal, but each pass retains the
+two-page bound.
 Required faults and enabling state: At least 2,048 older WrongScope rows, one
 later eligible row, repeated calls on the same dispatcher, and a bounded terminal
 write refusal before one retry.
 Confidence: high -
 [evidence](evidence/embedding-dispatch-scan-makes-bounded-progress.md). The SQL
-order, private two-page cap, cursor commit point, tail wrap, and integration test
-were verified together.
+order, private two-page cap, cursor reset and commit points, tail wrap, and
+integration tests were verified together.
 Existing check: `project_scan_cursor_advances_across_more_than_two_wrong_scope_pages`
-and `terminal_search_deadline_preserves_the_candidate_for_retry` in
-`crates/daemon/tests/embedding_dispatch.rs`; `eligible_rows_are_taken_oldest_first_not_by_identifier`
-checks the keyset order.
+at `crates/daemon/tests/embedding_dispatch.rs:2822-2855`,
+`deferred_row_is_revisited_when_its_retry_becomes_due` at
+`crates/daemon/tests/embedding_dispatch.rs:2857-2912`, and
+`terminal_search_deadline_preserves_the_candidate_for_retry` at
+`crates/daemon/tests/embedding_dispatch.rs:1973-2021`;
+`eligible_rows_are_taken_oldest_first_not_by_identifier` checks the keyset order.
 Impact: A project with a large older prefix can starve forever, or a failed
 disposition can be skipped permanently.
 Open questions: None.
@@ -531,7 +545,8 @@ Existing check: `max_jobs_bounds_terminal_dispositions`,
 `malformed_candidate_is_obsoleted_without_poisoning_valid_work`, and
 `terminal_search_deadline_preserves_the_candidate_for_retry` in
 `crates/daemon/tests/embedding_dispatch.rs`; `eligibility_cardinality_mismatch_is_a_release_error`
-in `crates/daemon/src/embedding_dispatch.rs`.
+in `crates/daemon/src/embedding_dispatch.rs`. The malformed-candidate test runs
+two one-action passes and observes the valid row remain pending after the first.
 Impact: A nominally bounded maintenance pass can perform unbounded writes, skip
 valid work after malformed input, or emit completion events for no-op races.
 Open questions: None.

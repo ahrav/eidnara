@@ -2021,7 +2021,7 @@ async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconciled_terminal_commit_emits_stopped_once() {
+async fn unknown_terminal_commit_emits_no_attributed_stop() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
@@ -2048,13 +2048,7 @@ async fn reconciled_terminal_commit_emits_stopped_once() {
         None
     );
     assert_eq!(ledger(dir.path(), occurrence).state, "obsolete");
-    assert_eq!(
-        stopped(&events),
-        vec![(
-            ledger(dir.path(), occurrence).job_id,
-            "retracted".to_owned()
-        )]
-    );
+    assert!(stopped(&events).is_empty(), "{events:?}");
     assert_eq!(engine.calls(), 0);
 }
 
@@ -2861,6 +2855,63 @@ async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let deferred = corpus.publish_scoped("deferred", "deferred input", SCOPE);
+    let wrong_scope = corpus.publish_scoped("wrong-scope", "other project", SCOPE_B);
+    let actionable = corpus.publish_scoped("actionable", "held input", SCOPE);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let deferred_occurrence = occurrence_of(&rows, &deferred);
+    let wrong_scope_occurrence = occurrence_of(&rows, &wrong_scope);
+    let actionable_occurrence = occurrence_of(&rows, &actionable);
+    let conn = Connection::open(search_path(dir.path())).unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=0,next_attempt_at=?2 WHERE occurrence_id=?1",
+        rusqlite::params![deferred_occurrence, NOW + 1],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=1 WHERE occurrence_id=?1",
+        [wrong_scope_occurrence],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=2 WHERE occurrence_id=?1",
+        [actionable_occurrence],
+    )
+    .unwrap();
+    drop(conn);
+
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let synapse = component(&engine, SynapseLimits::default());
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        ..bounds(Duration::ZERO)
+    };
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+
+    dispatcher
+        .run_pass(eligibility(&project), &one, NOW, &mut |_| {})
+        .unwrap();
+    assert_eq!(ledger(dir.path(), deferred_occurrence).attempts, 0);
+    assert_eq!(ledger(dir.path(), actionable_occurrence).state, "admitted");
+
+    dispatcher
+        .run_pass(eligibility(&project), &one, NOW + 1, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        ledger(dir.path(), deferred_occurrence).attempts,
+        1,
+        "the scan must revisit a deferred row when its retry becomes due"
+    );
+    drop(gate);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_jobs_bounds_terminal_dispositions() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
@@ -2905,31 +2956,99 @@ async fn malformed_candidate_is_obsoleted_without_poisoning_valid_work() {
     let (projection, rows) = corpus.bootstrap(dir.path());
     let malformed_occurrence = occurrence_of(&rows, &malformed);
     let valid_occurrence = occurrence_of(&rows, &valid);
-    Connection::open(search_path(dir.path()))
-        .unwrap()
-        .execute(
-            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
-            [malformed_occurrence],
-        )
-        .unwrap();
+    let conn = Connection::open(search_path(dir.path())).unwrap();
+    conn.execute(
+        "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+        [malformed_occurrence],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=0 WHERE occurrence_id=?1",
+        [malformed_occurrence],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=1 WHERE occurrence_id=?1",
+        [valid_occurrence],
+    )
+    .unwrap();
+    drop(conn);
     let engine = TestEngine::new();
     let synapse = component(&engine, SynapseLimits::default());
-    let two = DispatchBounds {
-        max_jobs: NonZeroUsize::new(2).unwrap(),
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
         ..bounds(Duration::from_secs(5))
     };
 
-    let (end, events) = pass(&corpus, &projection, &synapse, &two, NOW);
+    let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW);
 
     assert_eq!(end, None);
     assert_eq!(ledger(dir.path(), malformed_occurrence).state, "obsolete");
-    assert_eq!(ledger(dir.path(), valid_occurrence).state, "embedded");
+    assert_eq!(ledger(dir.path(), valid_occurrence).state, "pending");
     assert!(
         stopped(&events)
             .iter()
             .any(|(_, reason)| reason == "invalid_identity"),
         "{events:?}"
     );
+    assert_eq!(engine.calls(), 0);
+
+    let (end, events) = pass(&corpus, &projection, &synapse, &one, NOW + 1);
+    assert_eq!(end, None);
+    assert_eq!(ledger(dir.path(), valid_occurrence).state, "embedded");
+    assert_eq!(published(&events).len(), 1, "{events:?}");
+    assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_jobs_are_hydrated_only_when_they_are_driven() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let first = corpus.publish("hydrate-first", "first input");
+    let corrupt = corpus.publish("hydrate-corrupt", "later input");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let first_occurrence = occurrence_of(&rows, &first);
+    let corrupt_occurrence = occurrence_of(&rows, &corrupt);
+    let conn = Connection::open(search_path(dir.path())).unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=0 WHERE occurrence_id=?1",
+        [first_occurrence],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET created_at=1 WHERE occurrence_id=?1",
+        [corrupt_occurrence],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE payloads SET bytes=?1 WHERE payload_id=(SELECT payload_id FROM occurrences WHERE occurrence_id=?2)",
+        rusqlite::params![b"other input".as_slice(), corrupt_occurrence],
+    )
+    .unwrap();
+    drop(conn);
+
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let result = dispatcher.run_pass(
+        eligibility(&project),
+        &DispatchBounds {
+            max_jobs: NonZeroUsize::new(2).unwrap(),
+            ..bounds(Duration::from_secs(5))
+        },
+        NOW,
+        &mut |_| {},
+    );
+
+    assert!(matches!(result, Err(DispatchError::Quarantined(_))));
+    assert_eq!(
+        ledger(dir.path(), first_occurrence).state,
+        "embedded",
+        "the first payload must complete before the next payload is hydrated"
+    );
+    assert_eq!(ledger(dir.path(), corrupt_occurrence).state, "pending");
     assert_eq!(engine.calls(), 1);
 }
 

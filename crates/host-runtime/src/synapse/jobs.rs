@@ -323,10 +323,26 @@ pub(crate) fn retained_input_bytes(
     key_len: usize,
     item_meta_lens: impl IntoIterator<Item = (usize, usize)>,
 ) -> usize {
-    item_meta_lens.into_iter().fold(
-        2usize.saturating_mul(key_len),
-        |bytes, (id_len, hash_len)| bytes.saturating_add(id_len).saturating_add(hash_len),
-    )
+    let metadata_bytes = item_meta_lens
+        .into_iter()
+        .fold(0usize, |bytes, (id, hash)| {
+            bytes.saturating_add(id).saturating_add(hash)
+        });
+    retained_input_bytes_for_metadata(key_len, metadata_bytes).unwrap_or(usize::MAX)
+}
+
+pub(crate) fn max_retained_input_bytes(
+    key_len: usize,
+    item_count: usize,
+    id_len: usize,
+    hash_len: usize,
+) -> Option<usize> {
+    let metadata_bytes = item_count.checked_mul(id_len.checked_add(hash_len)?)?;
+    retained_input_bytes_for_metadata(key_len, metadata_bytes)
+}
+
+fn retained_input_bytes_for_metadata(key_len: usize, metadata_bytes: usize) -> Option<usize> {
+    key_len.checked_mul(2)?.checked_add(metadata_bytes)
 }
 
 /// Collects `Job`s and `ByteCharge`s removed under the table lock so they drop after the guard releases; retained vectors and permits are then freed outside the lock.

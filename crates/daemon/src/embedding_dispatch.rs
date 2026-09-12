@@ -19,9 +19,9 @@ use kernel::{
 };
 use retrieval::ProjectionError;
 use retrieval::dispatch::{
-    Admission, BindingOutcome, DispatchCandidate, DispatchCursor, DispatchJob, Disposition,
-    EXHAUSTED, EpisodeGrant, JobLedger, LaneBinding, bind_lane, charge_admission, dispatch_jobs,
-    eligible_job_candidates, job_ledger, rebind_host_job, record_retry, stop_job,
+    Admission, BindingOutcome, CandidateReadiness, DispatchCandidate, DispatchCursor, DispatchJob,
+    Disposition, EXHAUSTED, EpisodeGrant, JobLedger, LaneBinding, bind_lane, charge_admission,
+    dispatch_job, job_ledger, open_job_candidates, rebind_host_job, record_retry, stop_job,
 };
 use retrieval::vectors::{Obsoletion, completion_status, obsolete_embedding};
 
@@ -133,6 +133,13 @@ struct EligibilityCursorBinding {
     destination: kernel::ArtifactDestination,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanPosition {
+    binding: EligibilityCursorBinding,
+    cursor: Option<DispatchCursor>,
+    revisit_at: Option<i64>,
+}
+
 fn lost_charge_resolution(
     original_attempts: u32,
     host_job_id: &str,
@@ -184,8 +191,7 @@ pub struct EmbeddingDispatcher<'a> {
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
     fault: Option<DispatchFault>,
-    cursor: Option<DispatchCursor>,
-    cursor_binding: Option<EligibilityCursorBinding>,
+    scan_position: Option<ScanPosition>,
 }
 
 impl<'a> EmbeddingDispatcher<'a> {
@@ -199,8 +205,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             projection,
             synapse,
             fault: None,
-            cursor: None,
-            cursor_binding: None,
+            scan_position: None,
         }
     }
 
@@ -213,7 +218,9 @@ impl<'a> EmbeddingDispatcher<'a> {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn eligibility_cursor_for_test(&self) -> Option<DispatchCursor> {
-        self.cursor.clone()
+        self.scan_position
+            .as_ref()
+            .and_then(|position| position.cursor.clone())
     }
 
     fn take_fault(&mut self, fault: DispatchFault) -> bool {
@@ -225,7 +232,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
     }
 
-    /// Runs one pass and reports what stopped it early, if anything; every job's disposition reaches `observer`.
+    /// Runs one pass and reports what stopped it early, if anything; every confirmed job disposition reaches `observer`. An unknown terminal write is reconciled without a synthetic event because durable state cannot identify which writer performed the transition.
     /// `now` is one caller-defined logical-time snapshot for the entire pass;
     /// episode deadlines do not expire by wall clock while the pass runs.
     ///
@@ -256,9 +263,15 @@ impl<'a> EmbeddingDispatcher<'a> {
             project: eligibility.project.clone(),
             destination: eligibility.destination,
         };
-        if self.cursor_binding.as_ref() != Some(&cursor_binding) {
-            self.cursor = None;
-            self.cursor_binding = Some(cursor_binding);
+        if self.scan_position.as_ref().is_none_or(|position| {
+            position.binding != cursor_binding
+                || position.revisit_at.is_some_and(|revisit| revisit <= now)
+        }) {
+            self.scan_position = Some(ScanPosition {
+                binding: cursor_binding.clone(),
+                cursor: None,
+                revisit_at: None,
+            });
         }
         let lane = match serving(self.synapse.status()) {
             Ok(lane) => lane,
@@ -280,8 +293,13 @@ impl<'a> EmbeddingDispatcher<'a> {
         }
         let page_limit = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES)
             .expect("the kernel eligibility limit is nonzero");
-        let mut scan_cursor = self.cursor.clone();
-        let mut wrong_scope_cursor = self.cursor.clone();
+        let position = self
+            .scan_position
+            .as_ref()
+            .expect("the scan position is initialized above");
+        let mut scan_cursor = position.cursor.clone();
+        let mut safe_cursor = position.cursor.clone();
+        let mut revisit_at = position.revisit_at;
         let mut action_found = false;
         let mut actions = 0;
         let mut selected = Vec::with_capacity(bounds.max_jobs.get());
@@ -289,13 +307,14 @@ impl<'a> EmbeddingDispatcher<'a> {
         for page_index in 0..MAX_ELIGIBILITY_PAGES_PER_PASS {
             let page = self
                 .projection
-                .read(|conn| eligible_job_candidates(conn, scan_cursor.as_ref(), page_limit, now));
+                .read(|conn| open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now));
             let page = self.before_dispositions(page)?;
             if page.is_empty() {
                 let restart_at_beginning = page_index == 0 && scan_cursor.is_some();
                 scan_cursor = None;
                 if !action_found {
-                    wrong_scope_cursor = None;
+                    safe_cursor = None;
+                    revisit_at = None;
                 }
                 if restart_at_beginning {
                     continue;
@@ -303,23 +322,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 break;
             }
             let short_page = page.len() < MAX_ELIGIBILITY_CANDIDATES;
-            let mut valid = Vec::with_capacity(page.len());
-            let mut kernel_candidates = Vec::with_capacity(page.len());
-            for candidate in &page {
-                let kernel_candidate = EligibilityCandidate {
-                    object_id: candidate.source_object_id.clone(),
-                    source_revision: candidate.source_revision,
-                    artifact_digest: Some(candidate.source_artifact_digest.clone()),
-                };
-                match kernel_candidate.validate() {
-                    Ok(()) => {
-                        valid.push(true);
-                        kernel_candidates.push(kernel_candidate);
-                    }
-                    Err(KernelError::InvalidInput) => valid.push(false),
-                    Err(error) => return Err(DispatchError::Kernel(error)),
-                }
-            }
+            let (prepared, kernel_candidates) = prepare_candidates(&page)?;
             let verdicts = if kernel_candidates.is_empty() {
                 Vec::new()
             } else {
@@ -332,55 +335,57 @@ impl<'a> EmbeddingDispatcher<'a> {
                     .map_err(eligibility_error)?
                     .verdicts
             };
-            let mut verdicts = exact_verdicts(verdicts, kernel_candidates.len())?.into_iter();
+            let classifications = classify_candidates(prepared, verdicts)?;
             let mut processed = 0;
-            for (candidate, valid) in page.iter().zip(valid) {
+            for (candidate, classification) in page.iter().zip(classifications) {
                 if actions == bounds.max_jobs.get() {
                     break;
                 }
                 processed += 1;
                 scan_cursor = Some(candidate.cursor());
-                if !valid {
-                    action_found = true;
-                    terminal.push(PendingObsoletion::candidate(candidate, "invalid_identity"));
-                    actions += 1;
-                    continue;
-                }
-                let verdict = verdicts
-                    .next()
-                    .expect("verdict cardinality was checked before processing");
-                match verdict {
-                    EligibilityVerdict::Ok => {
+                match classification {
+                    CandidateClassification::Deferred { until } => {
+                        if !action_found {
+                            safe_cursor = Some(candidate.cursor());
+                            revisit_at = Some(revisit_at.map_or(until, |saved| saved.min(until)));
+                        }
+                    }
+                    CandidateClassification::InvalidIdentity => {
+                        action_found = true;
+                        terminal.push(PendingObsoletion::candidate(candidate, "invalid_identity"));
+                        actions += 1;
+                    }
+                    CandidateClassification::Verdict(EligibilityVerdict::Ok) => {
                         action_found = true;
                         selected.push(candidate.job_id.clone());
                         actions += 1;
                     }
-                    EligibilityVerdict::WrongScope => {
+                    CandidateClassification::Verdict(EligibilityVerdict::WrongScope) => {
                         if !action_found {
-                            wrong_scope_cursor = Some(candidate.cursor());
+                            safe_cursor = Some(candidate.cursor());
                         }
                     }
-                    EligibilityVerdict::Retracted => {
+                    CandidateClassification::Verdict(EligibilityVerdict::Retracted) => {
                         action_found = true;
                         terminal.push(PendingObsoletion::candidate(candidate, "retracted"));
                         actions += 1;
                     }
-                    EligibilityVerdict::Superseded => {
+                    CandidateClassification::Verdict(EligibilityVerdict::Superseded) => {
                         action_found = true;
                         terminal.push(PendingObsoletion::candidate(candidate, "superseded"));
                         actions += 1;
                     }
-                    EligibilityVerdict::Stale => {
+                    CandidateClassification::Verdict(EligibilityVerdict::Stale) => {
                         action_found = true;
                         terminal.push(PendingObsoletion::candidate(candidate, "stale"));
                         actions += 1;
                     }
-                    EligibilityVerdict::Hidden => {
+                    CandidateClassification::Verdict(EligibilityVerdict::Hidden) => {
                         action_found = true;
                         terminal.push(PendingObsoletion::candidate(candidate, "hidden"));
                         actions += 1;
                     }
-                    EligibilityVerdict::ProviderSensitive => {
+                    CandidateClassification::Verdict(EligibilityVerdict::ProviderSensitive) => {
                         action_found = true;
                         terminal.push(PendingObsoletion::candidate(
                             candidate,
@@ -392,7 +397,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             }
             if short_page && processed == page.len() {
                 if !action_found {
-                    wrong_scope_cursor = None;
+                    safe_cursor = None;
+                    revisit_at = None;
                 }
                 break;
             }
@@ -400,10 +406,6 @@ impl<'a> EmbeddingDispatcher<'a> {
                 break;
             }
         }
-        let jobs = self
-            .projection
-            .read(|conn| dispatch_jobs(conn, &selected, now));
-        let jobs = self.before_dispositions(jobs)?;
         let terminal_deadline = Instant::now() + bounds.guard_deadline;
         if let Some(blocked) =
             self.obsolete_candidates(&terminal, terminal_deadline, now, observer)?
@@ -417,13 +419,21 @@ impl<'a> EmbeddingDispatcher<'a> {
             bounds,
             now,
         };
-        for job in &jobs {
+        for job_id in &selected {
+            let job = self.projection.read(|conn| dispatch_job(conn, job_id, now));
+            let Some(job) = self.before_dispositions(job)? else {
+                continue;
+            };
             self.check_quarantine()?;
-            if let Some(blocked) = self.drive(job, &pass, observer)? {
+            if let Some(blocked) = self.drive(&job, &pass, observer)? {
                 return Ok(Some(blocked));
             }
         }
-        self.cursor = wrong_scope_cursor;
+        self.scan_position = Some(ScanPosition {
+            binding: cursor_binding,
+            cursor: safe_cursor,
+            revisit_at,
+        });
         Ok(None)
     }
 
@@ -892,7 +902,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
                 Ok(Some(Blocked::SearchDeadline))
             }
-            Err(_) => self.reconcile_obsoletions(candidates, observer),
+            Err(_) => self.reconcile_obsoletions(candidates),
         }
     }
 
@@ -920,7 +930,6 @@ impl<'a> EmbeddingDispatcher<'a> {
     fn reconcile_obsoletions(
         &mut self,
         candidates: &[PendingObsoletion],
-        observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
         let statuses = self.projection.read(|conn| {
             candidates
@@ -932,14 +941,6 @@ impl<'a> EmbeddingDispatcher<'a> {
         });
         match statuses {
             Ok(statuses) => {
-                for (candidate, status) in candidates.iter().zip(&statuses) {
-                    if status.job_state.as_deref() == Some("obsolete") {
-                        observer(DispatchEvent::Stopped {
-                            job_id: candidate.job_id.clone(),
-                            reason: candidate.reason.to_owned(),
-                        });
-                    }
-                }
                 if statuses.iter().all(|status| {
                     !matches!(status.job_state.as_deref(), Some("pending" | "admitted"))
                 }) {
@@ -1007,6 +1008,70 @@ fn eligibility_error(error: KernelError) -> DispatchError {
         KernelError::Busy | KernelError::Deadline => DispatchError::RetryableKernel(error),
         _ => DispatchError::Kernel(error),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedCandidate {
+    Deferred { until: i64 },
+    InvalidIdentity,
+    NeedsVerdict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateClassification {
+    Deferred { until: i64 },
+    InvalidIdentity,
+    Verdict(EligibilityVerdict),
+}
+
+fn prepare_candidates(
+    candidates: &[DispatchCandidate],
+) -> Result<(Vec<PreparedCandidate>, Vec<EligibilityCandidate>), DispatchError> {
+    let mut prepared = Vec::with_capacity(candidates.len());
+    let mut kernel_candidates = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if let CandidateReadiness::Deferred { until } = candidate.readiness {
+            prepared.push(PreparedCandidate::Deferred { until });
+            continue;
+        }
+        let kernel_candidate = EligibilityCandidate {
+            object_id: candidate.source_object_id.clone(),
+            source_revision: candidate.source_revision,
+            artifact_digest: Some(candidate.source_artifact_digest.clone()),
+        };
+        match kernel_candidate.validate() {
+            Ok(()) => {
+                prepared.push(PreparedCandidate::NeedsVerdict);
+                kernel_candidates.push(kernel_candidate);
+            }
+            Err(KernelError::InvalidInput) => prepared.push(PreparedCandidate::InvalidIdentity),
+            Err(error) => return Err(DispatchError::Kernel(error)),
+        }
+    }
+    Ok((prepared, kernel_candidates))
+}
+
+fn classify_candidates(
+    prepared: Vec<PreparedCandidate>,
+    verdicts: Vec<EligibilityVerdict>,
+) -> Result<Vec<CandidateClassification>, DispatchError> {
+    let expected = prepared
+        .iter()
+        .filter(|candidate| matches!(candidate, PreparedCandidate::NeedsVerdict))
+        .count();
+    let mut verdicts = exact_verdicts(verdicts, expected)?.into_iter();
+    Ok(prepared
+        .into_iter()
+        .map(|candidate| match candidate {
+            PreparedCandidate::Deferred { until } => CandidateClassification::Deferred { until },
+            PreparedCandidate::InvalidIdentity => CandidateClassification::InvalidIdentity,
+            PreparedCandidate::NeedsVerdict => CandidateClassification::Verdict(
+                verdicts
+                    .next()
+                    .expect("verdict cardinality was checked before classification"),
+            ),
+        })
+        .collect())
 }
 
 fn exact_verdicts(

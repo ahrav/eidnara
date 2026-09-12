@@ -91,7 +91,8 @@ Per-K reconciliation is the primary oracle; aggregate call counts are secondary.
 - Findings: The durable episode is the host item identity. One value reaches
   host submission and the serialized charge transaction. A changed episode
   defers without consuming the replacement grant.
-- Missing evidence: Approved durable and resident capacity limits and a
-  crash-spanning acceptance trace.
+- Missing evidence: Approved durable and resident capacity limits, the
+  submission-before-charge crash window, and a full production acceptance trace.
 - Conclusion: Resolved for episode identity. Capacity approval and full
-  acceptance evidence remain open.
+  acceptance evidence remain open. The post-charge crash/reopen window is
+  covered by `crash_after_charge_reopens_state_and_accounting_together`.

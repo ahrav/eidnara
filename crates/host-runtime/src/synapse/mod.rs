@@ -1708,7 +1708,30 @@ mod tests {
     }
 
     #[test]
-    fn maximal_retained_result_limit_declares_failure_without_panicking() {
+    fn large_unvalidated_item_count_does_not_delay_construction() {
+        let limits = SynapseLimits {
+            max_batch_items: 1_000_000_000_000,
+            ..SynapseLimits::default()
+        };
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let component = SynapseComponent::new(Some(SynapseConfig {
+                bundle_dir: PathBuf::from("unused"),
+                bundle_manifest_sha256: None,
+                ort_library: PathBuf::from("unused"),
+                ort_library_sha256: String::new(),
+                limits,
+            }));
+            let _ = sent.send(component.resources().retained_resident_bytes);
+        });
+
+        received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("construction must not iterate over the configured item count");
+    }
+
+    #[tokio::test]
+    async fn maximal_retained_result_limit_declares_failure_without_panicking() {
         let limits = SynapseLimits {
             max_retained_result_bytes: u64::MAX,
             ..SynapseLimits::default()
@@ -1722,6 +1745,15 @@ mod tests {
         }));
 
         assert_eq!(component.resources().retained_resident_bytes, u64::MAX);
+        let error = SecondaryComponent::initialize(&component)
+            .await
+            .expect_err("the combined resource declaration must be representable");
+        assert!(
+            error
+                .to_string()
+                .contains("combined local input and retained result capacity overflows"),
+            "{error}"
+        );
     }
 
     struct CountingEngine(Arc<std::sync::atomic::AtomicUsize>);

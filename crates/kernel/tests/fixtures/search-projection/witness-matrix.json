@@ -1550,10 +1550,11 @@
       ],
       "scenario_ids": [
         "two_wrong_scope_pages_then_eligible",
+        "deferred_prefix_becomes_due",
         "terminal_deadline_then_retry"
       ],
-      "independent_oracle": "Ordered durable job ledger and one dispatcher reused across passes.",
-      "negative_control": "Restarting each pass at the first page or committing the cursor before disposition must fail.",
+      "independent_oracle": "Ordered durable job ledger, next-attempt timestamps, and one dispatcher reused across passes.",
+      "negative_control": "Restarting each pass at the first page, carrying a cursor past a newly due retry, or committing the cursor before disposition must fail.",
       "integration_observation": "U3d bounded project scan and retry after a refused terminal write.",
       "constructing_tickets": [
         368,
