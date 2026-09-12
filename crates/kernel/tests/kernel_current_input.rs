@@ -366,7 +366,7 @@ fn every_stale_dimension_is_named_and_retains_the_writer_until_dropped() {
 }
 
 #[test]
-fn a_descriptor_whose_cited_evidence_was_logically_deleted_is_retracted() {
+fn deleted_evidence_is_retracted_unless_the_binding_is_wrong_scope() {
     let fixture = Fixture::open();
     let project = ProjectScope::new(PROJECT).unwrap();
     let expectation = fixture.publish("a", "msg-a", "1", "first message", true, true);
@@ -382,6 +382,18 @@ fn a_descriptor_whose_cited_evidence_was_logically_deleted_is_retracted() {
             deleted_at: 1,
         })
         .unwrap();
+
+    let other_project = ProjectScope::new(&"b".repeat(64)).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .guard_current_input(&expectation, binding(&other_project), soon())
+            .unwrap()
+            .err()
+            .map(|stale| stale.reason().clone()),
+        Some(StaleInput::Ineligible(EligibilityVerdict::WrongScope)),
+        "an unrelated binding cannot turn retraction into permission to mutate its projection",
+    );
 
     let local = EligibilityBinding {
         project: &project,

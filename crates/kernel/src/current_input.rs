@@ -267,11 +267,11 @@ fn revalidate(
         eligibility.destination,
         std::slice::from_ref(candidate),
     )?;
-    let (early_stale, eligibility_stale) =
+    let (early_stale, binding_stale, eligibility_stale) =
         match verdicts.first().ok_or(KernelError::CorruptCanonicalRow)? {
-            EligibilityVerdict::Ok => (None, None),
-            EligibilityVerdict::Retracted => (Some(StaleInput::Retracted), None),
-            EligibilityVerdict::Superseded => (Some(StaleInput::Superseded), None),
+            EligibilityVerdict::Ok => (None, None, None),
+            EligibilityVerdict::Retracted => (Some(StaleInput::Retracted), None, None),
+            EligibilityVerdict::Superseded => (Some(StaleInput::Superseded), None, None),
             EligibilityVerdict::Stale => {
                 let current: i64 = tx
                     .query_row_cached(
@@ -280,9 +280,14 @@ fn revalidate(
                         |row| row.get(0),
                     )
                     .map_err(map_sqlite)?;
-                (Some(StaleInput::RevisionChanged { current }), None)
+                (Some(StaleInput::RevisionChanged { current }), None, None)
             }
-            verdict => (None, Some(StaleInput::Ineligible(*verdict))),
+            EligibilityVerdict::WrongScope => (
+                None,
+                Some(StaleInput::Ineligible(EligibilityVerdict::WrongScope)),
+                None,
+            ),
+            verdict => (None, None, Some(StaleInput::Ineligible(*verdict))),
         };
     let stored = tx
         .query_row_cached(
@@ -308,7 +313,7 @@ fn revalidate(
         return Err(KernelError::CorruptCanonicalRow);
     };
     let descriptor = stored.into_validated_descriptor(expected)?;
-    if let Some(stale) = early_stale {
+    if let Some(stale) = early_stale.or(binding_stale) {
         return Ok(RevalidatedInput {
             tip,
             database_incarnation_id,
