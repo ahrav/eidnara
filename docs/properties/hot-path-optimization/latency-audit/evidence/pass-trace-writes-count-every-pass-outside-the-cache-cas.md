@@ -178,7 +178,12 @@ parity check and the redaction receipts other tests count are unchanged. Any
 substituting, rejecting, or detecting scan keeps the receive write's rows, and
 the [receive test][receive-test] shows a clean receive leaving the audit
 tables alone while a detected identity on a known session still records its
-row. The identifiers are generated inside the fenced transaction, so a random
+row. The skip applies only to a `session_id` that `pass_trace` or `cache_state`
+already holds, decided by [one point lookup][receive-known] inside the
+transaction: the receive that introduces a session is the only durable write
+for that identity until the pass commits or rejects, so it keeps its
+zero-finding receipt, as the [first-receive test][first-receive-test] shows.
+The identifiers are generated inside the fenced transaction, so a random
 source failure now aborts the write where `randomblob` could not fail; on
 Linux after boot that failure is not reachable.
 
@@ -243,18 +248,20 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2629-L2637
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2444
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16591-L16633
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6985
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16557-L16586
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16717-L16759
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7029
+[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7059-L7071
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16695-L16712
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16661-L16690
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2863
 [retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L8930
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L8985-L8991
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2644-L2686
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8882
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16414-L16552
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16672-L16771
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9064-L9078
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L16871-L16934
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24065-L24088
-[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24765-L24809
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6994
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8936-L8938
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16518-L16656
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16798-L16897
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9074-L9088
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L16903-L16966
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24191-L24214
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24789-L24833
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7038

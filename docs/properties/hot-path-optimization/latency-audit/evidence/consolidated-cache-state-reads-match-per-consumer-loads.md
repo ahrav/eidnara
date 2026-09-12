@@ -265,8 +265,8 @@ branch as well and passing in isolation.
 [epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6551-L6563
 [phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6569-L6583
 [select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4785-L4801
-[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15408-L15625
-[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15632-L15660
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15418-L15635
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15642-L15670
 [load-count]: ../../../../../crates/daemon/src/lib.rs#L24693-L24745
 [timing-test]: ../../../../../crates/daemon/src/lib.rs#L24751-L24763
 [phase-test]: ../../../../../crates/daemon/src/lib.rs#L24769-L24782

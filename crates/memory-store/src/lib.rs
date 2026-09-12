@@ -7025,8 +7025,7 @@ impl MemoryStore {
         let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
         write.domain_owner("session", session_id, "pass_trace");
         write.existing_identity("session_id", session_id)?;
-        // The breadcrumb carries no content of its own; a clean identity leaves the audit
-        // with nothing to say, so the ordinary pass pays the one UPSERT below.
+        // Existing clean `session_id` values skip the audit.
         write.skip_audit_when_only_clean_identities();
         let flagged = write.recorded_detections(&["session_id"]);
         #[cfg(any(test, feature = "test-support"))]
@@ -7041,9 +7040,7 @@ impl MemoryStore {
                     MemoryStoreError::Serde("injected pass-trace receive failure".to_string()),
                 )));
             }
-            // A clean identity skips this query, so the ordinary pass pays one UPSERT.
-            // A detected one is only tolerable when the session is already keyed by it;
-            // a trace breadcrumb must not be what introduces a secret-bearing session.
+            // Reject a detected `session_id` unless `cache_state` already contains it.
             if flagged {
                 let known: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM cache_state WHERE session_id = ?1)",
@@ -7058,6 +7055,19 @@ impl MemoryStore {
                         .map_err(|error| {
                             rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                         })?;
+                }
+            } else {
+                let known: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pass_trace WHERE session_id = ?1)
+                         OR EXISTS(SELECT 1 FROM cache_state WHERE session_id = ?1)",
+                    params![session_id],
+                    |row| row.get(0),
+                )?;
+                if !known {
+                    coordinated
+                        .prepared
+                        .borrow_mut()
+                        .skip_audit_when_only_clean_identities = false;
                 }
             }
             tx.prepare_cached(
@@ -16676,6 +16686,28 @@ mod tests {
         assert_eq!(
             owner_copy_counts(&store, "ses"),
             vec![("cache_state".to_string(), live.1)]
+        );
+    }
+
+    /// The receive that introduces a session into `pass_trace` is the only durable write
+    /// for that identity until the pass commits or rejects, so it keeps its receipt.
+    #[test]
+    fn the_first_receive_for_a_new_session_records_its_identity_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let before = scan_audit_rows(&store);
+        store.trace_pass_received("fresh", 1).unwrap();
+        let introduced = scan_audit_rows(&store);
+        assert_eq!(
+            introduced,
+            (before.0 + 1, before.1 + 1),
+            "the introducing receive records one zero-finding scan and one owner copy"
+        );
+        store.trace_pass_received("fresh", 2).unwrap();
+        assert_eq!(
+            scan_audit_rows(&store),
+            introduced,
+            "a receive for a session pass_trace already keys records nothing"
         );
     }
 
