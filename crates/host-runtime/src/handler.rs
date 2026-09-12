@@ -442,7 +442,44 @@ pub struct RequestCtx {
     /// `scratch` is separate from the pool that charged `body`.
     /// `scratch` charges cannot stall another connection's frame admission.
     pub(crate) scratch: crate::wire::ByteBudget,
+    /// The ledgers that join this request's blocking work: the request's own, waited on by
+    /// its cancel arm, and the route's, waited on by route close.
+    pub(crate) work: WorkLedgers,
 }
+
+/// The trackers a request's blocking work is entered in.
+#[derive(Clone)]
+pub(crate) struct WorkLedgers {
+    pub(crate) request: tokio_util::task::TaskTracker,
+    pub(crate) route: tokio_util::task::TaskTracker,
+}
+
+/// Blocking work that produced no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlockingWorkFailed {
+    /// The closure panicked; the panic reached stderr through the redacting hook.
+    Panicked,
+    /// The runtime stopped before the work ran or before its result was delivered.
+    RuntimeStopped,
+    /// The route was already closing when the work was offered, so it was not run: work
+    /// entered after the route's fence has drained would run outside every join.
+    RouteClosing,
+}
+
+impl std::fmt::Display for BlockingWorkFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BlockingWorkFailed::Panicked => "request blocking work panicked",
+            BlockingWorkFailed::RuntimeStopped => "request blocking work was not run to a result",
+            BlockingWorkFailed::RouteClosing => {
+                "request blocking work was offered to a closing route"
+            }
+        })
+    }
+}
+
+impl std::error::Error for BlockingWorkFailed {}
 
 impl RequestCtx {
     /// The future resolves when the host requests cancellation.
@@ -453,6 +490,13 @@ impl RequestCtx {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    /// A handle on this request's cancellation that owns no borrow, for work that runs where
+    /// `cancelled()` cannot be awaited: a blocking closure checks it at its safe points, since
+    /// the host cannot stop a thread that has started.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 
     /// Reserves capacity and its resident-byte charge before allocating output.
@@ -495,6 +539,67 @@ impl RequestCtx {
     /// After `Err`, `stream` cannot queue another item.
     pub async fn stream(&self, item: OutputBuffer, binary: bool) -> Result<(), StreamClosed> {
         self.stream.send(item, binary).await
+    }
+
+    /// Runs `work` on the blocking pool as this request's work. The panic-redaction guard is
+    /// raised on the blocking thread, so a panic inside `work` reaches stderr only as the
+    /// redacted diagnostic and surfaces here as [`BlockingWorkFailed::Panicked`]. The work is
+    /// joined by the request's cancel arm and by route close: dropping the returned future,
+    /// as an aborted handler does, detaches only the result, and the host still waits for the
+    /// thread to finish before it settles the cancellation or runs route-gone. Values `work`
+    /// captures, charges included, are released when it returns or unwinds, so a charge
+    /// returns exactly once whichever side stops waiting.
+    ///
+    /// The work is submitted when this is called, on the calling runtime, not when the future
+    /// is first polled; calling it off the runtime panics. Nothing can stop the thread once it
+    /// has started, so `work` must terminate on its own or observe [`cancel_token`] at its
+    /// safe points, and work held past the route-close budget follows the host's fatal path
+    /// rather than cleanup. The handler task is the caller this is built for: work entered
+    /// from a task that outlives it, after the cancel arm has waited on the request ledger,
+    /// is joined by route close alone, and once the route's fence has closed the work is
+    /// refused with [`BlockingWorkFailed::RouteClosing`] rather than run outside every join.
+    /// The refusal reads the fence before entering the work, so an offer that races the
+    /// fence's own drain by a few instructions can still slip past it.
+    ///
+    /// [`cancel_token`]: RequestCtx::cancel_token
+    pub fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> impl Future<Output = Result<T, BlockingWorkFailed>> + Send + 'static {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if self.work.route.is_closed() {
+            drop(result_tx);
+            return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
+        }
+        let blocking =
+            tokio::task::spawn_blocking(move || crate::panic_boundary::redact_sync(work));
+        // The join lives in its own task, entered in both ledgers, so the trackers stay
+        // non-empty until the thread finishes whether or not the handler is still waiting.
+        // The result is handed over, or dropped when no one waits, under the redaction guard,
+        // so a destructor panic in the value or in a panic payload is redacted too.
+        let join_task = self
+            .work
+            .request
+            .track_future(self.work.route.track_future(async move {
+                let outcome = blocking.await;
+                crate::panic_boundary::redact_sync(|| {
+                    let _ = result_tx.send(outcome);
+                });
+            }));
+        tokio::spawn(join_task);
+        blocking_result(result_rx, BlockingWorkFailed::RuntimeStopped)
+    }
+}
+
+/// Resolves a blocking result from its channel; a channel with no sender reports `unrun`.
+async fn blocking_result<T: Send + 'static>(
+    result_rx: tokio::sync::oneshot::Receiver<Result<T, tokio::task::JoinError>>,
+    unrun: BlockingWorkFailed,
+) -> Result<T, BlockingWorkFailed> {
+    match result_rx.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(join)) if join.is_panic() => Err(BlockingWorkFailed::Panicked),
+        Ok(Err(_)) | Err(_) => Err(unrun),
     }
 }
 

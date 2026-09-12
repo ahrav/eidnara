@@ -125,6 +125,23 @@ struct Inner {
     block_runtime_drop: AtomicBool,
     runtime_drop_started: AtomicBool,
     runtime_drop_gate: (Mutex<bool>, Condvar),
+    /// The `blocking_hold` closure waits on this gate from its blocking thread.
+    blocking_gate: Arc<(Mutex<bool>, Condvar)>,
+    blocking_started: Arc<AtomicUsize>,
+    /// Incremented when the `blocking_hold` closure's captured charge is dropped.
+    blocking_charge_released: Arc<AtomicUsize>,
+}
+
+/// Releases a captured resident charge and counts the release, whichever side drops it.
+struct CountedCharge {
+    _charge: host_runtime::wire::ByteCharge,
+    released: Arc<AtomicUsize>,
+}
+
+impl Drop for CountedCharge {
+    fn drop(&mut self) {
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// `TestHandler` chooses per-request behavior from the request body so the raw client can drive it over the wire.
@@ -168,9 +185,29 @@ impl TestHandler {
                 block_runtime_drop: AtomicBool::new(false),
                 runtime_drop_started: AtomicBool::new(false),
                 runtime_drop_gate: (Mutex::new(false), Condvar::new()),
+                blocking_gate: Arc::new((Mutex::new(false), Condvar::new())),
+                blocking_started: Arc::new(AtomicUsize::new(0)),
+                blocking_charge_released: Arc::new(AtomicUsize::new(0)),
             }),
             record_runtime_drop: false,
         }
+    }
+
+    /// How many `blocking_hold` closures have started on their thread.
+    pub fn blocking_started(&self) -> usize {
+        self.inner.blocking_started.load(Ordering::SeqCst)
+    }
+
+    /// How many times a `blocking_hold` closure's charge was released.
+    pub fn blocking_charges_released(&self) -> usize {
+        self.inner.blocking_charge_released.load(Ordering::SeqCst)
+    }
+
+    /// Lets every held `blocking_hold` closure finish.
+    pub fn release_blocking(&self) {
+        let (lock, ready) = &*self.inner.blocking_gate;
+        *lock.lock().expect("blocking gate lock") = true;
+        ready.notify_all();
     }
 
     fn runtime_clone(&self) -> Self {
@@ -535,6 +572,52 @@ impl HostHandler for TestHandler {
                 response_from_slice(&ctx, b"slow-done", false).await
             }
             "panic" => panic!("{}", String::from_utf8_lossy(CANARY_BODY)),
+            // `blocking_hold` awaits held work; `blocking_detached` starts it and answers at
+            // once, so only route close can join it; `blocking_panic` panics on the thread.
+            "blocking_hold" | "blocking_detached" | "blocking_panic" => {
+                let Some(charge) = ctx.try_reserve_resident(1024) else {
+                    return RequestOutcome::error(
+                        "scratch_exhausted",
+                        "the test handler could not reserve its held charge",
+                    );
+                };
+                let charge = CountedCharge {
+                    _charge: charge,
+                    released: Arc::clone(&self.inner.blocking_charge_released),
+                };
+                if mode == "blocking_panic" {
+                    let outcome = ctx
+                        .run_blocking(move || -> Vec<u8> {
+                            let _charge = charge;
+                            panic!("{}", String::from_utf8_lossy(CANARY_BODY))
+                        })
+                        .await;
+                    return match outcome {
+                        Ok(body) => response_from_slice(&ctx, &body, false).await,
+                        Err(_) => RequestOutcome::error("internal_error", "blocking work failed"),
+                    };
+                }
+                let gate = Arc::clone(&self.inner.blocking_gate);
+                let started = Arc::clone(&self.inner.blocking_started);
+                let held = ctx.run_blocking(move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    let (lock, ready) = &*gate;
+                    let mut released = lock.lock().expect("blocking gate lock");
+                    while !*released {
+                        released = ready.wait(released).expect("blocking gate lock");
+                    }
+                    drop(charge);
+                    b"held-done".to_vec()
+                });
+                if mode == "blocking_detached" {
+                    drop(held);
+                    return response_from_slice(&ctx, b"detached", false).await;
+                }
+                match held.await {
+                    Ok(body) => response_from_slice(&ctx, &body, false).await,
+                    Err(_) => RequestOutcome::error("internal_error", "blocking work failed"),
+                }
+            }
             other => {
                 RequestOutcome::error("unknown_mode", format!("unsupported test mode {other}"))
             }

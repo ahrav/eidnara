@@ -59,5 +59,5 @@ gap, not proof of liveness failure. No witness runs here; checks are unaudited.
 [start]: ../../../../crates/host-runtime/src/dispatch.rs#L857-L934
 [cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L937-L954
 [close]: ../../../../crates/host-runtime/src/dispatch.rs#L1226-L1268
-[test]: ../../../../crates/host-runtime/tests/dispatch.rs#L357-L399
-[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L832-L887
+[test]: ../../../../crates/host-runtime/tests/dispatch.rs#L356-L449
+[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L1110-L1166

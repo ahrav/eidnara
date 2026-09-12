@@ -167,7 +167,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 [routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L458-L459
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
 [tl-test]: ../../../../../crates/daemon/src/transform.rs#L487-L490
-[t-panic-stderr]: ../../../../../crates/host-runtime/tests/dispatch.rs#L603-L628
-[t-panic-child]: ../../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
+[t-panic-stderr]: ../../../../../crates/host-runtime/tests/dispatch.rs#L603-L605
+[t-panic-child]: ../../../../../crates/host-runtime/tests/dispatch.rs#L643-L673
 [hr-redact]: ../../../host-runtime/catalog.md#every-callback-invocation-is-inside-the-redaction-guard
 [hr-hook]: ../../../host-runtime/catalog.md#the-panic-hook-cannot-itself-fail

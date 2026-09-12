@@ -66,6 +66,12 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [closing_a_route_settles_its_admitted_work][route-overlap] | A hanging callback starts before Goodbye; the test observes cancelled settlement and exactly one route-gone. | unaudited |
 | [Stream cancellation][stream-cancel] | A cancelled stream stops with one terminal. | unaudited |
 | [Handler panic][handler-panic] | A callback panic maps to one redacted internal-error terminal. | unaudited |
+| [`cancel_waits_for_the_request_blocking_work`][t-cancel-work] | Cancel during held blocking work settles nothing and releases no charge until the work is released, then one `cancelled` terminal and one release. | unaudited |
+| [`route_close_waits_for_the_request_blocking_work`][t-close-work] | Goodbye during held blocking work runs no route-gone until the work is released, then the `cancelled` terminal, exactly one route-gone, and one release. | unaudited |
+| [`route_close_waits_for_blocking_work_the_handler_did_not_await`][t-detached-work] | A handler answers without awaiting its work; route-gone still waits for the work, and the charge releases once. | unaudited |
+| [`blocking_work_held_past_the_route_close_budget_is_fatal_not_cleaned_up`][t-fatal-work] | Work held past a shortened route-close budget produces no route-gone and a lifecycle-fatal shutdown. | unaudited |
+| [`a_blocking_work_panic_settles_as_one_internal_error`][t-panic-work] | A panic inside `run_blocking` settles as one `internal_error` terminal and releases the held charge once. | unaudited |
+| [`blocking_work_panic_payload_is_redacted_from_process_stderr`][t-stderr-work] | A child process panicking inside `run_blocking` writes the fixed diagnostic and not the payload to stderr. | unaudited |
 | [Output reservation][output-reservation] | Concurrent output is reserved before allocation. | unaudited |
 | [Egress exhaustion][egress-exhaustion] | A blocked reservation deadline retires the generation. | unaudited |
 | [Reserved-class isolation][reserved-isolation] | Saturated reserved work cannot consume a general slot. | unaudited |
@@ -87,8 +93,8 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [Cleared finish restoration][upload-cleared] | A cleared coordinator refuses restoration of an old finish. | unaudited |
 | [Early discard][upload-discard] | Discard releases the declared total even before a page arrives. | unaudited |
 
-No off-worker transform completion test is found in this scope; that execution
-topology is not implemented at the cited transform site. Pending-table size or
+The blocking-work tests cover the host seam with a test handler; no relocated
+transform runs through it at the cited transform site. Pending-table size or
 health counters alone are not physical completion witnesses. A transform may
 have durable effects despite an unknown transport outcome, so terminal counts
 are not durable-effect counts.
@@ -341,13 +347,19 @@ that no related check exists anywhere in the repository.
 [parse-admission]: ../../../crates/daemon/src/lib.rs#L11805-L11826
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
-[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L832-L887
+[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1110-L1166
 [stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L503
 [handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L551
-[output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L710
-[egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L786
-[reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L970
-[general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1067
+[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725-L776
+[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781-L825
+[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830-L866
+[t-fatal-work]: ../../../crates/host-runtime/tests/dispatch.rs#L871-L898
+[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L904-L938
+[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610-L612
+[output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L988
+[egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1064
+[reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1248
+[general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1345
 [request-cap]: ../../../crates/daemon/src/lib.rs#L18568
 [parse-nodes]: ../../../crates/daemon/src/lib.rs#L18628
 [parse-copies]: ../../../crates/daemon/src/lib.rs#L18647

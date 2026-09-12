@@ -2942,7 +2942,7 @@ evaluation of this area and its disposition are recorded in
 [tl-test]: ../../../../crates/daemon/src/transform.rs#L487-L490
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
-[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
+[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643-L673
 
 [pass-drain]: ../../../../crates/daemon/src/lib.rs#L8124-L8128
 [due-predicate]: ../../../../crates/memory-store/src/lib.rs#L10893-L10894

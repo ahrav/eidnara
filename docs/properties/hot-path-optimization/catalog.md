@@ -224,26 +224,37 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No physical-work completion/cleanup trace is collected.
-Guarantee: The current callback completion gate precedes route cleanup and
-reuse, and execution relocation must extend that gate to owned physical work.
+Exercised: partial - the
+[cancel and route-close tests](evidence/route-cleanup-waits-for-request-owned-physical-work.md#request-work-join-evidence)
+hold a request's blocking work on its thread, cancel or close, and see no
+terminal, no route-gone, and no charge release until the work is released, then
+one of each, with work the handler did not await joined by route close alone;
+the budget test holds work past a shortened route-close budget and sees the
+fatal path, not cleanup; the panic and stderr tests cover the redacted
+diagnostic, the internal-error settlement, and the charge released on unwind;
+no relocated transform runs through the seam yet.
+Guarantee: The callback completion gate precedes route cleanup and reuse, and
+blocking work a request runs through its context is inside that gate: joined by
+the request's cancel arm and by route close, with its panics redacted.
 Check: `always` - At route-gone entry and cleanup-gated reuse, an independent
 ledger contains no live request-owned work that can access that route's state;
-an unquiesced timeout follows the fatal/refusal path instead of cleanup.
+an unquiesced timeout follows the fatal/refusal path instead of cleanup; a
+cancelled terminal is not sent while the request's blocking work runs.
 Fault/timing angle: Cancellation or outer-future drop precedes actual worker
 completion, including a worker that has not observed abort.
 Required faults and enabling state: Hold request work at an observable live
 barrier, start route or generation close, and independently observe completion,
 route-gone, and reuse. Classify durable outcomes through existing CAS/receipts.
-Confidence: medium - [Evidence](evidence/route-cleanup-waits-for-request-owned-physical-work.md).
-The current handler completion fence is verified; worker-specific test readiness
-is BLOCKED until ownership and completion design are supplied.
+Confidence: high - [Evidence](evidence/route-cleanup-waits-for-request-owned-physical-work.md).
+The handler completion fence, the request ledger the cancel arm waits on, and
+the route-tracker entry of the join task are source-verified and exercised.
 Existing check: [Lifecycle checks](existing-checks.md#execution-lifecycle) cover
 settlement and cleanup cases; their status is unaudited.
 Impact: Cleanup can race live work or permit stale work to affect reused state.
 Open questions:
-- What owns and joins any proposed off-worker transform work? FUTURE topology
-  remains unresolved. (needs human input)
+- What owns and joins any proposed off-worker transform work? The host does:
+  `RequestCtx::run_blocking` enters the work in the request's and the route's
+  ledgers, and the daemon keeps no drain of its own. (answered)
 
 ### request-work-accounting-covers-retained-resources
 

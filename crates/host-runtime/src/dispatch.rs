@@ -11,7 +11,7 @@ use crate::wire::{EnvelopeHeader, Flags, FrameType, HEADER_LEN};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::connection::{GenerationCore, PendingEntry, PendingKey};
 use crate::control::{CODE_CANCELLED, CODE_INTERNAL_ERROR, CODE_SERVER_BUSY, CODE_UNKNOWN_CHANNEL};
@@ -912,6 +912,11 @@ pub async fn dispatch_request<H: HostHandler>(
             corr,
             cancel: cancel.clone(),
         };
+        // Blocking work the handler runs through the context is joined here on cancel and by
+        // route close through the route tracker. The request ledger is closed once the handler
+        // task has ended; work a surviving task enters after that is covered by the route
+        // ledger alone.
+        let request_work = TaskTracker::new();
         let ctx = RequestCtx {
             route,
             // A handler that moves the body into a background task retains ingress accounting in that task.
@@ -923,6 +928,10 @@ pub async fn dispatch_request<H: HostHandler>(
             cancel: cancel.clone(),
             stream: sink,
             scratch: shared_task.scratch_budget.clone(),
+            work: crate::handler::WorkLedgers {
+                request: request_work.clone(),
+                route: handler_fence.clone(),
+            },
         };
         let handler = Arc::clone(&shared_task.handler);
         let inner = shared_task.spawn_tracked(handler_fence.track_future(async move {
@@ -939,6 +948,10 @@ pub async fn dispatch_request<H: HostHandler>(
             () = cancel.cancelled() => {
                 inner.abort();
                 let _ = (&mut inner).await;
+                // The aborted handler may have left blocking work running; the cancellation
+                // settles only once that work has finished.
+                request_work.close();
+                request_work.wait().await;
                 settle(
                     &settlement,
                     &shared_task.egress_budget,

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use host_runtime::{ResourceDeclaration, RouteClass, StaticComposite};
 use support::raw_client::{
-    FLAGS_INTERACTIVE, FLAGS_PURE_HEADER, RawFrame, TY_CANCEL, TY_ERROR, TY_GOODBYE, TY_REQUEST,
-    TY_RESPONSE, TY_STREAM_DATA, TY_STREAM_END,
+    FLAGS_INTERACTIVE, FLAGS_PURE_HEADER, RawClient, RawFrame, TY_CANCEL, TY_ERROR, TY_GOODBYE,
+    TY_REQUEST, TY_RESPONSE, TY_STREAM_DATA, TY_STREAM_END,
 };
 use support::{CompositeTestHost, LINKED_MODULE_ID, TestHost, mode_body};
 
@@ -601,9 +601,21 @@ async fn a_handler_panic_maps_to_one_redacted_internal_error() {
 
 #[test]
 fn handler_panic_payload_is_redacted_from_process_stderr() {
+    assert_panic_payload_is_redacted_from_process_stderr("panic");
+}
+
+/// A panic on the blocking thread of request work reaches stderr only as the redacted
+/// diagnostic, like a panic on the handler's own poll.
+#[test]
+fn blocking_work_panic_payload_is_redacted_from_process_stderr() {
+    assert_panic_payload_is_redacted_from_process_stderr("blocking_panic");
+}
+
+/// Re-runs this binary as the child that panics in `mode`, then inspects its stderr.
+fn assert_panic_payload_is_redacted_from_process_stderr(mode: &str) {
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args(["--exact", "panic_redaction_subprocess_child", "--nocapture"])
-        .env(PANIC_CHILD_ENV, "1")
+        .env(PANIC_CHILD_ENV, mode)
         .output()
         .expect("run panic redaction subprocess");
     assert!(
@@ -629,9 +641,10 @@ fn handler_panic_payload_is_redacted_from_process_stderr() {
 
 #[tokio::test]
 async fn panic_redaction_subprocess_child() {
-    if std::env::var_os(PANIC_CHILD_ENV).is_none() {
+    let Some(mode) = std::env::var_os(PANIC_CHILD_ENV) else {
         return;
-    }
+    };
+    let mode = mode.to_string_lossy().into_owned();
     std::panic::set_hook(Box::new(|info| eprintln!("prior panic hook: {info}")));
 
     let host = TestHost::start().await;
@@ -648,7 +661,7 @@ async fn panic_redaction_subprocess_child() {
             channel,
             epoch,
             corr,
-            &mode_body(serde_json::json!({"mode": "panic"})),
+            &mode_body(serde_json::json!({"mode": mode})),
         )
         .await
         .expect("send");
@@ -657,6 +670,271 @@ async fn panic_redaction_subprocess_child() {
     host.shutdown_gracefully().await;
 
     let _ = std::panic::catch_unwind(|| panic!("UNRELATED-PANIC-CANARY"));
+}
+
+/// Releases the held blocking closures when dropped, so a failed assertion cannot leave a
+/// blocking thread waiting through the host's shutdown.
+struct ReleaseOnDrop<'h>(&'h TestHost);
+
+impl Drop for ReleaseOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.handler.release_blocking();
+    }
+}
+
+/// Sends a request in `mode` on a fresh route and waits until its closure has started on the
+/// blocking thread as the `expected_started`th; returns the client, the route, and the
+/// request correlation.
+async fn start_held_blocking_work(
+    host: &TestHost,
+    session: &str,
+    mode: &str,
+    expected_started: usize,
+) -> (RawClient, u16, u32, u64) {
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", session)
+        .await
+        .expect("route");
+    let corr = client.next_corr();
+    client
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &mode_body(serde_json::json!({"mode": mode})),
+        )
+        .await
+        .expect("send");
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while host.handler.blocking_started() < expected_started {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "blocking work never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (client, channel, epoch, corr)
+}
+
+/// Cancelling a request whose blocking work is held settles nothing until that work
+/// finishes; the captured charge is released exactly once, by the work.
+#[tokio::test]
+async fn cancel_waits_for_the_request_blocking_work() {
+    let host = TestHost::start().await;
+    let release = ReleaseOnDrop(&host);
+    let (mut client, channel, epoch, corr) =
+        start_held_blocking_work(&host, "cancel-held", "blocking_hold", 1).await;
+
+    client
+        .send_frame(TY_CANCEL, FLAGS_PURE_HEADER, channel, epoch, corr, &[])
+        .await
+        .expect("cancel");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), client.expect_frame())
+            .await
+            .is_err(),
+        "the cancellation settled while the blocking work was still held"
+    );
+    assert_eq!(host.handler.blocking_charges_released(), 0);
+    drop(release);
+
+    let frame = client.frame_within(BUDGET).await.expect("terminal");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.error_code(), "cancelled");
+    assert_eq!(
+        host.handler.blocking_charges_released(),
+        1,
+        "the work released its charge once"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), client.expect_frame())
+            .await
+            .is_err(),
+        "the finished work must not settle a second time"
+    );
+
+    // The route still serves.
+    let corr = client.next_corr();
+    client
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &mode_body(serde_json::json!({"mode": "echo"})),
+        )
+        .await
+        .expect("send");
+    let frame = client.frame_within(BUDGET).await.expect("terminal");
+    assert_eq!(frame.ty, TY_RESPONSE);
+    assert_eq!(frame.corr, corr);
+    host.shutdown_gracefully().await;
+}
+
+/// Closing a route whose request holds blocking work runs route-gone only after that work
+/// finishes; the request settles as cancelled and the charge is released exactly once.
+#[tokio::test]
+async fn route_close_waits_for_the_request_blocking_work() {
+    let host = TestHost::start().await;
+    let release = ReleaseOnDrop(&host);
+    let (mut client, channel, epoch, corr) =
+        start_held_blocking_work(&host, "close-held", "blocking_hold", 1).await;
+
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .expect("route goodbye");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), client.expect_frame())
+            .await
+            .is_err(),
+        "the closed route's request settled while its blocking work was still held"
+    );
+    assert!(
+        host.handler.route_gones().is_empty(),
+        "route-gone ran while the blocking work was still held"
+    );
+    assert_eq!(host.handler.blocking_charges_released(), 0);
+    drop(release);
+
+    let (_, frame) = client
+        .frames_until_corr(corr, BUDGET)
+        .await
+        .expect("terminal for the closed route's work");
+    assert_eq!(frame.error_code(), "cancelled");
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    loop {
+        let gones = host.handler.route_gones();
+        if gones.iter().any(|handle| handle.channel == channel) {
+            assert_eq!(
+                gones.iter().filter(|h| h.channel == channel).count(),
+                1,
+                "route-gone must fire once"
+            );
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(host.handler.blocking_charges_released(), 1);
+    host.shutdown_gracefully().await;
+}
+
+/// A handler that answers while its blocking work runs leaves that work in the route ledger
+/// alone: the response settles at once, and route close still waits for the work.
+#[tokio::test]
+async fn route_close_waits_for_blocking_work_the_handler_did_not_await() {
+    let host = TestHost::start().await;
+    let release = ReleaseOnDrop(&host);
+    let (mut client, channel, epoch, corr) =
+        start_held_blocking_work(&host, "close-detached", "blocking_detached", 1).await;
+    let frame = client.frame_within(BUDGET).await.expect("terminal");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(
+        frame.ty, TY_RESPONSE,
+        "the handler answered without waiting"
+    );
+    assert_eq!(host.handler.blocking_charges_released(), 0);
+
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .expect("route goodbye");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        host.handler.route_gones().is_empty(),
+        "route-gone ran while the detached blocking work was still held"
+    );
+    drop(release);
+
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    while !host
+        .handler
+        .route_gones()
+        .iter()
+        .any(|handle| handle.channel == channel)
+    {
+        assert!(tokio::time::Instant::now() < deadline, "route-gone missing");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(host.handler.blocking_charges_released(), 1);
+    host.shutdown_gracefully().await;
+}
+
+/// Blocking work held past the route-close budget is not cleaned up around: the close
+/// aborts the dispatch, waits the budget again, and trips the host's fatal path.
+#[tokio::test]
+async fn blocking_work_held_past_the_route_close_budget_is_fatal_not_cleaned_up() {
+    let host = TestHost::start_with(|config| {
+        config.timing.route_close_budget = Duration::from_millis(200);
+        config.timing.shutdown_deadline = Duration::from_secs(3);
+    })
+    .await;
+    let release = ReleaseOnDrop(&host);
+    let (mut client, channel, epoch, _corr) =
+        start_held_blocking_work(&host, "close-overrun", "blocking_hold", 1).await;
+
+    client
+        .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+        .await
+        .expect("route goodbye");
+    // Both budget windows elapse while the work is held.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(
+        host.handler.route_gones().is_empty(),
+        "route-gone ran around blocking work that never stopped"
+    );
+    drop(release);
+
+    let result = host.shutdown().await;
+    assert!(
+        matches!(result, Err(host_runtime::HostError::LifecycleFatal(_))),
+        "expected lifecycle fatal, got {result:?}"
+    );
+}
+
+/// A panic inside the blocking work reports through the request as the handler's internal
+/// error and releases the charge the closure held; the process-level redaction is checked by
+/// the subprocess test.
+#[tokio::test]
+async fn a_blocking_work_panic_settles_as_one_internal_error() {
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open(LINKED_MODULE_ID, ROOT, "opencode", "blocking-panic")
+        .await
+        .expect("route");
+    let corr = client.next_corr();
+    client
+        .send_frame(
+            TY_REQUEST,
+            FLAGS_INTERACTIVE,
+            channel,
+            epoch,
+            corr,
+            &mode_body(serde_json::json!({"mode": "blocking_panic"})),
+        )
+        .await
+        .expect("send");
+    let frame = client.frame_within(BUDGET).await.expect("terminal");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.error_code(), "internal_error");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), client.expect_frame())
+            .await
+            .is_err(),
+        "one terminal"
+    );
+    assert_eq!(
+        host.handler.blocking_charges_released(),
+        1,
+        "the unwinding closure released its charge once"
+    );
+    host.shutdown_gracefully().await;
 }
 
 #[tokio::test]

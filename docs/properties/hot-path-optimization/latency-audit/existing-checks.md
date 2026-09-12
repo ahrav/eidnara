@@ -658,7 +658,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-hostile]: ../../../../crates/daemon/src/config.rs#L1722
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
-[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
+[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643-L673
 [t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15238-L15441
 [t-load-count]: ../../../../crates/daemon/src/lib.rs#L24667-L24710
 
