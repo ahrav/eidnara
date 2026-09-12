@@ -110,7 +110,7 @@ because the decoded type exposes no copy count.
 
 - Sources examined: the [page apply][pageapply] call into
   `handle_transform_unpaged_value`, the [512 KiB page cap][hostpagecheck], and
-  the staging constants at [`:742-743`][hostpage] (128 MiB staged maximum).
+  the staging constants at [`:735-736`][hostpage] (128 MiB staged maximum).
 - Findings: The assembled `Value` reaches the typed decode with the per-page
   reservation history only; no `value_footprint_bound` runs on the whole.
 - Missing evidence: A statement of which budget covers the assembled tree.
@@ -279,9 +279,16 @@ and returns that probe; a body at or under 1 MiB is probed after the cap, so
 the [allocation test][t-cap-alloc] holds with no reservation to order against.
 The base also gates the direct lane on a [tree-parse walk][witness] that
 refuses the raw-value token at every key; the merged
-[`dispatch_body`][dispatch-body] runs it after the byte-derived floor and
-before the metered typed decode, unmetered, so its scratch buffer is bounded by
-the byte cap like the probe's. The count-only [`SkippedValue`][skipped-live]
+[`dispatch_body`][dispatch-body] runs it after the byte-derived floor through
+the [metered gate][gate], so the walk charges the pool as it visits values and
+the typed decode restarts the count on the bytes the walk holds. A pool with
+nothing free therefore refuses the walk at its first value, before serde_json
+unescapes any string further into the body: the [held-pool test][t-held] runs
+a 4 MiB escaped text block against a drained reserve and measures under 64 KiB
+allocated, where the unmetered walk allocated 4194305 bytes. The one
+body-proportional allocation the meter cannot precede remains serde_json's
+unescape buffer for the string being visited, taken before that string's
+charge, as the module states. The count-only [`SkippedValue`][skipped-live]
 behind `footprint_of` reads a leading token as the `Value` parse does (one
 string, then the object must end) so the oracle stops where the tree decode
 stops; the [oracle test][t-footprint-oracle] pins that on seven shapes, and the
@@ -298,10 +305,10 @@ passed 7 including the ring test;
 passed.
 
 [handle-live]: ../../../../../crates/daemon/src/lib.rs#L11921-L11936
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12676-L12716
-[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15814-L15822
-[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15830-L15835
-[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15837-L15842
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12676-L12718
+[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15841-L15849
+[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15857-L15862
+[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15864-L15869
 [meter]: ../../../../../crates/daemon/src/metered_decode.rs#L134-L142
 [need]: ../../../../../crates/daemon/src/metered_decode.rs#L227-L287
 [release]: ../../../../../crates/daemon/src/metered_decode.rs#L202-L208
@@ -312,17 +319,17 @@ passed.
 [ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L608-L614
 [constants]: ../../../../../crates/daemon/src/metered_decode.rs#L57
 [step]: ../../../../../crates/daemon/src/metered_decode.rs#L65
-[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19985-L20020
-[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20026-L20059
-[t-small]: ../../../../../crates/daemon/src/lib.rs#L20063-L20080
-[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20085-L20113
+[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L20012-L20047
+[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20053-L20086
+[t-small]: ../../../../../crates/daemon/src/lib.rs#L20090-L20107
+[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20112-L20140
 [t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L1001-L1029
 [t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L1054-L1092
-[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20212-L20224
-[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20172-L20207
-[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19892-L19938
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20119-L20167
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20229-L20277
+[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20239-L20251
+[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20199-L20234
+[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19919-L19965
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20146-L20194
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20256-L20304
 [t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
 [preset]: ../../../../../crates/daemon/src/prompt_surface.rs#L108-L163
@@ -332,8 +339,10 @@ passed.
 [scratch]: ../../../../../crates/daemon/src/metered_decode.rs#L59-L60
 [escaped]: ../../../../../crates/daemon/src/metered_decode.rs#L753-L760
 [skipped-live]: ../../../../../crates/daemon/src/metered_decode.rs#L418-L547
-[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15844-L15867
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15511-L15514
+[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15871-L15894
+[gate]: ../../../../../crates/daemon/src/lib.rs#L15520-L15532
+[t-held]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L237-L261
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15513-L15518
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

@@ -12684,22 +12684,24 @@ impl Handler {
         if footprint_floor_exceeds(body, meter.capacity()) {
             return (BodyLane::Unread, request_too_large_error());
         }
-        if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
-            && tree_decode_parses(body)
-        {
+        if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
             let decode_started_at = Instant::now();
-            match decode_metered::<TransformRequest>(body, meter) {
-                Ok(parsed) => {
-                    let outcome = self
-                        .handle_transform_direct(channel, parsed, decode_started_at)
-                        .await;
-                    return (BodyLane::Direct, outcome);
-                }
-                Err(DecodeFailure::Refused(refusal)) => {
-                    return (BodyLane::Direct, resident_refusal(refusal, body, meter));
-                }
-                // The tree decode reuses the bytes the failed decode holds.
-                Err(DecodeFailure::Invalid(_)) => meter.restart(),
+            match direct_lane_gate(body, meter) {
+                Ok(true) => match decode_metered::<TransformRequest>(body, meter) {
+                    Ok(parsed) => {
+                        let outcome = self
+                            .handle_transform_direct(channel, parsed, decode_started_at)
+                            .await;
+                        return (BodyLane::Direct, outcome);
+                    }
+                    Err(DecodeFailure::Refused(refusal)) => {
+                        return (BodyLane::Direct, resident_refusal(refusal, body, meter));
+                    }
+                    // The tree decode reuses the bytes the failed decode holds.
+                    Err(DecodeFailure::Invalid(_)) => meter.restart(),
+                },
+                Ok(false) => {}
+                Err(refusal) => return (BodyLane::Direct, resident_refusal(refusal, body, meter)),
             }
         }
         let request = match decode_metered::<Value>(body, meter) {
@@ -15508,9 +15510,34 @@ fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
         .then(|| probe_request(body))?
 }
 
-/// The direct lane requires `true` so a body the tree refuses never decodes typed.
+/// The direct lane requires `true` so a body the tree refuses never decodes typed; the
+/// dispatch runs it through [`direct_lane_gate`], the tests call it bare.
+#[cfg(test)]
 fn tree_decode_parses(body: &[u8]) -> bool {
     serde_json::from_slice::<SkippedValue>(body).is_ok()
+}
+
+/// The tree-parse walk charged against `meter`: `Ok(true)` admits the body to the typed
+/// decode, which starts over on the bytes the walk holds; `Ok(false)` sends it to the tree
+/// decode the same way; `Err` is the walk's refused charge, taken before the value that
+/// needed it was built, so a held pool stops the walk at its first value.
+fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refusal> {
+    let walked = match decode_metered::<SkippedValue>(body, meter) {
+        Ok(SkippedValue) => true,
+        Err(DecodeFailure::Invalid(_)) => false,
+        Err(DecodeFailure::Refused(refusal)) => return Err(refusal),
+    };
+    meter.restart();
+    Ok(walked)
+}
+
+/// The direct lane's charged walk against `reserve`, for the allocation test.
+#[cfg(feature = "test-support")]
+pub fn direct_lane_gate_for_test(
+    body: &[u8],
+    reserve: &dyn metered_decode::ResidentReserve,
+) -> Result<bool, metered_decode::Refusal> {
+    direct_lane_gate(body, &ResidentMeter::new(reserve))
 }
 
 /// Which decode a body went through.

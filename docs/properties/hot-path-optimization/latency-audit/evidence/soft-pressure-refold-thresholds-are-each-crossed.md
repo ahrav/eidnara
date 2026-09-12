@@ -30,7 +30,7 @@ is never distinguished from the reference. The parent's
   under `memory_enabled`, or newly claimed notes ([`:174-222`][m1-pieces]).
 - `history_budget_tokens` is the request value filtered to finite and
   `>= 0.0`, else the binding's frozen budget
-  ([`lib.rs:8239-8242`][budget-filter]); a small positive budget is reachable
+  ([`lib.rs:8248-8251`][budget-filter]); a small positive budget is reachable
   from the request.
 - `memory_update_count` is `0` on every composition
   ([`m1_compose.rs:231`][m1-count-zero]); no other writer exists in the

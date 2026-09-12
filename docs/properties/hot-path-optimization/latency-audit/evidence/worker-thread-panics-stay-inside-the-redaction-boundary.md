@@ -53,7 +53,7 @@ widens to every pass.
 - Three direct `spawn_blocking` calls: [`health.rs:224`][spawn-health];
   [`mod.rs:358-362`][spawn-kernel-open], where a `JoinError` is printed with
   `eprintln!` and mapped to `KernelError::Fault` (`:360-362`); and
-  [`lib.rs:3858-3866`][spawn-store-open], where a `JoinError` re-panics on the
+  [`lib.rs:3867-3875`][spawn-store-open], where a `JoinError` re-panics on the
   caller (`:3810`).
 - The evaluation names `routing.rs:591` as a production tenant of the pool.
   That call sits inside `#[cfg(test)] mod tests`
@@ -114,7 +114,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 
 - Sources examined: [`dispatch.rs:985-989`][terminal],
   [`mod.rs:462-468`][blocking], [`read.rs:296-322`][read-arms],
-  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3858-3866`][spawn-store-open].
+  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3867-3875`][spawn-store-open].
 - Findings: Three distinct mappings exist for a `JoinError` from a worker
   panic: an `internal_error` terminal (host), a `store_unavailable` response
   (kernel routes), and a re-panic (store open). The kernel-route mapping is a

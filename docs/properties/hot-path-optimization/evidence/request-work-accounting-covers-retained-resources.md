@@ -10,7 +10,8 @@ result still occupies a different bounded resource.
 
 ## Evidence trail
 
-[Parse admission][parse] precedes decode with a [three-copy bound][footprint].
+[Parse admission][parse] is charged inside the decode against a
+[three-copy bound][footprint].
 [Decode][decode] and [finish][finish] move guards with work and retained results.
 
 The current ledger separates classes by actual units and ownership boundaries.
@@ -71,8 +72,8 @@ Include refusal and ownership transfer, not equality between unrelated counters.
 [decode]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L692-L763
 [finish]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L787-L815
 [checks]: ../existing-checks.md#execution-lifecycle
-[parse]: ../../../../crates/daemon/src/lib.rs#L11867-L11888
-[footprint]: ../../../../crates/daemon/src/lib.rs#L15546-L15582
+[parse]: ../../../../crates/daemon/src/lib.rs#L11921-L11936
+[footprint]: ../../../../crates/daemon/src/metered_decode.rs#L54-L57
 [input]: ../../../../crates/host-runtime/src/handler.rs#L277-L295
 [resident]: ../../../../crates/host-runtime/src/handler.rs#L474-L490
 [caps]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L43-L82

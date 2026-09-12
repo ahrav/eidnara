@@ -220,3 +220,42 @@ fn byte_cap_admits_a_facade_sized_body_without_body_proportional_allocation() {
         body.len()
     );
 }
+
+/// A reserve that is already drained: every charge is refused as transient.
+struct Drained;
+
+impl ResidentReserve for Drained {
+    fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        None
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
+#[test]
+fn a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string() {
+    let _serial = measure();
+    // The walk that gates the direct lane is charged like the decodes, so a pool that has no
+    // bytes free refuses it at its first value and serde_json never grows an unescape buffer
+    // for the 4 MiB text block further into the body.
+    let body = text_body(1 << 22, true);
+    assert!(
+        footprint_of(&body) > 1 << 22,
+        "the body's footprint covers its text"
+    );
+
+    let base = reset_peak();
+    let gate = daemon::direct_lane_gate_for_test(&body, &Drained);
+    let peak = peak_since(base);
+    assert!(
+        peak < 64 * 1024,
+        "the walk allocated {peak} bytes against a held pool; the 4 MiB text block was \
+         unescaped before any charge (gate: {gate:?})"
+    );
+    assert!(
+        matches!(gate, Err(daemon::metered_decode::Refusal::Transient)),
+        "the held pool refuses the walk: {gate:?}"
+    );
+}

@@ -35,9 +35,9 @@ privilege rules that a project tier must never bypass.
   project value only when it tightens the user value.
 - Per-pass callers: [`maybe_spawn_reattach`][call-reattach],
   [`prepare_historian_fire`][call-fire] after the state load, pending-rewrite,
-  and live-historian early returns ([`:5062-5100`][fire-early]), and the
-  wrapup path at [`:5417`][call-wrapup]. [`bind`][call-bind] freezes a copy
-  into `SessionBinding`, whose doc at [`:223-224`][binding-doc] says config
+  and live-historian early returns ([`:5085-5121`][fire-early]), and the
+  wrapup path at [`:5440`][call-wrapup]. [`bind`][call-bind] freezes a copy
+  into `SessionBinding`, whose doc at [`:231-235`][binding-doc] says config
   can change while the route stays open.
 - The mtime test at [`:2165-2202`][t-mtime] rewrites the user file with the
   original mtime restored and asserts the old value is returned, then
@@ -91,8 +91,8 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 
 ### Q: Should the historian read the bind-frozen config instead?
 
-- Sources examined: [`:5100`][call-fire], [`:11846`][call-bind],
-  [`:223-224`][binding-doc].
+- Sources examined: [`:5123`][call-fire], [`:11903-11904`][call-bind],
+  [`:231-235`][binding-doc].
 - Findings: The binding doc freezes the fallback history budget because
   config can change while the route stays open; the historian deliberately
   reads a fresh merge per pass. Switching it to the frozen copy removes the
@@ -100,13 +100,13 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 - Missing evidence: A specification decision.
 - Conclusion: needs human input.
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4595-L4604
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L232-L233
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4609-L4618
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L231-L235
 [call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4848
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5071-L5109
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5109
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5426
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11857
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5085-L5121
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5123
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5440
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11903-L11904
 [tier-struct]: ../../../../../crates/daemon/src/config.rs#L222-L228
 [cache-struct]: ../../../../../crates/daemon/src/config.rs#L230-L235
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245

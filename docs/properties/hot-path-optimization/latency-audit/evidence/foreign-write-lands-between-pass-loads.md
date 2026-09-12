@@ -128,6 +128,6 @@ carries the fold.
 The hook stays `#[cfg(test)]`; a campaign outside the unit-test crate still
 needs its own seam, as the investigation log records.
 
-[marker-test]: ../../../../../crates/daemon/src/lib.rs#L36383-L36440
+[marker-test]: ../../../../../crates/daemon/src/lib.rs#L36410-L36467
 [pre-floor-live]: ../../../../../crates/daemon/src/lib.rs#L8312-L8317
 [floor-live]: ../../../../../crates/daemon/src/lib.rs#L8452-L8455

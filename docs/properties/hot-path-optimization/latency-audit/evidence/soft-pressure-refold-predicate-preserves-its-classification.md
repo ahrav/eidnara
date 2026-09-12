@@ -38,7 +38,7 @@ a pass lands in while every H record still passes.
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
   compartment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
-  `ProducerContext` at [`lib.rs:8239-8242`][budget-filter], which admits only
+  `ProducerContext` at [`lib.rs:8248-8251`][budget-filter], which admits only
   finite values `>= 0.0` from the request and falls back to the bound
   budget; a zero budget disables the second disjunct through the
   `> 0.0` guard.

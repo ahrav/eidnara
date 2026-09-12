@@ -43,10 +43,10 @@ only; no test ran and nothing outside this file changed.
   on an already-typed request built by [`serde_json::from_value`][hp-req]
   against a [fresh tempfile store][hp-store]. The production handler wraps
   that call with work the bench never sees: the projection-cache lookup,
-  side-channel drain, and `trace_pass_received` at [8181-8198][h-pre], the
+  side-channel drain, and `trace_pass_received` at [8190-8207][h-pre], the
   `project_memory` read, `historian_active`, and guidance-date lookups inside
   [`run_transform`][h-run], a `Some` projection-cache input at
-  [8250-8256][h-call], `prepare_historian_fire`, and response encoding in
+  [8259-8265][h-call], `prepare_historian_fire`, and response encoding in
   [`respond_transform`][respond]. The bench tops out at 1_000 messages because
   the store's 512 KiB durable-text bound rejects a 1_400-message first HARD
   pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]); that cliff is
@@ -111,7 +111,7 @@ only; no test ran and nothing outside this file changed.
   ([1026-1207][tt]), so a dropped field deserializes as zero and the plugin
   prints `n/a` only when the key is absent from the JSON object
   ([1019-1024][ts-stage-fn]). The handler assigns its stage fields from
-  `Instant` pairs taken on the handler task at [8540-8564][h-timings]; a
+  `Instant` pairs taken on the handler task at [8549-8573][h-timings]; a
   `spawn_blocking` relocation separates those pairs from the worker's.
   [`record_token_cache_delta`][rtcd] subtracts two reads of the
   [thread-local counters][tc-local]; both reads sit inside the synchronous
@@ -127,8 +127,8 @@ only; no test ran and nothing outside this file changed.
 - Required faults and enabling state: none beyond a code change and a pass
   that populates `timings`.
 - Reachability: default-production - the handler populates `timings` on the
-  ordinary path ([8540-8564][h-timings]) and [`respond_transform`][respond] emits
-  the line for every response ([14521-14539][emit-call]).
+  ordinary path ([8549-8573][h-timings]) and [`respond_transform`][respond] emits
+  the line for every response ([14558-14576][emit-call]).
 - Existing check: [`pass_timing_line_is_parseable_for_an_empty_session`][t-line]
   pins the line's key set; [`timings_are_present_and_old_responses_deserialize_without_them`][t-timings]
   pins the default; the plugin test at [test.ts:244][ts-test] asserts the
@@ -158,7 +158,7 @@ only; no test ran and nothing outside this file changed.
   exactly two generations of that cap and is one term of
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared], whose doc says the runtime
   bound holds only when the declaration is truthful and lists each retention
-  class so a change cannot omit one ([2243-2248][declared-doc]); no test
+  class so a change cannot omit one ([2252-2257][declared-doc]); no test
   checks the sum. [`count_with_digest`][tc-cwd] returns counts above `u32`
   uncached ([135-137][tc-u32]) and tokenizes outside the lock, so concurrent
   misses may tokenize twice ([107-109][tc-concurrent]).
@@ -396,9 +396,9 @@ only; no test ran and nothing outside this file changed.
   clone of the merged config at [288][eff-clone]. Per-pass callers are
   [`maybe_spawn_reattach`][call-reattach],
   [`prepare_historian_fire`][call-fire], and the wrapup path
-  [5417][call-wrapup]; [`bind`][call-bind] freezes a copy into
+  [5426][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
-  open ([lib.rs:223-224][binding-doc]). One `ConfigCache` per handler holds
+  open ([lib.rs:232-233][binding-doc]). One `ConfigCache` per handler holds
   one project tier, so two bound project roots alternating re-read the file
   every call ([368-398][tier-cached]). The staleness contract at HEAD
   already ignores a same-mtime edit ([test 2182-2188][t-mtime]).
@@ -451,7 +451,7 @@ only; no test ran and nothing outside this file changed.
 - Every process-global cache is declared.
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared]
   lists each retention class so a budget change cannot omit one
-  ([2243-2248][declared-doc]); a merged-config cache, a sharded token cache,
+  ([2252-2257][declared-doc]); a merged-config cache, a sharded token cache,
   a cron cache, or a scanner anchor index adds its bound there. No test
   checks the sum.
 - Scanner semantics are versioned. An evaluator change that can alter any

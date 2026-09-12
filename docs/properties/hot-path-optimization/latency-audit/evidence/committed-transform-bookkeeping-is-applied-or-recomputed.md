@@ -16,12 +16,12 @@ structures and the recovery each one has.
 ## Evidence trail
 
 The handler is [`handle_transform_dispatch`][handler]. After admission it
-takes a snapshot generation ([`:8142-8146`][snapshot-begin]) and runs the
-pre-transform work at [`:8181-8198`][h-pre]. The `run_transform` closure at
-[`:8195-8261`][h-run] reads `guidance_date` through
-[`guidance_date_for_transform`][guidance-fn] at [`:8261`][guidance-use] and
+takes a snapshot generation ([`:8151-8155`][snapshot-begin]) and runs the
+pre-transform work at [`:8190-8207`][h-pre]. The `run_transform` closure at
+[`:8204-8270`][h-run] reads `guidance_date` through
+[`guidance_date_for_transform`][guidance-fn] at [`:8270`][guidance-use] and
 calls [`transform_with_projection_cached`][tc-inject] with
-`&self.serialized_outputs`. The first call is at [`:8288-8291`][commit-call].
+`&self.serialized_outputs`. The first call is at [`:8297-8300`][commit-call].
 Inside that call, `apply_once` commits the store at
 [`commit_transform:4950-4982`][store-commit] and then replaces the
 serialized-output cache at [`:4987-4997`][output-replace]; both are inside
@@ -30,34 +30,34 @@ the closure, so the transform catalog's
 
 In-memory mutations after `run_transform()` returns, in order:
 
-- [`:8297-8302`][roots-insert] inserts `lineage_root` into
+- [`:8306-8311`][roots-insert] inserts `lineage_root` into
   `transform_session_roots`. Its [field doc][roots-doc] says the durable
   table is the authority and [`module_knows_transform_session`][knows]
-  repopulates the map from it ([`:4531-4552`][knows-heal]) when the session
+  repopulates the map from it ([`:4540-4561`][knows-heal]) when the session
   has `cache_state`.
-- [`:8303-8308`][floor-a] reads the publication floor (Emergency95 only), then
+- [`:8312-8317`][floor-a] reads the publication floor (Emergency95 only), then
   the `#[cfg(test)]` [hook][hook] runs.
 - [`prepare_historian_fire`][prepare] replaces the session's boundary-token
-  snapshot at [`:5197-5200`][boundary-store] and persists no-fire reasons by
+  snapshot at [`:5206-5209`][boundary-store] and persists no-fire reasons by
   CAS at [`record_no_fire:5511`][no-fire]; `spawn_historian_firing` at
-  [`:8429`][spawn-fire] detaches the firing task.
-- [`:8444-8451`][pc-store] calls [`store_projection_cache`][store-pc], which
+  [`:8438`][spawn-fire] detaches the firing task.
+- [`:8453-8460`][pc-store] calls [`store_projection_cache`][store-pc], which
   replaces the `projections` entry for `(session, revert_epoch)`.
-- [`:8474-8479`][guidance-remove] removes the session's `guidance_dates` pin
+- [`:8483-8488`][guidance-remove] removes the session's `guidance_dates` pin
   when `response.committed`. The pin is inserted by
   [`guidance_date_for_session`][guidance-pin] when the loaded `meta` has no
   date, and [`guidance_date_for_transform`][guidance-fn] returns it until it
   is removed. The transform copies `ctx.guidance_date` into `meta` only on a
   bust pass ([`transform.rs:4001-4002`][guidance-meta]).
-- [`:8481-8510`][native-attach] updates `native_attachments`;
-  [`:8512`][trace-complete] writes the completion trace;
-  [`:8514-8517`][observation] records the response observation;
-  [`:8527-8538`][finish-ready] finishes the snapshot generation with the
+- [`:8490-8519`][native-attach] updates `native_attachments`;
+  [`:8521`][trace-complete] writes the completion trace;
+  [`:8523-8526`][observation] records the response observation;
+  [`:8536-8547`][finish-ready] finishes the snapshot generation with the
   retained request.
 
-On the ordinary path there is no `.await` between [`:8288-8291`][commit-call] and
-[`:8527-8538`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
-sit inside the Emergency95 branch ([`:8329-8433`][emergency]), and each is
+On the ordinary path there is no `.await` between [`:8297-8300`][commit-call] and
+[`:8536-8547`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
+sit inside the Emergency95 branch ([`:8338-8442`][emergency]), and each is
 followed by another `run_transform()` call, so an abort there leaves the
 first commit's roots inserted and the later bookkeeping skipped.
 
@@ -98,7 +98,7 @@ the parent's [E1][e1] and [E2][e2] cover route state and charges.
 
 ### Q: What owns and joins any proposed off-worker transform work?
 
-- Sources examined: [`:8195-8261`][h-run] (a closure over borrowed `parsed`,
+- Sources examined: [`:8204-8270`][h-run] (a closure over borrowed `parsed`,
   `binding`, `store`, `project_memory`, and `projection_cache_input`), the
   host cancel arm at [`dispatch.rs:938-955`][host-cancel], the route-close
   path at [`:1239-1259`][host-close].

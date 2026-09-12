@@ -30,8 +30,8 @@ consumer.
 - The production host's [`scheduled_projects`][sched-projects] reads
   `dreamer_review_user_memories_schedule` from each bound route's frozen
   config (`:13991`), skips roots whose memories authority is not `MODULE`
-  ([`:14056-14061`][sched-authority]), and drops a project with no schedule
-  through `schedule: schedule?` ([`:14081`][sched-filter]).
+  ([`:14085-14090`][sched-authority]), and drops a project with no schedule
+  through `schedule: schedule?` ([`:14110`][sched-filter]).
 - The schedule [defaults to `None`][sched-default], so a default campaign
   yields an empty list, `next_due` is never called, and the loop waits
   [`IDLE_POLL`][sched-idle] (60 s) between ticks.
@@ -101,9 +101,9 @@ route in `MODULE` authority. No existing test records the marker.
 [sched-fixture]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L586-L593
 [sched-scripted]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L595-L600
 [t-sched-cron]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L680-L704
-[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L14064-L14113
-[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L14083-L14088
-[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L14108
+[sched-projects]: ../../../../../crates/daemon/src/lib.rs#L14066-L14115
+[sched-authority]: ../../../../../crates/daemon/src/lib.rs#L14085-L14090
+[sched-filter]: ../../../../../crates/daemon/src/lib.rs#L14110
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L887
 [valid]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L205-L210
