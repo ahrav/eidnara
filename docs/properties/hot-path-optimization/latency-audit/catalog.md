@@ -207,13 +207,15 @@ Reachability: default-production
 Status: active
 Exercised: partial - the
 [entry differential](evidence/route-and-typed-decode-are-independent-of-entry-path.md#direct-decode-evidence)
-runs a corpus of 33 body shapes through the body entry and the tree dispatch,
+runs a corpus of 39 body shapes through the body entry and the tree dispatch,
 asserts one outcome, and pins which bodies took the direct lane; the decode
 differential pins the acceptance differences to repeated keys and to
-derive-lenient shapes under an ignored field, both kept off the direct lane,
-and decodes a page assembly to the one-slice request; the serialized corpus
-runs paged against one-slice through the direct-host fixture; none drives
-`Handler::handle` with an over-cap or over-footprint body.
+derive-lenient shapes under an ignored field or the discriminator (including
+the serde_json raw-value token, which a `Value` parse reads under its own
+rule), both kept off the direct lane, and decodes a page assembly to the
+one-slice request; the serialized corpus runs paged against one-slice through
+the direct-host fixture; none drives `Handler::handle` with an over-cap or
+over-footprint body.
 Guarantee: The lane a body reaches, the cap it is admitted under, and the
 typed request it decodes to depend only on raw discriminator and page-field
 reads, and agree across the unpaged lane, the page lane, and any replacement

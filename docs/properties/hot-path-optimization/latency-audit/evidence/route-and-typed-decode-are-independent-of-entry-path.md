@@ -139,47 +139,56 @@ any [`TRANSFORM_PAGE_FIELDS`][pageconst] key is present. The probe's
 struct: a repeated key keeps its last value, a page key counts when present
 whatever its value, `null` included, each key is [classified in place][probe-key]
 so no key text is retained however long it is, and every other value is skipped
-through [`deserialize_any`][skipped] so every check serde_json applies to a
-`Value` parse applies to the probe: the nesting limit, number range, string
-escapes, and UTF-8 (`IgnoredAny` skips without those checks and would let a
-body probe where the tree refuses it). A probe is therefore proof that the tree
-decode parses the body. The probe's only body-proportional cost is serde_json's
-scratch buffer for one escaped string at a time, released with the probe; the
-probe runs before the resident reservation, as the byte-cap probe always did.
+through `IgnoredAny`, the byte scan the byte-cap probe always used. The probe
+selects the lane and the byte-cap class; it does not decide whether the tree
+parses the body, so a body it routes to the direct lane is not admitted there on
+the probe alone.
 
 The same probe serves the byte cap: [`enforce_request_byte_cap`][cap-live] takes
 it instead of running its own read, so a body over 1 MiB is probed once, and it
 keeps the [class read][class-live] (an overlong `method` reads as absent for the
 widening while [dispatch's read][route-resolve] takes any string `method` as
 the route, so that body is admitted and then refused by shape). A body over
-1 MiB that yields no probe is classed by the [lenient read][class-probe], which
-skips other fields without the tree's checks as the derive does, so a
-transform-class body the tree cannot parse past is still admitted under the
-wider cap and refused by shape, as before; its refusal code does not move to the
-1 MiB cap.
+1 MiB whose discriminator the probe scans past a value the tree cannot parse is
+still admitted under the wider cap and refused by shape, as before; its refusal
+code does not move to the 1 MiB cap.
 
 [`dispatch_body`][dispatch-body] is the one branch. When the probe names the
-`transform` route with no page key, the body decodes with
-`serde_json::from_slice::<TransformRequest>` and enters the
+`transform` route with no page key, the body is first walked by
+[`tree_decode_parses`][witness], which skips every value through
+[`deserialize_any`][skipped] so every check serde_json applies to a `Value`
+parse applies to the walk: the nesting limit, number range, string escapes, and
+UTF-8. The walk also refuses any object whose first key is the
+[raw-value token][raw-token]: serde_json's `raw_value` feature, on in this
+workspace, makes a `Value` parse read that object as one boxed raw document
+(the value must be a string holding a document and no key may follow), while a
+derived struct skips it as an unknown field, so without the rule the direct
+decode accepted `{"kind":"transform",...,"x":{"$serde_json::private::RawValue":1}}`
+where the tree refused it. A `true` from the walk is therefore proof that the
+tree decode parses the body. Only then does the body decode with
+`serde_json::from_slice::<TransformRequest>` and enter the
 [direct lane][direct-lane]; on any decode error the body falls through to the
 `Value` parse and the tree dispatch, so a refusal is always the tree decode's
 refusal with the tree decode's message. Every other body takes the tree path
-unchanged. The branch reports the lane it took, which the handler discards and
-the tests assert. The [tree-decoded unpaged lane][tree-lane] and the
-[page apply][page-apply-live] both decode their `Value` with `from_value` and
-enter the same [typed handler][typed-entry] the direct lane enters; the
+unchanged and pays only the byte scan for the lane choice. The branch reports
+the lane it took, which the handler discards and the tests assert. The
+[tree-decoded unpaged lane][tree-lane] and the [page apply][page-apply-live]
+both decode their `Value` with `from_value` and enter the same
+[typed handler][typed-entry] the direct lane enters; the
 `request_observed_at_ms` read moved from the raw `Value` to the typed field,
 which decodes to the same value wherever the typed decode succeeds. The
 `handler_total` timing starts before the typed decode on both lanes; on the
 direct lane that decode reads the body bytes, so the direct lane's
 `handler_total` includes the byte parse that the tree lane's `Value` parse
-precedes. The [byte-scan bound][copies-live] is retained; the direct decode
-retains at most what the tree lane retains, and the [peak test][t-peak]
+precedes. The walk's only body-proportional cost is serde_json's scratch buffer
+for one escaped string at a time, released with the walk, and it runs after the
+resident reservation. The [byte-scan bound][copies-live] is retained; the direct
+decode retains at most what the tree lane retains, and the [peak test][t-peak]
 measures it below the tree decode's peak on the dense native corpus.
 [`handle_transform_for_test`][test-entry] serializes its request and enters at
 the body branch, so the crate's transform tests run the direct lane.
 
-The [corpus][t-corpus] holds 33 bodies: a valid body under `kind` and under
+The [corpus][t-corpus] holds 39 bodies: a valid body under `kind` and under
 `method`, an unknown top-level field, `null` on an `Option` and on a defaulted
 field, a wrong type, a float, an exponent, a negative and an above-`u64`
 integer on integer fields, `-0` on a float field, a repeated top-level key, a
@@ -188,25 +197,32 @@ missing and an unknown serializer profile, a `null` and a lone page field, a
 non-string and an overlong `method` beside `kind`, another route, trailing
 bytes, malformed JSON, array, string and empty bodies, `messages` as an object,
 an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
-field, and nesting at and one past the tree's depth limit. The
-[entry differential][t-entry-diff] runs every body through `dispatch_body` and
-through the tree dispatch on two identical handlers and asserts the same
-response with the timing block removed, or the same code and message; it pins
-the nine bodies that took the direct lane and asserts the valid body was
-served. The [decode differential][t-decode-diff] asserts for every body that a
-probe implies the tree parses it, that where both decodes accept a body they
-produce the same request (pinning the thirteen such bodies, with `-0` compared
-by bit pattern), pins the bodies only the tree accepts to the three
+field, the raw-value token opening an object under an ignored field, with a
+sibling key, inside an ignored array, under the discriminator, holding a
+document string, and after another key, and nesting at and one past the tree's
+depth limit. The [entry differential][t-entry-diff] runs every body through
+`dispatch_body` and through the tree dispatch on two identical handlers and
+asserts the same response with the timing block removed, or the same code and
+message; it pins the ten bodies that took the direct lane and asserts the valid
+body was served. The [decode differential][t-decode-diff] asserts for every
+body that the walk implies the tree parses it, that where both decodes accept a
+body they produce the same request (pinning the fifteen such bodies, with `-0`
+compared by bit pattern), pins the bodies only the tree accepts to the three
 repeated-key shapes (the derive refuses a repeated field; the handler's
 fallback carries them), pins the bodies only the direct decode accepts to the
-four derive-leniency shapes under an ignored field and asserts the probe
-refuses each first, and decodes a two-page assembly of the valid body to the
-one-slice request. The [probe test][t-probe] checks each page key with `null`,
-the discriminator fallbacks, last-wins, the overlong-`method` split between cap
-and route, and the depth limit found by probing the tree. The
-[cap test][t-cap-live] adds a body of exactly `MAX_TRANSFORM_FRAME_BYTES`
-admitted, one byte more refused, and a 2 MiB transform-class body nested past
-the depth limit still admitted.
+eight derive-leniency shapes under an ignored field or the discriminator and
+asserts the walk refuses each first, and decodes a two-page assembly of the
+valid body to the one-slice request. The [probe test][t-probe] checks each page
+key with `null`, the discriminator fallbacks, last-wins, the overlong-`method`
+split between cap and route, and that an over-deep body probes while the walk
+refuses it. The [walk test][t-witness] checks the walk against a `Value` parse
+on scalar, array, string, out-of-range, lone-surrogate, trailing, malformed, and
+empty bodies and pins the raw-value rule, including the one shape the tree
+accepts and the walk declines (the token holding a document string, which then
+takes the tree lane). The [token test][t-token] holds the pinned literal to
+serde_json's behavior. The [cap test][t-cap-live] adds a body of exactly
+`MAX_TRANSFORM_FRAME_BYTES` admitted, one byte more refused, and a 2 MiB
+transform-class body nested past the depth limit still admitted.
 
 The numeric open question is answered by the run: the tree and the direct
 decode share one parser and one set of visitors, so a float or exponent on an
@@ -217,7 +233,7 @@ unchanged, last-wins through the tree.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p daemon --locked` passed 1016 tests including the four above, the
+`cargo test -p daemon --locked` passed 1018 tests including the six above, the
 two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation;
 `cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
@@ -229,27 +245,37 @@ generated the 19-case serialized corpus and passed
 the direct-host fixture, which compares the paged final `messages` bytes to the
 one-slice control.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11892-L11913
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12649-L12669
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15442-L15446
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15461-L15495
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15506-L15531
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15540-L15590
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15594-L15599
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15609-L15616
-[class-probe]: ../../../../../crates/daemon/src/lib.rs#L15727-L15732
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15835-L15856
-[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7964-L7976
-[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7980-L8000
-[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8005
-[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9513
-[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15753
-[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8588-L8598
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19344-L19389
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19392-L19524
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19544-L19662
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19685-L19723
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19262-L19341
+Before the raw-value rule and the split into probe and walk, the six raw-value
+corpus bodies failed both differentials: the body with the token under an
+ignored field was served through `dispatch_body` on the direct lane while the
+tree dispatch refused it with `unrecognized_request_shape`, and the probe
+accepted it where the tree did not parse it. The rule and the split were added
+against those failures.
+
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11891-L11910
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12647-L12669
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15440-L15448
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15450-L15453
+[raw-token]: ../../../../../crates/daemon/src/lib.rs#L15433-L15437
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15464-L15497
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15509-L15533
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15536-L15622
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15627-L15632
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15642-L15649
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15819-L15838
+[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7963-L7975
+[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7979-L7999
+[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8004
+[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9512
+[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15740
+[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8587-L8597
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19326-L19374
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19379-L19405
+[t-token]: ../../../../../crates/daemon/src/lib.rs#L19410-L19422
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19425-L19586
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19607-L19730
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19753-L19792
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19244-L19323
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
