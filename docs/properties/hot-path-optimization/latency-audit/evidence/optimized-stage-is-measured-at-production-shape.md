@@ -25,7 +25,7 @@ must reach before any "faster" claim is checkable.
   (single-threaded, warm-process, warm-tokenizer service time of one stage
   call at a fixed corpus point) and says one process's numbers are not a
   baseline. The bench needs `--features bench-internals`
-  ([Cargo.toml:71-75][cargo-bench]).
+  ([Cargo.toml:62-75][cargo-bench]).
 - Payload sizes: the tokenizer arm sweeps [`PAYLOAD_SIZES`][hp-sizes]
   (256, 2_048, 4_096 bytes); the projection and tail-hygiene arms use
   [`MESSAGE_COUNTS`][hp-counts] (100, 1_400, 2_500 messages) at 2 KiB
@@ -46,7 +46,7 @@ must reach before any "faster" claim is checkable.
   [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound]
   (1_000 commits, 1_400 fails). The test carries
   `#![cfg(feature = "bench-internals")]` and a `required-features` gate in
-  [Cargo.toml:67-69][cargo-bench].
+  [Cargo.toml:62-75][cargo-bench].
 - The two production-sized fixtures are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] (1_400 messages) and
   [`full_module_pass_timing_fixture`][fx-2500] (2_500 messages, 47_075
@@ -102,7 +102,7 @@ specification enumerates the stages, and no name is built at run time.
 ### Q: Which size class is "production-shaped", 1_400 or 2_500 messages?
 
 - Sources examined: [`MESSAGE_COUNTS`][hp-counts], the two fixtures
-  ([1_400][fx-1400], [2_500][fx-2500]), [`E2E_MESSAGE_COUNTS`][hp-e2e-counts].
+  ([1_12434-12494][fx-1400], [2_28083-28292][fx-2500]), [`E2E_MESSAGE_COUNTS`][hp-e2e-counts].
 - Findings: The bench header treats 1_400 at 2 KiB mixed as the
   production-shaped point; the module fixture uses 2_500 with 4_096-byte
   payloads and 47_075 frozen units. No document reconciles them.

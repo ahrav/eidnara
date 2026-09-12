@@ -1717,7 +1717,7 @@ numbers as a baseline; its end-to-end arms call [`transform_cached`][hp-e2e]
 on an already-typed request against a fresh store, skipping the handler work
 at [`:8181-8198`][h-pre] and the response encoding in
 [`respond_transform`][respond]. The two production-sized fixtures
-([1_400][fx-1400], [2_500][fx-2500]) are `#[ignore]` and print to stderr. The
+([1_12436-12441][fx-1400], [2_28085-28090][fx-2500]) are `#[ignore]` and print to stderr. The
 transport bench measures a fixed [256- or 4096-byte payload][he-payload],
 [rejects `--designated-host`][he-designated], and labels its own record
 [`BLOCKED`][he-blocked] while its [manifest][he-manifest] declares 24 probes.
@@ -2248,19 +2248,19 @@ handler future ([`dispatch.rs:928-934`][wrap-callback]). A
 initial `0` and the hook forwards the full panic info to the previously
 installed hook ([`:36-50`][pb-hook]), the Rust default because the only other
 `std::panic::set_hook` in the tree is in a test
-([`tests/dispatch.rs:635`][t-panic-child]). Tokio catches the unwinding panic
+([`tests/dispatch.rs:631-660`][t-panic-child]). Tokio catches the unwinding panic
 as a `JoinError` after the hook has printed. At HEAD the daemon runs kernel
 work this way through [`kernel_routes::blocking`][blocking] at eight sites
 ([`commit.rs:1013`][blk-commit-preview], [`:1038`][blk-commit-run],
 [`egress.rs:201`][blk-egress], [`eligibility.rs:346`][blk-eligibility],
-[`ingest.rs:796`][blk-ingest-decode], [`:797`][blk-ingest-finish],
+[`ingest.rs:722`][blk-ingest-decode], [`:797`][blk-ingest-finish],
 [`read.rs:291`][blk-read-gate], [`:311`][blk-read-rows]) and directly at
-[`health.rs:224`][spawn-health], [`mod.rs:360-362`][spawn-kernel-open], and
-[`lib.rs:3810`][spawn-store-open]. The ingest finish closure calls
+[`health.rs:224`][spawn-health], [`mod.rs:358-362`][spawn-kernel-open], and
+[`lib.rs:3858-3866`][spawn-store-open]. The ingest finish closure calls
 [`store.ingest_artifact`][route-ingest] with the upload payload and the page
 decode closure holds the base64 page; a relocated transform carries the whole
 request. The same boundary crosses the token-cache counters
-([`token_cache.rs:57`][tc-local], W2); the third `thread_local!` in the
+([`token_cache.rs:57-76`][tc-local], W2); the third `thread_local!` in the
 inspected crates is test-only ([`transform.rs:495-498`][tl-test]).
 Required faults and enabling state: A panic injected inside the relocated
 work (a `kernel_routes::blocking` closure at HEAD, or the relocated
@@ -2275,13 +2275,13 @@ The thread-local, the hook branch, the two guard entry points, the handler
 wrap, the eight `blocking` sites, the three direct `spawn_blocking` sites,
 and the `JoinError` mappings are source-verified. The terminal clause
 disagrees with HEAD for kernel routes: `blocking` maps a worker panic to
-`KernelOutcome::unavailable(StoreUnavailable)` ([`mod.rs:467`][blocking]),
+`KernelOutcome::unavailable(StoreUnavailable)` ([`mod.rs:462-468`][blocking]),
 which the route returns as a `Response` body
 `{"kind":"unavailable","reason":"store_unavailable"}` by the documented
 intent at [`:460-461`][blocking-doc], not as an `internal_error` terminal;
 `open_once` maps it to `KernelError::Fault` after an `eprintln!`
-([`mod.rs:360-362`][spawn-kernel-open]); the store opener re-panics
-([`lib.rs:3810`][spawn-store-open]). Both sides are cited; the record does not
+([`mod.rs:358-362`][spawn-kernel-open]); the store opener re-panics
+([`lib.rs:3858-3866`][spawn-store-open]). Both sides are cited; the record does not
 resolve which terminal is the contract.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the three host-runtime redaction tests
@@ -2537,12 +2537,12 @@ evaluation of this area and its disposition are recorded in
 [wire751]: ../../../host-wire-protocol.md#L440
 [wire77]: ../../../host-wire-protocol.md#L666
 
-[handle]: ../../../../crates/daemon/src/lib.rs#L11873-L11895
-[bytecap]: ../../../../crates/daemon/src/lib.rs#L15541-L15557
-[footprint]: ../../../../crates/daemon/src/lib.rs#L15496-L15524
-[copies]: ../../../../crates/daemon/src/lib.rs#L15477-L15486
-[toolarge]: ../../../../crates/daemon/src/lib.rs#L15527-L15532
-[queuefull]: ../../../../crates/daemon/src/lib.rs#L15534-L15539
+[handle]: ../../../../crates/daemon/src/lib.rs#L11882-L11904
+[bytecap]: ../../../../crates/daemon/src/lib.rs#L15574-L15590
+[footprint]: ../../../../crates/daemon/src/lib.rs#L15516-L15552
+[copies]: ../../../../crates/daemon/src/lib.rs#L15511-L15514
+[toolarge]: ../../../../crates/daemon/src/lib.rs#L15559-L15565
+[queuefull]: ../../../../crates/daemon/src/lib.rs#L15567-L15572
 [probe]: ../../../../crates/daemon/src/lib.rs#L15390-L15398
 [class]: ../../../../crates/daemon/src/lib.rs#L15470-L15481
 [dispatch]: ../../../../crates/daemon/src/lib.rs#L12627-L12721
@@ -2553,8 +2553,8 @@ evaluation of this area and its disposition are recorded in
 [routechan]: ../../../../crates/daemon/src/lib.rs#L8113-L8116
 [accept]: ../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../crates/daemon/src/lib.rs#L587-L644
-[pageapply]: ../../../../crates/daemon/src/lib.rs#L9493-L9501
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12553-L12568
+[pageapply]: ../../../../crates/daemon/src/lib.rs#L9487-L9510
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12568-L12577
 [wirestruct]: ../../../../crates/daemon/src/transform.rs#L809-L980
 [wiremsg]: ../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../crates/memory-store/src/lib.rs#L250-L264
@@ -2567,7 +2567,7 @@ evaluation of this area and its disposition are recorded in
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
 [cfg-compaction]: ../../../../crates/daemon/src/config.rs#L121
-[expand]: ../../../../crates/daemon/src/lib.rs#L4190-L4282
+[expand]: ../../../../crates/daemon/src/lib.rs#L4204-L4291
 [store-pc]: ../../../../crates/daemon/src/lib.rs#L4336-L4378
 [historian-fire]: ../../../../crates/daemon/src/lib.rs#L5047
 [assemble]: ../../../../crates/daemon/src/lib.rs#L5287-L5291
@@ -2595,7 +2595,7 @@ evaluation of this area and its disposition are recorded in
 [active-match]: ../../../../crates/daemon/src/transform.rs#L7429
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23662
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23669-L23950
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23945
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3045-L3046
@@ -2757,7 +2757,7 @@ evaluation of this area and its disposition are recorded in
 [reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L517-L554
 [direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
 [native-reserve]: ../../../../packages/shm-native/src/lib.rs#L1024
-[settle-with]: ../../../../crates/daemon/src/lib.rs#L12083-L12139
+[settle-with]: ../../../../crates/daemon/src/lib.rs#L12093-L12148
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
@@ -2920,7 +2920,7 @@ evaluation of this area and its disposition are recorded in
 [blk-read-rows]: ../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3854-L3856
+[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3858-L3866
 [tl-test]: ../../../../crates/daemon/src/transform.rs#L495-L498
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603

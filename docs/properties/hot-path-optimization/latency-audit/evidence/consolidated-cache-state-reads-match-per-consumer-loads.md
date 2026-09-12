@@ -164,7 +164,7 @@ The handler [loads `meta` once][pass-load] through [`load_meta`][meta-load]
 before the tail-delta expansion and hands the result to the pre-transform
 consumers as a [`PassState`][pass-state]: `Loaded` carries the metadata,
 `Unavailable` means the load failed, and `Reload` means the consumer runs after
-a commit. The load reads the [`meta` projection][meta-select] alone: no
+a commit. The load reads the [`meta` projection][meta-select-live] alone: no
 pre-transform consumer reads the core, and the full row's `core_state`
 deserialization is the largest cost of a full load. The
 [tail-delta expansion][delta] and the [projection-cache lookup][lookup] take
@@ -172,7 +172,7 @@ deserialization is the largest cost of a full load. The
 full-sync and misses the cache as it did on its own failed load. The
 [last-response anchor][last-response] takes `Loaded`'s timestamp, `0` on
 `Unavailable`, and a `load_meta` read on `Reload`; the
-[historian-active check][active] takes `Loaded`'s phase when it is idle, idle on
+[historian-active check][active-live] takes `Loaded`'s phase when it is idle, idle on
 `Unavailable`, and the phase alone from the store on `Reload` and on a `Loaded`
 non-idle phase with no live run, since a run that completes after the pass load
 leaves the live map and commits idle. The
@@ -263,12 +263,12 @@ branch as well and passing in isolation.
 [delta]: ../../../../../crates/daemon/src/lib.rs#L4206
 [lookup]: ../../../../../crates/daemon/src/lib.rs#L4317
 [last-response]: ../../../../../crates/daemon/src/lib.rs#L4641-L4673
-[active]: ../../../../../crates/daemon/src/lib.rs#L4609-L4632
+[active-live]: ../../../../../crates/daemon/src/lib.rs#L4609-L4632
 [run-transform]: ../../../../../crates/daemon/src/lib.rs#L8222
 [pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
 [scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4731-L4732
-[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8217
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8217-L8221
 [floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6520-L6535
 [epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6494
 [phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6500-L6514

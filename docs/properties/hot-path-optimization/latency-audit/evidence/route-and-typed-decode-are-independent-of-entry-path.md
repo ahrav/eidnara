@@ -122,8 +122,8 @@ oracle once the change replaces it.
 - Missing evidence: A differential run over the numeric corpus.
 - Conclusion: unresolved, needs a differential run.
 
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11863-L11885
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15530-L15546
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11882-L11904
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15574-L15590
 [probe]: ../../../../../crates/daemon/src/lib.rs#L15369-L15381
 [probestr]: ../../../../../crates/daemon/src/lib.rs#L15388-L15451
 [class]: ../../../../../crates/daemon/src/lib.rs#L15453-L15464
@@ -135,8 +135,8 @@ oracle once the change replaces it.
 [tdispatch]: ../../../../../crates/daemon/src/lib.rs#L7936-L7952
 [observed]: ../../../../../crates/daemon/src/lib.rs#L7975-L7981
 [fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7982-L7990
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9483-L9491
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12542-L12557
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9487-L9510
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12568-L12577
 [wirestruct]: ../../../../../crates/daemon/src/transform.rs#L809-L980
 [typed-decode]: ../../../../../crates/daemon/src/transform.rs#L917-L980
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143

@@ -98,7 +98,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   a publication landing between the transform and the floor check; a CAS
   conflict injected between snapshot and commit.
 - Reachability: default-production - the handler path at
-  [lib.rs:8202-8377][handler] runs for every transform request;
+  [lib.rs:8171-8434][handler] runs for every transform request;
   `compaction_enabled` defaults to `true` ([config.rs:121][cfg-compaction]).
   The Emergency95 arm needs usage at or above the emergency threshold.
 - Existing check: [`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`][t-no-fire]
@@ -138,7 +138,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   [`expand_transform_tail_delta`][epoch-read-delta] map any load error to
   `None`, and [`historian_active`][active] maps it to `false`; a corrupt
   `core_state` column trips both because [`load`][load] decodes both columns.
-  The comment at [lib.rs:4174][epoch-comment] states why the epoch must be the
+  The comment at [lib.rs:4203][epoch-comment] states why the epoch must be the
   persisted one. `ModuleMeta` has no `deny_unknown_fields` and no `flatten`, and
   `revert_epoch` grows by `saturating_add`, so the SQLite integer range is not
   a practical concern but belongs in the equivalence statement.
@@ -189,10 +189,10 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   transaction at all ([`record_stable_pass_trace`][stable-call] runs only when
   `!committed`). Consumers: [session status][status-read] and
   [health][health-read] JSON, the `newest_pass_at` age computation at
-  [lib.rs:6245-6254][age], and the plugin's `Passes: N received, M rejected`
-  line at [command-handler.ts:267][plugin]. No scheduler decision reads
+  [lib.rs:6300-6311][age], and the plugin's `Passes: N received, M rejected`
+  line at [command-handler.ts:265-268][plugin]. No scheduler decision reads
   `pass_trace`; [`load_pass_scheduler_history`][sched-history] has one
-  non-store caller and it is a test at [transform.rs:13564][sched-test].
+  non-store caller and it is a test at [transform.rs:13578][sched-test].
 - Fault/timing angle: A fold moves the bump after `run_transform`, so a
   rejected or stable pass under-counts, or a rerun Emergency95 pass
   double-counts if the bump is attached to every commit.
@@ -226,8 +226,8 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   ignores trace-write errors with `let _ =` on every call site.
 - Guarantee: Diagnostics cannot veto or enlarge the state commit.
 - Rationale: Every trace call site discards its result
-  ([8131][received-call], [8196][rejected-call], [8436][completed-call],
-  [1836][stable-call]). The doc comments on [`trace_pass_received`][received-doc]
+  ([8206][received-call], [8280-8287][rejected-call], [8512][completed-call],
+  [1823-1847][stable-call]). The doc comments on [`trace_pass_received`][received-doc]
   and [`trace_pass_completed`][completed-doc] state that these writes stay
   outside the fenced cache-state transaction so they cannot contend with,
   extend, or alter CAS semantics. Folding the bump into `commit_transform`
@@ -284,7 +284,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   and user observations; a crash or abort injected between the two fenced
   transactions; a second drainer started between load and deliver.
 - Reachability: default-production for the drain call
-  ([lib.rs:8124][drain-call]); explicit-config-only for row delivery, because
+  ([lib.rs:8199-8203][drain-call]); explicit-config-only for row delivery, because
   outbox rows come from [`publish_historian_chunk`][publish] and firing
   requires a configured `model_chain` ([config.rs:119][cfg-models],
   [`no_models` gate][no-models]); `user_observation` rows further require
@@ -395,7 +395,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   the interleaving that makes the first property meaningful may never occur.
 - Guarantee: The campaign exercises the state that distinguishes
   one-load-per-pass from per-consumer loads.
-- Rationale: The rerun logic at [lib.rs:8365-8384][floor-b] exists for this
+- Rationale: The rerun logic at [lib.rs:8425-8444][floor-b] exists for this
   interleaving. Without it, a single-load design and the current design are
   indistinguishable.
 - Fault/timing angle: The window between `commit_transform` and

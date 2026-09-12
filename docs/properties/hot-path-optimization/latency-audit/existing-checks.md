@@ -247,9 +247,9 @@ not whether the focused tests ran.
 | [read-session-raw.test.ts:173, 249][tordinal] | Ordinal keyset page reads wider than one part chunk; summary rows spend no ordinal. | unaudited |
 | [sqlite.test.ts:279-467][tsqlite] | Adapter constructor option mapping, transaction shim, runtime selector errors. | unaudited |
 | [sqlite-bind-style.test.ts:32][tbind] | Every `.run/.get/.all` uses spread positional binds. | unaudited |
-| [module-wire.test.ts:1308][t1308] | Unpaged `bytes` equals a later `JSON.stringify` length. | unaudited |
-| [module-wire.test.ts:1371][t1371] | Each paged `bytes` equals a later `JSON.stringify` length. | unaudited |
-| [module-wire.test.ts:1391][t1391] | The pageable array field list matches the daemon's Rust literal. | unaudited |
+| [module-wire.test.ts:1310][t1308] | Unpaged `bytes` equals a later `JSON.stringify` length. | unaudited |
+| [module-wire.test.ts:1373][t1371] | Each paged `bytes` equals a later `JSON.stringify` length. | unaudited |
+| [module-wire.test.ts:1393][t1391] | The pageable array field list matches the daemon's Rust literal. | unaudited |
 | [rust-mode-transform.test.ts:540, 578, 617][tpaged] | A paged series re-pages after `need_full_sync`; it restarts on attempt mismatch and reconnect. | unaudited |
 | [frame-channel.test.ts:181, 193][t181] | The declared byte length equals written bytes for lone surrogates, including across a segment boundary. | unaudited |
 | [Joint pager and native-writer fake][serialized-writer] | Frozen corpus checks carried UTF-8 bytes against the raw header and captured byte array through the real module transport, client encoder, and writer. Exact first/final lengths and page counts are asserted. | unaudited |
@@ -447,7 +447,7 @@ Production guards go to
 categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12561-L12566
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12568-L12577
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 [t-cap]: ../../../../crates/daemon/src/lib.rs#L18995-L19053
 [t-fp]: ../../../../crates/daemon/src/lib.rs#L19048-L19111
@@ -478,7 +478,7 @@ not a claim that no related check exists anywhere in the repository.
 [synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23945
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27889
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23662
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23669-L23950
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13993
 [served-shells]: ../../../../crates/daemon/src/transform.rs#L13714
 [served-corpus]: ../../../../crates/daemon/src/transform.rs#L13760
