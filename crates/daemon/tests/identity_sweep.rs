@@ -344,7 +344,13 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     // Nothing is eligible on a fresh projection: a sweep is a witnessed no-op.
     let untouched = inventory(dir.path());
     let report = sweep(&projection, &synapse, ten());
-    assert_eq!(report, SweepReport::default());
+    assert_eq!(
+        report,
+        SweepReport {
+            inspected: 6,
+            ..SweepReport::default()
+        }
+    );
     assert_eq!(inventory(dir.path()), untouched);
 
     // Current generation: alpha, beta, gamma, delta embedded; echo left pending; foxtrot stopped.
@@ -389,8 +395,9 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     );
     let fixed = singletons(dir.path());
 
-    let report = sweep(&projection, &synapse, ten());
+    let report = sweep(&projection, &synapse, NonZeroUsize::new(11).unwrap());
     assert_eq!(report.held, Vec::<Candidate>::new());
+    assert_eq!(report.inspected, 11);
     assert_eq!(report.survivors, 0);
     assert_eq!(
         (
@@ -459,7 +466,10 @@ async fn the_reference_ledger_predicts_survivors_and_eligible_identities_are_gon
     let again = sweep(&projection, &synapse, ten());
     assert_eq!(
         again,
-        SweepReport::default(),
+        SweepReport {
+            inspected: 8,
+            ..SweepReport::default()
+        },
         "a second sweep finds nothing left"
     );
     assert_eq!(engine.calls(), 4);
@@ -595,7 +605,8 @@ async fn races_with_selection_preserve_live_work_and_release_makes_candidates_re
     // Selection observes two candidates: old under the current generation, late under the retired one.
     let selected = projection
         .read(|conn| candidates(conn, ten(), None))
-        .unwrap();
+        .unwrap()
+        .candidates;
     let mut pairs: Vec<(&str, &str)> = selected
         .iter()
         .map(|candidate| {
@@ -724,6 +735,7 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         .unwrap();
     let engine = TestEngine::new();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let synapse = component(
         &engine,
         SynapseLimits {
@@ -913,7 +925,7 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
             PublicationFault::LoseLocalCommitReply,
         )
     });
-    let report = report.expect("the sweep ran inside the reconciliation window");
+    let report = report.unwrap_or_else(|| panic!("no reconciliation sweep: {result:?}"));
     assert_eq!(
         (report.candidates, report.held.len(), report.jobs_reclaimed),
         (1, 1, 0),
@@ -932,6 +944,129 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     assert!(inventory(dir.path()).is_empty());
 }
 
+fn occurrences_in_job_order(data_home: &Path) -> Vec<String> {
+    let conn = inspect(data_home);
+    let mut statement = conn
+        .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY job_id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
+    for count in [3, 4] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        for name in ["a", "b", "c", "d"].iter().take(count) {
+            corpus.publish(name, &format!("{name} text"));
+        }
+        let (projection, _) = corpus.bootstrap(dir.path());
+        let ordered = occurrences_in_job_order(dir.path());
+        for occurrence in &ordered[2..] {
+            tombstone(&projection, occurrence, 50);
+        }
+        let engine = TestEngine::new();
+        let synapse = component(&engine, SynapseLimits::default());
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, None);
+        let two = NonZeroUsize::new(2).unwrap();
+        let before = inventory(dir.path());
+        assert_eq!(
+            tokio::task::block_in_place(|| {
+                sweeper
+                    .run_sweep(two, &budget(Duration::from_secs(30)))
+                    .unwrap()
+            }),
+            SweepReport {
+                inspected: 2,
+                ..SweepReport::default()
+            }
+        );
+        assert_eq!(inventory(dir.path()), before);
+        let cursor = sweeper.cursor().map(str::to_owned);
+        assert_eq!(cursor, Some(job_id_of(dir.path(), &ordered[1])));
+        drop(sweeper);
+
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor.clone());
+        let cancelled = budget(Duration::from_secs(30));
+        cancelled.cancel();
+        assert_eq!(
+            tokio::task::block_in_place(|| sweeper.run_sweep(two, &cancelled).unwrap()),
+            SweepReport {
+                budget_exhausted: true,
+                ..SweepReport::default()
+            }
+        );
+        assert_eq!(sweeper.cursor(), cursor.as_deref());
+        assert_eq!(inventory(dir.path()), before);
+        let cursor = sweeper.cursor().map(str::to_owned);
+        drop(sweeper);
+
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        assert_eq!(
+            tokio::task::block_in_place(|| {
+                sweeper
+                    .run_sweep(two, &budget(Duration::from_secs(30)))
+                    .unwrap()
+            }),
+            SweepReport {
+                inspected: count - 2,
+                candidates: count - 2,
+                jobs_reclaimed: count - 2,
+                ..SweepReport::default()
+            }
+        );
+        assert!(
+            inventory(dir.path())
+                .iter()
+                .all(|(o, _, _)| ordered[..2].contains(o))
+        );
+        let cursor = sweeper.cursor().map(str::to_owned);
+        assert_eq!(cursor.is_some(), count == 4);
+        drop(sweeper);
+        tombstone(&projection, &ordered[0], 60);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        if count == 4 {
+            assert_eq!(
+                tokio::task::block_in_place(|| {
+                    sweeper
+                        .run_sweep(two, &budget(Duration::from_secs(30)))
+                        .unwrap()
+                }),
+                SweepReport::default(),
+                "a full final page requires an EOF read before wrapping"
+            );
+        }
+        let cursor = sweeper.cursor().map(str::to_owned);
+        assert_eq!(cursor, None);
+        drop(sweeper);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        assert_eq!(
+            tokio::task::block_in_place(|| {
+                sweeper
+                    .run_sweep(two, &budget(Duration::from_secs(30)))
+                    .unwrap()
+            }),
+            SweepReport {
+                inspected: 2,
+                candidates: 1,
+                jobs_reclaimed: 1,
+                ..SweepReport::default()
+            },
+            "wraparound revisits a prefix identity that became eligible"
+        );
+        assert_eq!(
+            inventory(dir.path()),
+            BTreeSet::from([(ordered[1].clone(), GENERATION.to_string(), Row::Job)])
+        );
+        assert_eq!(engine.calls(), 0);
+    }
+}
+
 /// Held candidates consume the inspection bound without starving free identities across sweeps.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_candidates_do_not_starve_free_identities_behind_them() {
@@ -942,17 +1077,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
         corpus.publish(name, &format!("{name} text"));
     }
     let (projection, _) = corpus.bootstrap(dir.path());
-    let ordered: Vec<String> = {
-        let conn = inspect(dir.path());
-        let mut statement = conn
-            .prepare("SELECT occurrence_id FROM embedding_jobs ORDER BY job_id")
-            .unwrap();
-        statement
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<Vec<String>, _>>()
-            .unwrap()
-    };
+    let ordered = occurrences_in_job_order(dir.path());
     let (held_occurrences, free_occurrence) = ordered.split_at(3);
     // The free identity dies before dispatch, so no host ever held it.
     tombstone(&projection, &free_occurrence[0], 50);
@@ -980,6 +1105,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
                 .run_sweep(one, &budget(Duration::from_secs(30)))
                 .unwrap()
         });
+        assert_eq!(report.inspected, 1, "one job row is inspected");
         assert_eq!(report.candidates, 1, "one candidate is inspected");
         assert_eq!(report.held.len(), 1, "one held identity survives");
         assert_eq!(&report.held[0].occurrence_id, occurrence);
@@ -990,6 +1116,7 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
             .run_sweep(one, &budget(Duration::from_secs(30)))
             .unwrap()
     });
+    assert_eq!(report.inspected, 1, "one job row is inspected");
     assert_eq!(report.candidates, 1, "one candidate is inspected");
     assert!(report.held.is_empty());
     assert_eq!(
@@ -1072,7 +1199,13 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
             .run_sweep(ten(), &budget(Duration::from_secs(30)))
             .unwrap()
     });
-    assert_eq!(again, SweepReport::default());
+    assert_eq!(
+        again,
+        SweepReport {
+            inspected: 1,
+            ..SweepReport::default()
+        }
+    );
     drop(projection);
     let _ = SearchProjection::open(dir.path()).unwrap();
     assert_eq!(inventory(dir.path()), expected);

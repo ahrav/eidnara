@@ -13,6 +13,8 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepReport {
+    /// Job rows inspected, including identities that remain referenced or unfinished.
+    pub inspected: usize,
     /// Finished, unreferenced identities the selection found, before any holder or recheck excluded them.
     pub candidates: usize,
     /// Candidates the host still holds; their rows stay until the holder exits.
@@ -72,14 +74,17 @@ impl<'a> IdentitySweeper<'a> {
         self.lose_reclaim_reply = true;
     }
 
-    /// Inspects at most `max_candidates` finished, unreferenced identities and reclaims those no holder protects. Selection resumes across calls, so held rows consume this call's bound without starving later identities. The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves the selected page for the next sweep to select again, and the report says the budget ended it.
+    /// Inspects at most `max_jobs` job rows and reclaims finished, unreferenced identities that no holder protects.
+    /// Selection advances past every inspected row, even on candidate-free pages, and wraps after a short page.
+    /// Keeping `cursor` across calls prevents live or held rows from starving later identities.
+    /// The budget is checked before selection and again before the write: an exhausted budget selects nothing, or leaves the selected page and cursor unchanged for the next sweep, and the report says the budget ended it.
     ///
     /// # Errors
     ///
     /// Returns [`SweepError::Read`] when selection fails and [`SweepError::Quarantined`] once a reclamation is refused, its outcome cannot be reconciled, or any writer has quarantined the projection.
     pub fn run_sweep(
         &mut self,
-        max_candidates: NonZeroUsize,
+        max_jobs: NonZeroUsize,
         budget: &EvalBudget,
     ) -> Result<SweepReport, SweepError> {
         if let Some(quarantine) = self.projection.quarantine() {
@@ -94,17 +99,18 @@ impl<'a> IdentitySweeper<'a> {
         let mut report = SweepReport::default();
         let page = self
             .projection
-            .read(|conn| candidates(conn, max_candidates, self.cursor.as_deref()))
+            .read(|conn| candidates(conn, max_jobs, self.cursor.as_deref()))
             .map_err(SweepError::Read)?;
-        report.candidates = page.len();
+        report.inspected = page.inspected;
+        report.candidates = page.candidates.len();
         // A short page ends one pass over the table; a full page resumes after its last row once this call has judged it.
-        let next_cursor = if page.len() < max_candidates.get() {
+        let next_cursor = if page.inspected < max_jobs.get() {
             None
         } else {
-            page.last().map(|candidate| candidate.job_id.clone())
+            page.last_job_id
         };
-        let mut free = Vec::with_capacity(page.len());
-        for candidate in page {
+        let mut free = Vec::with_capacity(page.candidates.len());
+        for candidate in page.candidates {
             if self.holds(&candidate) {
                 report.held.push(candidate);
             } else {
