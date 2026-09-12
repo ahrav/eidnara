@@ -2637,7 +2637,7 @@ evaluation of this area and its disposition are recorded in
 [handler]: ../../../../crates/daemon/src/lib.rs#L8181-L8444
 [received-call]: ../../../../crates/daemon/src/lib.rs#L8197
 [rejected-call]: ../../../../crates/daemon/src/lib.rs#L8271-L8278
-[commit-call]: ../../../../crates/daemon/src/lib.rs#L8266
+[commit-call]: ../../../../crates/daemon/src/lib.rs#L8288
 [roots-insert]: ../../../../crates/daemon/src/lib.rs#L8286-L8291
 [floor-a]: ../../../../crates/daemon/src/lib.rs#L8294-L8302
 [hook]: ../../../../crates/daemon/src/lib.rs#L8303-L8308

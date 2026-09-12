@@ -267,7 +267,7 @@ branch as well and passing in isolation.
 [run-transform]: ../../../../../crates/daemon/src/lib.rs#L8222
 [pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
-[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4728-L4729
+[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4731-L4732
 [floor-live]: ../../../../../crates/daemon/src/lib.rs#L8217
 [floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6520-L6535
 [epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6494
