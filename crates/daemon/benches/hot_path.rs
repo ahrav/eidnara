@@ -167,6 +167,16 @@ fn bench_tail_hygiene(c: &mut Criterion) {
     for &count in MESSAGE_COUNTS {
         let messages = ingress_messages(ContentClass::Mixed, count, 2_048);
         let projection = project_messages(&messages).expect("projection");
+        let memo = bench_internals::HygieneMemo::default();
+        black_box(bench_internals::measure_tail_hygiene(
+            &projection,
+            &core,
+            None,
+            &[],
+            20,
+            &protected,
+            &memo,
+        ));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
             &projection,
@@ -179,6 +189,7 @@ fn bench_tail_hygiene(c: &mut Criterion) {
                         &[],
                         20,
                         &protected,
+                        &memo,
                     )
                 })
             },

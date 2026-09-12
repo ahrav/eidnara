@@ -124,21 +124,21 @@ because the decoded type exposes no copy count.
 - Conclusion: needs human input.
 
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11805-L11827
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15472-L15488
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15427-L15455
-[copies]: ../../../../../crates/daemon/src/lib.rs#L15408-L15417
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15458-L15463
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15465-L15470
-[freeze]: ../../../../../crates/daemon/src/lib.rs#L8036-L8037
-[routechan]: ../../../../../crates/daemon/src/lib.rs#L8045-L8048
-[accept]: ../../../../../crates/daemon/src/lib.rs#L8066
-[ticket]: ../../../../../crates/daemon/src/lib.rs#L574-L631
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9425-L9433
-[hostpage]: ../../../../../crates/daemon/src/lib.rs#L735-L736
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9317-L9323
-[settle]: ../../../../../crates/daemon/src/lib.rs#L12072-L12087
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12484-L12499
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11811-L11833
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15478-L15494
+[footprint]: ../../../../../crates/daemon/src/lib.rs#L15433-L15461
+[copies]: ../../../../../crates/daemon/src/lib.rs#L15414-L15423
+[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15464-L15469
+[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15471-L15476
+[freeze]: ../../../../../crates/daemon/src/lib.rs#L8042-L8043
+[routechan]: ../../../../../crates/daemon/src/lib.rs#L8051-L8054
+[accept]: ../../../../../crates/daemon/src/lib.rs#L8072
+[ticket]: ../../../../../crates/daemon/src/lib.rs#L580-L637
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9431-L9439
+[hostpage]: ../../../../../crates/daemon/src/lib.rs#L741-L742
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9323-L9329
+[settle]: ../../../../../crates/daemon/src/lib.rs#L12078-L12093
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12490-L12505
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
 [reserve]: ../../../../../crates/host-runtime/src/handler.rs#L474-L484

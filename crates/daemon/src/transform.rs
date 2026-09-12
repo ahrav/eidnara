@@ -4696,13 +4696,20 @@ fn apply_once(
     let hygiene_tag_rows =
         tag_rows_for_hygiene(&projection, &tag_rows, &tag_overlay, !tagging_active);
     let tail_hygiene_started_at = Instant::now();
-    let hygiene_measurement = measure_tail_hygiene(
-        &projection,
-        &core,
-        meta.coverage_ordinal,
-        hygiene_tag_rows.iter().map(Arc::as_ref),
-        req.protected_tags,
-        &protected_block_ids,
+    let hygiene_measurement = crate::tail_hygiene::hygiene_memos().with_session(
+        store.tag_cache_namespace(),
+        &req.session_id,
+        |memo| {
+            measure_tail_hygiene(
+                &projection,
+                &core,
+                meta.coverage_ordinal,
+                hygiene_tag_rows.iter().map(Arc::as_ref),
+                req.protected_tags,
+                &protected_block_ids,
+                memo,
+            )
+        },
     );
     timings.tail_hygiene = elapsed_ms(tail_hygiene_started_at);
     let current_hygiene_baseline = if is_bust_pass {
@@ -10529,7 +10536,7 @@ fn enforce_unique_tool_use_ids(
             .collect::<HashSet<_>>();
         for (id, message_index, _) in &duplicates {
             let owner_becomes_empty = messages[*message_index]
-                .content
+                .content()
                 .iter()
                 .enumerate()
                 .all(|(block_index, _)| remove_positions.contains(&(*message_index, block_index)));
@@ -10537,9 +10544,9 @@ fn enforce_unique_tool_use_ids(
                 continue;
             }
             if let Some(result) = messages.get(message_index + 1) {
-                for (block_index, block) in result.content.iter().enumerate() {
+                for (block_index, block) in result.content().iter().enumerate() {
                     if matches!(
-                        &block.kind,
+                        block.kind(),
                         wire::BlockKind::ToolResult { id: result_id, .. } if result_id == id
                     ) {
                         remove_positions.insert((message_index + 1, block_index));
@@ -10558,15 +10565,15 @@ fn enforce_unique_tool_use_ids(
                 continue;
             }
             let mut rendered = served.into_message();
-            rendered.content = rendered
-                .content
+            let content = std::mem::take(rendered.content_mut())
                 .into_iter()
                 .enumerate()
                 .filter_map(|(block_index, block)| {
                     (!remove_positions.contains(&(message_index, block_index))).then_some(block)
                 })
                 .collect();
-            if !rendered.content.is_empty() {
+            *rendered.content_mut() = content;
+            if !rendered.content().is_empty() {
                 messages.push(ServedMessage::from_message(rendered));
             }
         }
@@ -22303,6 +22310,73 @@ pub(crate) mod tests {
             ),
             &spine(),
         );
+    }
+
+    #[test]
+    fn production_transform_reuses_hygiene_memo_and_recounts_only_edited_block() {
+        const CHILD: &str = "EIDNARA_HYGIENE_MEMO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // libtest names tests without the crate segment that `module_path!` includes.
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, rest)| rest);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(format!(
+                    "{module}::{}",
+                    stringify!(
+                        production_transform_reuses_hygiene_memo_and_recounts_only_edited_block
+                    )
+                ))
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "the child must run exactly this test:\n{stdout}"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let output_cache = Mutex::new(SerializedOutputCache::default());
+        let make_request = |middle| {
+            req(
+                "hygiene-production",
+                "cfg0",
+                vec![
+                    item("a", 1, "first text"),
+                    item("b", 2, middle),
+                    item("c", 3, "last text"),
+                ],
+            )
+        };
+        for (middle, expected) in [
+            ("original", (0, 3)),
+            ("original", (3, 0)),
+            ("modified", (2, 1)),
+        ] {
+            let before = crate::tail_hygiene::local_memo_stats();
+            let response = transform_with_projection_cached(
+                &store,
+                &make_request(middle),
+                &ctx,
+                &output_cache,
+                None,
+            )
+            .unwrap();
+            assert_eq!(response.response.status, TransformStatus::Ok);
+            let after = crate::tail_hygiene::local_memo_stats();
+            assert_eq!((after.0 - before.0, after.1 - before.1), expected);
+        }
     }
 
     #[test]
