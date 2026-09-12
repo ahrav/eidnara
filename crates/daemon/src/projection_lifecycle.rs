@@ -11,7 +11,7 @@ use rustix::fs::{FlockOperation, OFlags};
 use serde::{Deserialize, Serialize};
 use storage::{StoreError, delete_sqlite_family};
 
-use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
+use crate::projection_gates::{Admission, Denial, EntryPoint, HookGate, ProjectionHook};
 use crate::search_projection::search_descriptor;
 
 pub const CONTROL_DIR: &str = "search-lifecycle";
@@ -175,6 +175,9 @@ pub enum IntentRefusal {
     IllegalCombination,
     #[error("the projection gate denied the transition: {0}")]
     Denied(Denial),
+    /// The gate invalidated the admission before the operation took effect; nothing was changed.
+    #[error("the admission was invalidated before the operation took effect")]
+    Revoked,
     /// Another intent is already recorded; nothing was changed.
     #[error("an intent with attempt {attempt_id} is already recorded and does not match")]
     Conflict { attempt_id: String },
@@ -214,6 +217,8 @@ pub enum WriteBarrier {
     /// The record names the new bytes; the directory entry is not yet synced.
     AfterRename,
     AfterDirectorySync,
+    /// The deletion is admitted and the record synced; no family member is removed yet.
+    BeforeFamilyRemoval,
 }
 
 /// The daemon's handle on the control record.
@@ -245,8 +250,6 @@ impl ProjectionLifecycle {
         // The creator may have died before this sync, so an existing directory is synced too.
         File::open(data_home)?.sync_all()?;
         let dir_fd = open_directory(&dir)?;
-        // The umask may have narrowed the requested mode; the directory is set to exactly owner-only.
-        dir_fd.set_permissions(Permissions::from_mode(0o700))?;
         let metadata = dir_fd.metadata()?;
         if !metadata.is_dir() || !owned_by_caller(&metadata) {
             return Err(io::Error::new(
@@ -254,6 +257,8 @@ impl ProjectionLifecycle {
                 "the lifecycle directory is not the caller's own directory",
             ));
         }
+        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only.
+        dir_fd.set_permissions(Permissions::from_mode(0o700))?;
         let this = Self {
             data_home: data_home.to_path_buf(),
             dir,
@@ -377,7 +382,8 @@ impl ProjectionLifecycle {
         if now > request.deadline {
             return Err(IntentRefusal::DeadlineExpired);
         }
-        gate.admit(request.transition.hook(), EntryPoint::Reload)
+        let admission = gate
+            .admit(request.transition.hook(), EntryPoint::Reload)
             .map_err(IntentRefusal::Denied)?;
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {
@@ -426,7 +432,7 @@ impl ProjectionLifecycle {
         {
             return Err(IntentRefusal::Oversized);
         }
-        self.replace(&intent)?;
+        self.replace(&intent, &admission)?;
         Ok(Recorded {
             intent,
             replayed: false,
@@ -444,7 +450,7 @@ impl ProjectionLifecycle {
         now: i64,
     ) -> Result<EpisodeAccounting, IntentRefusal> {
         let _lock = self.lock().map_err(io_refusal)?;
-        let mut intent = self.admitted_intent(gate)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
         if now > intent.episodes.deadline {
             return Err(IntentRefusal::DeadlineExpired);
         }
@@ -452,20 +458,24 @@ impl ProjectionLifecycle {
             return Err(IntentRefusal::AllowanceExhausted);
         }
         intent.episodes.consumed += 1;
-        self.replace(&intent)?;
+        self.replace(&intent, &admission)?;
         Ok(intent.episodes)
     }
 
-    /// The recorded intent once the gate admits its transition; the gate is asked before anything acts on the record.
-    fn admitted_intent(&self, gate: &HookGate) -> Result<LifecycleIntent, IntentRefusal> {
+    /// The gate admits the intent's transition before callers modify the control record or remove the disposable family.
+    fn admitted_intent(
+        &self,
+        gate: &HookGate,
+    ) -> Result<(LifecycleIntent, Admission), IntentRefusal> {
         let intent = match self.read() {
             ControlState::Absent => return Err(IntentRefusal::NoIntent),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
             ControlState::Intent(intent) => intent,
         };
-        gate.admit(intent.transition.hook(), EntryPoint::Reload)
+        let admission = gate
+            .admit(intent.transition.hook(), EntryPoint::Reload)
             .map_err(IntentRefusal::Denied)?;
-        Ok(intent)
+        Ok((intent, admission))
     }
 
     /// Removes the database and journals of this handle's disposable family while holding the family's exclusive storage lease. The gate must admit a recorded intent whose deadline has not passed and whose episode allowance remains.
@@ -479,7 +489,7 @@ impl ProjectionLifecycle {
         now: i64,
     ) -> Result<LifecycleIntent, IntentRefusal> {
         let _lock = self.lock().map_err(io_refusal)?;
-        let intent = self.admitted_intent(gate)?;
+        let (intent, admission) = self.admitted_intent(gate)?;
         if now > intent.episodes.deadline {
             return Err(IntentRefusal::DeadlineExpired);
         }
@@ -489,6 +499,10 @@ impl ProjectionLifecycle {
         // Nothing is removed on the strength of a record whose own durability is unknown.
         self.sync_directory()?;
         let descriptor = search_descriptor(&self.data_home).map_err(store_refusal)?;
+        self.at(WriteBarrier::BeforeFamilyRemoval);
+        if admission.invalidated.is_cancelled() {
+            return Err(IntentRefusal::Revoked);
+        }
         delete_sqlite_family(&descriptor).map_err(store_refusal)?;
         Ok(intent)
     }
@@ -500,7 +514,11 @@ impl ProjectionLifecycle {
     }
 
     /// Writes the record to a fresh temp file, syncs it, renames it over the record, and syncs the directory.
-    fn replace(&self, intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
+    fn replace(
+        &self,
+        intent: &LifecycleIntent,
+        admission: &Admission,
+    ) -> Result<(), IntentRefusal> {
         let io = io_refusal;
         let bytes = encode(intent)?;
         if bytes.len() as u64 > MAX_RECORD_BYTES {
@@ -530,6 +548,10 @@ impl ProjectionLifecycle {
             return Err(io(error));
         }
         self.at(WriteBarrier::BeforeRename);
+        if admission.invalidated.is_cancelled() {
+            let _ = fs::remove_file(&temp);
+            return Err(IntentRefusal::Revoked);
+        }
         if let Err(error) = fs::rename(&temp, self.dir.join(CONTROL_RECORD)) {
             let _ = fs::remove_file(&temp);
             return Err(io(error));
