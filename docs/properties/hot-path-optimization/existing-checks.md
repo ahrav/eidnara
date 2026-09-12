@@ -339,7 +339,7 @@ that no related check exists anywhere in the repository.
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L11849-L11870
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L11850-L11871
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
 [route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L832-L887
@@ -349,10 +349,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L786
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L970
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1067
-[request-cap]: ../../../crates/daemon/src/lib.rs#L18612
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L18672
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L18691
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L18707
+[request-cap]: ../../../crates/daemon/src/lib.rs#L18613
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L18673
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L18692
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L18708
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -423,4 +423,4 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5191-L5250
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L15532-L15559
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L15566-L15591
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L24654-L24782
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L24655-L24783

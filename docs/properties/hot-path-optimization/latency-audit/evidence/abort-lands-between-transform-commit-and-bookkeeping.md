@@ -94,16 +94,16 @@ with completion.
 - Conclusion: needs human input.
 
 [hook-field]: ../../../../../crates/daemon/src/lib.rs#L2915-L2918
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8188-L8250
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8262
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8269-L8274
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8284-L8294
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8251-L8341
-[await-a]: ../../../../../crates/daemon/src/lib.rs#L8322
-[await-b]: ../../../../../crates/daemon/src/lib.rs#L8348
-[await-c]: ../../../../../crates/daemon/src/lib.rs#L8322
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8437
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8448-L8453
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8189-L8251
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8263
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8270-L8275
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8285-L8295
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8252-L8342
+[await-a]: ../../../../../crates/daemon/src/lib.rs#L8323
+[await-b]: ../../../../../crates/daemon/src/lib.rs#L8349
+[await-c]: ../../../../../crates/daemon/src/lib.rs#L8323
+[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8438
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8449-L8454
 [store-commit]: ../../../../../crates/daemon/src/transform.rs#L4947-L4985
 [load]: ../../../../../crates/memory-store/src/lib.rs#L6236-L6263
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955

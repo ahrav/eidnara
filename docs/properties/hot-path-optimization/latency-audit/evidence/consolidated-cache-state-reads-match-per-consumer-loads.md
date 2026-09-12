@@ -248,15 +248,15 @@ the timing test, the durable-phase test, and the extended interleave test, the
 two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
-[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8119
+[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8120
 [meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6380-L6392
 [meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4664-L4665
 [pass-state]: ../../../../../crates/daemon/src/lib.rs#L3506-L3510
 [delta]: ../../../../../crates/daemon/src/lib.rs#L4205
 [lookup]: ../../../../../crates/daemon/src/lib.rs#L4316
-[last-response]: ../../../../../crates/daemon/src/lib.rs#L4639-L4671
-[active]: ../../../../../crates/daemon/src/lib.rs#L4608-L4630
-[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8220
+[last-response]: ../../../../../crates/daemon/src/lib.rs#L4640-L4672
+[active]: ../../../../../crates/daemon/src/lib.rs#L4608-L4631
+[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8221
 [pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
 [scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4691-L4692
@@ -267,6 +267,6 @@ branch as well and passing in isolation.
 [select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4669-L4685
 [scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15277-L15494
 [counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15501-L15529
-[load-count]: ../../../../../crates/daemon/src/lib.rs#L24693-L24745
-[timing-test]: ../../../../../crates/daemon/src/lib.rs#L24751-L24763
-[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24769-L24782
+[load-count]: ../../../../../crates/daemon/src/lib.rs#L24694-L24746
+[timing-test]: ../../../../../crates/daemon/src/lib.rs#L24752-L24764
+[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24770-L24783

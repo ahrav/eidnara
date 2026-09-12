@@ -4620,9 +4620,10 @@ impl Handler {
             return true;
         }
         match pass_state {
-            PassState::Loaded(meta) => meta.historian.state != HistorianPhase::Idle,
+            // A loaded non-idle phase without a live run may have completed since the pass load.
+            PassState::Loaded(meta) if meta.historian.state == HistorianPhase::Idle => false,
             PassState::Unavailable => false,
-            PassState::Reload => store
+            PassState::Loaded(_) | PassState::Reload => store
                 .load_historian_phase(session_id)
                 .map(|phase| phase != HistorianPhase::Idle)
                 .unwrap_or(false),
@@ -24781,6 +24782,29 @@ mod tests {
         assert!(!handler.historian_active(&store, "never-seen", PassState::Reload));
     }
 
+    /// A historian that completes after the pass load leaves the live map and commits
+    /// `Idle`; the pass load's `Firing` is stale and must not veto.
+    #[test]
+    fn historian_active_rereads_a_loaded_active_phase_when_no_run_is_live() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Firing;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let pass_meta = store.load_meta("ses").unwrap();
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Idle;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        assert!(
+            !handler.historian_active(&store, "ses", PassState::Loaded(&pass_meta)),
+            "the completed run committed Idle after the pass load"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn status_and_health_surface_pass_trace_for_rejected_sessions() {
         let producer = Arc::new(ProducerState::default());
@@ -36097,7 +36121,8 @@ mod tests {
         assert!(
             published > transform_committed,
             "the foreign publish committed row version {published} after the transform's \
-             {transform_committed}, before the pass's first post-commit cache_state read"
+             {transform_committed} and after the pass's pre-hook floor read, before \
+             prepare_historian_fire's load and the final floor check"
         );
         // A second producer start is valid because eligible content still crosses the trigger bar after the first fold.
         // Eligible content still crosses the trigger bar after the first fold publishes.

@@ -102,11 +102,11 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 
 [eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4580-L4589
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4832
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5055-L5093
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5093
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5410
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11839
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4833
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5056-L5094
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5094
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5411
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11840
 [tier-struct]: ../../../../../crates/daemon/src/config.rs#L222-L228
 [cache-struct]: ../../../../../crates/daemon/src/config.rs#L230-L235
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245

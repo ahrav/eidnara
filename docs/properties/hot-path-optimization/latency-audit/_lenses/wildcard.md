@@ -596,13 +596,13 @@ call site.
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12392-L12397
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27683-L27688
 
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8164-L8181
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8187-L8250
-[h-call]: ../../../../../crates/daemon/src/lib.rs#L8243-L8249
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8513-L8538
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14455
-[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14514-L14532
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14536-L14558
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8165-L8182
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8188-L8251
+[h-call]: ../../../../../crates/daemon/src/lib.rs#L8244-L8250
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8514-L8539
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14456
+[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14515-L14533
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14537-L14559
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
 [rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
 [fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
@@ -700,10 +700,10 @@ call site.
 
 [eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4580-L4589
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4832
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5093
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5410
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11839
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4833
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5094
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5411
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11840
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288

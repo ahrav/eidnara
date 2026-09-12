@@ -121,19 +121,19 @@ channel, the authority route read, and dreamer tasks only.
 - Conclusion: unresolved, needs R3's owner-relationship normalization.
 
 [r3]: ../../catalog.md#redaction-audit-does-not-depend-on-retained-payload
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8180
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8251-L8261
-[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8323-L8326
-[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8422-L8425
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8486
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6239-L6289
-[age]: ../../../../../crates/daemon/src/lib.rs#L6280
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7868-L7916
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23850
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23880
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23896
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23928
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23960
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8181
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8252-L8262
+[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8324-L8327
+[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8423-L8426
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8487
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6240-L6290
+[age]: ../../../../../crates/daemon/src/lib.rs#L6281
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7869-L7917
+[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23851
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L23881
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23897
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23929
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L23961
 [stable-call]: ../../../../../crates/daemon/src/transform.rs#L1830-L1854
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13535
 [sched-test]: ../../../../../crates/daemon/src/transform.rs#L13578

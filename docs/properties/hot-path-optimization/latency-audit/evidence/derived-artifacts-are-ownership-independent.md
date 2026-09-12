@@ -557,7 +557,7 @@ latency.
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
 [canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13797
 [canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L252-L279
-[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11867-L11889
+[canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11868-L11890
 [canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13942
 [canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L171
 
