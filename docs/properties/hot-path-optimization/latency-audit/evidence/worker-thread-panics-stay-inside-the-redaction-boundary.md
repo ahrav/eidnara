@@ -163,7 +163,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 [blk-read-rows]: ../../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3838-L3840
+[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3839-L3841
 [routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L458-L459
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
 [tl-test]: ../../../../../crates/daemon/src/transform.rs#L495-L498

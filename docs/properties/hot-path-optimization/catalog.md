@@ -309,14 +309,19 @@ run in `cargo test -p storage`: a warm fenced statement is not re-prepared
 across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, and a
 temp-shadow statement cached before it is refused afterwards; a statement
 prepared under the unrestricted mode is refused in a guarded callback once the
-cache is flushed; a panicking read or fenced callback returns the connection to
+cache is flushed; the flush also runs when a maintenance callback panics, so a
+temp-shadow statement cached before that callback's main DDL is refused
+afterwards; a panicking read or fenced callback returns the connection to
 the unrestricted mode and rolls its partial write back; and baseline text with
 a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
 format-marker delete is refused by the store connection's gate. With the
 snapshot keyed on the schema and data versions, a rename through a second
 connection is observed by the next callback even when the schema version is
 written back, a maintenance-left temp shadow is still refused, a panicking
-maintenance callback still discards the snapshot and re-arms the pin, and the
+maintenance callback still discards the snapshot and re-arms the pin, a
+rescan under an unchanged schema version flushes the cached statements and
+reloads the parsed schema, a
+second connection cannot leave WAL while the store is open, and the
 durability pin runs once per connection until the maintenance path re-arms it. No baseline-versus-candidate trace over interleaved facade
 callers runs.
 Guarantee: Cached statements and reduced callback setup preserve each call's
@@ -335,12 +340,7 @@ Callback installation, release, shadow checks, and facade scope sites are read.
 Existing check: [Guarded-store checks](existing-checks.md#guarded-store) are
 unaudited and cover cached statements, shadows, and restoration.
 Impact: Setup elision can authorize stale privileges or target shadow objects.
-Open questions:
-- Resolved by the connection-open unit (#430): the read path's `query_only`
-  toggle stays. It expires every cached statement on the connection, and it is
-  the read callback's only write barrier for main and temp alike because
-  `deny_scope_escapes` allows DML on every non-infrastructure table; the two
-  pragma statements are the price of that barrier.
+Open questions: None.
 
 ### callback-batching-preserves-observation-boundaries
 
@@ -635,14 +635,14 @@ them without creating implementation tickets.
 [r1]: #prepared-field-output-and-audit-policy-agree
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
-[pass-read]: ../../../crates/daemon/src/lib.rs#L8176-L8253
+[pass-read]: ../../../crates/daemon/src/lib.rs#L8177-L8254
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L934
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
-[read-callback]: ../../../crates/storage/src/lib.rs#L229-L261
-[write-callback]: ../../../crates/storage/src/lib.rs#L306-L332
-[prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2239-L2265
+[read-callback]: ../../../crates/storage/src/lib.rs#L343-L360
+[write-callback]: ../../../crates/storage/src/lib.rs#L409-L473
+[prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4034-L4061
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
 [core-prep]: ../../../crates/memory-store/src/lib.rs#L3459-L3490

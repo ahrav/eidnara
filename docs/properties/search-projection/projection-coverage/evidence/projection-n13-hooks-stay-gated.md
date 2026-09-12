@@ -95,12 +95,12 @@ scheduler record rather than duplicating lease/receipt rules.
 
 [n1]: ../../../../../../commons/docs/plans/2026-09-08-1614-feat-eidnara-rust-product-state-ownership-plan.md#L156-L169
 [plan]: ../../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-1-projection-coverage-plan.md#L54-L59
-[handler]: ../../../../../crates/daemon/src/lib.rs#L11850-L11871
-[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12603-L12695
+[handler]: ../../../../../crates/daemon/src/lib.rs#L11851-L11872
+[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12604-L12696
 [config]: ../../../../../crates/daemon/src/config.rs#L1881-L1929
 [keys]: ../../../../../crates/daemon/src/config.rs#L532-L624
-[facade]: ../../../../../crates/daemon/src/lib.rs#L10267-L10279
-[routes]: ../../../../../crates/daemon/src/lib.rs#L32613-L32653
+[facade]: ../../../../../crates/daemon/src/lib.rs#L10268-L10280
+[routes]: ../../../../../crates/daemon/src/lib.rs#L32614-L32654
 [scheduler]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L25-L36
-[bridge]: ../../../../../crates/daemon/src/lib.rs#L14024-L14089
+[bridge]: ../../../../../crates/daemon/src/lib.rs#L14025-L14090
 [acceptance]: ../catalog.md#projection-acceptance-situations-witnessed
