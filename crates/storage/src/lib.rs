@@ -895,9 +895,11 @@ mod sqlite_backend {
             }) {
                 conn.flush_prepared_statement_cache();
             }
-            if snapshot.retained_bytes() <= SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND {
-                self.lock().schema = Some(Arc::clone(&snapshot));
-            }
+            // The retained snapshot must match the policy under which cached statements
+            // were prepared, so an unretained snapshot clears the retained snapshot.
+            self.lock().schema = (snapshot.retained_bytes()
+                <= SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND)
+                .then(|| Arc::clone(&snapshot));
             Ok(snapshot)
         }
 
@@ -5319,6 +5321,58 @@ mod tests {
             matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
             "the cached temp-shadow statement must be re-authorized against the rescanned \
              main-schema names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An oversized snapshot serves its callback without being retained, so the retained
+    /// snapshot can predate the policy that authorized the cached statements. A foreign
+    /// change that keeps that later cookie must still flush them.
+    #[test]
+    fn a_rescan_after_an_unretained_policy_discards_cached_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get::<_, i64>(0)))
+            .expect("retain the baseline snapshot");
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        let wide_name = "w".repeat(200);
+        let ddl: String = (0..SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND / 200 + 2)
+            .map(|i| format!("CREATE TABLE {wide_name}{i} (x);"))
+            .collect();
+        raw.execute_batch(&ddl).expect("oversized schema");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement under the unretained policy");
+        let version: i64 = raw
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .expect("schema version");
+        raw.execute_batch(&format!(
+            "CREATE TABLE late (x); PRAGMA schema_version = {version};"
+        ))
+        .expect("DDL, then write the schema version the store last saw back");
+        drop(raw);
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the statement cached under the unretained policy must be re-authorized, got {shadow:?}"
         );
         let temp_late: i64 = store
             .with_conn_unfenced(|c| {

@@ -151,16 +151,17 @@ Checks added with the mode-gated authorizer (implementation base
 | [Durability pin once per connection][pin-test] | A fenced write does not re-run the pin; the first fenced write after maintenance re-pins `synchronous=FULL`; a panicking maintenance callback still re-arms the pin and discards the snapshot. | unaudited |
 | [Foreign rename observed][rename-test] | After an `ALTER TABLE ... RENAME` on a second connection, the next callback denies a temp shadow of the new name, allows the old one, and still refuses a maintenance-left shadow. | unaudited |
 | [Rescan flushes cached statements][rescan-flush-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a second connection creates main `late` and writes the old schema version back; no temp `late` is created. Failed with `Ok(())` before the rescan flushed the cache. | unaudited |
+| [Unretained policy still flushes][unretained-policy-test] | A `CREATE TEMP TABLE late (x)` cached under an oversized foreign schema is refused `not authorized` after a second connection creates main `late` and writes back the schema version the store last saw; no temp `late` is created. Failed with `Ok(())` while the retained snapshot survived an oversized replacement. | unaudited |
 | [Foreign journal-mode switch refused][foreign-wal-test] | A second connection's `PRAGMA journal_mode = DELETE` fails with `database is locked` while the store is open and idle; the store's next fenced write still runs in WAL without re-running the pin. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4876-L4973
-[read-witness]: ../../../crates/storage/src/lib.rs#L5027-L5056
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L5063-L5086
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L5092-L5144
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L5150-L5180
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L5187-L5207
-[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L5209-L5251
-[gate-tests]: ../../../crates/storage/src/lib.rs#L2158-L2497
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4878-L4975
+[read-witness]: ../../../crates/storage/src/lib.rs#L5029-L5058
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L5065-L5088
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L5094-L5146
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L5152-L5182
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L5189-L5209
+[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L5211-L5253
+[gate-tests]: ../../../crates/storage/src/lib.rs#L2160-L2499
 
 ## History render
 
@@ -415,8 +416,9 @@ that no related check exists anywhere in the repository.
 [shared-catalog]: ../shared-primitives/catalog.md
 [transform-catalog]: ../daemon/transform/catalog.md
 [memory-catalog]: ../memory-store/catalog.md
-[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2254-L2388
-[pin-test]: ../../../crates/storage/src/lib.rs#L2396-L2488
-[rename-test]: ../../../crates/storage/src/lib.rs#L4980-L5020
-[rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5295-L5334
-[foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5258-L5288
+[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2256-L2390
+[pin-test]: ../../../crates/storage/src/lib.rs#L2398-L2490
+[rename-test]: ../../../crates/storage/src/lib.rs#L4982-L5022
+[rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5297-L5336
+[foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5260-L5290
+[unretained-policy-test]: ../../../crates/storage/src/lib.rs#L5342-L5388
