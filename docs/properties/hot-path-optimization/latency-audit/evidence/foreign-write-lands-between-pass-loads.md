@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The marker evidence below describes the live test.
 
 ## Discovery trigger
 
@@ -89,17 +91,40 @@ subject and is not the witness.
   is unit-test-only; a campaign outside that crate needs a new seam, which is
   a specification decision.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2908-L2911
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L4994-L5067
-[prepare-load]: ../../../../../crates/daemon/src/lib.rs#L5013
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8215-L8223
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8224-L8232
-[rerun]: ../../../../../crates/daemon/src/lib.rs#L8264-L8271
-[prepare-b]: ../../../../../crates/daemon/src/lib.rs#L8336-L8338
-[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8358-L8377
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34923
-[t-hook-install]: ../../../../../crates/daemon/src/lib.rs#L34942-L34945
-[t-hook-second]: ../../../../../crates/daemon/src/lib.rs#L35389-L35392
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
-[publish]: ../../../../../crates/memory-store/src/lib.rs#L10559
-[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10762-L10771
+[hook-field]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L2908-L2911
+[prepare]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994-L5067
+[prepare-load]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5013
+[floor-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8215-L8223
+[hook]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8224-L8232
+[rerun]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8264-L8271
+[prepare-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8336-L8338
+[floor-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8358-L8377
+[t-emergency]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L34923
+[t-hook-install]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L34942-L34945
+[t-hook-second]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L35389-L35392
+[load]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6196-L6223
+[publish]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10559
+[publish-drain]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10762-L10771
+
+## Marker evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the
+storage units that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/432)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+The [emergency interleave test][marker-test] now carries the marker. Inside the
+`between_transform_and_prepare` hook it reads the `row_version` the transform
+committed, releases the blocked producer, waits for the publish to leave the
+historian idle, and records the `row_version` that publish committed; after
+the pass it asserts the published version exceeds the transform's. Both values
+come from the store through the test's own handle, not from the pass's
+post-commit read, which is C1's subject. The pass's post-commit floor read is
+a [scalar read][floor-live] after this change and still observes the publish:
+the response carries the fold.
+
+The hook stays `#[cfg(test)]`; a campaign outside the unit-test crate still
+needs its own seam, as the investigation log records.
+
+[marker-test]: ../../../../../crates/daemon/src/lib.rs#L35980-L36052
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8432

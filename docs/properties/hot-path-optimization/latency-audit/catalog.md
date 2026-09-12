@@ -679,12 +679,22 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - The no-fire CAS test and the emergency interleave test
-exercise the post-commit load; no test compares a narrow `meta` read with
-`MemoryStore::load`, and none covers `historian_active` reading durable
-state.
+exercise the post-commit load. The
+[memory-store differential test](evidence/consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence)
+compares the `revert_epoch`, `historian.state`, and
+`publication_floor_ordinal` scalar reads with `MemoryStore::load` over absent
+keys, JSON `null`, booleans, unknown variants, negative and textual epochs, a
+non-object `historian`, JSON5, and malformed `meta`; the daemon load-count test
+shows one pre-transform full load and one post-commit full load per steady
+pass, split by the interleave hook; the durable-phase test exercises
+`historian_active` on every `PassState`.
 Guarantee: Consolidating or narrowing `cache_state` loads never changes what
 any consumer observes: a post-commit consumer sees its own commit, and a
-scalar projection decodes and fails exactly as the full load does.
+scalar projection decodes its field as the full load does and fails where the
+full load fails on that field; the per-field divergences (a corrupt
+`core_state`, a corrupt sibling field, a non-object ancestor, an integer above
+`i64::MAX`) are recorded in the evidence and no consumer proceeds on a row the
+full load would have refused.
 Check: `always` - Freshness: within one pass, every `cache_state` read that
 executes after `commit_transform`, [`descend_lineage`][descend],
 [`truncate_compartments_for_revert`][truncate], or an awaited historian
@@ -916,8 +926,11 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial - The emergency interleave test constructs the situation
-through the test hook; no campaign marker records it.
+Exercised: yes - The
+[emergency interleave test](evidence/foreign-write-lands-between-pass-loads.md#marker-evidence)
+records the transform's committed `row_version` and the publish's committed
+`row_version` from the store inside the hook and asserts the publish landed
+after the transform and before the pass's post-commit read.
 Guarantee: A state-load campaign reaches the interleaving that distinguishes
 one-load-per-pass from per-consumer loads.
 Check: `sometimes` - For some pass, a foreign commit by another actor

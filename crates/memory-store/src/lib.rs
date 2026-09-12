@@ -4671,6 +4671,13 @@ const CACHE_STATE_META_SELECT: &str =
     "SELECT row_version, meta FROM cache_state WHERE session_id = ?1";
 const CACHE_STATE_FULL_SELECT: &str =
     "SELECT row_version, core_state, meta FROM cache_state WHERE session_id = ?1";
+/// One `meta` field by SQL JSON extraction. `json_valid(meta, 1)` is the strict RFC 8259
+/// check: SQLite's parser accepts JSON5 that serde refuses, so a lenient parse must not
+/// stand in for the full load's failure. `json_type` distinguishes an absent path (SQL NULL,
+/// the serde default) from a JSON `null` (the type text `null`); `->>` yields the unquoted
+/// SQL value. Text that is not JSON at all fails the statement.
+const CACHE_STATE_META_SCALAR_SELECT: &str = "SELECT json_valid(meta, 1), json_type(meta, ?2), \
+     meta ->> ?2 FROM cache_state WHERE session_id = ?1";
 
 /// Column list every `stored_compartment_from_row` reader selects, in the
 /// positional order that mapper reads. All compartment SELECTs interpolate
@@ -5404,6 +5411,17 @@ impl MemoryStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn statement_evictions(&self) -> std::collections::BTreeMap<String, u32> {
         self.inner.statement_evictions()
+    }
+
+    /// How many times the connection has run the full `cache_state` row select through the
+    /// statement cache on the handle the probe observed; a pass's full loads add to it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cache_state_full_load_runs(&self) -> i32 {
+        self.inner
+            .statement_runs()
+            .get(CACHE_STATE_FULL_SELECT.trim())
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, MemoryStoreError> {
@@ -6332,6 +6350,102 @@ impl MemoryStore {
                 row_version: Some(rv),
             }),
         }
+    }
+
+    /// One `meta` field read by SQL JSON extraction, decoded by `decode` from the JSON type
+    /// text and the unquoted SQL value. An absent row or an absent path passes `None`, so
+    /// `decode` applies the serde default; a JSON `null` passes `Some(("null", Null))`.
+    /// `meta` that is not strict JSON is refused before `decode` runs, as the full load
+    /// refuses it.
+    ///
+    /// A scalar read is per field where the full load is per row: a row whose other fields
+    /// the full load refuses, or whose `core_state` is corrupt, still answers here. Every
+    /// caller either follows a full load of the same row in the same request or is about
+    /// to fail on that row itself.
+    fn load_meta_scalar<T>(
+        &self,
+        session_id: &str,
+        path: &str,
+        decode: impl FnOnce(Option<(String, rusqlite::types::Value)>) -> Result<T, MemoryStoreError>,
+    ) -> Result<T, MemoryStoreError> {
+        let row = self.inner.with_conn(|conn| {
+            conn.prepare_cached(CACHE_STATE_META_SCALAR_SELECT)?
+                .query_row(params![session_id, path], |row| {
+                    let strict: bool = row.get(0)?;
+                    let field = match row.get::<_, Option<String>>(1)? {
+                        Some(kind) => Some((kind, row.get::<_, rusqlite::types::Value>(2)?)),
+                        None => None,
+                    };
+                    Ok((strict, field))
+                })
+                .optional()
+        })?;
+        match row {
+            None => decode(None),
+            Some((false, _)) => Err(MemoryStoreError::Serde(
+                "meta is not strict JSON; the full load refuses this row".to_string(),
+            )),
+            Some((true, field)) => decode(field),
+        }
+    }
+
+    /// `meta.revert_epoch` without deserializing the row: absent is `0`, the serde default;
+    /// a JSON `null`, a boolean, a float, a string, or a negative integer is refused as serde
+    /// refuses it. SQLite hands an integer above `i64::MAX` back as a float, so such an
+    /// epoch is refused here where serde would accept it; an epoch is a small counter.
+    pub fn load_revert_epoch(&self, session_id: &str) -> Result<u64, MemoryStoreError> {
+        self.load_meta_scalar(session_id, "$.revert_epoch", |field| match field {
+            None => Ok(ModuleMeta::default().revert_epoch),
+            Some((kind, rusqlite::types::Value::Integer(epoch)))
+                if kind == "integer" && epoch >= 0 =>
+            {
+                Ok(epoch as u64)
+            }
+            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                "revert_epoch is a JSON {kind}, expected an unsigned integer that fits i64"
+            ))),
+        })
+    }
+
+    /// `meta.historian.state` without deserializing the row: absent is `Idle`, the serde
+    /// default; an unknown variant or a non-string is refused as serde refuses it. A
+    /// `historian` that is not an object also reads as absent here, because the path has
+    /// no object to descend, where the full load refuses the row.
+    pub fn load_historian_phase(
+        &self,
+        session_id: &str,
+    ) -> Result<HistorianPhase, MemoryStoreError> {
+        self.load_meta_scalar(session_id, "$.historian.state", |field| match field {
+            None => Ok(HistorianPhase::default()),
+            Some((kind, rusqlite::types::Value::Text(state))) if kind == "text" => {
+                serde_json::from_value(serde_json::Value::String(state))
+                    .map_err(|e| MemoryStoreError::Serde(e.to_string()))
+            }
+            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                "historian.state is a JSON {kind}, expected a string"
+            ))),
+        })
+    }
+
+    /// `meta.publication_floor_ordinal` without deserializing the row: absent and JSON
+    /// `null` are both `None`, as serde decodes an optional field; any other non-integer
+    /// is refused, and an integer above `i64::MAX` is refused as in
+    /// [`Self::load_revert_epoch`].
+    pub fn load_publication_floor_ordinal(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<u64>, MemoryStoreError> {
+        self.load_meta_scalar(session_id, "$.publication_floor_ordinal", |field| match field {
+            None | Some((_, rusqlite::types::Value::Null)) => Ok(None),
+            Some((kind, rusqlite::types::Value::Integer(floor)))
+                if kind == "integer" && floor >= 0 =>
+            {
+                Ok(Some(floor as u64))
+            }
+            Some((kind, _)) => Err(MemoryStoreError::Serde(format!(
+                "publication_floor_ordinal is a JSON {kind}, expected an unsigned integer or null"
+            ))),
+        })
     }
 
     /// Load cache state and non-tag render overlays from one SQLite read transaction.
@@ -15111,6 +15225,219 @@ mod tests {
 
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         MemoryStore::test_descriptor(dir, "eidnara-test")
+    }
+
+    /// Every scalar read agrees with the full deserialization on the rows the full load
+    /// accepts, and fails on its own field where the full load fails: absent keys take the
+    /// serde default, a JSON `null`, boolean, string, or negative under an unsigned field
+    /// is refused, an unknown enum variant is refused, JSON5 and malformed text fail. The
+    /// recorded divergences: a corrupt `core_state` and a sibling field's corruption fail
+    /// only the full load; a `historian` that is not an object reads as absent; an epoch
+    /// above `i64::MAX` fails only the scalar read.
+    #[test]
+    fn meta_scalar_reads_agree_with_the_full_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let empty_core = serde_json::to_string(&CoreState::empty()).unwrap();
+        // Every variant starts from a serializable default so only the field under test
+        // differs from what the full load accepts.
+        let meta_with = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+            let mut value = serde_json::to_value(ModuleMeta::default()).unwrap();
+            edit(value.as_object_mut().unwrap());
+            value.to_string()
+        };
+        let rows: Vec<(&str, String, String)> = vec![
+            (
+                "absent",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.remove("revert_epoch");
+                    m.remove("historian");
+                    m.remove("publication_floor_ordinal");
+                }),
+            ),
+            (
+                "valid",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), 7.into());
+                    m.insert("historian".into(), serde_json::json!({"state": "firing"}));
+                    m.insert("publication_floor_ordinal".into(), 42.into());
+                }),
+            ),
+            (
+                "floor-null",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("publication_floor_ordinal".into(), serde_json::Value::Null);
+                }),
+            ),
+            (
+                "epoch-null",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), serde_json::Value::Null);
+                }),
+            ),
+            (
+                "epoch-negative",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), (-1).into());
+                }),
+            ),
+            (
+                "epoch-text",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), "7".into());
+                }),
+            ),
+            (
+                "phase-unknown",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("historian".into(), serde_json::json!({"state": "dreaming"}));
+                }),
+            ),
+            (
+                "epoch-boolean",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), true.into());
+                }),
+            ),
+            (
+                "floor-boolean",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("publication_floor_ordinal".into(), true.into());
+                }),
+            ),
+            (
+                "epoch-above-i64",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), (i64::MAX as u64 + 1).into());
+                }),
+            ),
+            (
+                "historian-null",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("historian".into(), serde_json::Value::Null);
+                }),
+            ),
+            (
+                "historian-scalar",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("historian".into(), 5.into());
+                }),
+            ),
+            (
+                "meta-json5",
+                empty_core.clone(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), 5.into());
+                })
+                .replacen('"', "'", 2),
+            ),
+            (
+                "meta-malformed",
+                empty_core.clone(),
+                "{not json".to_string(),
+            ),
+            (
+                "core-malformed",
+                "{not json".to_string(),
+                meta_with(&|m| {
+                    m.insert("revert_epoch".into(), 3.into());
+                }),
+            ),
+        ];
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                for (session, core, meta) in &rows {
+                    conn.execute(
+                        "INSERT INTO cache_state (session_id, row_version, core_state, meta, last_activity_at)
+                         VALUES (?1, 1, ?2, ?3, 0)",
+                        params![session, core, meta],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        for (session, _, _) in &rows {
+            let session = *session;
+            let full = store.load(session);
+            let epoch = store.load_revert_epoch(session);
+            let phase = store.load_historian_phase(session);
+            let floor = store.load_publication_floor_ordinal(session);
+            if session == "epoch-above-i64" {
+                // SQLite returns the integer as a float, so only the scalar read refuses it.
+                assert!(full.is_ok() && epoch.is_err(), "{session}: {epoch:?}");
+                continue;
+            }
+            match full {
+                Ok(loaded) => {
+                    assert_eq!(epoch.unwrap(), loaded.meta.revert_epoch, "{session}");
+                    assert_eq!(phase.unwrap(), loaded.meta.historian.state, "{session}");
+                    assert_eq!(
+                        floor.unwrap(),
+                        loaded.meta.publication_floor_ordinal,
+                        "{session}"
+                    );
+                }
+                Err(_) if session == "core-malformed" => {
+                    assert_eq!(epoch.unwrap(), 3, "a scalar read does not touch core_state");
+                }
+                Err(_) => {
+                    // The failing field's read fails; a sibling field's read is per field
+                    // and still answers, which the full load's per-row refusal does not.
+                    let failing = match session {
+                        "epoch-null" | "epoch-negative" | "epoch-text" | "epoch-boolean" => {
+                            assert!(phase.is_ok() && floor.is_ok(), "{session}: siblings answer");
+                            epoch.is_err()
+                        }
+                        "floor-boolean" => floor.is_err(),
+                        "phase-unknown" => {
+                            assert!(epoch.is_ok(), "{session}: siblings answer");
+                            phase.is_err()
+                        }
+                        "historian-null" | "historian-scalar" => {
+                            // `$.historian.state` has no object to descend, so the path is
+                            // absent here while the full load refuses the non-object.
+                            assert_eq!(phase.unwrap(), HistorianPhase::Idle, "{session}");
+                            true
+                        }
+                        "meta-json5" | "meta-malformed" => {
+                            epoch.is_err() && phase.is_err() && floor.is_err()
+                        }
+                        other => panic!("unexpected full-load failure for {other}"),
+                    };
+                    assert!(
+                        failing,
+                        "{session}: the scalar read fails where the full load fails"
+                    );
+                }
+            }
+        }
+        let never_seen = store.load("never-seen").unwrap();
+        assert_eq!(
+            store.load_revert_epoch("never-seen").unwrap(),
+            never_seen.meta.revert_epoch
+        );
+        assert_eq!(
+            store.load_historian_phase("never-seen").unwrap(),
+            never_seen.meta.historian.state
+        );
+        assert_eq!(
+            store.load_publication_floor_ordinal("never-seen").unwrap(),
+            never_seen.meta.publication_floor_ordinal
+        );
     }
 
     /// The connection-open path sizes the page cache from the file's measured page size,

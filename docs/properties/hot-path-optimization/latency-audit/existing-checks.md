@@ -161,7 +161,7 @@ not performance measurements or a full-workspace gate.
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
 | [`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`][t-no-fire] | The post-commit load feeds the `record_no_fire` CAS; a repeated reason leaves `row_version` unchanged. | unaudited |
-| [`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`][t-emergency] | A publication between transform and prepare, injected through [`between_transform_and_prepare`][hook], triggers the rerun. | unaudited |
+| [`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`][t-emergency] | A publication between transform and prepare, injected through [`between_transform_and_prepare`][hook], triggers the rerun; the hook records the transform's and the publish's committed row versions and asserts their order. | unaudited |
 | [`handler_delta_boundary_divergence_recut_retries_cas_without_stale_projection`][t-cas] | A CAS conflict reruns `apply_once` with a fresh load. | unaudited |
 | [`transform_snapshot_resists_commit_between_state_and_overlay_reads`][t-snap-resist] | One read transaction pins `cache_state` and the overlays. | unaudited |
 | [`transform_snapshot_keeps_row_version_and_overlays_from_one_commit`][t-snap-keeps] | The snapshot `row_version` matches overlays from the same commit. | unaudited |
@@ -188,10 +188,11 @@ not performance measurements or a full-workspace gate.
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | Commit redacts the core payload, preserves legacy ids, and refuses an integrity secret in `meta`. | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | New-versus-existing session is decided inside the fenced transaction. | unaudited |
 | [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` is pinned on open and re-pinned per fenced write. | unaudited |
+| [`meta_scalar_reads_agree_with_the_full_deserialization`][t-scalar] | Each scalar `meta` read equals the full deserialization where it succeeds and fails where it fails on `meta`; a corrupt `core_state` fails only the full load. | unaudited |
+| [`a_steady_pass_loads_the_full_cache_state_row_once_before_the_transform`][t-load-count] | A steady pass runs the full row select once before the transform and once after the commit, split by the interleave hook, on a handle that was never evicted. | unaudited |
+| [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
 
-None found: equivalence between a narrow `meta` scalar read and
-`MemoryStore::load`; `Handler::historian_active` reading the durable phase
-(only the in-memory branch is implied by firing tests); `first_divergence`
+None found: `first_divergence`
 NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
 commits twice; a `pass_trace` write failure beside a successful cache commit;
 a crash between the outbox mark commit and the delete commit; two drainers
@@ -641,3 +642,10 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15238-L15441
+[t-load-count]: ../../../../crates/daemon/src/lib.rs#L24667-L24710
+
+The two checks above were added with the single-load pass (implementation base
+`96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage units);
+their links are to the live tree.
+[t-phase]: ../../../../crates/daemon/src/lib.rs#L24716-L24729

@@ -204,6 +204,22 @@ mod sqlite_backend {
         }
 
         /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
+        /// the highest run count a returned handle carried. SQLite counts a run per step
+        /// sequence ended by a reset and keeps the count across in-place re-preparation, so
+        /// a text's count is the number of times the connection ran it since the handle
+        /// was created. Empty when the probe was never started.
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn statement_runs(&self) -> std::collections::BTreeMap<String, i32> {
+            self.gate
+                .lock()
+                .statement_probe
+                .iter()
+                .flat_map(|probe| probe.iter())
+                .map(|(sql, reuse)| (sql.clone(), reuse.max_runs))
+                .collect()
+        }
+
+        /// Per cache key passed to [`GuardedConn::prepare_cached`] since the probe started,
         /// how many times the statement cache handed out a re-created handle after a
         /// returned handle of that key had run. Every key prepared appears; a cache sized
         /// for the hot set shows zero for each. Empty when the probe was never started.

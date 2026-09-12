@@ -78,8 +78,8 @@ use memory_store::dreamer_ledger::{
     DreamerReceiptState, DreamerTerminalKind, DreamerTransition, dreamer_request_digest,
 };
 use memory_store::{
-    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
-    MemoryStoreError, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
+    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, LoadedState,
+    MemoryStore, MemoryStoreError, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
     ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow, NoteCasOutcome,
     NoteConditionCompile, NoteEvalAbandonOutcome, NoteEvalAcquireOutcome, NoteEvalCandidate,
     NoteEvalClaim, NoteEvalCompleteOutcome, NoteEvalReducedState, NoteEvalRenewOutcome,
@@ -3496,6 +3496,32 @@ impl HistorianProducerFactory for MissingProducerFactory {
     }
 }
 
+/// Where a pre-transform consumer takes its `cache_state` from. The pass loads the row once;
+/// a consumer that runs again after a commit reads the store, and a pass whose load failed
+/// gives every consumer its conservative branch without a second read.
+#[derive(Clone, Copy)]
+enum PassState<'a> {
+    Loaded(&'a LoadedState),
+    Unavailable,
+    Reload,
+}
+
+impl<'a> PassState<'a> {
+    fn from(load: &'a Result<LoadedState, MemoryStoreError>) -> Self {
+        match load {
+            Ok(state) => Self::Loaded(state),
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    fn loaded(self) -> Option<&'a LoadedState> {
+        match self {
+            Self::Loaded(state) => Some(state),
+            Self::Unavailable | Self::Reload => None,
+        }
+    }
+}
+
 impl Handler {
     /// Creates a handler without a host connection file.
     pub fn new() -> Self {
@@ -4176,6 +4202,7 @@ impl Handler {
     fn expand_transform_tail_delta(
         &self,
         parsed: &mut TransformRequest,
+        pass_state: PassState<'_>,
     ) -> Option<NativeDeltaFrontier> {
         let delta = parsed.tail_delta.as_ref().and_then(Value::as_object)?;
         let after = delta.get("after").and_then(Value::as_str)?.to_string();
@@ -4189,13 +4216,10 @@ impl Handler {
             .and_then(|value| usize::try_from(value).ok())?;
         parsed.full_array_fingerprint.as_ref()?;
 
-        // The code loads the persisted epoch before inspecting bounded projection and native cores so stale request state cannot select an outdated entry after a store-side rewrite.
-        let current_revert_epoch = self
-            .store()?
-            .load(&parsed.session_id)
-            .ok()?
-            .meta
-            .revert_epoch;
+        // The persisted epoch is checked before the bounded projection and native cores so
+        // stale request state cannot select an outdated entry after a store-side rewrite;
+        // a pass without a loaded state takes the full-sync branch.
+        let current_revert_epoch = pass_state.loaded()?.meta.revert_epoch;
         let projection_cache = self.lookup_projection_cache(
             parsed,
             current_revert_epoch,
@@ -4289,14 +4313,10 @@ impl Handler {
     fn lookup_full_projection_cache(
         &self,
         request: &TransformRequest,
+        pass_state: PassState<'_>,
     ) -> Option<ProjectionCacheInput> {
         let after = request.full_array_fingerprint.as_deref()?;
-        let revert_epoch = self
-            .store()?
-            .load(&request.session_id)
-            .ok()?
-            .meta
-            .revert_epoch;
+        let revert_epoch = pass_state.loaded()?.meta.revert_epoch;
         self.lookup_projection_cache(
             request,
             revert_epoch,
@@ -4582,7 +4602,12 @@ impl Handler {
             .effective_for_project(project_root)
     }
 
-    fn historian_active(&self, store: &MemoryStore, session_id: &str) -> bool {
+    fn historian_active(
+        &self,
+        store: &MemoryStore,
+        session_id: &str,
+        pass_state: PassState<'_>,
+    ) -> bool {
         if self
             .live_historian_sessions
             .lock()
@@ -4591,10 +4616,14 @@ impl Handler {
         {
             return true;
         }
-        store
-            .load(session_id)
-            .map(|state| state.meta.historian.state != HistorianPhase::Idle)
-            .unwrap_or(false)
+        match pass_state {
+            PassState::Loaded(state) => state.meta.historian.state != HistorianPhase::Idle,
+            PassState::Unavailable => false,
+            PassState::Reload => store
+                .load_historian_phase(session_id)
+                .map(|phase| phase != HistorianPhase::Idle)
+                .unwrap_or(false),
+        }
     }
 
     fn wrapup_active(&self, session_id: &str) -> bool {
@@ -4604,7 +4633,12 @@ impl Handler {
             .contains_key(session_id)
     }
 
-    fn observed_last_response_at_ms(&self, store: &MemoryStore, session_id: &str) -> Option<i64> {
+    fn observed_last_response_at_ms(
+        &self,
+        store: &MemoryStore,
+        session_id: &str,
+        pass_state: PassState<'_>,
+    ) -> Option<i64> {
         let mut observations = self
             .scheduler_observations
             .lock()
@@ -4614,11 +4648,15 @@ impl Handler {
                 .observed_in_process
                 .then_some(observation.last_response_at_ms);
         }
-        let anchor = store
-            .load(session_id)
-            .ok()
-            .map(|state| state.meta.last_committed_pass_at_ms)
-            .unwrap_or(0);
+        let anchor = match pass_state {
+            PassState::Loaded(state) => state.meta.last_committed_pass_at_ms,
+            PassState::Unavailable => 0,
+            PassState::Reload => store
+                .load(session_id)
+                .ok()
+                .map(|state| state.meta.last_committed_pass_at_ms)
+                .unwrap_or(0),
+        };
         observations.insert(
             session_id.to_string(),
             SchedulerObservation {
@@ -6423,7 +6461,7 @@ impl Handler {
         if !generation_current {
             return Ok(false);
         }
-        Ok(store.load(session_id)?.meta.revert_epoch == revert_epoch)
+        Ok(store.load_revert_epoch(session_id)? == revert_epoch)
     }
 
     fn retryable_wrapup_response(
@@ -8065,9 +8103,14 @@ impl Handler {
             .lock()
             .expect("transform route channels mutex")
             .insert(channel, (binding.session.clone(), lineage_root.clone()));
+        // One `cache_state` load serves every pre-transform consumer of this pass. The
+        // transform takes its own snapshot as its linearization point, and consumers that
+        // run after a commit read the store again.
+        let pass_load = store.load(&parsed.session_id);
+        let pass_state = PassState::from(&pass_load);
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
-            let expanded = self.expand_transform_tail_delta(&mut parsed);
+            let expanded = self.expand_transform_tail_delta(&mut parsed, pass_state);
             delta_expand_ms = delta_expand_started_at.elapsed().as_secs_f64() * 1_000.0;
             let Some(frontier) = expanded else {
                 return need_full_sync_response(&parsed);
@@ -8136,7 +8179,7 @@ impl Handler {
         let projection_cache_input = native_delta_frontier
             .as_ref()
             .and_then(|frontier| frontier.projection_cache.clone())
-            .or_else(|| self.lookup_full_projection_cache(&parsed));
+            .or_else(|| self.lookup_full_projection_cache(&parsed, pass_state));
         let projection_cache_lookup_ms =
             projection_cache_lookup_started_at.elapsed().as_secs_f64() * 1_000.0;
         let side_channel_drain_started_at = Instant::now();
@@ -8155,7 +8198,15 @@ impl Handler {
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
         let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
-        let run_transform = || {
+        // The first run consumes the pass load; a rerun after an inline firing or a live
+        // completion runs after a commit and reads the store again. The floor is read after
+        // every commit the same way.
+        let read_floor = || {
+            store
+                .load_publication_floor_ordinal(&parsed.session_id)
+                .unwrap_or(None)
+        };
+        let run_transform = |pass_state: PassState<'_>| {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
                     binding
@@ -8189,10 +8240,13 @@ impl Handler {
                 cache_ttl: resolved_cache_ttl.value,
                 cache_ttl_provenance: resolved_cache_ttl.provenance,
                 model_key: binding.model_key.clone(),
-                observed_last_response_at_ms: self
-                    .observed_last_response_at_ms(&store, &parsed.session_id),
+                observed_last_response_at_ms: self.observed_last_response_at_ms(
+                    &store,
+                    &parsed.session_id,
+                    pass_state,
+                ),
                 guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, pass_now)),
-                historian_active: self.historian_active(&store, &parsed.session_id),
+                historian_active: self.historian_active(&store, &parsed.session_id, pass_state),
                 wrapup_active: self.wrapup_active(&parsed.session_id),
                 #[cfg(test)]
                 injected_reductions: self
@@ -8218,10 +8272,13 @@ impl Handler {
                 message,
             }
         };
-        let mut result = match run_transform() {
+        let mut result = match run_transform(pass_state) {
             Ok(result) => result,
             Err(e) => return reject_transform(e),
         };
+        // Dropping the load makes `Reload` the only state a rerun can name and frees the
+        // core payload before the post-transform work.
+        drop(pass_load);
         // Lineage is proof that this root produced accepted session state, so it is recorded
         // only after the transform succeeds; a rejected attempt must not authorize facade
         // routes for a root the session never served.
@@ -8233,10 +8290,7 @@ impl Handler {
             .insert(lineage_root);
         let mut emergency_pre_floor =
             if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
-                store
-                    .load(&parsed.session_id)
-                    .map(|state| state.meta.publication_floor_ordinal)
-                    .unwrap_or(None)
+                read_floor()
             } else {
                 None
             };
@@ -8280,14 +8334,11 @@ impl Handler {
                     completion,
                 } => {
                     if self.await_live_historian_completion(completion).await {
-                        result = match run_transform() {
+                        result = match run_transform(PassState::Reload) {
                             Ok(result) => result,
                             Err(e) => return reject_transform(e),
                         };
-                        emergency_pre_floor = store
-                            .load(&parsed.session_id)
-                            .map(|state| state.meta.publication_floor_ordinal)
-                            .unwrap_or(None);
+                        emergency_pre_floor = read_floor();
                         match self.prepare_historian_fire(
                             Arc::clone(&store),
                             &parsed,
@@ -8307,14 +8358,11 @@ impl Handler {
                                 let diagnostics = prepared.diagnostics.clone();
                                 match self.run_historian_firing_inline(prepared.task).await {
                                     Ok(_) => {
-                                        result = match run_transform() {
+                                        result = match run_transform(PassState::Reload) {
                                             Ok(result) => result,
                                             Err(e) => return reject_transform(e),
                                         };
-                                        emergency_pre_floor = store
-                                            .load(&parsed.session_id)
-                                            .map(|state| state.meta.publication_floor_ordinal)
-                                            .unwrap_or(None);
+                                        emergency_pre_floor = read_floor();
                                         diagnostics
                                     }
                                     Err(_) => self.refresh_historian_diagnostics(
@@ -8333,14 +8381,11 @@ impl Handler {
                     let diagnostics = prepared.diagnostics.clone();
                     match self.run_historian_firing_inline(prepared.task).await {
                         Ok(_) => {
-                            result = match run_transform() {
+                            result = match run_transform(PassState::Reload) {
                                 Ok(result) => result,
                                 Err(e) => return reject_transform(e),
                             };
-                            emergency_pre_floor = store
-                                .load(&parsed.session_id)
-                                .map(|state| state.meta.publication_floor_ordinal)
-                                .unwrap_or(None);
+                            emergency_pre_floor = read_floor();
                             diagnostics
                         }
                         Err(_) => self.refresh_historian_diagnostics(
@@ -8384,11 +8429,11 @@ impl Handler {
         // bytes.
         if !parsed.is_subagent && result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             let floor_advanced = store
-                .load(&parsed.session_id)
-                .map(|state| state.meta.publication_floor_ordinal != emergency_pre_floor)
+                .load_publication_floor_ordinal(&parsed.session_id)
+                .map(|floor| floor != emergency_pre_floor)
                 .unwrap_or(false);
             if floor_advanced {
-                result = match run_transform() {
+                result = match run_transform(PassState::Reload) {
                     Ok(result) => result,
                     Err(e) => return reject_transform(e),
                 };
@@ -21103,8 +21148,10 @@ mod tests {
             "replace_from": 4,
             "native_replace_from": 2,
         }));
+        let pass_load = _store.load(&second_request.session_id);
+        let pass_state = PassState::from(&pass_load);
         let frontier = handler
-            .expand_transform_tail_delta(&mut second_request)
+            .expand_transform_tail_delta(&mut second_request, pass_state)
             .expect("cached native prefix must reattach");
         assert_eq!(
             serde_json::to_value(&second_request).unwrap(),
@@ -21417,8 +21464,10 @@ mod tests {
             "replace_from": 3,
             "native_replace_from": 3,
         }));
+        let pass_load = _store.load(&delta.session_id);
+        let pass_state = PassState::from(&pass_load);
         let frontier = handler
-            .expand_transform_tail_delta(&mut delta)
+            .expand_transform_tail_delta(&mut delta, pass_state)
             .expect("full snapshot must supply the evicted native prefix");
         assert!(frontier.projection_cache.is_none());
         for (reattached, original) in delta.messages.iter().zip(&request.messages) {
@@ -21609,8 +21658,10 @@ mod tests {
             "native_replace_from": GIANT_MESSAGE_COUNT,
         }));
 
+        let pass_load = _store.load(&delta.session_id);
+        let pass_state = PassState::from(&pass_load);
         let frontier = handler
-            .expand_transform_tail_delta(&mut delta)
+            .expand_transform_tail_delta(&mut delta, pass_state)
             .expect("required cores must accept the tail delta without a full-request snapshot");
         let reusable_projection = frontier
             .projection_cache
@@ -23741,8 +23792,10 @@ mod tests {
             reference.messages.extend(third.messages.iter().cloned());
             reference.tail_delta = None;
             let mut reattached = third.clone();
+            let pass_load = store.load(&reattached.session_id);
+            let pass_state = PassState::from(&pass_load);
             let frontier = handler
-                .expand_transform_tail_delta(&mut reattached)
+                .expand_transform_tail_delta(&mut reattached, pass_state)
                 .expect("third delta reattaches");
             assert!(
                 frontier.projection_cache.is_some(),
@@ -24600,6 +24653,79 @@ mod tests {
             evicted.is_empty(),
             "statements were re-created after eviction: {evicted:?}"
         );
+    }
+
+    /// A steady pass loads the full `cache_state` row through the statement cache exactly
+    /// twice: once before the transform, shared by the tail-delta expansion, the
+    /// projection-cache lookup, the last-response anchor, and the historian-active check;
+    /// and once after the commit in `prepare_historian_fire`, which needs the committed
+    /// `row_version` for its own write. The interleave hook splits the two: it runs after
+    /// the transform commit and before the post-commit load. The transform's own snapshot
+    /// read is uncached and stays its linearization point. The run count is read on one
+    /// handle, so the test also requires that handle was never evicted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_steady_pass_loads_the_full_cache_state_row_once_before_the_transform() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store.start_statement_reuse_probe();
+        let mut messages = vec![ck("m1", 1, "turn 1")];
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["status"], "ok", "warm pass");
+        let after_warm = store.cache_state_full_load_runs();
+        let at_hook = Arc::new(Mutex::new(None));
+        {
+            let store = Arc::clone(&store);
+            let at_hook = Arc::clone(&at_hook);
+            *handler
+                .between_transform_and_prepare
+                .lock()
+                .expect("interleave hook mutex") = Some(Box::new(move || {
+                *at_hook.lock().expect("hook cell") = Some(store.cache_state_full_load_runs());
+            }));
+        }
+        messages.push(ck("m2", 2, "turn 2"));
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["status"], "ok", "steady pass");
+        let at_hook = at_hook.lock().expect("hook cell").expect("the hook ran");
+        assert_eq!(
+            at_hook - after_warm,
+            1,
+            "one full load before the transform"
+        );
+        assert_eq!(
+            store.cache_state_full_load_runs() - at_hook,
+            1,
+            "one full load after the commit"
+        );
+        let full_select_evictions: u32 = store
+            .statement_evictions()
+            .into_iter()
+            .filter(|(sql, _)| sql.contains("core_state, meta FROM cache_state"))
+            .map(|(_, evictions)| evictions)
+            .sum();
+        assert_eq!(
+            full_select_evictions, 0,
+            "the counted handle was never re-created"
+        );
+    }
+
+    /// The durable historian phase decides `historian_active` when no live run is
+    /// registered: a pass with its own load reads the phase from that load, a rerun reads
+    /// it from the store, and a pass whose load failed treats the historian as idle.
+    #[test]
+    fn historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Firing;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let loaded = store.load("ses").unwrap();
+        assert!(handler.historian_active(&store, "ses", PassState::Loaded(&loaded)));
+        assert!(handler.historian_active(&store, "ses", PassState::Reload));
+        assert!(!handler.historian_active(&store, "ses", PassState::Unavailable));
+        assert!(!handler.historian_active(&store, "never-seen", PassState::Reload));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -35866,23 +35992,35 @@ mod tests {
         // The interleave seam runs between the request's pre-fold transform and `Emergency95` prepare.
         // By prepare time, the run has published and released its live-map entry.
         // Only `Complete`'s row-advance check can fold the run.
-        // response.
+        // The hook also records the foreign-write witness: the row version the transform
+        // committed and the row version the publish committed after it, read from the store
+        // rather than from the pass's own post-commit read.
+        let witness: Arc<Mutex<Option<(u64, u64)>>> = Arc::new(Mutex::new(None));
         {
             let producer = Arc::clone(&producer);
             let store_for_hook = Arc::clone(&store);
+            let witness = Arc::clone(&witness);
             *handler
                 .between_transform_and_prepare
                 .lock()
                 .expect("interleave hook mutex") = Some(Box::new(move || {
+                let transform_committed = store_for_hook
+                    .load("ses")
+                    .ok()
+                    .and_then(|s| s.row_version)
+                    .expect("the transform committed a row before the hook");
                 producer.block_output.store(false, Ordering::SeqCst);
                 producer.notify.notify_waiters();
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
-                    let idle = store_for_hook
+                    let published = store_for_hook
                         .load("ses")
-                        .map(|s| s.meta.historian.state == HistorianPhase::Idle)
-                        .unwrap_or(false);
-                    if idle {
+                        .ok()
+                        .filter(|s| s.meta.historian.state == HistorianPhase::Idle)
+                        .and_then(|s| s.row_version);
+                    if let Some(published) = published {
+                        *witness.lock().expect("witness mutex") =
+                            Some((transform_committed, published));
                         break;
                     }
                     assert!(
@@ -35898,6 +36036,15 @@ mod tests {
         assert!(
             m0_text(&response).contains("autonomous summary"),
             "a fold published between the transform and the live-map check must land in this response"
+        );
+        let (transform_committed, published) = witness
+            .lock()
+            .expect("witness mutex")
+            .expect("the hook ran and recorded both row versions");
+        assert!(
+            published > transform_committed,
+            "the foreign publish committed row version {published} after the transform's \
+             {transform_committed}, before the pass's first post-commit cache_state read"
         );
         // A second producer start is valid because eligible content still crosses the trigger bar after the first fold.
         // Eligible content still crosses the trigger bar after the first fold publishes.
@@ -37097,7 +37244,8 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
     // Route-bound compaction settings can differ while the session and ingress stay the same.
     for (pass, compaction_enabled) in [false, true, true, false, true].into_iter().enumerate() {
         ctx.compaction_enabled = compaction_enabled;
-        let cached = handler.lookup_full_projection_cache(&request);
+        let pass_load = store.load(&request.session_id);
+        let cached = handler.lookup_full_projection_cache(&request, PassState::from(&pass_load));
         assert_eq!(cached.is_some(), pass > 0);
         if let Some(cache) = &cached {
             assert_eq!(cache.replace_from, request.messages.len());
