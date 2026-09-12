@@ -151,8 +151,9 @@ footprint fits but the pool is short ([`resident_capacity_error`][queuefull]);
 a refused request creates no [`TransformDispatchTicket`][ticket], changes no
 `transform_route_channels`, prompt freeze, page staging, or store state, and
 releases any taken charge when the future ends; and for every admitted
-request `charge >= nodes * size_of::<Value>() * VALUE_NODE_SLACK +
-string_bytes * RETAINED_STRING_COPIES + VALUE_ENVELOPE_BYTES`, with at most
+request `charge >= nodes * size_of::<Value>() * VALUE_NODE_SLACK *
+RETAINED_NODE_COPIES + string_bytes * RETAINED_STRING_COPIES +
+VALUE_ENVELOPE_BYTES`, with at most
 [`RETAINED_STRING_COPIES`][copies] owned copies of each string block
 retained by the typed decode, observed structurally (the `Value` node, the
 `WireMessage` `original`, and the `WireBlock` `original` for one known
