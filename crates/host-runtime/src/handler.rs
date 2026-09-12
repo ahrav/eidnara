@@ -574,7 +574,7 @@ impl RequestCtx {
     /// Runs `work` on the blocking pool as this request's work.
     /// The blocking thread raises the redaction guard before invoking `work`.
     /// A panic in `work` is redacted and surfaces as [`BlockingWorkFailed::Panicked`].
-    /// Request cancellation, route close, and host shutdown wait for this work.
+    /// Route close and host shutdown join detached work.
     /// Dropping the returned future detaches the result, not the physical completion tokens.
     /// Captures dropped by `work` release their charges on return or unwind.
     /// Captures moved into the result release when their final owner drops them.
@@ -629,7 +629,7 @@ struct BlockingOutcome<T>(Option<Result<T, tokio::task::JoinError>>);
 
 impl<T> Drop for BlockingOutcome<T> {
     fn drop(&mut self) {
-        crate::panic_boundary::redact_sync(|| drop(self.0.take()));
+        crate::panic_boundary::drop_redacted(self.0.take());
     }
 }
 
@@ -792,6 +792,25 @@ mod tests {
                 host: tokio_util::task::TaskTracker::new(),
             },
         }
+    }
+
+    #[test]
+    fn buffered_result_destructor_during_unwind_preserves_first_panic() {
+        struct PanicsOnDrop;
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("buffered destructor panic");
+            }
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        assert!(tx.send(BlockingOutcome(Some(Ok(PanicsOnDrop)))).is_ok());
+        let future = blocking_result(rx, BlockingWorkFailed::RuntimeStopped);
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _future = future;
+            panic!("owner panic");
+        }))
+        .unwrap_err();
+        assert_eq!(first.downcast_ref::<&str>().copied(), Some("owner panic"));
     }
 
     #[tokio::test]

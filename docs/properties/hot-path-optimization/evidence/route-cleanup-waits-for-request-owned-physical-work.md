@@ -95,8 +95,9 @@ the existing deferred reaper retains the handler and instance lock until drain.
 
 The cancel arm aborts and joins the handler task as before and then
 [closes and waits on the request ledger][cancel-join] before it settles the
-cancelled terminal, so a cancellation cannot report before the request's
-blocking work has stopped. Route close keeps its shape: the
+cancelled terminal. Work registered before that drain completes must stop
+first; subsequent submissions remain covered by route close and host shutdown,
+not by the completed request drain. Route close keeps its shape: the
 [close gate][close-gate-live] closes the route tracker, waits the route-close
 budget, aborts the dispatch tasks, waits the budget again, and trips fatal
 rather than running route-gone if work is still live; the join task is entered

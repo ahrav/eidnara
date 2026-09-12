@@ -75,22 +75,23 @@ struct RedactedOnDrop<F>(Option<std::pin::Pin<Box<F>>>);
 
 impl<F> Drop for RedactedOnDrop<F> {
     fn drop(&mut self) {
-        let _guard = CallbackPollGuard::enter();
-        let future = self.0.take();
-        if !std::thread::panicking() {
-            drop(future);
-            return;
-        }
-        // This frame is unwinding from a poll-time panic, so a destructor panic here would be a
-        // second panic and abort the process. It is caught and discarded; the first panic
-        // already carries the callback failure to the host.
-        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            drop(future);
-        })) && let Err(second) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(payload)))
-        {
-            std::mem::forget(second);
-        }
+        drop_redacted(self.0.take());
+    }
+}
+
+pub(crate) fn drop_redacted<T>(value: T) {
+    let _guard = CallbackPollGuard::enter();
+    if !std::thread::panicking() {
+        drop(value);
+        return;
+    }
+    // During an existing unwind, disposal must preserve the first panic rather than abort.
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        drop(value);
+    })) && let Err(second) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(payload)))
+    {
+        std::mem::forget(second);
     }
 }
 

@@ -241,10 +241,12 @@ blocking work a request runs through its context is inside that gate: joined by
 the request's cancel arm and by route close, with its panics redacted.
 Check: `always` - At route-gone entry and cleanup-gated reuse, an independent
 ledger contains no live request-owned work that can access that route's state;
-an unquiesced timeout follows the fatal/refusal path instead of cleanup; a
-cancelled terminal is not sent while the request's blocking work runs. If
-cancellation wins and the generation remains viable through output admission,
-one cancelled terminal is queued after work stops. Logical settlement does not
+an unquiesced timeout follows the fatal/refusal path instead of cleanup.
+Work registered before the cancel arm completes its request-ledger drain
+finishes before a cancelled terminal. Later submissions may outlive that
+terminal but remain joined by route close and host shutdown. If cancellation
+wins and the generation remains viable through output admission, one cancelled
+terminal is queued after the request drain. Logical settlement does not
 prove peer observation: retired generations and failed delivery preserve
 `outcome_unknown`, and unquiesced work follows fatal refusal.
 Fault/timing angle: Cancellation or outer-future drop precedes actual worker

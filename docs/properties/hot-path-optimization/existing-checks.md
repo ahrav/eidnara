@@ -451,10 +451,10 @@ that no related check exists anywhere in the repository.
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L25844
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1494
-[t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L834
+[t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L853
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1464
-[t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L798
-[t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L820
+[t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L817
+[t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L839
 [t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L208
 [t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L236
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054
