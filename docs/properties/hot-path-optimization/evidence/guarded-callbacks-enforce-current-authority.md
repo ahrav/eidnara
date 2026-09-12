@@ -76,8 +76,8 @@ map onto three policies: a read-only callback and a fenced write share the
 statement runs. A callback [enters its mode][scope-install] after the
 temp-shadow scan, which stays uncached, and a [drop guard][mode-hold] returns
 the connection to `Unrestricted` on release and on unwind; entering a mode
-while one is held is an assertion in every build. The [read path][read] still toggles
-`query_only` around the mode; the [fenced path][write] still prechecks the
+while one is held is an assertion in every build. The [read path][live-read] still toggles
+`query_only` around the mode; the [fenced path][live-write] still prechecks the
 fence, pins durability, and claims inside the immediate transaction. The
 [baseline DDL][apply] on a pristine file runs under `Baseline`; the marker and
 version writes that follow run under `Unrestricted`.
@@ -158,8 +158,10 @@ Review-time verification: the new test failed with `Ok(())` in place of
 the live tree at that state.
 
 [lock]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L195-L209
-[read]: ../../../../crates/storage/src/lib.rs#L305-L321
-[write]: ../../../../crates/storage/src/lib.rs#L369-L433
+[read]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L229-L245
+[write]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L290-L316
+[live-read]: ../../../../crates/storage/src/lib.rs#L305-L321
+[live-write]: ../../../../crates/storage/src/lib.rs#L369-L433
 [scope]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L624-L705
 [cache]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L487-L498
 [facade]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5563-L5586
