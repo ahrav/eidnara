@@ -29,14 +29,14 @@ bound before either moves.
   doubles it for two directions ([profile.rs:155-158][charge]), so eight
   connections fit under 1 GiB.
 - [`try_reserve`][try-reserve] calls `reclaim_completed` at
-  [`:1281`][try-reserve] on every reservation.
+  [`:1263-1340`][try-reserve] on every reservation.
   [`reclaim_completed_inner`][reclaim] walks released slots, and at
   [`:2129-2134`][punch-decision] punches only when
   `new_reclaimed - punched >= punch_batch_bytes()`.
   [`punch_batch_bytes`][batch] is `arena_bytes / PUNCH_BATCH_DIVISOR` with
   [divisor 4][divisor], so 16 MiB;
   [`punch_dead_pages`][punch] leaves `punched` page-aligned below `reclaimed`
-  ([`:2240`][punch]), so the boundary page stays until the next batch.
+  ([`:2163-2242`][punch]), so the boundary page stays until the next batch.
 - [`removal_ranges`][removal-ranges] rounds inward to whole pages and splits
   at the arena end; [`remove_pages`][remove-pages] carries the `SAFETY`
   comment "page-aligned range inside the live shared mapping with no live
@@ -45,7 +45,7 @@ bound before either moves.
 - [`abort_reservation`][abort] punches `[arena_write, reserved_end)` through
   `punch_range`, again rounded inward, so a page shared with live bytes stays.
 - [`trim`][trim] punches every dead page including the partial one; its
-  comment at [`:2254-2255`][trim] names the idle-ring role. Only tests call it
+  comment at [`:2244-2266`][trim] names the idle-ring role. Only tests call it
   ([ring.rs:3086][t-syscall] and siblings); the client crate has no caller and
   runs the same [`reserve_until`][native-reserve] path.
 - [§7.7][wire77] states no timed ring poll or prefault exists; [§7.5.1][wire751]

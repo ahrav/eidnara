@@ -58,7 +58,7 @@ lineage restrictions, and both row and payload boundaries. Existing checks are
   choice, not an open semantic acceptance rule; candidate helpers are not oracles.
 
 [pass]: ../../../../crates/daemon/src/lib.rs#L8182-L8262
-[reruns]: ../../../../crates/daemon/src/lib.rs#L8323-L8425
+[reruns]: ../../../../crates/daemon/src/lib.rs#L8329-L8433
 [entry]: ../../../../crates/daemon/src/canonical_memory.rs#L141-L174
 [query]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248

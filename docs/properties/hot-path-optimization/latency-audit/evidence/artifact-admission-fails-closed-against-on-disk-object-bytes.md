@@ -17,8 +17,8 @@ preserve that, or state what it trades away.
   under `tmp` ([`:379-405`][ingest-temp]) before any lock; a
   [`StagedObject`][staged] unlinks it on drop unless consumed.
 - It then takes the exclusive [writer lock][lock-writer] and calls
-  [`check_budget`][check-budget] at [`:407-410`][ingest-lock], before the
-  shard is created ([`:411-416`][ingest-lock]), before the reservation row
+  [`check_budget`][check-budget] at [`:407-416`][ingest-lock], before the
+  shard is created ([`:407-416`][ingest-lock]), before the reservation row
   ([`:424-471`][ingest-reservation]), and before the publish rename
   ([`:476-526`][ingest-publish]).
 - [`check_budget`][check-budget] calls [`regular_file_bytes`][walk] with an

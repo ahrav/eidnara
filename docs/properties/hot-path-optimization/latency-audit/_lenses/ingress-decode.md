@@ -328,8 +328,8 @@ bodies opaque and states only the `invalid_params` cap codes
 [observed]: ../../../../../crates/daemon/src/lib.rs#L7986-L7992
 [fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7993-L8001
 [freeze]: ../../../../../crates/daemon/src/lib.rs#L8096-L8097
-[routechan]: ../../../../../crates/daemon/src/lib.rs#L8105-L8108
-[accept]: ../../../../../crates/daemon/src/lib.rs#L8133
+[routechan]: ../../../../../crates/daemon/src/lib.rs#L8113-L8116
+[accept]: ../../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../../crates/daemon/src/lib.rs#L591-L648
 [pageapply]: ../../../../../crates/daemon/src/lib.rs#L9487-L9502
 [settle]: ../../../../../crates/daemon/src/lib.rs#L12142-L12157

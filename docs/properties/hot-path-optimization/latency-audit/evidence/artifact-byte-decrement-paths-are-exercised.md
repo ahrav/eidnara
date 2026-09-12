@@ -25,7 +25,7 @@ bytes at stake, not to check the accounting.
   - [`run_artifact_recovery`][recovery] promotes orphan `Live` rows through
     [`prepare_startup_cas_recovery`][startup] and runs `reclaim_candidate`
     over them, which reaches [`unlink_artifact`][unlink-artifact].
-  - [`reclaim_candidate`][reclaim-cand] unlinks at [`:260`][reclaim-cand]
+  - [`reclaim_candidate`][reclaim-cand] unlinks at [`:212-289`][reclaim-cand]
     after `prepare_reclaim` accepts a candidate past its grace; it is reached
     from [`run_artifact_gc`][run-gc], which
     [`run_staging_maintenance`][maintenance] calls after its own transaction.

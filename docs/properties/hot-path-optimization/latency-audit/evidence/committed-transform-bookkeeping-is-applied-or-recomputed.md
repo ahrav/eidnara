@@ -16,48 +16,48 @@ structures and the recovery each one has.
 ## Evidence trail
 
 The handler is [`handle_transform_dispatch`][handler]. After admission it
-takes a snapshot generation ([`:8067-8071`][snapshot-begin]) and runs the
-pre-transform work at [`:8115-8132`][h-pre]. The `run_transform` closure at
-[`:8139-8193`][h-run] reads `guidance_date` through
-[`guidance_date_for_transform`][guidance-fn] at [`:8175`][guidance-use] and
+takes a snapshot generation ([`:8142-8146`][snapshot-begin]) and runs the
+pre-transform work at [`:8181-8198`][h-pre]. The `run_transform` closure at
+[`:8195-8261`][h-run] reads `guidance_date` through
+[`guidance_date_for_transform`][guidance-fn] at [`:8261`][guidance-use] and
 calls [`transform_with_projection_cached`][tc-inject] with
-`&self.serialized_outputs`. The first call is at [`:8202`][commit-call].
+`&self.serialized_outputs`. The first call is at [`:8288-8291`][commit-call].
 Inside that call, `apply_once` commits the store at
 [`commit_transform:4939-4971`][store-commit] and then replaces the
-serialized-output cache at [`:4984-4994`][output-replace]; both are inside
+serialized-output cache at [`:4987-4997`][output-replace]; both are inside
 the closure, so the transform catalog's
 [output-cache record][tc-output] governs their order.
 
 In-memory mutations after `run_transform()` returns, in order:
 
-- [`:8209-8214`][roots-insert] inserts `lineage_root` into
+- [`:8297-8302`][roots-insert] inserts `lineage_root` into
   `transform_session_roots`. Its [field doc][roots-doc] says the durable
   table is the authority and [`module_knows_transform_session`][knows]
-  repopulates the map from it ([`:4501-4522`][knows-heal]) when the session
+  repopulates the map from it ([`:4531-4552`][knows-heal]) when the session
   has `cache_state`.
-- [`:8215-8223`][floor-a] reads the publication floor (Emergency95 only), then
+- [`:8303-8308`][floor-a] reads the publication floor (Emergency95 only), then
   the `#[cfg(test)]` [hook][hook] runs.
 - [`prepare_historian_fire`][prepare] replaces the session's boundary-token
-  snapshot at [`:5148-5151`][boundary-store] and persists no-fire reasons by
+  snapshot at [`:5197-5200`][boundary-store] and persists no-fire reasons by
   CAS at [`record_no_fire:5462`][no-fire]; `spawn_historian_firing` at
-  [`:8353`][spawn-fire] detaches the firing task.
-- [`:8387-8394`][pc-store] calls [`store_projection_cache`][store-pc], which
+  [`:8429`][spawn-fire] detaches the firing task.
+- [`:8444-8451`][pc-store] calls [`store_projection_cache`][store-pc], which
   replaces the `projections` entry for `(session, revert_epoch)`.
-- [`:8398-8403`][guidance-remove] removes the session's `guidance_dates` pin
+- [`:8474-8479`][guidance-remove] removes the session's `guidance_dates` pin
   when `response.committed`. The pin is inserted by
   [`guidance_date_for_session`][guidance-pin] when the loaded `meta` has no
   date, and [`guidance_date_for_transform`][guidance-fn] returns it until it
   is removed. The transform copies `ctx.guidance_date` into `meta` only on a
   bust pass ([`transform.rs:3998-3999`][guidance-meta]).
-- [`:8407-8419`][native-attach] updates `native_attachments`;
-  [`:8436`][trace-complete] writes the completion trace;
-  [`:8439`][observation] records the response observation;
-  [`:8452-8461`][finish-ready] finishes the snapshot generation with the
+- [`:8481-8510`][native-attach] updates `native_attachments`;
+  [`:8512`][trace-complete] writes the completion trace;
+  [`:8514-8517`][observation] records the response observation;
+  [`:8527-8538`][finish-ready] finishes the snapshot generation with the
   retained request.
 
-On the ordinary path there is no `.await` between [`:8202`][commit-call] and
-[`:8462`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
-sit inside the Emergency95 branch ([`:8244-8334`][emergency]), and each is
+On the ordinary path there is no `.await` between [`:8288-8291`][commit-call] and
+[`:8527-8538`][finish-ready]. The three awaits at `:8263`, `:8289`, and `:8315`
+sit inside the Emergency95 branch ([`:8329-8433`][emergency]), and each is
 followed by another `run_transform()` call, so an abort there leaves the
 first commit's roots inserted and the later bookkeeping skipped.
 
@@ -98,7 +98,7 @@ the parent's [E1][e1] and [E2][e2] cover route state and charges.
 
 ### Q: What owns and joins any proposed off-worker transform work?
 
-- Sources examined: [`:8139-8193`][h-run] (a closure over borrowed `parsed`,
+- Sources examined: [`:8195-8261`][h-run] (a closure over borrowed `parsed`,
   `binding`, `store`, `project_memory`, and `projection_cache_input`), the
   host cancel arm at [`dispatch.rs:938-955`][host-cancel], the route-close
   path at [`:1239-1259`][host-close].
@@ -120,22 +120,22 @@ the parent's [E1][e1] and [E2][e2] cover route state and charges.
 [boundary-store]: ../../../../../crates/daemon/src/lib.rs#L5197-L5200
 [no-fire]: ../../../../../crates/daemon/src/lib.rs#L5511
 [guidance-pin]: ../../../../../crates/daemon/src/lib.rs#L7681-L7720
-[snapshot-begin]: ../../../../../crates/daemon/src/lib.rs#L8116-L8127
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8171-L8188
+[snapshot-begin]: ../../../../../crates/daemon/src/lib.rs#L8142-L8146
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8181-L8198
 [h-run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
-[guidance-use]: ../../../../../crates/daemon/src/lib.rs#L8239
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8269
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8276-L8281
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8282-L8290
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8291-L8301
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8310-L8394
-[spawn-fire]: ../../../../../crates/daemon/src/lib.rs#L8410
+[guidance-use]: ../../../../../crates/daemon/src/lib.rs#L8261
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8288-L8291
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8297-L8302
+[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8303-L8308
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8308-L8316
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8329-L8433
+[spawn-fire]: ../../../../../crates/daemon/src/lib.rs#L8429
 [pc-store]: ../../../../../crates/daemon/src/lib.rs#L8444-L8451
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8455-L8460
-[native-attach]: ../../../../../crates/daemon/src/lib.rs#L8464-L8476
-[trace-complete]: ../../../../../crates/daemon/src/lib.rs#L8493
-[observation]: ../../../../../crates/daemon/src/lib.rs#L8496
-[finish-ready]: ../../../../../crates/daemon/src/lib.rs#L8509-L8518
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8474-L8479
+[native-attach]: ../../../../../crates/daemon/src/lib.rs#L8481-L8510
+[trace-complete]: ../../../../../crates/daemon/src/lib.rs#L8512
+[observation]: ../../../../../crates/daemon/src/lib.rs#L8514-L8517
+[finish-ready]: ../../../../../crates/daemon/src/lib.rs#L8527-L8538
 [tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
 [guidance-meta]: ../../../../../crates/daemon/src/transform.rs#L4001-L4002
 [store-commit]: ../../../../../crates/daemon/src/transform.rs#L4950-L4982

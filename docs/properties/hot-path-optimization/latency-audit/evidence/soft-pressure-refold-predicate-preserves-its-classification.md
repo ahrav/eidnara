@@ -20,7 +20,7 @@ a pass lands in while every H record still passes.
   with [`cached_estimate_tokens`][soft-m1-compose] as its estimator; that
   estimator is used only for user-profile trimming
   ([`m1_compose.rs:196-202`][m1-trim]).
-- The predicate at [`:4306-4324`][soft-predicate]: `m0_tokens` is
+- The predicate at [`:4309-4327`][soft-predicate]: `m0_tokens` is
   `tokenizer::estimate_tokens(&unit.frozen_payload)` for the frozen unit with
   key `m0`, or `0` when none exists; `m1_has_content` is `m1.body !=
   M1_PLACEHOLDER`; `m1_tokens` is `tokenizer::estimate_tokens(&m1.body)`
@@ -38,7 +38,7 @@ a pass lands in while every H record still passes.
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
   compartment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
-  `ProducerContext` at [`lib.rs:8163-8166`][budget-filter], which admits only
+  `ProducerContext` at [`lib.rs:8239-8242`][budget-filter], which admits only
   finite values `>= 0.0` from the request and falls back to the bound
   budget; a zero budget disables the second disjunct through the
   `> 0.0` guard.
@@ -81,7 +81,7 @@ constructed `M1Composition` until a writer for `memory_update_count` exists.
 
 ### Q: Are the constants 40, 0.20, 0.15, and 500 a contract or tuning?
 
-- Sources examined: [`:4318-4324`][soft-predicate], the transform catalog's
+- Sources examined: [`:4309-4327`][soft-predicate], the transform catalog's
   history records ([H1][h1], [H2][h2]), `docs/` for the constants.
 - Findings: The constants appear only in the predicate; no document names
   them. A frozen reference pins them either way.
@@ -134,6 +134,6 @@ a writer or treating an unreachable condition as covered.
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
 [assemble]: ../../../../../crates/daemon/src/memory_render.rs#L206-L231
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8212-L8223
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8239-L8242
 [h1]: ../../catalog.md#history-budget-selection-preserves-reference-bytes
 [h2]: ../../catalog.md#history-budget-boundaries-remain-distinct
