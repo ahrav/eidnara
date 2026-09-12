@@ -1077,20 +1077,20 @@ None.
 exceeds the 60 to 120 line target (173 lines including 34 link definitions)
 to keep every verified anchor; the C6 and W13 files are within it.
 
-[call-bind]: ../../../../crates/daemon/src/lib.rs#L11795
-[call-fire]: ../../../../crates/daemon/src/lib.rs#L5058
-[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1948-L1987
+[call-bind]: ../../../../crates/daemon/src/lib.rs#L11840
+[call-fire]: ../../../../crates/daemon/src/lib.rs#L5094
+[cas-retry]: ../../../../crates/daemon/src/transform.rs#L1951-L1990
 [cleanup]: ../../../../crates/kernel/src/cas/ingest.rs#L779-L849
-[copies]: ../../../../crates/daemon/src/lib.rs#L15415-L15424
+[copies]: ../../../../crates/daemon/src/lib.rs#L15460-L15469
 [diff-ref]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
-[fmt]: ../../../../crates/daemon/src/transform.rs#L1224-L1357
+[fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360
 [from-writer]: ../../../../crates/host-runtime/src/handler.rs#L465-L472
 [ismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L73-L82
-[normalize]: ../../../../crates/daemon/src/transform.rs#L2091-L2108
-[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4306-L4324
+[normalize]: ../../../../crates/daemon/src/transform.rs#L2094-L2111
+[soft-predicate]: ../../../../crates/daemon/src/transform.rs#L4309-L4327
 [stepper]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L163-L192
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
 [ts-stages]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
-[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1205
+[tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
 [walk]: ../../../../crates/kernel/src/cas/ingest.rs#L1228-L1288

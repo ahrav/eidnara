@@ -24,9 +24,9 @@ record permits batching unrelated operations into one snapshot, weaker
 durability, or a schema/version ledger.
 
 [mutex]: ../../../../crates/storage/src/lib.rs#L195-L209
-[read]: ../../../../crates/storage/src/lib.rs#L229-L245
-[write]: ../../../../crates/storage/src/lib.rs#L290-L316
-[scope]: ../../../../crates/storage/src/lib.rs#L624-L705
-[cache]: ../../../../crates/storage/src/lib.rs#L487-L498
-[facade]: ../../../../crates/memory-store/src/lib.rs#L5563-L5586
-[snapshot]: ../../../../crates/storage/src/lib.rs#L3946-L3981
+[read]: ../../../../crates/storage/src/lib.rs#L229-L261
+[write]: ../../../../crates/storage/src/lib.rs#L306-L332
+[scope]: ../../../../crates/storage/src/lib.rs#L648-L729
+[cache]: ../../../../crates/storage/src/lib.rs#L503-L514
+[facade]: ../../../../crates/memory-store/src/lib.rs#L5640-L5663
+[snapshot]: ../../../../crates/storage/src/lib.rs#L3972-L4007

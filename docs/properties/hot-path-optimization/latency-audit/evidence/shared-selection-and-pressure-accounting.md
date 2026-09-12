@@ -214,11 +214,11 @@ benchmark adapters account for 12 additional non-production lines. Full
 workspace/Bun gates and index resolution remain controller work. The worktree
 contains no conflict markers; the unmerged index is deliberately untouched.
 
-[selection]: ../../../../../crates/daemon/src/transform.rs#L6360
-[historian]: ../../../../../crates/daemon/src/lib.rs#L16637
-[pressure]: ../../../../../crates/daemon/src/transform.rs#L6323
+[selection]: ../../../../../crates/daemon/src/transform.rs#L6363
+[historian]: ../../../../../crates/daemon/src/lib.rs#L16682
+[pressure]: ../../../../../crates/daemon/src/transform.rs#L6326
 [sidecar]: ../../../../../crates/daemon/src/codec/opencode.rs#L2071
-[thresholds]: ../../../../../crates/daemon/src/transform.rs#L24603
+[thresholds]: ../../../../../crates/daemon/src/transform.rs#L24606
 [wire-deser]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L732
 [wire-bytes]: ../../../../../crates/daemon/src/retained_size.rs#L213-L218

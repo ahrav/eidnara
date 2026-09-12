@@ -14,21 +14,21 @@ can shrink a number without making anything faster.
 
 ## Evidence trail
 
-- [`TransformTimings`][tt] has 89 fields, each with `#[serde(default)]`, so
+- [`TransformTimings`][tt] has 90 fields, each with `#[serde(default)]`, so
   a field removed from the producer deserializes as `0` or `0.0` on the
   consumer.
-- [`format_pass_timing_line`][fmt] prints 90 `key=value` pairs (`session`
+- [`format_pass_timing_line`][fmt] prints 91 `key=value` pairs (`session`
   plus one per field). The key for `post_attach` is `post_attach_ms`
-  ([`:1262`][fmt-post-attach], value at [`:1339`][fmt-post-attach-value]);
+  ([`:1264`][fmt-post-attach], value at [`:1342`][fmt-post-attach-value]);
   every other key equals its field name. The plugin's `rust module stages:`
   line ([`:1013-1042`][ts-stages]) reads 22 keys by name from the response
   object; all 22 exist in the struct. Its [`stage`][ts-stage-fn] helper
   prints `n/a` only when the key is absent or non-finite, so a present zero
   prints as `0.0`.
-- The handler assigns 24 fields at [`:8463-8488`][h-timings]. Thirteen are
+- The handler assigns 25 fields at [`:8538-8562`][h-timings]. Fourteen are
   millisecond durations from `Instant` pairs taken on the handler task:
   `handler_total` from `handler_started_at`, the request-to-handler gap,
-  delta expand, side-channel drain, receive trace, cache lookup and store,
+  the pass-state load, delta expand, side-channel drain, receive trace, cache lookup and store,
   native attach, completion trace, observation, retained size, snapshot
   store, and `post_attach`. Six trigger fields come from
   `HistorianTriggerTimings` filled inside [`prepare_historian_fire`][prepare];
@@ -62,10 +62,21 @@ None in time. The hazard is structural: a stage split across an `.await`
 or moved to another thread changes what its field brackets while the field
 keeps its name and its `#[serde(default)]` fallback.
 
+## Recorded stage delta
+
+The single pass-state load
+([consolidated-cache-state-reads-match-per-consumer-loads](consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence))
+moved the `cache_state` read from inside the `delta_expand` and
+`projection_cache_lookup` windows to before both. It added
+[`pass_state_load`][pass-state-load] as the read's own field and key instead
+of letting those two buckets shrink by the read's cost, so no existing field
+changed what it brackets and the key-to-field map stays the identity except
+`post_attach_ms`. The counts above are the post-change counts.
+
 ## What a test must construct
 
 An ordinary pass that populates `timings`, then a source-level assertion that
-the plugin's 22 keys and the line's 90 keys resolve to struct fields (the
+the plugin's 22 keys and the line's 91 keys resolve to struct fields (the
 `post_attach_ms` rename is the one exception to record), and a per-field
 statement of the start and stop instants each field brackets. The
 [wildcard checks](../existing-checks.md#wildcard-and-cross-cutting) pin the
@@ -93,18 +104,19 @@ not a runtime assertion.
   set.
 - Conclusion: needs human input.
 
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1205
-[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1207-L1218
-[fmt]: ../../../../../crates/daemon/src/transform.rs#L1224-L1357
-[fmt-post-attach]: ../../../../../crates/daemon/src/transform.rs#L1262
-[fmt-post-attach-value]: ../../../../../crates/daemon/src/transform.rs#L1339
-[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2381
-[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2860
+[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
+[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
+[fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
+[fmt-post-attach]: ../../../../../crates/daemon/src/transform.rs#L1264
+[fmt-post-attach-value]: ../../../../../crates/daemon/src/transform.rs#L1342
+[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2384
+[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2863
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8470-L8495
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5001-L5331
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14411
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14492-L14514
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8539-L8563
+[pass-state-load]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5037-L5367
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14456
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14537-L14559
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
