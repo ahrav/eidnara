@@ -354,9 +354,9 @@ candidate was not committed and has no immutable source revision.
 [host-generator]: ../../../../../packages/e2e-tests/scripts/serialized-transform-pages.ts
 [host-test]: ../../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
 
-[current-page-check]: ../../../../../crates/daemon/src/lib.rs#L9370-L9392
-[current-parse]: ../../../../../crates/daemon/src/lib.rs#L11874-L11895
-[current-shape]: ../../../../../crates/daemon/src/lib.rs#L12772-L12784
+[current-page-check]: ../../../../../crates/daemon/src/lib.rs#L9369-L9391
+[current-parse]: ../../../../../crates/daemon/src/lib.rs#L11873-L11894
+[current-shape]: ../../../../../crates/daemon/src/lib.rs#L12770-L12782
 [prior-record]: https://github.com/ahrav/eidnara/blob/90f75bbe5606c4f6b52ffa3bdc4fe52dcce59253/docs/properties/hot-path-optimization/latency-audit/catalog.md#L1024-L1073
 
 [paged]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L635-L640

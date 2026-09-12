@@ -12,9 +12,10 @@
 //! footprint exceeds the capacity holds pool bytes for the values it built until the
 //! footprint crosses the capacity, so a doomed decode occupies the pool for the length of
 //! its failing parse; the byte cap bounds that parse to one transform body. And serde_json
-//! unescapes a string into its scratch buffer before the visitor sees it, so an escaped
-//! string is allocated once, up to the body's length, before its charge is taken; the buffer
-//! is reused across strings, so that allocation is at most one body long.
+//! unescapes a string into its scratch buffer before the visitor sees it, so a decode run
+//! without [`ResidentMeter::reserve_unescape_scratch`] allocates an escaped string, up to
+//! the body's length, before its charge is taken; the handler takes that charge from the
+//! bytes first, and serde_json reuses the buffer across strings.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -224,6 +225,16 @@ impl<'r> ResidentMeter<'r> {
         self.need((len - longest).saturating_mul(UNESCAPE_SCRATCH_SLACK))
     }
 
+    /// Charges the unescape buffer for the longest escaped string in `body` before any
+    /// decode runs. serde_json grows that buffer to a string's length before the visitor
+    /// sees the string, so this is the one body-proportional allocation a decode makes
+    /// ahead of its charge; taking the charge from the bytes puts it under the pool first.
+    /// A visited string never exceeds the raw length counted here, so the decodes charge
+    /// nothing more for the buffer.
+    pub fn reserve_unescape_scratch(&self, body: &[u8]) -> Result<(), Refusal> {
+        self.escaped_text(longest_escaped_string(body))
+    }
+
     fn need(&self, bytes: usize) -> Result<(), Refusal> {
         if let Some(refusal) = self.refusal() {
             return Err(refusal);
@@ -340,10 +351,53 @@ pub fn footprint_of(body: &[u8]) -> usize {
     meter.needed()
 }
 
+/// The raw length of the longest string in `body` that holds an escape, from its bytes
+/// alone; zero when no string does. Raw length is at least the decoded length.
+fn longest_escaped_string(body: &[u8]) -> usize {
+    if !body.contains(&b'\\') {
+        return 0;
+    }
+    let mut longest = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut current = 0;
+    let mut has_escape = false;
+    for &byte in body {
+        if !in_string {
+            if byte == b'"' {
+                in_string = true;
+                current = 0;
+                has_escape = false;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            current += 1;
+        } else if byte == b'\\' {
+            escaped = true;
+            has_escape = true;
+            current += 1;
+        } else if byte == b'"' {
+            in_string = false;
+            if has_escape {
+                longest = longest.max(current);
+            }
+        } else {
+            current += 1;
+        }
+    }
+    if in_string && has_escape {
+        longest = longest.max(current);
+    }
+    longest
+}
+
 /// Whether the footprint `body` reaches when decoded exceeds `capacity`, counted without
 /// charging any pool. The count stops at the value that crosses `capacity`, so a body far
 /// above it is not parsed to its end.
-pub fn footprint_exceeds(body: &[u8], capacity: usize) -> bool {
+#[cfg(test)]
+pub(crate) fn footprint_exceeds(body: &[u8], capacity: usize) -> bool {
     let reserve = CountOnly { capacity };
     let meter = ResidentMeter::new(&reserve);
     matches!(

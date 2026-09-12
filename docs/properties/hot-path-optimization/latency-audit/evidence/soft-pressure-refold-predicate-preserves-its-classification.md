@@ -38,7 +38,7 @@ a pass lands in while every H record still passes.
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
   compartment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
-  `ProducerContext` at [`lib.rs:8248-8251`][budget-filter], which admits only
+  `ProducerContext` at [`lib.rs:8247-8250`][budget-filter], which admits only
   finite values `>= 0.0` from the request and falls back to the bound
   budget; a zero budget disables the second disjunct through the
   `> 0.0` guard.
@@ -134,6 +134,6 @@ a writer or treating an unreachable condition as covered.
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
 [assemble]: ../../../../../crates/daemon/src/memory_render.rs#L206-L231
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8248-L8251
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8247-L8250
 [h1]: ../../catalog.md#history-budget-selection-preserves-reference-bytes
 [h2]: ../../catalog.md#history-budget-boundaries-remain-distinct

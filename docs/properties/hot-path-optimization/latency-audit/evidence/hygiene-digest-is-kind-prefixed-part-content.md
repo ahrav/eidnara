@@ -241,7 +241,7 @@ anchors above identify each branch.
   bundle is read for this update; the older secret-bearing raw bundle is not.
 
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L731-L796
-[token-count]: ../../../../../crates/daemon/src/lib.rs#L2051-L2075
+[token-count]: ../../../../../crates/daemon/src/lib.rs#L2050-L2074
 [hyg-output]: ../../../../../crates/daemon/src/tail_hygiene.rs#L572-L591
 [part-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L599-L622
 [th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
@@ -261,5 +261,5 @@ anchors above identify each branch.
 [count-digest]: ../../../../../crates/daemon/src/token_cache.rs#L103-L143
 [memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L417
 [caller]: ../../../../../crates/daemon/src/transform.rs#L4710-L4724
-[declaration]: ../../../../../crates/daemon/src/lib.rs#L2265-L2295
+[declaration]: ../../../../../crates/daemon/src/lib.rs#L2264-L2294
 [bench]: ../../../../../crates/daemon/benches/hot_path.rs#L161-L199

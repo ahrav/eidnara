@@ -247,15 +247,62 @@ fn a_held_pool_stops_the_direct_lane_walk_before_it_unescapes_a_large_string() {
     );
 
     let base = reset_peak();
-    let gate = daemon::direct_lane_gate_for_test(&body, &Drained);
+    let outcome = daemon::direct_lane_admission_for_test(&body, &Drained);
     let peak = peak_since(base);
     assert!(
         peak < 64 * 1024,
-        "the walk allocated {peak} bytes against a held pool; the 4 MiB text block was \
-         unescaped before any charge (gate: {gate:?})"
+        "the refusal allocated {peak} bytes against a held pool; the 4 MiB text block was \
+         unescaped before any charge (outcome: {outcome:?})"
     );
     assert!(
-        matches!(gate, Err(daemon::metered_decode::Refusal::Transient)),
-        "the held pool refuses the walk: {gate:?}"
+        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+        "the held pool refuses the body as transient: {outcome:?}"
+    );
+}
+
+/// A reserve that grants charges until `limit` bytes are held, then refuses every one.
+struct Granting {
+    limit: usize,
+    held: std::sync::atomic::AtomicUsize,
+}
+
+impl ResidentReserve for Granting {
+    fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+        let held = self.held.load(Ordering::Relaxed);
+        if held + bytes > self.limit {
+            return None;
+        }
+        self.held.store(held + bytes, Ordering::Relaxed);
+        Some(host_runtime::wire::ByteCharge::none())
+    }
+
+    fn capacity(&self) -> usize {
+        usize::MAX
+    }
+}
+
+#[test]
+fn a_pool_with_room_for_the_prefix_only_refuses_before_the_large_string_is_unescaped() {
+    let _serial = measure();
+    // The pool admits the body's leading values but not the 4 MiB text block. The charge for
+    // the unescape buffer that block needs is taken from the bytes before any decode, so the
+    // refusal arrives before serde_json has grown that buffer.
+    let body = text_body(1 << 22, true);
+    let reserve = Granting {
+        limit: 64 * 1024,
+        held: std::sync::atomic::AtomicUsize::new(0),
+    };
+
+    let base = reset_peak();
+    let outcome = daemon::direct_lane_admission_for_test(&body, &reserve);
+    let peak = peak_since(base);
+    assert!(
+        peak < 64 * 1024,
+        "the refusal allocated {peak} bytes with 64 KiB of pool; the 4 MiB text block was \
+         unescaped before its charge (outcome: {outcome:?})"
+    );
+    assert!(
+        matches!(&outcome, Err(daemon::dispatch::PreparedOutcome::Error { code, .. }) if code == "queue_full"),
+        "the short pool refuses the body as transient: {outcome:?}"
     );
 }

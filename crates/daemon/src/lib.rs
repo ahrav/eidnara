@@ -110,8 +110,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 use crate::metered_decode::{
-    DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_exceeds,
-    footprint_floor_exceeds,
+    DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_floor_exceeds,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -12680,9 +12679,8 @@ impl Handler {
         probe: Option<&RequestEntryProbe>,
         meter: &ResidentMeter<'_>,
     ) -> (BodyLane, PreparedOutcome) {
-        // Refusing from the bytes keeps a doomed body from holding pool bytes while it parses.
-        if footprint_floor_exceeds(body, meter.capacity()) {
-            return (BodyLane::Unread, request_too_large_error());
+        if let Err(outcome) = admit_body(body, meter) {
+            return (BodyLane::Unread, outcome);
         }
         if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
             let decode_started_at = Instant::now();
@@ -12695,19 +12693,19 @@ impl Handler {
                         return (BodyLane::Direct, outcome);
                     }
                     Err(DecodeFailure::Refused(refusal)) => {
-                        return (BodyLane::Direct, resident_refusal(refusal, body, meter));
+                        return (BodyLane::Direct, resident_refusal(refusal));
                     }
                     // The tree decode reuses the bytes the failed decode holds.
                     Err(DecodeFailure::Invalid(_)) => meter.restart(),
                 },
                 Ok(false) => {}
-                Err(refusal) => return (BodyLane::Direct, resident_refusal(refusal, body, meter)),
+                Err(refusal) => return (BodyLane::Direct, resident_refusal(refusal)),
             }
         }
         let request = match decode_metered::<Value>(body, meter) {
             Ok(request) => request,
             Err(DecodeFailure::Refused(refusal)) => {
-                return (BodyLane::Tree, resident_refusal(refusal, body, meter));
+                return (BodyLane::Tree, resident_refusal(refusal));
             }
             Err(DecodeFailure::Invalid(_)) => Value::Null,
         };
@@ -15531,13 +15529,17 @@ fn direct_lane_gate(body: &[u8], meter: &ResidentMeter<'_>) -> Result<bool, Refu
     Ok(walked)
 }
 
-/// The direct lane's charged walk against `reserve`, for the allocation test.
+/// The admission steps `dispatch_body` runs for an unpaged transform body before its typed
+/// decode, against `reserve`, for the allocation tests: `Ok(walked)` is the gate's verdict
+/// and `Err` the refusal the request would end with.
 #[cfg(feature = "test-support")]
-pub fn direct_lane_gate_for_test(
+pub fn direct_lane_admission_for_test(
     body: &[u8],
     reserve: &dyn metered_decode::ResidentReserve,
-) -> Result<bool, metered_decode::Refusal> {
-    direct_lane_gate(body, &ResidentMeter::new(reserve))
+) -> Result<bool, PreparedOutcome> {
+    let meter = ResidentMeter::new(reserve);
+    admit_body(body, &meter)?;
+    direct_lane_gate(body, &meter).map_err(resident_refusal)
 }
 
 /// Which decode a body went through.
@@ -15838,12 +15840,25 @@ impl<'de> Deserialize<'de> for RouteName {
     }
 }
 
-fn resident_refusal(refusal: Refusal, body: &[u8], meter: &ResidentMeter<'_>) -> PreparedOutcome {
+/// What the decodes are charged for before either runs. A body whose value count alone
+/// proves its footprint exceeds the capacity is refused from its bytes, so a doomed body
+/// never holds pool bytes while it parses; the unescape buffer for its longest escaped
+/// string is charged next, so the pool refuses before serde_json grows that buffer.
+fn admit_body(body: &[u8], meter: &ResidentMeter<'_>) -> Result<(), PreparedOutcome> {
+    if footprint_floor_exceeds(body, meter.capacity()) {
+        return Err(request_too_large_error());
+    }
+    meter
+        .reserve_unescape_scratch(body)
+        .map_err(resident_refusal)
+}
+
+/// A transient refusal is answered as `queue_full` from the count the decode had reached;
+/// a body the pool could never hold is refused as too large once the pool has room to count
+/// it, rather than by a second parse that would allocate outside the pool.
+fn resident_refusal(refusal: Refusal) -> PreparedOutcome {
     match refusal {
         Refusal::Permanent => request_too_large_error(),
-        Refusal::Transient if footprint_exceeds(body, meter.capacity()) => {
-            request_too_large_error()
-        }
         Refusal::Transient => resident_capacity_error(),
     }
 }
@@ -20164,7 +20179,7 @@ mod tests {
         assert!(marker.charged < marker.needed);
         assert_eq!(marker.capacity, pool.capacity());
         assert_eq!(
-            comparable_outcome(resident_refusal(Refusal::Transient, &body, &meter)),
+            comparable_outcome(resident_refusal(Refusal::Transient)),
             comparable_outcome(resident_capacity_error())
         );
         drop(meter);
@@ -20174,23 +20189,32 @@ mod tests {
         let decoded: Value = decode_metered(&body, &meter).unwrap();
         assert_eq!(decoded["kind"], "transform");
 
-        // A transient refusal of a body the pool could never hold is classed as too large.
+        // A body the pool could never hold is `queue_full` while another request holds the
+        // pool, since classifying it would mean a second parse outside the pool, and too
+        // large once the pool has room to count it.
         let oversized = format!(
             r#"{{"kind":"transform","x":[{}]}}"#,
             "1,".repeat(200_000) + "1"
         );
         let pool = TestPool::with_capacity(footprint_of(oversized.as_bytes()) - 1);
-        let holder = pool.hold(1);
+        let holder = pool.hold(pool.capacity() / 2);
         let meter = ResidentMeter::new(&pool);
+        let failure = decode_metered::<Value>(oversized.as_bytes(), &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Transient)
+        ));
         assert_eq!(
-            comparable_outcome(resident_refusal(
-                Refusal::Transient,
-                oversized.as_bytes(),
-                &meter
-            )),
-            comparable_outcome(request_too_large_error())
+            comparable_outcome(resident_refusal(Refusal::Transient)),
+            comparable_outcome(resident_capacity_error())
         );
         drop(holder);
+        let meter = ResidentMeter::new(&pool);
+        let failure = decode_metered::<Value>(oversized.as_bytes(), &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Permanent)
+        ));
     }
 
     /// Bodies whose byte-derived footprint exceeds pool capacity are rejected before decoding

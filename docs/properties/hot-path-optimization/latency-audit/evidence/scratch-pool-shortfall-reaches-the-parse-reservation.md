@@ -110,8 +110,9 @@ budget: another charge holds half the pool, a body that fits the capacity is
 decoded, the meter refuses it as transient and releases its bytes, the count
 rises, the meter's marker satisfies both preconditions, `resident_refusal`
 maps it to `queue_full`, and once the holder releases the same body decodes. It
-also shows a transient refusal of a body the pool could never hold classed as
-too large. The [effect test][t-effect] drives the same transient refusal
+also shows a body the pool could never hold refused as transient while another
+request holds the pool and as too large once the pool has room to count it,
+there being no second parse to class it earlier. The [effect test][t-effect] drives the same transient refusal
 through `dispatch_body` and shows no dispatch-side effect. A shortfall through
 the ring is not constructed: the fixture's scratch pool is the fixed
 `SCRATCH_RESERVED_BYTES`, and holding a first request's charge while a second
@@ -121,13 +122,13 @@ arrives needs a barrier inside the handler that the fixture does not expose.
 
 `cargo test -p daemon --locked` passed 1024 tests including the two above.
 
-[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L134-L142
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L227-L287
-[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L113-L120
-[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L185-L190
-[count]: ../../../../../crates/daemon/src/metered_decode.rs#L127-L129
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20146-L20194
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20256-L20304
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L135-L143
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L238-L298
+[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L114-L121
+[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L186-L191
+[count]: ../../../../../crates/daemon/src/metered_decode.rs#L128-L130
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20161-L20218
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20280-L20328
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [footprint]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15427-L15455

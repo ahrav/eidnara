@@ -345,7 +345,7 @@ that no related check exists anywhere in the repository.
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L11921-L11936
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L11920-L11935
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
 [route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L832-L887
@@ -355,10 +355,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L786
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L970
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1067
-[request-cap]: ../../../crates/daemon/src/lib.rs#L18583
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20012-L20047
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20012-L20047
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20012-L20047
+[request-cap]: ../../../crates/daemon/src/lib.rs#L18598
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20027-L20062
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20027-L20062
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20027-L20062
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -429,7 +429,7 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5228-L5287
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L15582-L15609
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L15616-L15641
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25871-L25901
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L25895-L25925
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5616-L5655
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5579-L5609
 [unretained-policy-test]: ../../../crates/storage/src/lib.rs#L5700-L5746

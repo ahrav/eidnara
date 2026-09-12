@@ -30,7 +30,7 @@ is never distinguished from the reference. The parent's
   under `memory_enabled`, or newly claimed notes ([`:174-222`][m1-pieces]).
 - `history_budget_tokens` is the request value filtered to finite and
   `>= 0.0`, else the binding's frozen budget
-  ([`lib.rs:8248-8251`][budget-filter]); a small positive budget is reachable
+  ([`lib.rs:8247-8250`][budget-filter]); a small positive budget is reachable
   from the request.
 - `memory_update_count` is `0` on every composition
   ([`m1_compose.rs:231`][m1-count-zero]); no other writer exists in the
@@ -124,4 +124,4 @@ these shapes represent production traffic.
 [m1-pieces]: ../../../../../crates/daemon/src/m1_compose.rs#L174-L222
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8248-L8251
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8247-L8250
