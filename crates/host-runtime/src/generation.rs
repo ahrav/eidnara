@@ -571,6 +571,21 @@ impl GenerationStore {
         meta: &StageMeta,
         protected: &BTreeSet<String>,
     ) -> Result<String, GenerationError> {
+        let digest = self.stage(sources, meta, protected)?;
+        self.replace_profile(&digest)?;
+        self.verify_named_identity()?;
+        Ok(digest)
+    }
+
+    /// Stages and publishes the generation directory under its digest without touching the current profile. Nothing selects the staged generation, and `prune` reclaims it unless the caller names its digest in `protected`; a repeated staging of the same bytes finds the valid occupant and publishes nothing twice.
+    ///
+    /// The method returns `InsufficientStorage`, `UnsupportedStateSchema`, and `NativePayloadInvalid` as [`Self::stage_and_promote`] does.
+    pub fn stage(
+        &self,
+        sources: &[SourceSpec],
+        meta: &StageMeta,
+        protected: &BTreeSet<String>,
+    ) -> Result<String, GenerationError> {
         // A quarantined profile blocks mutation because its references are uncertain.
         if self.read_current()? == CurrentProfile::Quarantined {
             return Err(GenerationError::UnsupportedStateSchema);
@@ -611,8 +626,6 @@ impl GenerationStore {
             let _ = remove_tree(&self.generations_fd, &temp_name);
             return Err(err);
         }
-        self.replace_profile(&digest)?;
-        self.verify_named_identity()?;
         Ok(digest)
     }
 

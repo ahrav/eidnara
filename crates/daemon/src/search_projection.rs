@@ -212,6 +212,25 @@ impl SearchProjection {
             .expect("pragma update");
     }
 
+    /// Closes the connection and returns the path with the database lease still held, so nothing else opens the file until the lease is dropped.
+    pub fn close(self) -> (PathBuf, Option<lease::HeldFileLease>) {
+        let SearchProjection { store, path, .. } = self;
+        (path, store.close())
+    }
+
+    /// Runs one `PRAGMA wal_checkpoint(TRUNCATE)` outside any transaction and returns `(busy, wal_frames, checkpointed_frames)` as SQLite reports them. A nonzero `busy` means a reader or writer held the checkpoint back; the log is complete only when every frame was checkpointed and the log was reset.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] when the connection is unavailable or the pragma fails.
+    pub fn checkpoint_truncate(&self) -> Result<(i64, i64, i64), SearchProjectionError> {
+        Ok(self.store.with_conn_unfenced(|conn| {
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+        })?)
+    }
+
     /// Reads the connection state and refuses anything but a crash-safe,
     /// constraint-enforcing, bounded connection.
     pub fn verify_connection(&self) -> Result<ConnectionFacts, SearchProjectionError> {

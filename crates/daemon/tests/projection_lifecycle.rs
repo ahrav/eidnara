@@ -69,6 +69,7 @@ fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
             deadline: request.deadline,
         },
         authorization_ref: request.authorization_ref.clone(),
+        staged_seed_digest: None,
         recorded_at: NOW,
     }
 }
@@ -95,6 +96,7 @@ fn recovery_ledger(consumed: u32) -> Value {
         "recovery_target": { "commit_seq": 41 },
         "episodes": { "allowance": 2, "consumed": consumed, "deadline": NOW + 60_000 },
         "authorization_ref": "ops:ticket-77",
+        "staged_seed_digest": null,
         "recorded_at": NOW,
     })
 }

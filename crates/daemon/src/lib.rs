@@ -43,6 +43,7 @@ mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
 pub mod search_projection;
+pub mod search_seed;
 pub mod search_writer;
 pub mod selection;
 pub mod session_resolver;

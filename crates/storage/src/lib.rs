@@ -204,6 +204,13 @@ mod sqlite_backend {
             self.epoch
         }
 
+        /// Closes the connection and keeps the database lease. While the returned lease is held, no other store can open the file, so a closed database stays exactly as the close left it.
+        pub fn close(self) -> Option<HeldFileLease> {
+            let SqliteStore { conn, _lease, .. } = self;
+            drop(conn);
+            _lease
+        }
+
         /// Construct a store over an open connection without acquiring a lease.
         ///
         /// Tests use this to model stale and replacement connections at different
@@ -1268,7 +1275,7 @@ mod sqlite_backend {
     /// `-wal`, and creates no sidecar. Every byte outside the unreserved ASCII set is
     /// percent-encoded, so `%`, `?`, `#`, spaces, and each byte of a non-ASCII name reach
     /// SQLite's decoder as the bytes the filesystem holds.
-    pub(crate) fn immutable_uri(path: &Path) -> String {
+    pub fn immutable_uri(path: &Path) -> String {
         let mut out = String::from("file:");
         for byte in path.as_os_str().as_encoded_bytes() {
             match byte {
@@ -1855,7 +1862,7 @@ mod sqlite_backend {
 #[cfg(feature = "sqlite")]
 pub use sqlite_backend::{
     APPLICATION_ID, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn, STORE_BASELINE,
-    SchemaObject, SqliteStore, USER_VERSION, open_sqlite, schema_inventory,
+    SchemaObject, SqliteStore, USER_VERSION, immutable_uri, open_sqlite, schema_inventory,
 };
 
 #[cfg(all(test, feature = "sqlite"))]

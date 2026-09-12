@@ -517,18 +517,7 @@ impl Corpus {
     pub fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
-        // The projection identity names the kernel database it mirrors, so the incarnation comes from the kernel file rather than a constant.
-        let kernel_incarnation_id: String = Connection::open_with_flags(
-            data_home.join("kernel/kernel.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap()
-        .query_row(
-            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+        let kernel_incarnation_id = kernel_incarnation_id(data_home);
         projection
             .write(|conn| {
                 install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
@@ -553,6 +542,21 @@ impl Corpus {
         projection.apply_batch(&batch, batch_bounds(), 2).unwrap();
         (projection, rows)
     }
+}
+
+/// The projection identity names the kernel database it mirrors, so the incarnation comes from the kernel file rather than a constant.
+pub fn kernel_incarnation_id(data_home: &Path) -> String {
+    Connection::open_with_flags(
+        data_home.join("kernel/kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 pub fn occurrence_of<'a>(rows: &'a [SourceRow], object_id: &str) -> &'a str {

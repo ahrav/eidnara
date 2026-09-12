@@ -109,6 +109,8 @@ pub struct LifecycleIntent {
     pub recovery_target: Option<RecoveryTarget>,
     pub episodes: EpisodeAccounting,
     pub authorization_ref: Option<String>,
+    /// The lifecycle-store digest of the closed seed staged for this transition; the reclaimer protects it while the intent stands.
+    pub staged_seed_digest: Option<String>,
     pub recorded_at: i64,
 }
 
@@ -363,6 +365,7 @@ impl ProjectionLifecycle {
                 deadline: request.deadline,
             },
             authorization_ref: request.authorization_ref.clone(),
+            staged_seed_digest: None,
             recorded_at: now,
         };
         self.replace(&intent)?;
@@ -393,6 +396,32 @@ impl ProjectionLifecycle {
         intent.episodes.consumed += 1;
         self.replace(&intent)?;
         Ok(intent.episodes)
+    }
+
+    /// Pins the staged seed `digest` to the recorded intent under the gate's admission, so the reclaimer keeps that object while the intent stands. Pinning the same digest again changes nothing; another digest is refused, since one transition builds from one seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], or [`IntentRefusal::Conflict`] with the recorded attempt when another seed is already pinned.
+    pub fn pin_seed(
+        &self,
+        gate: &HookGate,
+        digest: &str,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let mut intent = self.admitted_intent(gate)?;
+        match intent.staged_seed_digest.as_deref() {
+            Some(pinned) if pinned == digest => return Ok(intent),
+            Some(_) => {
+                return Err(IntentRefusal::Conflict {
+                    attempt_id: intent.attempt_id,
+                });
+            }
+            None => {}
+        }
+        intent.staged_seed_digest = Some(digest.to_owned());
+        self.replace(&intent)?;
+        Ok(intent)
     }
 
     /// The recorded intent once the gate admits its transition; the gate is asked before anything acts on the record.
