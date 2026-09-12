@@ -10,14 +10,14 @@ close starts. The witness must describe overlap, not a forbidden outcome.
 
 ## Evidence trail
 
-- [dispatch.rs:857-934][start] installs pending identity before dispatch and
+- [dispatch.rs:858-941][start] installs pending identity before dispatch and
   starts the tracked handler with cancellation and charged input.
-- [dispatch.rs:937-954][cancel] requests abort and waits for callback completion.
-- [dispatch.rs:1226-1268][close] initiates cancellation before waiting for route
+- [dispatch.rs:945-961][cancel] requests abort and waits for callback completion.
+- [dispatch.rs:1242-1322][close] initiates cancellation before waiting for route
   quiescence, so an active-request close is a production lifecycle situation.
-- [tests/dispatch.rs:357-399][test] waits for dispatch before cancellation and
+- [tests/dispatch.rs:356-449][test] waits for dispatch before cancellation and
   checks the terminal; it is not a future transform-worker completion witness.
-- [tests/dispatch.rs:832-887][overlap] overlaps a hanging callback with route
+- [tests/dispatch.rs:1078-1134][overlap] overlaps a hanging callback with route
   Goodbye and checks cancellation plus one cleanup callback; it is unaudited.
 
 ## Failure scenario
@@ -56,8 +56,8 @@ gap, not proof of liveness failure. No witness runs here; checks are unaudited.
   is BLOCKED. Default-production reachability describes the existing callback
   lifecycle, whose witness must extend to owned physical work if execution moves.
 
-[start]: ../../../../crates/host-runtime/src/dispatch.rs#L857-L934
-[cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L937-L954
-[close]: ../../../../crates/host-runtime/src/dispatch.rs#L1226-L1268
-[test]: ../../../../crates/host-runtime/tests/dispatch.rs#L357-L399
-[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L832-L887
+[start]: ../../../../crates/host-runtime/src/dispatch.rs#L858-L941
+[cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L945-L961
+[close]: ../../../../crates/host-runtime/src/dispatch.rs#L1242-L1322
+[test]: ../../../../crates/host-runtime/tests/dispatch.rs#L356-L449
+[overlap]: ../../../../crates/host-runtime/tests/dispatch.rs#L1078-L1134

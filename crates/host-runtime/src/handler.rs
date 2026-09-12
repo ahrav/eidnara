@@ -442,6 +442,70 @@ pub struct RequestCtx {
     /// `scratch` is separate from the pool that charged `body`.
     /// `scratch` charges cannot stall another connection's frame admission.
     pub(crate) scratch: crate::wire::ByteBudget,
+    /// The request, route, and host trackers retain this request's blocking work.
+    pub(crate) work: WorkLedgers,
+}
+
+/// The trackers a request's blocking work is entered in.
+#[derive(Clone)]
+pub(crate) struct WorkLedgers {
+    pub(crate) request: tokio_util::task::TaskTracker,
+    pub(crate) route: tokio_util::task::TaskTracker,
+    pub(crate) host: tokio_util::task::TaskTracker,
+}
+
+/// Blocking work that produced no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlockingWorkFailed {
+    /// The closure panicked; the panic reached stderr through the redacting hook.
+    Panicked,
+    /// The runtime stopped before the work ran or before its result was delivered.
+    RuntimeStopped,
+    /// The route was already closing when the work was offered, so it was not run: work
+    /// entered after the route's fence has drained would run outside every join.
+    RouteClosing,
+}
+
+impl std::fmt::Display for BlockingWorkFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BlockingWorkFailed::Panicked => "request blocking work panicked",
+            BlockingWorkFailed::RuntimeStopped => "request blocking work was not run to a result",
+            BlockingWorkFailed::RouteClosing => {
+                "request blocking work was offered to a closing route"
+            }
+        })
+    }
+}
+
+impl std::error::Error for BlockingWorkFailed {}
+
+/// Hides the `CancellationToken` methods that can cancel or derive request tokens, so a
+/// handler cannot settle its own request as cancelled.
+///
+/// ```compile_fail
+/// fn no_cancel(signal: host_runtime::CancelSignal) { signal.cancel(); }
+/// ```
+///
+/// ```compile_fail
+/// fn no_guard(signal: host_runtime::CancelSignal) { let _ = signal.drop_guard(); }
+/// ```
+#[derive(Clone, Debug)]
+pub struct CancelSignal {
+    token: CancellationToken,
+}
+
+impl CancelSignal {
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    /// The future resolves when the host requests cancellation; it borrows nothing, so a task
+    /// that outlives the handler can hold it.
+    pub fn cancelled(&self) -> impl Future<Output = ()> + Send + 'static {
+        self.token.clone().cancelled_owned()
+    }
 }
 
 impl RequestCtx {
@@ -453,6 +517,16 @@ impl RequestCtx {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    /// A handle on this request's cancellation that owns no borrow, for work that runs where
+    /// `cancelled()` cannot be awaited: a blocking closure checks it at its safe points, since
+    /// the host cannot stop a thread that has started. The handle observes only; the host is
+    /// the sole party that cancels a request.
+    pub fn cancel_signal(&self) -> CancelSignal {
+        CancelSignal {
+            token: self.cancel.clone(),
+        }
     }
 
     /// Reserves capacity and its resident-byte charge before allocating output.
@@ -495,6 +569,87 @@ impl RequestCtx {
     /// After `Err`, `stream` cannot queue another item.
     pub async fn stream(&self, item: OutputBuffer, binary: bool) -> Result<(), StreamClosed> {
         self.stream.send(item, binary).await
+    }
+
+    /// Runs `work` on the blocking pool as this request's work.
+    /// The blocking thread raises the redaction guard before invoking `work`.
+    /// A panic in `work` is redacted and surfaces as [`BlockingWorkFailed::Panicked`].
+    /// Route close and host shutdown join detached work.
+    /// Dropping the returned future detaches the result, not the physical completion tokens.
+    /// Captures dropped by `work` release their charges on return or unwind.
+    /// Captures moved into the result release when their final owner drops them.
+    ///
+    /// The calling runtime submits work immediately, without polling the returned future.
+    /// Calling this method outside a Tokio runtime panics.
+    /// Started work must terminate on its own or observe [`cancel_signal`] at safe points.
+    /// Work held beyond the close budget causes fatal refusal rather than concurrent cleanup.
+    /// The handler task is the intended caller.
+    /// A surviving task can submit work after request cancellation has drained its ledger.
+    /// Route close and host shutdown still join that late work.
+    /// A closed route refuses new work with [`BlockingWorkFailed::RouteClosing`].
+    ///
+    /// [`cancel_signal`]: RequestCtx::cancel_signal
+    pub fn run_blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> impl Future<Output = Result<T, BlockingWorkFailed>> + Send + 'static {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        // Registration precedes the closed check so accepted work holds the drain open.
+        let physical_work = (
+            self.work.host.token(),
+            self.work.request.token(),
+            self.work.route.token(),
+        );
+        if self.work.route.is_closed() {
+            crate::panic_boundary::redact_sync(|| drop(work));
+            drop(result_tx);
+            return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
+        }
+        let join_work = (physical_work.0.clone(), physical_work.2.clone());
+        let blocking = tokio::task::spawn_blocking(move || {
+            let _physical_work = physical_work;
+            crate::panic_boundary::redact_sync(work)
+        });
+        // Physical work retains its tokens even if runtime shutdown drops the join task.
+        // The observer retains its own tokens through result delivery or disposal.
+        let join_task = self.work.request.track_future(async move {
+            let _join_work = join_work;
+            let outcome = blocking.await;
+            crate::panic_boundary::redact_sync(|| {
+                let _ = result_tx.send(BlockingOutcome(Some(outcome)));
+            });
+        });
+        tokio::spawn(join_task);
+        blocking_result(result_rx, BlockingWorkFailed::RuntimeStopped)
+    }
+}
+
+#[derive(Debug)]
+struct BlockingOutcome<T>(Option<Result<T, tokio::task::JoinError>>);
+
+impl<T> Drop for BlockingOutcome<T> {
+    fn drop(&mut self) {
+        crate::panic_boundary::drop_redacted(self.0.take());
+    }
+}
+
+/// Resolves a blocking result from its channel; a channel with no sender reports `unrun`.
+async fn blocking_result<T: Send + 'static>(
+    result_rx: tokio::sync::oneshot::Receiver<BlockingOutcome<T>>,
+    unrun: BlockingWorkFailed,
+) -> Result<T, BlockingWorkFailed> {
+    let outcome = match result_rx.await {
+        Ok(mut outcome) => outcome.0.take().expect("blocking outcome is consumed once"),
+        Err(_) => return Err(unrun),
+    };
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(join) if join.is_panic() => {
+            // `JoinError` owns the panic payload; drop it under the redaction guard.
+            crate::panic_boundary::redact_sync(|| drop(join));
+            Err(BlockingWorkFailed::Panicked)
+        }
+        Err(_) => Err(unrun),
     }
 }
 
@@ -592,6 +747,149 @@ mod tests {
     use super::*;
     use crate::wire::{ByteBudget, HEADER_LEN};
 
+    fn request_context() -> RequestCtx {
+        let budget = ByteBudget::new(4096);
+        let token = CancellationToken::new();
+        let (writer, _queue) =
+            crate::frame_channel::frame_sender(8, token.clone(), std::time::Duration::from_secs(1));
+        let generation = std::sync::Arc::new(crate::connection::GenerationCore {
+            id: 1,
+            token,
+            read_cancel: CancellationToken::new(),
+            read_tasks: tokio_util::task::TaskTracker::new(),
+            shutdown_complete: CancellationToken::new(),
+            writer,
+            pending: Default::default(),
+            pings: Default::default(),
+            busy_rejects: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            next_ping_corr: 1.into(),
+        });
+        let route = RouteHandle {
+            channel: 1,
+            epoch: 1,
+        };
+        let cancel = CancellationToken::new();
+        RequestCtx {
+            route,
+            body: InputBuffer {
+                body: Vec::new(),
+                _charge: budget.try_charge(0).unwrap(),
+            },
+            binary: false,
+            cancel: cancel.clone(),
+            stream: crate::dispatch::StreamSink {
+                settlement: crate::dispatch::Settlement::new(),
+                generation,
+                budget: budget.clone(),
+                route,
+                corr: 1,
+                cancel,
+            },
+            scratch: budget,
+            work: WorkLedgers {
+                request: tokio_util::task::TaskTracker::new(),
+                route: tokio_util::task::TaskTracker::new(),
+                host: tokio_util::task::TaskTracker::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn buffered_result_destructor_during_unwind_preserves_first_panic() {
+        struct PanicsOnDrop;
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("buffered destructor panic");
+            }
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        assert!(tx.send(BlockingOutcome(Some(Ok(PanicsOnDrop)))).is_ok());
+        let future = blocking_result(rx, BlockingWorkFailed::RuntimeStopped);
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _future = future;
+            panic!("owner panic");
+        }))
+        .unwrap_err();
+        assert_eq!(first.downcast_ref::<&str>().copied(), Some("owner panic"));
+    }
+
+    #[tokio::test]
+    async fn unpolled_blocking_results_drop_under_redaction() {
+        for panics in [false, true] {
+            let ctx = request_context();
+            let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let capture = RecordsPollingOnDrop(seen.clone());
+            let future = ctx.run_blocking(move || {
+                if panics {
+                    std::panic::panic_any(capture);
+                }
+                capture
+            });
+            ctx.work.request.close();
+            ctx.work.request.wait().await;
+            drop(future);
+            assert!(
+                seen.load(std::sync::atomic::Ordering::SeqCst),
+                "buffered result dropped without redaction (panic={panics})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_blocking_captures_drop_under_redaction() {
+        let ctx = request_context();
+        ctx.work.route.close();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let capture = RecordsPollingOnDrop(seen.clone());
+        let result = ctx.run_blocking(move || drop(capture)).await;
+        assert_eq!(result, Err(BlockingWorkFailed::RouteClosing));
+        assert!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            "refused capture dropped without redaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_submission_runtime_does_not_release_live_work_fences() {
+        let ctx = request_context();
+        let ledgers = ctx.work.clone();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, running) = std::sync::mpsc::channel();
+        let result = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let future: std::pin::Pin<
+                Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send>,
+            > = {
+                let _entered = runtime.enter();
+                Box::pin(ctx.run_blocking(move || {
+                    started.send(()).unwrap();
+                    let _ = held.recv();
+                }))
+            };
+            running
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            runtime.shutdown_background();
+            future
+        })
+        .join()
+        .unwrap();
+        assert_eq!(result.await, Err(BlockingWorkFailed::RuntimeStopped));
+        ledgers.request.close();
+        ledgers.route.close();
+        let request_still_held = !ledgers.request.is_empty();
+        let route_still_held = !ledgers.route.is_empty();
+        drop(release);
+        ledgers.request.wait().await;
+        ledgers.route.wait().await;
+        assert!(
+            request_still_held && route_still_held,
+            "runtime shutdown released fences while the closure was held"
+        );
+    }
+
     #[test]
     fn into_parts_returns_the_unused_output_reservation() {
         let budget = ByteBudget::new(1024);
@@ -671,5 +969,39 @@ mod tests {
             "the unused reservation's memory must be returned, not just its permits"
         );
         assert_eq!(budget.available(), (1 << 20) - charge.bytes());
+    }
+
+    /// A payload that records whether the redaction guard was active when it was dropped.
+    struct RecordsPollingOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for RecordsPollingOnDrop {
+        fn drop(&mut self) {
+            self.0.store(
+                crate::panic_boundary::callback_is_polling(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// The `JoinError` of panicked blocking work owns the panic payload; the receiver that
+    /// translates it drops that payload under the redaction guard, so a destructor panic in
+    /// the payload is redacted wherever the returned future is awaited.
+    #[tokio::test]
+    async fn a_blocking_panic_payload_is_dropped_under_the_redaction_guard() {
+        let seen_polling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let payload = RecordsPollingOnDrop(seen_polling.clone());
+        let outcome = tokio::task::spawn_blocking(move || std::panic::panic_any(payload)).await;
+        assert!(outcome.as_ref().is_err_and(|join| join.is_panic()));
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        result_tx
+            .send(BlockingOutcome(Some(outcome)))
+            .expect("receiver is held");
+        let result = blocking_result::<()>(result_rx, BlockingWorkFailed::RuntimeStopped).await;
+        assert_eq!(result, Err(BlockingWorkFailed::Panicked));
+        assert!(
+            seen_polling.load(std::sync::atomic::Ordering::SeqCst),
+            "the panic payload was dropped outside the redaction guard"
+        );
     }
 }

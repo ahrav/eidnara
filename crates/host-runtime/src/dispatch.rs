@@ -11,7 +11,7 @@ use crate::wire::{EnvelopeHeader, Flags, FrameType, HEADER_LEN};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::connection::{GenerationCore, PendingEntry, PendingKey};
 use crate::control::{CODE_CANCELLED, CODE_INTERNAL_ERROR, CODE_SERVER_BUSY, CODE_UNKNOWN_CHANNEL};
@@ -808,7 +808,8 @@ pub async fn dispatch_request<H: HostHandler>(
 
     // `register_dispatch` rechecks admission before dispatch.
     // The tracker wraps the dispatch future so route close can wait for it to stop even if the waiting future is dropped.
-    let Some((route_tracker, class)) = shared.registry.route_tracker(route, generation.id) else {
+    let Some((route_tracker, class, cancel)) = shared.registry.route_tracker(route, generation.id)
+    else {
         drop(frame);
         emit_rejection(
             shared,
@@ -855,9 +856,7 @@ pub async fn dispatch_request<H: HostHandler>(
     };
 
     // The pending entry is visible before the read loop processes later frames, so a pipelined `Cancel` finds the correlation.
-    // `cancel` remains a free-standing root; route close cancels collected pending entries explicitly.
     let settlement = Settlement::new();
-    let cancel = CancellationToken::new();
     let key: PendingKey = (route.channel, route.epoch, corr);
     generation.pending.lock().expect("pending lock").insert(
         key,
@@ -873,6 +872,7 @@ pub async fn dispatch_request<H: HostHandler>(
     // The route completion fence covers the handler callback because dropping the outer task only requests callback abort.
     // Without the handler fence, route close could see the tracker empty while request code still runs.
     let handler_fence = route_tracker.clone();
+    let rejection_settlement = Arc::clone(&settlement);
     let outer = shared.spawn_tracked(route_tracker.track_future(async move {
         let _pending_permit = pending_permit;
         if start_rx.await.is_err() {
@@ -892,11 +892,7 @@ pub async fn dispatch_request<H: HostHandler>(
                 &gen_task,
                 route,
                 corr,
-                Terminal::Error {
-                    code: CODE_CANCELLED.to_owned(),
-                    message: "request cancelled".to_owned(),
-                    retry_after_ms: None,
-                },
+                cancelled_terminal(),
             )
             .await;
             remove_pending(&gen_task, key);
@@ -912,6 +908,11 @@ pub async fn dispatch_request<H: HostHandler>(
             corr,
             cancel: cancel.clone(),
         };
+        // Blocking work belongs to request, route, and host trackers.
+        // Cancellation waits for request work after the handler task ends.
+        // Route close also covers work submitted by a surviving task.
+        // The host tracker retains work when forced shutdown aborts dispatch.
+        let request_work = TaskTracker::new();
         let ctx = RequestCtx {
             route,
             // A handler that moves the body into a background task retains ingress accounting in that task.
@@ -923,6 +924,11 @@ pub async fn dispatch_request<H: HostHandler>(
             cancel: cancel.clone(),
             stream: sink,
             scratch: shared_task.scratch_budget.clone(),
+            work: crate::handler::WorkLedgers {
+                request: request_work.clone(),
+                route: handler_fence.clone(),
+                host: shared_task.tracker.clone(),
+            },
         };
         let handler = Arc::clone(&shared_task.handler);
         let inner = shared_task.spawn_tracked(handler_fence.track_future(async move {
@@ -939,17 +945,17 @@ pub async fn dispatch_request<H: HostHandler>(
             () = cancel.cancelled() => {
                 inner.abort();
                 let _ = (&mut inner).await;
+                // The aborted handler may have left blocking work running; the cancellation
+                // settles only once that work has finished.
+                request_work.close();
+                request_work.wait().await;
                 settle(
                     &settlement,
                     &shared_task.egress_budget,
                     &gen_task,
                     route,
                     corr,
-                    Terminal::Error {
-                        code: CODE_CANCELLED.to_owned(),
-                        message: "request cancelled".to_owned(),
-                        retry_after_ms: None,
-                    },
+                    cancelled_terminal(),
                 )
                 .await;
             }
@@ -1015,14 +1021,28 @@ pub async fn dispatch_request<H: HostHandler>(
                     "no live route for this channel and epoch",
                 )
             };
-        emit_rejection(
+        emit_pending_rejection(
             shared,
             generation,
+            &rejection_settlement,
             FrameId::routed(route, corr),
             code,
             message,
         )
         .await;
+    }
+}
+
+pub(crate) async fn emit_pending_rejection<H: HostHandler>(
+    shared: &Arc<HostShared<H>>,
+    generation: &Arc<GenerationCore>,
+    settlement: &Settlement,
+    id: FrameId,
+    code: &'static str,
+    message: &'static str,
+) {
+    if !settlement.won.swap(true, Ordering::SeqCst) {
+        emit_rejection(shared, generation, id, code, message).await;
     }
 }
 
@@ -1032,6 +1052,14 @@ fn remove_pending(generation: &GenerationCore, key: PendingKey) {
         .lock()
         .expect("pending lock")
         .remove(&key);
+}
+
+fn cancelled_terminal() -> Terminal {
+    Terminal::Error {
+        code: CODE_CANCELLED.to_owned(),
+        message: "request cancelled".to_owned(),
+        retry_after_ms: None,
+    }
 }
 
 pub async fn open_route<H: HostHandler>(
@@ -1223,7 +1251,7 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
             aborts,
             tracker,
         } => {
-            let keys: Vec<PendingKey> = generation
+            let entries: Vec<(PendingKey, Arc<Settlement>)> = generation
                 .pending
                 .lock()
                 .expect("pending lock")
@@ -1231,7 +1259,7 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                 .filter(|(key, _)| key.0 == handle.channel && key.1 == handle.epoch)
                 .map(|(key, entry)| {
                     entry.cancel.cancel();
-                    *key
+                    (*key, Arc::clone(&entry.settlement))
                 })
                 .collect();
 
@@ -1245,7 +1273,8 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                 // A task observes abort only when it yields.
                 // A future that never yields prevents its task from observing abort.
                 // Shutdown must still terminate; trip the fatal latch when the task does not stop within the post-abort budget.
-                if timeout(shared.timing.route_close_budget, tracker.wait())
+                let post_abort_deadline = Instant::now() + shared.timing.route_close_budget;
+                if timeout_at(post_abort_deadline, tracker.wait())
                     .await
                     .is_err()
                 {
@@ -1258,11 +1287,35 @@ pub(crate) async fn settle_route_work<H: HostHandler>(
                     );
                     return false;
                 }
+                // An aborted dispatch task never reaches its own `settle`; `settle` is
+                // first-terminal-wins, so a request settled before the abort is left alone.
+                let emit_remaining = async {
+                    for (key, settlement) in &entries {
+                        if settlement.is_settled() {
+                            continue;
+                        }
+                        settle(
+                            settlement,
+                            &shared.egress_budget,
+                            &generation,
+                            handle,
+                            key.2,
+                            cancelled_terminal(),
+                        )
+                        .await;
+                    }
+                };
+                if timeout_at(post_abort_deadline, emit_remaining)
+                    .await
+                    .is_err()
+                {
+                    generation.token.cancel();
+                }
             }
             {
                 let mut pending = generation.pending.lock().expect("pending lock");
-                for key in keys {
-                    pending.remove(&key);
+                for (key, _) in &entries {
+                    pending.remove(key);
                 }
             }
             true
