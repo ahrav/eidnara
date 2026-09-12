@@ -142,7 +142,10 @@ and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 ahead of one walk, and the walk does the rest: it validates every object key it
 descends through, refuses or substitutes protected values, records detections,
 and sets a [`changed` flag][changed] when a value is replaced by different
-text. The separate key-validation pass and the clone-and-compare are gone; the
+text. The separate key-validation pass is gone. The clone-and-compare is gone
+from release builds; a debug build keeps the [clone][debug-clone] and asserts
+that the flag agrees with the [structural compare][debug-compare], so a
+mutation site that forgets the flag fails every test run. The
 [clean branch][clean-branch-live] returns the input when nothing changed and
 re-serializes otherwise. The walk judges a subtree whole without descending in
 two cases, an integrity-named value and an identity-named value under a policy
@@ -192,9 +195,11 @@ above; `cargo test -p daemon --locked` passed 1012, the two
 branch as well and passing in isolation.
 
 [single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3223-L3415
-[changed]: ../../../../../crates/memory-store/src/lib.rs#L3403
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3378-L3381
+[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3401-L3402
+[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3407-L3408
 [clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3409-L3414
-[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3273
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3273-L3286
 [preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3311-L3321
 [walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3388-L3394
 [collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3217

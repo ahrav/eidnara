@@ -928,7 +928,7 @@ every reader deserializes and the transform compares values
 ([`next_meta != loaded.meta`][value-compare]), so no reader depends on byte
 form.
 Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list five preparation tests; the canonical policy records are
+list eight preparation tests; the canonical policy records are
 [preserved-identity-name-does-not-exempt-its-value][ms-preserved] and
 [refused-durable-write-leaves-no-row-and-no-receipt][ms-refused]; all
 unaudited.
