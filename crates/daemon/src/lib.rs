@@ -12,6 +12,7 @@ pub mod codec;
 mod commit_stream;
 pub(crate) mod compartment_coverage;
 pub(crate) mod config;
+pub mod coverage;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;

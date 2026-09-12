@@ -104,9 +104,9 @@ pub enum BatchStatus {
     NotApplied,
 }
 
-/// The dense-eligible classes: raw tool spans stay lexical-only.
-fn dense_eligible(class: &str) -> bool {
-    OccurrenceClass::from_code(class).is_some_and(|class| class != OccurrenceClass::RawToolSpans)
+/// The dense-eligible classes: raw tool spans stay lexical-only. The coverage report reads the same predicate, so `R` is exactly the set that queues work.
+pub fn dense_eligible(class: OccurrenceClass) -> bool {
+    class != OccurrenceClass::RawToolSpans
 }
 
 /// The job identity for one occurrence in one generation, so the same work
@@ -253,7 +253,7 @@ pub fn batch_status(
             });
         }
         if let Some(generation) = batch.generation_id
-            && dense_eligible(record.occurrence.class)
+            && OccurrenceClass::from_code(record.occurrence.class).is_some_and(dense_eligible)
             && stored.tombstone.is_none()
             && !has_job(conn, &occurrence_id, generation)?
         {
@@ -413,9 +413,11 @@ fn queues_work(
     occurrence_id: &str,
     tombstoned: &HashSet<&str>,
 ) -> Result<bool, ProjectionError> {
-    Ok(dense_eligible(class)
-        && !tombstoned.contains(occurrence_id)
-        && !has_tombstone(conn, occurrence_id)?)
+    Ok(
+        OccurrenceClass::from_code(class).is_some_and(dense_eligible)
+            && !tombstoned.contains(occurrence_id)
+            && !has_tombstone(conn, occurrence_id)?,
+    )
 }
 
 fn admit<'a>(
