@@ -49,7 +49,7 @@ tokenizer obligations remain in their canonical catalogs, named under
 
 | Records | Class | Evidence and limit |
 | --- | --- | --- |
-| A1-A2 | default-production | Every request runs [`Handler::handle`][handle] and [`dispatch_value_with_inbound_bytes`][dispatch]. Refusal arms and the over-1 MiB probe need constructed input because the plugin [pages at 512 KiB][paging]. |
+| A1-A2 | default-production | Every request runs [`Handler::handle`][handle] and its body branch; an unpaged transform body the tree-parse walk admits enters the typed handler from its bytes, and every other body runs [`dispatch_value_with_inbound_bytes`][dispatch]. Refusal arms and the over-1 MiB probe need constructed input because the plugin [pages at 512 KiB][paging]. |
 | A3 | test-only | Pool pressure needs concurrent oversize parses; production occurrence is plausible but unverified. |
 | B1-B5 | default-production | Every pass with [`compaction_enabled`][cfg-compaction] (default true) projects, serves, and normalizes; the incremental arms need a cache hit, which the plugin's delta protocol produces on steady turns. |
 | C1, C2, C4, C5 | default-production | The [handler path][handler] runs for every transform request; the Emergency95 arm needs usage at the emergency threshold. |
@@ -264,9 +264,12 @@ source-verified; serde duplicate-key behavior is cited from upstream source,
 not run.
 Existing check: [Ingress checks](existing-checks.md#ingress-admission-and-decode)
 cover `kind` routing, the unrecognized shape, retired aliases, the probe
-class set, and one full envelope decode; none found for a `null` page field,
-a non-string `method` at dispatch, duplicate keys, `null` handling, malformed
-JSON on either lane, or exactly 32 MiB; all unaudited.
+class set, one full envelope decode, and, through the entry and decode
+differentials over the 42-body corpus, a `null` and a lone page field, a
+non-string `method` beside `kind`, repeated keys, `null` on optional and
+defaulted fields, malformed JSON and non-object bodies on both lanes, the
+raw-value token in every position tried, and the lane each body took; the cap
+test covers exactly 32 MiB admitted and one byte more refused; all unaudited.
 Impact: A body can be misrouted, admitted under the wrong cap, or decode
 differently depending on which lane carried it.
 Open questions:
