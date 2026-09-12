@@ -878,7 +878,10 @@ pub(crate) fn fingerprint_from_projected_wire(
     }
     Some((fingerprint_digest(&flat.content_hash), flat.bytes.len()))
 }
-/// Hashes block equality identity for request-local fallback lookup, not served bytes.
+
+/// Hashes block equality identity for request-local fallback candidate selection, not served
+/// bytes. The field list mirrors `WireBlock`'s derived `PartialEq` by hand, so callers
+/// re-check equality on the selected candidate.
 pub(crate) fn block_identity_digest(block: &WireBlock) -> [u8; 32] {
     use serde_json::ser::{CompactFormatter, Formatter};
     use std::io::{self, Write};

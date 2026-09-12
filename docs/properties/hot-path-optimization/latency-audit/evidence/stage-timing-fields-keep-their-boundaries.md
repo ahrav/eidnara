@@ -19,7 +19,7 @@ can shrink a number without making anything faster.
   consumer.
 - [`format_pass_timing_line`][fmt] prints 90 `key=value` pairs (`session`
   plus one per field). The key for `post_attach` is `post_attach_ms`
-  ([`:1254`][fmt-post-attach], value at [`:1331`][fmt-post-attach-value]);
+  ([`:1262`][fmt-post-attach], value at [`:1339`][fmt-post-attach-value]);
   every other key equals its field name. The plugin's `rust module stages:`
   line ([`:1013-1042`][ts-stages]) reads 22 keys by name from the response
   object; all 22 exist in the struct. Its [`stage`][ts-stage-fn] helper
@@ -93,18 +93,18 @@ not a runtime assertion.
   set.
 - Conclusion: needs human input.
 
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1018-L1197
-[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1199-L1210
-[fmt]: ../../../../../crates/daemon/src/transform.rs#L1216-L1349
-[fmt-post-attach]: ../../../../../crates/daemon/src/transform.rs#L1254
-[fmt-post-attach-value]: ../../../../../crates/daemon/src/transform.rs#L1331
-[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2373
-[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2852
+[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1205
+[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1207-L1218
+[fmt]: ../../../../../crates/daemon/src/transform.rs#L1224-L1357
+[fmt-post-attach]: ../../../../../crates/daemon/src/transform.rs#L1262
+[fmt-post-attach-value]: ../../../../../crates/daemon/src/transform.rs#L1339
+[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2381
+[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2860
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8463-L8488
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L4994-L5324
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14404
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14485-L14507
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8470-L8495
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5001-L5331
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14411
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14492-L14514
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024

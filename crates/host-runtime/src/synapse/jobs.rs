@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 use super::SynapseLimits;
 use crate::wire::ByteCharge;
 
-pub(crate) const MAX_ITEM_ID_BYTES: usize = 256;
+/// The longest item identity the table admits, on the wire and in process.
+pub const MAX_ITEM_ID_BYTES: usize = 256;
 pub(crate) const CONTENT_SHA256_BYTES: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,13 @@ pub enum AdmitOutcome {
     ResultTooLarge,
     /// Shutdown already closed admission.
     Closed,
+}
+
+enum RetainedState {
+    Existing(JobDescriptor),
+    Conflict,
+    RetryableFailed(u64),
+    Missing,
 }
 
 pub enum PollOutcome {
@@ -162,6 +170,10 @@ impl Job {
 struct Jobs {
     by_key: HashMap<String, u64>,
     by_seq: HashMap<u64, Job>,
+    /// Weak handle to each completed result's lease. The entry outlives the job's removal:
+    /// a served page keeps the lease alive, and the job counts as held until the last page
+    /// drops. Every sweep prunes dead entries, bounding the map by retained jobs plus live pages.
+    leased: HashMap<u64, std::sync::Weak<ResultLease>>,
     next_seq: u64,
     queued_text_bytes: u64,
     retained_result_bytes: u64,
@@ -218,7 +230,7 @@ fn parse_canonical_decimal(digits: &str) -> Option<u64> {
 }
 
 /// While retained, a stored failure makes identical resubmissions report the same failure.
-fn failure_is_permanent(code: &str) -> bool {
+pub fn failure_is_permanent(code: &str) -> bool {
     matches!(
         code,
         "artifact_invalid"
@@ -230,32 +242,83 @@ fn failure_is_permanent(code: &str) -> bool {
     )
 }
 
-/// `parse_batch` verifies each `content_sha256` against its text before admission, so hashing the verified hash commits to the text bytes without a second pass over them.
-fn digest_payload(key: &str, items: &[BatchItem]) -> [u8; 32] {
+pub(crate) fn payload_digest<'a>(
+    key: &str,
+    items: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     let mut update = |bytes: &[u8]| {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
     update(key.as_bytes());
-    for item in items {
-        update(item.id.as_bytes());
-        update(item.content_sha256.as_bytes());
+    for (id, content_sha256) in items {
+        update(id.as_bytes());
+        update(content_sha256.as_bytes());
     }
     hasher.finalize().into()
 }
 
+fn digest_payload(key: &str, items: &[BatchItem]) -> [u8; 32] {
+    payload_digest(
+        key,
+        items
+            .iter()
+            .map(|item| (item.id.as_str(), item.content_sha256.as_str())),
+    )
+}
+
 pub(crate) fn job_input_bytes(key: &str, items: &[BatchItem]) -> usize {
-    let mut bytes = 2usize.saturating_mul(key.len());
-    for item in items {
-        bytes = bytes
-            .saturating_add(item.id.capacity())
-            .saturating_add(item.content_sha256.capacity())
-            .saturating_add(item.text.capacity())
-            .saturating_add(item.id.len())
-            .saturating_add(item.content_sha256.len());
+    job_input_bytes_for_shape(key.len(), items.iter().map(InputShape::allocated))
+}
+
+pub(super) struct InputShape {
+    id_capacity: usize,
+    content_sha256_capacity: usize,
+    text_capacity: usize,
+    id_len: usize,
+    content_sha256_len: usize,
+}
+
+impl InputShape {
+    fn allocated(item: &BatchItem) -> Self {
+        Self {
+            id_capacity: item.id.capacity(),
+            content_sha256_capacity: item.content_sha256.capacity(),
+            text_capacity: item.text.capacity(),
+            id_len: item.id.len(),
+            content_sha256_len: item.content_sha256.len(),
+        }
     }
-    bytes
+
+    pub(super) fn exact(item_id_bytes: usize, text_bytes: usize) -> Option<Self> {
+        if item_id_bytes > MAX_ITEM_ID_BYTES {
+            return None;
+        }
+        Some(Self {
+            id_capacity: item_id_bytes,
+            content_sha256_capacity: CONTENT_SHA256_BYTES,
+            text_capacity: text_bytes,
+            id_len: item_id_bytes,
+            content_sha256_len: CONTENT_SHA256_BYTES,
+        })
+    }
+}
+
+pub(super) fn job_input_bytes_for_shape(
+    key_len: usize,
+    items: impl IntoIterator<Item = InputShape>,
+) -> usize {
+    items
+        .into_iter()
+        .fold(2usize.saturating_mul(key_len), |bytes, shape| {
+            bytes
+                .saturating_add(shape.id_capacity)
+                .saturating_add(shape.content_sha256_capacity)
+                .saturating_add(shape.text_capacity)
+                .saturating_add(shape.id_len)
+                .saturating_add(shape.content_sha256_len)
+        })
 }
 
 /// The retained charge for a completed job: two key copies plus each item's id and hash lengths.
@@ -264,10 +327,26 @@ pub(crate) fn retained_input_bytes(
     key_len: usize,
     item_meta_lens: impl IntoIterator<Item = (usize, usize)>,
 ) -> usize {
-    item_meta_lens.into_iter().fold(
-        2usize.saturating_mul(key_len),
-        |bytes, (id_len, hash_len)| bytes.saturating_add(id_len).saturating_add(hash_len),
-    )
+    let metadata_bytes = item_meta_lens
+        .into_iter()
+        .fold(0usize, |bytes, (id, hash)| {
+            bytes.saturating_add(id).saturating_add(hash)
+        });
+    retained_input_bytes_for_metadata(key_len, metadata_bytes).unwrap_or(usize::MAX)
+}
+
+pub(crate) fn max_retained_input_bytes(
+    key_len: usize,
+    item_count: usize,
+    id_len: usize,
+    hash_len: usize,
+) -> Option<usize> {
+    let metadata_bytes = item_count.checked_mul(id_len.checked_add(hash_len)?)?;
+    retained_input_bytes_for_metadata(key_len, metadata_bytes)
+}
+
+fn retained_input_bytes_for_metadata(key_len: usize, metadata_bytes: usize) -> Option<usize> {
+    key_len.checked_mul(2)?.checked_add(metadata_bytes)
 }
 
 /// Collects `Job`s and `ByteCharge`s removed under the table lock so they drop after the guard releases; retained vectors and permits are then freed outside the lock.
@@ -334,6 +413,7 @@ impl JobTable {
             inner: std::sync::Mutex::new(Jobs {
                 by_key: HashMap::new(),
                 by_seq: HashMap::new(),
+                leased: HashMap::new(),
                 next_seq: 1,
                 queued_text_bytes: 0,
                 retained_result_bytes: 0,
@@ -354,6 +434,51 @@ impl JobTable {
         // Only canonical decimal representations resolve; `+1` and `007` must not resolve.
         // Reject noncanonical sequence numbers so each job has one valid ID.
         parse_canonical_decimal(seq)
+    }
+
+    /// The random nonce every job identifier of this table carries; a job identifier from another incarnation polls as `Restarted`.
+    pub fn incarnation(&self) -> &str {
+        &self.incarnation
+    }
+
+    fn retained_state(&self, jobs: &Jobs, key: &str, payload_digest: [u8; 32]) -> RetainedState {
+        let Some(seq) = jobs.by_key.get(key).copied() else {
+            return RetainedState::Missing;
+        };
+        let Some(existing) = jobs.by_seq.get(&seq) else {
+            return RetainedState::Missing;
+        };
+        if existing.payload_digest != payload_digest {
+            RetainedState::Conflict
+        } else if matches!(
+            &existing.state,
+            JobState::Failed { code, .. } if !failure_is_permanent(code)
+        ) {
+            RetainedState::RetryableFailed(seq)
+        } else {
+            RetainedState::Existing(JobDescriptor {
+                job_id: self.job_id(seq),
+                status: existing.status(),
+            })
+        }
+    }
+
+    pub(crate) fn probe_retained(
+        &self,
+        key: &str,
+        payload_digest: [u8; 32],
+    ) -> Option<AdmitOutcome> {
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        if jobs.closed {
+            return Some(AdmitOutcome::Closed);
+        }
+        match self.retained_state(&jobs, key, payload_digest) {
+            RetainedState::Existing(existing) => Some(AdmitOutcome::Existing(existing)),
+            RetainedState::Conflict => Some(AdmitOutcome::Conflict),
+            RetainedState::RetryableFailed(_) | RetainedState::Missing => None,
+        }
     }
 
     pub fn key_is_retained(&self, key: &str) -> bool {
@@ -404,28 +529,14 @@ impl JobTable {
         }
         self.sweep_expired(&mut jobs, &mut released);
 
-        // `failed_replay` holds a same-digest retryable failure; eviction waits until admission succeeds so rejected retries leave it pollable.
-        let mut failed_replay = None;
-        if let Some(seq) = jobs.by_key.get(&key).copied() {
-            let job = jobs.by_seq.get(&seq).expect("keyed job exists");
-            if job.payload_digest != digest {
-                return AdmitOutcome::Conflict;
-            }
-            // An identical re-submission replaces a retryable failure; a permanent failure returns `Existing`.
-            match &job.state {
-                JobState::Failed { code, .. } if !failure_is_permanent(code) => {
-                    failed_replay = Some(seq);
-                }
-                _ => {
-                    return AdmitOutcome::Existing(JobDescriptor {
-                        job_id: self.job_id(seq),
-                        status: job.status(),
-                    });
-                }
-            }
-        } else if key != canonical_key {
-            return AdmitOutcome::KeyMismatch;
-        }
+        // A retryable failed replay remains pollable unless its replacement passes every admission check.
+        let failed_replay = match self.retained_state(&jobs, &key, digest) {
+            RetainedState::Existing(existing) => return AdmitOutcome::Existing(existing),
+            RetainedState::Conflict => return AdmitOutcome::Conflict,
+            RetainedState::RetryableFailed(seq) => Some(seq),
+            RetainedState::Missing if key != canonical_key => return AdmitOutcome::KeyMismatch,
+            RetainedState::Missing => None,
+        };
 
         let Some(result_bytes) = result_bytes else {
             return AdmitOutcome::ResultTooLarge;
@@ -538,13 +649,15 @@ impl JobTable {
         job.text_bytes = 0;
 
         let boundaries = self.page_boundaries(&job.item_meta, &vectors);
+        let lease = Arc::new(ResultLease::new(
+            result_bytes,
+            Arc::clone(&self.live_result_bytes),
+        ));
+        let holder = Arc::downgrade(&lease);
         job.state = JobState::Ready {
             vectors,
             boundaries,
-            lease: Arc::new(ResultLease::new(
-                result_bytes,
-                Arc::clone(&self.live_result_bytes),
-            )),
+            lease,
         };
         job.result_bytes = result_bytes;
         job.completed_at = Some(Instant::now());
@@ -552,6 +665,7 @@ impl JobTable {
         let retained = job.retained_input_bytes();
         let excess = job.charge.split_excess(retained);
         released.charge(excess);
+        jobs.leased.insert(seq, holder);
         jobs.release_bytes(text_bytes, 0);
         jobs.retained_result_bytes += result_bytes;
         self.enforce_retention(&mut jobs, Some(seq), &mut released);
@@ -751,8 +865,51 @@ impl JobTable {
         self.sweep_expired(&mut jobs, &mut released);
     }
 
+    /// Whether the job is still a physical holder, after expiring what retention no longer keeps: present in the table, or completed with a served result page still alive. Unlike a poll, this neither issues a page nor refreshes the job's retention rank.
+    pub fn retains(&self, job_id: &str) -> bool {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return false;
+        };
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        jobs.by_seq.contains_key(&seq)
+            || jobs
+                .leased
+                .get(&seq)
+                .is_some_and(|lease| lease.strong_count() > 0)
+    }
+
+    /// The job's status word (`queued`, `running`, `ready`, `failed`) while the table holds it, after expiring what retention no longer keeps; `None` once it is gone or when another incarnation issued it. A served page alive past the job's removal keeps the job a holder for [`Self::retains`] but has no status here. Unlike a poll, this neither issues a page nor refreshes the job's retention rank.
+    pub fn status(&self, job_id: &str) -> Option<&'static str> {
+        let seq = self.parse_job_id(job_id)?;
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        jobs.by_seq.get(&seq).map(Job::status)
+    }
+
+    /// Whether a result page served for the job is still alive. A ready job's own retained lease does not count; only a page handed to a caller does.
+    pub fn result_in_use(&self, job_id: &str) -> bool {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return false;
+        };
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        match jobs.by_seq.get(&seq).map(|job| &job.state) {
+            Some(JobState::Ready { lease, .. }) => Arc::strong_count(lease) > 1,
+            Some(_) => false,
+            None => jobs
+                .leased
+                .get(&seq)
+                .is_some_and(|lease| lease.strong_count() > 0),
+        }
+    }
+
     fn sweep_expired(&self, jobs: &mut Jobs, released: &mut Released) {
         let now = Instant::now();
+        jobs.leased.retain(|_, lease| lease.strong_count() > 0);
         let expired: Vec<u64> = jobs
             .by_seq
             .values()
@@ -863,6 +1020,12 @@ impl JobTable {
         let job = jobs.by_seq.remove(&seq)?;
         jobs.release_bytes(job.text_bytes, job.result_bytes);
         jobs.by_key.remove(&job.key);
+        // `Arc::strong_count(lease) == 1` means only the removed job retains the lease: no served page exists, so the leased entry goes with the job.
+        if let JobState::Ready { lease, .. } = &job.state
+            && Arc::strong_count(lease) == 1
+        {
+            jobs.leased.remove(&seq);
+        }
         Some(job)
     }
 
@@ -914,6 +1077,12 @@ mod tests {
             .map(|item| item.id.len() + item.content_sha256.len())
             .sum();
         2 * key.len() + meta
+    }
+
+    #[test]
+    fn exact_input_shape_refuses_an_unaccounted_item_identity() {
+        assert!(InputShape::exact(MAX_ITEM_ID_BYTES, 1).is_some());
+        assert!(InputShape::exact(MAX_ITEM_ID_BYTES + 1, 1).is_none());
     }
 
     #[test]
@@ -1425,6 +1594,41 @@ mod tests {
             PollOutcome::Restarted
         ));
         assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_served_page_keeps_the_job_held_past_expiry() {
+        let dimensions = 2;
+        let mut jobs = JobTable::new(SynapseLimits::default());
+
+        let AdmitOutcome::Admitted { job_id, seq } = jobs.admit_uncharged_for_tests(
+            "held".to_owned(),
+            vec![charged_item("a", "alpha")],
+            dimensions,
+        ) else {
+            panic!("the job is admitted");
+        };
+        jobs.start(seq).expect("the job starts");
+        jobs.publish_ready(seq, vec![vec![0.5; dimensions]]);
+        let PollOutcome::Page(page) = jobs.poll(&job_id, "held", None) else {
+            panic!("the result is served");
+        };
+
+        jobs.limits.retention = std::time::Duration::ZERO;
+        assert!(matches!(
+            jobs.poll(&job_id, "held", None),
+            PollOutcome::Restarted
+        ));
+        assert!(
+            jobs.retains(&job_id),
+            "a job whose served page is alive is still held"
+        );
+
+        drop(page);
+        assert!(
+            !jobs.retains(&job_id),
+            "dropping the last page releases the job"
+        );
     }
 
     #[test]

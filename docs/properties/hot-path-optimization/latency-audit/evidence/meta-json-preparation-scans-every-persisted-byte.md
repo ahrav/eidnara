@@ -126,5 +126,5 @@ covers byte identity of a clean stored `meta` or a `BTreeMap`-key secret.
 [t-container]: ../../../../../crates/memory-store/src/lib.rs#L15129
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15166
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3184
+[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3192
 [serde-features]: ../../../../../Cargo.toml#L45
