@@ -421,11 +421,15 @@ async fn retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot() {
         &live_candidates_now,
     )
     .unwrap();
-    assert!(
-        adapter
-            .occurrences
-            .iter()
-            .all(|o| o.disposition == Disposition::PolicyExcluded(EligibilityVerdict::WrongScope)),
+    let dispositions = |report: &EligibilityReport| -> Vec<Disposition> {
+        report.occurrences.iter().map(|o| o.disposition).collect()
+    };
+    assert_eq!(
+        dispositions(&adapter),
+        vec![
+            Disposition::PolicyExcluded(EligibilityVerdict::WrongScope);
+            live_candidates_now.len()
+        ],
         "{adapter:?}"
     );
     let adapter = judge_occurrences(
@@ -435,11 +439,9 @@ async fn retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot() {
         &live_candidates_now,
     )
     .unwrap();
-    assert!(
-        adapter
-            .occurrences
-            .iter()
-            .all(|o| o.disposition == Disposition::Eligible),
+    assert_eq!(
+        dispositions(&adapter),
+        vec![Disposition::Eligible; live_candidates_now.len()],
         "{adapter:?}"
     );
     daemon.shutdown().await;
