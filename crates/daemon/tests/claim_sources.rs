@@ -1051,6 +1051,124 @@ fn lost_and_skipped_acknowledgements_replay_from_receipts() {
     );
 }
 
+/// A fold into a live survivor that the same commit then retires publishes nothing for the survivor and retires every descriptor; the episode reaches its target instead of blocking on the survivor's invalidated row.
+#[test]
+fn fold_then_retire_in_one_commit_retires_and_reaches_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let a = Seed::scoped("a", MEMORY, "PROJECT_RULES", 1, CONTRACT, "First.");
+    let b = Seed::scoped("b", MEMORY, "PROJECT_RULES", 2, CONTRACT, "Second.");
+    corpus.decide(a);
+    // `b` shares `a`'s source lineage at a later revision, so `a` can fold into it.
+    let b_spec = DecisionSpec {
+        source_id: "a-lineage".to_string(),
+        ..b.spec()
+    };
+    corpus
+        .kernel
+        .commit(intent("decide:b"), |envelope| {
+            envelope.insert_decision(b_spec.clone())?;
+            envelope.record_admission(admission("b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(corpus.materialize().published, 6);
+
+    corpus
+        .kernel
+        .commit(intent("fold-and-retire"), |envelope| {
+            envelope.correct_decision("a", b_spec.clone())?;
+            envelope.retire_decision("b")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (0, 6), "{report:?}");
+    assert_eq!(corpus.checkpoint(), Some(report.target));
+    assert!(corpus.inventory().is_empty());
+}
+
+/// A merge that supersedes several predecessors with one successor in a single commit retires every predecessor before the successor is published, so no commit holds a predecessor beside its successor.
+#[test]
+fn merge_retires_every_predecessor_before_publishing_the_successor() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let a = Seed::scoped("a", MEMORY, "PROJECT_RULES", 1, CONTRACT, "First.");
+    let b = Seed::scoped("b", MEMORY, "PROJECT_RULES", 1, "Keep it.", "Second.");
+    corpus.decide(a);
+    // Both predecessors sit on one source lineage, as a merge requires.
+    corpus
+        .kernel
+        .commit(intent("decide:b"), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                source_id: "a-lineage".to_string(),
+                ..b.spec()
+            })?;
+            envelope.record_admission(admission("b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(corpus.materialize().published, 6);
+    let successor = Seed::scoped("c", MEMORY, "PROJECT_RULES", 2, CONTRACT, "Merged.");
+    let c_spec = DecisionSpec {
+        source_id: "a-lineage".to_string(),
+        ..successor.spec()
+    };
+    corpus
+        .kernel
+        .commit(intent("merge"), |envelope| {
+            let c = envelope.correct_decision("a", c_spec.clone())?;
+            envelope.correct_decision("b", c_spec.clone())?;
+            envelope.record_admission(admission(&c.object_id))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (3, 6), "{report:?}");
+    let (new_rows, _) = successor.ledger();
+    assert_eq!(corpus.inventory(), new_rows.iter().cloned().collect());
+
+    // Every predecessor descriptor is invalidated at a commit before the first successor descriptor is created.
+    let db = corpus.kernel_db();
+    let commit_of = |expected: &Expected, column: &str| -> i64 {
+        let encoded = encode_preserving_span(&Occurrence {
+            class: expected.class,
+            identity: &[(expected.field, &expected.object_id)],
+            revision: &expected.revision.to_string(),
+            representation: expected.representation,
+            span: None,
+        })
+        .unwrap();
+        let object_id =
+            kernel::descriptor_object_id(&encoded.lineage_id, &expected.revision.to_string());
+        db.query_row(
+            &format!("SELECT {column} FROM object_registry WHERE object_id=?1"),
+            [object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let last_retired = a
+        .ledger()
+        .0
+        .iter()
+        .chain(&b.ledger().0)
+        .map(|row| commit_of(row, "invalidated_commit_seq"))
+        .max()
+        .unwrap();
+    let first_published = new_rows
+        .iter()
+        .map(|row| commit_of(row, "created_commit_seq"))
+        .min()
+        .unwrap();
+    assert!(
+        last_retired < first_published,
+        "predecessors retired at {last_retired}, successor published at {first_published}"
+    );
+}
+
 /// AC3: an acknowledgement whose outcome is unknown and whose durable checkpoint still sits below the page blocks the episode; the published page stays, and the next episode re-drives it from receipts and acknowledges.
 #[test]
 fn unresolved_acknowledgement_blocks_and_the_next_episode_recovers() {

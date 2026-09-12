@@ -11,9 +11,8 @@ use kernel::source_identity::{
 };
 use kernel::{
     APPROVAL_REVOKE_KIND, CommitIntent, CommitPageBounds, DECISION_CHANGE_KINDS,
-    DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND, DECISION_INSERT_KIND, DECISION_RETIRE_KIND,
-    DecisionRow, KernelError, KernelStore, ObjectRow, ProviderEgress, Sensitivity,
-    descriptor_object_id,
+    DECISION_CORRECT_KIND, DECISION_INSERT_KIND, DECISION_RETIRE_KIND, DecisionRow, KernelError,
+    KernelStore, ObjectRow, ProviderEgress, Sensitivity, descriptor_object_id,
 };
 use serde::Deserialize;
 
@@ -31,7 +30,7 @@ const PRODUCER: &str = "eidnara-daemon/claim-sources";
 
 const _: () = assert!(
     DECISION_CHANGE_KINDS.len() == 5,
-    "apply_change names a disposition for each decision change kind"
+    "retire_change and publish_change name a disposition for each decision change kind"
 );
 
 /// The registry facts of one decision that its occurrences are keyed by.
@@ -389,12 +388,18 @@ impl<'a> ClaimMaterializer<'a> {
             },
             |page| {
                 for commit in &page.commits {
-                    for row in commit
+                    let changes = commit
                         .rows
                         .iter()
                         .filter(|row| row.object_kind == "decision")
-                    {
-                        self.apply_change(row, commit.commit_seq, now, &mut report)?;
+                        .map(|row| Ok((row, self.parse_change(row, commit.commit_seq)?)))
+                        .collect::<Result<Vec<_>, Stop>>()?;
+                    // Every predecessor a commit invalidates is retired before any successor in it is published, whatever order the rows were written in, so no commit holds a predecessor beside its successor.
+                    for (row, change) in &changes {
+                        self.retire_change(row, change, commit.commit_seq, &mut report)?;
+                    }
+                    for (row, change) in &changes {
+                        self.publish_change(row, change, commit.commit_seq, now, &mut report)?;
                     }
                     report.commits_consumed += 1;
                 }
@@ -416,43 +421,68 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// An event append changes no text and produces nothing; an approval revocation invalidates the decision and retires like a retirement; every other kind must be one this materializer names.
-    fn apply_change(
+    /// A change kind this materializer does not name blocks before any row of its commit is applied.
+    fn parse_change(
         &self,
         row: &kernel::OutboxEntry,
         commit_seq: i64,
-        now: i64,
-        report: &mut MaterializationReport,
-    ) -> Result<(), Stop> {
+    ) -> Result<DecisionChange, Stop> {
         let change: DecisionChange =
             serde_json::from_slice(&row.payload).map_err(|_| ClaimBlocked::DecisionUnreadable {
                 object_id: row.object_id.clone(),
                 commit_seq,
             })?;
-        let kind = change.change_kind.as_str();
-        match kind {
+        if !DECISION_CHANGE_KINDS.contains(&change.change_kind.as_str()) {
+            return Err(ClaimBlocked::UnknownChangeKind {
+                object_id: row.object_id.clone(),
+                commit_seq,
+                change_kind: change.change_kind,
+            }
+            .into());
+        }
+        Ok(change)
+    }
+
+    /// A correction retires the object it replaced; a retirement or approval revocation retires the object itself.
+    fn retire_change(
+        &self,
+        row: &kernel::OutboxEntry,
+        change: &DecisionChange,
+        commit_seq: i64,
+        report: &mut MaterializationReport,
+    ) -> Result<(), Stop> {
+        match change.change_kind.as_str() {
+            DECISION_INSERT_KIND | DECISION_CORRECT_KIND => match &change.replaced_object_id {
+                Some(replaced) => self.retire_decision(replaced, commit_seq, report),
+                None => Ok(()),
+            },
+            DECISION_RETIRE_KIND | APPROVAL_REVOKE_KIND => {
+                self.retire_decision(&row.object_id, commit_seq, report)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// An insert or correction publishes the object's units; an event append changes no text and produces nothing.
+    fn publish_change(
+        &self,
+        row: &kernel::OutboxEntry,
+        change: &DecisionChange,
+        commit_seq: i64,
+        now: i64,
+        report: &mut MaterializationReport,
+    ) -> Result<(), Stop> {
+        match change.change_kind.as_str() {
             DECISION_INSERT_KIND | DECISION_CORRECT_KIND => {
-                if let Some(replaced) = change.replaced_object_id {
-                    self.retire_decision(&replaced, commit_seq, report)?;
-                }
                 let subject = ClaimSubject {
                     object_id: row.object_id.clone(),
-                    domain_id: change.object.domain_id,
+                    domain_id: change.object.domain_id.clone(),
                     revision: row.source_revision,
                     sensitivity: row.sensitivity,
                 };
                 self.publish_decision(&subject, commit_seq, now, report)
             }
-            DECISION_RETIRE_KIND | APPROVAL_REVOKE_KIND => {
-                self.retire_decision(&row.object_id, commit_seq, report)
-            }
-            DECISION_EVENT_APPEND_KIND => Ok(()),
-            _ => Err(ClaimBlocked::UnknownChangeKind {
-                object_id: row.object_id.clone(),
-                commit_seq,
-                change_kind: change.change_kind,
-            }
-            .into()),
+            _ => Ok(()),
         }
     }
 
@@ -464,7 +494,7 @@ impl<'a> ClaimMaterializer<'a> {
         report: &mut MaterializationReport,
     ) -> Result<(), Stop> {
         let Some(decision) = self.decision_at(&subject.object_id, commit_seq)? else {
-            // A decision created and invalidated in the same commit was never readable; there is nothing to publish and nothing to retire.
+            // The commit that changed the decision also invalidated it; its descriptors, if any, are retired by that commit's own rows.
             return Ok(());
         };
         let units = claim_units(subject, &decision)?;
@@ -558,7 +588,7 @@ impl<'a> ClaimMaterializer<'a> {
         Ok(())
     }
 
-    /// `None` when no decision row is visible at `commit_seq`, which after a registry row exists at that commit means the row was created and invalidated together.
+    /// `None` when no decision row is visible at `commit_seq` because the commit itself invalidated the object: it was created and invalidated together, or an existing survivor absorbed a fold and was then retired or corrected. The same commit carries the row that retires its descriptors.
     fn decision_at(&self, object_id: &str, commit_seq: i64) -> Result<Option<DecisionRow>, Stop> {
         let mut rows = self
             .kernel
@@ -570,11 +600,7 @@ impl<'a> ClaimMaterializer<'a> {
             .kernel
             .object_states(std::slice::from_ref(&object_id.to_owned()))?;
         match states.into_iter().next().flatten() {
-            Some(state)
-                if state.object.invalidated_commit_seq == Some(state.object.created_commit_seq) =>
-            {
-                Ok(None)
-            }
+            Some(state) if state.object.invalidated_commit_seq == Some(commit_seq) => Ok(None),
             _ => Err(ClaimBlocked::DecisionUnreadable {
                 object_id: object_id.to_owned(),
                 commit_seq,
