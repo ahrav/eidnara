@@ -1,0 +1,104 @@
+{
+ "_derivation": "Hand-derived IEEE 754 binary32 little-endian encodings. 0.6 = 0x3f19999a, 0.8 = 0x3f4ccccd, 1.0 = 0x3f800000, -1.0 = 0xbf800000, 0.0 = 0x00000000, -0.0 = 0x80000000, 1.0009 = 0x3f801d7e; bytes are listed least significant first. The unit-norm tolerance is the inference owner's 1e-3: a norm of 1.0009 is inside it and 1.002 is outside.",
+ "dimension": 2,
+ "valid": [
+  {
+   "label": "three-four-five",
+   "vector": [
+    0.6,
+    0.8
+   ],
+   "bytes": "9a99193fcdcc4c3f"
+  },
+  {
+   "label": "axis",
+   "vector": [
+    1.0,
+    0.0
+   ],
+   "bytes": "0000803f00000000"
+  },
+  {
+   "label": "negative axis",
+   "vector": [
+    0.0,
+    -1.0
+   ],
+   "bytes": "00000000000080bf"
+  },
+  {
+   "label": "just inside tolerance",
+   "vector": [
+    1.0009,
+    0.0
+   ],
+   "bytes": "7e1d803f00000000"
+  },
+  {
+   "label": "negative zero",
+   "vector": [
+    -0.0,
+    -1.0
+   ],
+   "bytes": "00000080000080bf"
+  }
+ ],
+ "invalid": [
+  {
+   "label": "one dimension",
+   "vector": [
+    1.0
+   ],
+   "reason": "dimension"
+  },
+  {
+   "label": "three dimensions",
+   "vector": [
+    0.6,
+    0.8,
+    0.0
+   ],
+   "reason": "dimension"
+  },
+  {
+   "label": "nan",
+   "vector": [
+    "nan",
+    0.0
+   ],
+   "reason": "nonfinite"
+  },
+  {
+   "label": "infinity",
+   "vector": [
+    "inf",
+    0.0
+   ],
+   "reason": "nonfinite"
+  },
+  {
+   "label": "half norm",
+   "vector": [
+    0.3,
+    0.4
+   ],
+   "reason": "norm"
+  },
+  {
+   "label": "zero",
+   "vector": [
+    0.0,
+    0.0
+   ],
+   "reason": "norm"
+  },
+  {
+   "label": "just over tolerance",
+   "vector": [
+    1.002,
+    0.0
+   ],
+   "reason": "norm"
+  }
+ ]
+}

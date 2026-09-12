@@ -39,6 +39,23 @@ pub struct EligibilityCandidate {
     pub artifact_digest: Option<String>,
 }
 
+impl EligibilityCandidate {
+    /// Validates identity fields without acquiring a kernel reader.
+    pub fn validate(&self) -> Result<(), KernelError> {
+        if self.object_id.is_empty() || self.object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES {
+            return Err(KernelError::InvalidInput);
+        }
+        if self
+            .artifact_digest
+            .as_deref()
+            .is_some_and(|digest| !is_artifact_digest(digest))
+        {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
 /// The exact `project` term value a stored scope must carry for its rows to serve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectScope {
@@ -143,24 +160,50 @@ fn judge(
     EligibilityVerdict::Ok
 }
 
+/// Judges every candidate against the registry state, served class, artifact facts, and scope terms visible in `tx` at `tip`.
+/// The caller has checked the batch bounds and owns the transaction, so the same verdicts serve a reader snapshot and a writer holder alike.
+pub(crate) fn judge_in_tx(
+    tx: &Transaction<'_>,
+    tip: i64,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    candidates: &[EligibilityCandidate],
+) -> Result<Vec<EligibilityVerdict>, KernelError> {
+    let named: Vec<(&str, Option<&str>)> = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.object_id.as_str(),
+                candidate.artifact_digest.as_deref(),
+            )
+        })
+        .collect();
+    let facts = egress_candidates_tx(tx, tip, &named, destination)?;
+    let mut scopes = ScopeVerdicts {
+        project,
+        verdicts: HashMap::new(),
+    };
+    candidates
+        .iter()
+        .zip(&facts)
+        .map(|(candidate, facts)| {
+            let scope_id = facts
+                .state
+                .as_ref()
+                .and_then(|state| state.scope_id.as_deref());
+            let in_scope = scopes.matches(tx, scope_id)?;
+            Ok(judge(candidate, facts, destination, in_scope))
+        })
+        .collect()
+}
+
 /// Runs before any reader is acquired; `egress_candidates_tx` repeats the digest check because it also serves callers that skip this gate.
-fn check_bounds(candidates: &[EligibilityCandidate]) -> Result<(), KernelError> {
+pub(crate) fn check_bounds(candidates: &[EligibilityCandidate]) -> Result<(), KernelError> {
     if candidates.len() > MAX_ELIGIBILITY_CANDIDATES {
         return Err(KernelError::InvalidInput);
     }
     for candidate in candidates {
-        if candidate.object_id.is_empty()
-            || candidate.object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES
-        {
-            return Err(KernelError::InvalidInput);
-        }
-        if candidate
-            .artifact_digest
-            .as_deref()
-            .is_some_and(|digest| !is_artifact_digest(digest))
-        {
-            return Err(KernelError::InvalidInput);
-        }
+        candidate.validate()?;
     }
     Ok(())
 }
@@ -174,34 +217,8 @@ impl KernelStore {
         candidates: &[EligibilityCandidate],
     ) -> Result<EligibilityBatch, KernelError> {
         check_bounds(candidates)?;
-        let named: Vec<(&str, Option<&str>)> = candidates
-            .iter()
-            .map(|candidate| {
-                (
-                    candidate.object_id.as_str(),
-                    candidate.artifact_digest.as_deref(),
-                )
-            })
-            .collect();
-        let (snapshot, verdicts) = self.egress_read(|tx, tip| {
-            let facts = egress_candidates_tx(tx, tip, &named, destination)?;
-            let mut scopes = ScopeVerdicts {
-                project,
-                verdicts: HashMap::new(),
-            };
-            candidates
-                .iter()
-                .zip(&facts)
-                .map(|(candidate, facts)| {
-                    let scope_id = facts
-                        .state
-                        .as_ref()
-                        .and_then(|state| state.scope_id.as_deref());
-                    let in_scope = scopes.matches(tx, scope_id)?;
-                    Ok(judge(candidate, facts, destination, in_scope))
-                })
-                .collect::<Result<Vec<_>, KernelError>>()
-        })?;
+        let (snapshot, verdicts) =
+            self.egress_read(|tx, tip| judge_in_tx(tx, tip, project, destination, candidates))?;
         Ok(EligibilityBatch { snapshot, verdicts })
     }
 }

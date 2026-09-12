@@ -14,12 +14,17 @@ pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
 pub(crate) mod dreamer_scheduler;
+pub mod embedding_dispatch;
+pub mod embedding_publication;
+pub mod embedding_supervisor;
+pub mod harness_sources;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
 pub mod historian_producer;
 pub(crate) mod historian_prompt;
 pub(crate) mod historian_validate;
+pub mod identity_sweep;
 pub mod injection;
 pub mod kernel_routes;
 pub mod m0_compose;
@@ -32,8 +37,9 @@ mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
 pub mod search_projection;
+pub mod search_writer;
 pub mod selection;
-mod served_json;
+pub mod served_json;
 pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
@@ -7730,6 +7736,7 @@ impl Handler {
                 .expect("boundary token cache mutex");
             (cache.retained_bytes, cache.sessions.len())
         };
+        let hygiene_memo = tail_hygiene::hygiene_memos().metrics();
         let (
             page_bytes,
             page_count,
@@ -7785,6 +7792,11 @@ impl Handler {
             "boundary_token": {
                 "charged_bytes": boundary_bytes,
                 "entry_count": boundary_count,
+            },
+            "tail_hygiene_memo": {
+                "charged_bytes": hygiene_memo.charged_bytes,
+                "entry_count": hygiene_memo.session_count,
+                "rejected_inserts": hygiene_memo.rejected_inserts,
             },
             "page_coordinator": {
                 "charged_bytes": page_bytes,
@@ -20357,6 +20369,8 @@ mod tests {
             );
         }
 
+        // Another handler's shutdown can clear shared memos before this status snapshot.
+        tail_hygiene::hygiene_memos().clear();
         let outcome = handler.handle_status_value(&json!({"method": "status"}));
         let PreparedOutcome::Response(bytes) = outcome else {
             panic!("module status did not respond: {outcome:?}");
@@ -20402,6 +20416,12 @@ mod tests {
         );
         assert_eq!(metrics["native_attach"]["charged_bytes"], 0);
         assert_eq!(metrics["native_attach"]["entry_count"], 0);
+        let hygiene_memo = &metrics["tail_hygiene_memo"];
+        assert!(hygiene_memo["entry_count"].is_u64());
+        let charged = hygiene_memo["charged_bytes"].as_u64().unwrap();
+        assert!(charged > std::mem::size_of::<OnceLock<tail_hygiene::HygieneMemos>>() as u64);
+        assert!(charged <= tail_hygiene::MEMO_RETAINED_BYTES_BOUND as u64);
+        assert!(hygiene_memo["rejected_inserts"].is_u64());
         assert_eq!(metrics["page_coordinator"]["charged_bytes"], 123);
         assert_eq!(metrics["page_coordinator"]["entry_count"], 1);
         assert_eq!(metrics["page_coordinator"]["completed_response_bytes"], 17);
@@ -21235,6 +21255,12 @@ mod tests {
             serde_json::to_vec(&fresh.native_messages).unwrap(),
         );
         assert_eq!(second.messages(), fresh.messages());
+        for (reattached, fresh_message) in second.messages().iter().zip(fresh.messages()) {
+            assert_eq!(
+                reattached.canonical_bytes(),
+                fresh_message.canonical_bytes()
+            );
+        }
         assert!(second_stats.reused_messages >= 5, "{second_stats:?}");
         assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
         let second_sidecar = Arc::clone(
@@ -21273,6 +21299,9 @@ mod tests {
             serde_json::to_vec(shared_replay.messages()).unwrap(),
             serde_json::to_vec(second.messages()).unwrap()
         );
+        for (shared, reattached) in shared_replay.messages().iter().zip(second.messages()) {
+            assert_eq!(shared.canonical_bytes(), reattached.canonical_bytes());
+        }
         let mut edited_output = shared_replay.native_messages.clone().unwrap();
         let original_output = serde_json::to_vec(&shared_replay.native_messages).unwrap();
         Arc::make_mut(&mut edited_output[0])["alias_mutation"] = json!(true);

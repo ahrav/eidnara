@@ -40,7 +40,7 @@ a campaign that never opens the window.
   observes abort only when it yields.
 - The commit is observable independently: [`MemoryStore::load`][load]
   returns `row_version`, and `commit_transform` returns the new version to
-  the closure at [`:4936-4974`][store-commit].
+  the closure at [`:4944-4982`][store-commit].
 - The parent's [E3][e3] carries the open question of which abort events a
   future worker can expose without equating waiter cancellation with
   completion.
@@ -93,18 +93,18 @@ with completion.
 - Missing evidence: A worker design and its completion channel.
 - Conclusion: needs human input.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2908-L2911
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8139-L8193
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8202
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8209-L8214
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8224-L8232
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8244-L8334
-[await-a]: ../../../../../crates/daemon/src/lib.rs#L8263
-[await-b]: ../../../../../crates/daemon/src/lib.rs#L8289
-[await-c]: ../../../../../crates/daemon/src/lib.rs#L8315
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8387
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8398-L8403
-[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4936-L4974
+[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2915-L2918
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8146-L8200
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8209
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8216-L8221
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8231-L8239
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8251-L8341
+[await-a]: ../../../../../crates/daemon/src/lib.rs#L8270
+[await-b]: ../../../../../crates/daemon/src/lib.rs#L8296
+[await-c]: ../../../../../crates/daemon/src/lib.rs#L8322
+[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8394
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8405-L8410
+[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4944-L4982
 [load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955
 [host-close]: ../../../../../crates/host-runtime/src/dispatch.rs#L1239-L1259

@@ -29,7 +29,8 @@ use crate::handler::{
 };
 pub use embed_tokens::EmbedTokens;
 use inference::{Backend, InferenceError, OrtIdentity};
-use jobs::{AdmitOutcome, JobTable, PollOutcome};
+use jobs::{AdmitOutcome, JobTable};
+pub use jobs::{PollOutcome, ResultLease, ResultPage, failure_is_permanent};
 pub use preflight::{
     AdmittedInput, DenseUnavailable, EmbeddingIdentity, EmbeddingInputLimits, InferenceFailureKind,
     LaneUnavailableState,
@@ -48,7 +49,8 @@ pub struct SynapseLimits {
     pub max_queued_jobs: usize,
     pub max_queued_request_bytes: u64,
     pub max_retained_jobs: usize,
-    /// Retained result vectors are declared to the host as `retained_resident_bytes`, so `HostLimits::max_resident_bytes` must leave room for this cap above the resident floor.
+    /// `retained_resident_bytes` includes local-input capacity plus this retained-result cap.
+    /// `HostLimits::max_resident_bytes` must fund that sum above the runtime floor.
     pub max_retained_result_bytes: u64,
     pub max_batch_items: usize,
     pub max_batch_text_bytes: usize,
@@ -229,6 +231,8 @@ struct SynapseInner {
     limits: SynapseLimits,
     state: Mutex<LaneState>,
     jobs: JobTable,
+    /// In-process submissions have no request scratch charge, so they reserve their retained inputs here before allocation.
+    local_inputs: crate::wire::ByteBudget,
     /// `cpu` has one permit, so at most one native inference call runs at a time.
     /// The semaphore serves waiters in registration order.
     /// Semaphore registration order prevents starvation among queued waiters.
@@ -270,6 +274,9 @@ impl SynapseComponent {
                 config,
                 unsupported_reason: None,
                 jobs: JobTable::new(limits.clone()),
+                local_inputs: crate::wire::ByteBudget::new(constructor_local_input_capacity(
+                    &limits,
+                )),
                 limits,
                 state: Mutex::new(LaneState::Disabled {
                     reason: "not initialized".to_owned(),
@@ -290,6 +297,9 @@ impl SynapseComponent {
                 config: None,
                 unsupported_reason: Some(reason),
                 jobs: JobTable::new(limits.clone()),
+                local_inputs: crate::wire::ByteBudget::new(constructor_local_input_capacity(
+                    &limits,
+                )),
                 limits,
                 state: Mutex::new(LaneState::Disabled {
                     reason: reason.to_owned(),
@@ -321,12 +331,15 @@ impl SynapseComponent {
         let query_admission_permits = limits
             .query_admission_permits()
             .expect("validate_serving_limits proves the permit count");
+        let local_input_bytes = checked_local_input_capacity(&limits)
+            .expect("validate_serving_limits proves the local input capacity");
         lane.max_text_bytes = limits.max_text_bytes;
         Ok(Self {
             inner: Arc::new(SynapseInner {
                 config: None,
                 unsupported_reason: None,
                 jobs: JobTable::new(limits.clone()),
+                local_inputs: crate::wire::ByteBudget::new(local_input_bytes),
                 limits,
                 state: Mutex::new(LaneState::Ready(Arc::new(ReadyLane::new(engine, lane)))),
                 cpu: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -335,6 +348,26 @@ impl SynapseComponent {
                 closing: CancellationToken::new(),
             }),
         })
+    }
+
+    /// # Errors
+    ///
+    /// Returns `bundle::BundleError` when the replacement identity or serving limits are invalid.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replace_ready_with_engine_for_test(
+        &self,
+        mut lane: LaneInfo,
+        engine: Arc<dyn EmbeddingEngine>,
+    ) -> Result<(), bundle::BundleError> {
+        bundle::validate_lane_identity(&lane)?;
+        bundle::validate_serving_limits(
+            lane.dims,
+            lane.recommended_rows as usize,
+            &self.inner.limits,
+        )?;
+        lane.max_text_bytes = self.inner.limits.max_text_bytes;
+        *self.inner.lock_state() = LaneState::Ready(Arc::new(ReadyLane::new(engine, lane)));
+        Ok(())
     }
 
     pub fn status(&self) -> SynapseStatus {
@@ -374,6 +407,34 @@ impl SynapseComponent {
         text: &'t str,
     ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
         let lane = self.ready_or_unavailable()?;
+        self.preflight_ready(&lane, limits, text)
+    }
+
+    /// Identity checking precedes input validation so a replacement's limits or tokenizer cannot misclassify the expected lane's input.
+    /// Count failures settle the lane as in [`Self::preflight_embedding`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable::IdentityChanged`] when the ready lane differs from `expected`; otherwise returns the same refusals as [`Self::preflight_embedding`].
+    pub fn preflight_embedding_for_lane<'t>(
+        &self,
+        expected: &LaneInfo,
+        text: &'t str,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        if !EmbeddingIdentity::of_lane(expected).matches(&lane.lane) {
+            return Err(DenseUnavailable::IdentityChanged);
+        }
+        self.preflight_ready(&lane, EmbeddingInputLimits::of_lane(expected), text)
+    }
+
+    /// Both entry points validate and count against their captured lane, without reading a replacement between identity checking and counting.
+    fn preflight_ready<'t>(
+        &self,
+        lane: &ReadyLane,
+        limits: EmbeddingInputLimits,
+        text: &'t str,
+    ) -> Result<AdmittedInput<'t>, DenseUnavailable> {
         let admitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             preflight::admit(&lane.lane, &*lane.backend, limits, text)
         }))
@@ -428,6 +489,114 @@ impl SynapseComponent {
             })?;
         // `check_engine_vectors` accepted exactly one vector for the one text.
         Ok(vectors.pop().expect("one vector for one admitted text"))
+    }
+
+    /// The job table's incarnation nonce; every job identifier this component issues starts with it, so a persisted job identifier names the host that admitted it.
+    pub fn host_incarnation(&self) -> &str {
+        self.inner.jobs.incarnation()
+    }
+
+    /// Admits one preflighted text into the job table as a single-item batch keyed by `item_id`, under the lane it was admitted for.
+    /// The canonical request key binds the item and text to the admitting model, fingerprint, and epoch. A retained job is reused only under that identity.
+    /// Admission reserves the dedicated local-input budget instead of wire scratch. Admission requires a Tokio runtime context because it starts an inference worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DenseUnavailable::LaneUnavailable`] when no lane serves and [`DenseUnavailable::IdentityChanged`] when the serving lane is no longer the admitting one.
+    pub fn submit_admitted(
+        &self,
+        admitted: &AdmittedInput<'_>,
+        item_id: &str,
+    ) -> Result<SubmitOutcome, DenseUnavailable> {
+        let lane = self.ready_or_unavailable()?;
+        if !admitted.identity().matches(&lane.lane) {
+            return Err(DenseUnavailable::IdentityChanged);
+        }
+        let Some(charge_bound) = local_input_charge_bound(item_id, admitted.text()) else {
+            return Ok(SubmitOutcome::Refused("unsupported_shape"));
+        };
+        let content_sha256 = protocol::sha256_hex(admitted.text().as_bytes());
+        let key = local_key(&lane.lane, item_id, &content_sha256);
+        let payload_digest =
+            jobs::payload_digest(&key, std::iter::once((item_id, content_sha256.as_str())));
+        if let Some(outcome) = self.inner.jobs.probe_retained(&key, payload_digest) {
+            return Ok(match outcome {
+                AdmitOutcome::Existing(descriptor) => SubmitOutcome::Queued {
+                    job_id: descriptor.job_id,
+                },
+                AdmitOutcome::Conflict => SubmitOutcome::Refused("idempotency_conflict"),
+                AdmitOutcome::Closed => SubmitOutcome::Closing,
+                _ => unreachable!("retained probe returns only retained outcomes"),
+            });
+        }
+        let Some(mut charge) = self.inner.local_inputs.try_charge(charge_bound) else {
+            return Ok(SubmitOutcome::Full);
+        };
+        let item = local_item(item_id, admitted.text(), content_sha256);
+        let input_bytes = jobs::job_input_bytes(&key, std::slice::from_ref(&item));
+        if let Some(outcome) = local_input_charge_mismatch(input_bytes, charge.bytes()) {
+            debug_assert!(
+                input_bytes <= charge.bytes(),
+                "local input charge mismatch: input_bytes={input_bytes}, charge_bytes={}, capacity={}",
+                charge.bytes(),
+                self.inner.local_inputs.capacity(),
+            );
+            return Ok(outcome);
+        }
+        charge.shrink_to(input_bytes);
+        let dims = lane.lane.dims;
+        Ok(
+            match self
+                .inner
+                .jobs
+                .admit_charged(key.clone(), &key, vec![item], dims, &mut charge)
+            {
+                AdmitOutcome::Existing(descriptor) => SubmitOutcome::Queued {
+                    job_id: descriptor.job_id,
+                },
+                AdmitOutcome::Admitted { job_id, seq } => {
+                    self.spawn_batch_worker(lane, seq);
+                    SubmitOutcome::Queued { job_id }
+                }
+                // The submitted key is its own canonical key, so only a retained key with a different payload can mismatch.
+                AdmitOutcome::Conflict | AdmitOutcome::KeyMismatch => {
+                    SubmitOutcome::Refused("idempotency_conflict")
+                }
+                AdmitOutcome::Full => SubmitOutcome::Full,
+                AdmitOutcome::ResultTooLarge => SubmitOutcome::Refused("unsupported_shape"),
+                AdmitOutcome::Closed => SubmitOutcome::Closing,
+            },
+        )
+    }
+
+    /// Whether this component's job table still holds `job_id`: queued, running, retaining a result, or completed with a served result page still alive. A job identifier from another incarnation is never held. The answer does not refresh the job's retention rank.
+    pub fn holds_job(&self, job_id: &str) -> bool {
+        self.inner.jobs.retains(job_id)
+    }
+
+    /// The table's status word for `job_id` (`queued`, `running`, `ready`, `failed`), or `None` once the table no longer holds it. `queued` and `running` mean native work this component still owns.
+    pub fn job_status(&self, job_id: &str) -> Option<&'static str> {
+        self.inner.jobs.status(job_id)
+    }
+
+    /// Whether a result page served for `job_id` is still alive. The job's own retained result does not count; only a page a caller still holds does.
+    pub fn holds_result_page(&self, job_id: &str) -> bool {
+        self.inner.jobs.result_in_use(job_id)
+    }
+
+    /// Polls using the frozen admitting lane, item identity, and text, so a replacement lane cannot retrieve another lane's result.
+    /// A single-item job returns its whole result in one page; the page's lease keeps the result bytes counted while the caller holds the vector.
+    /// A job identifier from another incarnation or an evicted job polls as [`PollOutcome::Restarted`]; a failed lane still answers for the jobs it settled.
+    pub fn poll_admitted(
+        &self,
+        lane: &LaneInfo,
+        job_id: &str,
+        item_id: &str,
+        text: &str,
+    ) -> PollOutcome {
+        let content_sha256 = protocol::sha256_hex(text.as_bytes());
+        let key = local_key(lane, item_id, &content_sha256);
+        self.inner.jobs.poll(job_id, &key, None)
     }
 
     /// One lock acquisition answers both whether a lane serves and, if not, which state refuses.
@@ -549,6 +718,69 @@ fn mark_disabled(inner: &SynapseInner, mut reason: String) {
     if matches!(&*state, LaneState::Ready(_)) {
         *state = LaneState::Disabled { reason };
     }
+}
+
+/// How the job table answered an in-process single-item admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    /// The job is queued, running, or already complete; poll it with [`SynapseComponent::poll_admitted`].
+    Queued { job_id: String },
+    /// Admission or result capacity is exhausted; the same submission may succeed once the table drains.
+    Full,
+    /// The table refuses the item for good: `idempotency_conflict` when its key is retained with a different payload, `unsupported_shape` when its identity exceeds [`jobs::MAX_ITEM_ID_BYTES`] or its single result exceeds the retained-result byte limit.
+    Refused(&'static str),
+    /// The component is shutting down and admits nothing.
+    Closing,
+}
+
+// Wire and in-process requests share a job table; the prefix keeps their idempotency namespaces separate.
+fn local_key(lane: &LaneInfo, item_id: &str, content_sha256: &str) -> String {
+    let canonical =
+        protocol::canonical_request_key_parts(lane, std::iter::once((item_id, content_sha256)));
+    protocol::sha256_hex(format!("local\u{1f}{canonical}").as_bytes())
+}
+
+fn local_item(item_id: &str, text: &str, content_sha256: String) -> jobs::BatchItem {
+    jobs::BatchItem {
+        id: exact_string(item_id),
+        content_sha256,
+        text: exact_string(text),
+    }
+}
+
+fn exact_string(value: &str) -> String {
+    let mut owned = String::with_capacity(value.len());
+    owned.push_str(value);
+    owned
+}
+
+fn local_input_charge_bound(item_id: &str, text: &str) -> Option<usize> {
+    Some(jobs::job_input_bytes_for_shape(
+        protocol::CANONICAL_REQUEST_KEY_BYTES,
+        std::iter::once(jobs::InputShape::exact(item_id.len(), text.len())?),
+    ))
+}
+
+fn local_input_charge_mismatch(input_bytes: usize, charge_bytes: usize) -> Option<SubmitOutcome> {
+    (input_bytes > charge_bytes).then_some(SubmitOutcome::Refused("unsupported_shape"))
+}
+
+fn checked_local_input_capacity(limits: &SynapseLimits) -> Option<u64> {
+    let max_permits = u64::try_from(tokio::sync::Semaphore::MAX_PERMITS).unwrap_or(u64::MAX);
+    bundle::max_queued_input_bytes(limits)
+        .and_then(|queued| {
+            bundle::max_retained_input_bytes(limits)
+                .and_then(|retained| queued.checked_add(retained))
+        })
+        .filter(|capacity| *capacity <= max_permits)
+}
+
+fn constructor_local_input_capacity(limits: &SynapseLimits) -> u64 {
+    checked_local_input_capacity(limits).unwrap_or(0)
+}
+
+fn declared_local_input_capacity(limits: &SynapseLimits) -> u64 {
+    checked_local_input_capacity(limits).unwrap_or(u64::MAX)
 }
 
 /// Captured `Arc<ReadyLane>` values can outlive a failing state transition, so callers must not run a captured backend after the transition.
@@ -1141,8 +1373,10 @@ impl CompositeComponent for SynapseComponent {
         crate::handler::ResourceDeclaration {
             // The declared hold bound is the permit count so the startup starvation guard sees exactly the queries that can park.
             general_task_hold_bound: self.inner.limits.query_admission_permits().unwrap_or(1),
-            // Retained result vectors live outside every `ByteCharge`; declaring their cap makes the runtime subtract it from ingress so a full retention set and a full ingress pool cannot coexist above `max_resident_bytes`.
-            retained_resident_bytes: self.inner.limits.max_retained_result_bytes,
+            // Local job inputs and retained results live outside ingress charges, so the runtime reserves both caps before sizing ingress.
+            // The shared job-table limits prevent wire and local queues from both reaching their full configured count and text caps; reserving the full local cap is conservative.
+            retained_resident_bytes: declared_local_input_capacity(&self.inner.limits)
+                .saturating_add(self.inner.limits.max_retained_result_bytes),
             ..Default::default()
         }
     }
@@ -1307,6 +1541,14 @@ impl SecondaryComponent for SynapseComponent {
         if matches!(&*state, LaneState::Ready(_)) {
             return Ok(());
         }
+        if let Some(config) = &self.inner.config
+            && let Err(error) = bundle::validate_limits(&config.limits)
+        {
+            return Err(InitError(format!(
+                "synapse limits are invalid: {}",
+                error.0
+            )));
+        }
         *state = if self.inner.config.is_some() {
             // Transport does not wait for bundle verification, ORT loading, or model construction.
             // Pre-publication bootstrap records only that the lane is starting.
@@ -1327,13 +1569,6 @@ impl SecondaryComponent for SynapseComponent {
         let Some(config) = self.inner.config.clone() else {
             return Ok(());
         };
-        // Invalid limits fail activation rather than disabling the lane.
-        if let Err(error) = bundle::validate_limits(&config.limits) {
-            return Err(InitError(format!(
-                "synapse limits are invalid: {}",
-                error.0
-            )));
-        }
         // Dropping the activation future does not stop the blocking task.
         let blocking = tokio::task::spawn_blocking(move || {
             let bundle = bundle::load_bundle(
@@ -1381,11 +1616,11 @@ fn lane_state_after_load(loaded: Result<ReadyLane, InferenceError>) -> LaneState
 mod tests {
     use super::*;
 
-    struct NoopEngine;
+    struct NoopEngine(f32);
 
     impl EmbeddingEngine for NoopEngine {
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-            Ok(texts.iter().map(|_| vec![1.0]).collect())
+            Ok(texts.iter().map(|_| vec![self.0]).collect())
         }
 
         fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
@@ -1421,7 +1656,7 @@ mod tests {
                 .query_admission_permits()
                 .expect("default-shaped limits have a permit count");
             let component =
-                SynapseComponent::ready_with_engine(lane(), Arc::new(NoopEngine), limits)
+                SynapseComponent::ready_with_engine(lane(), Arc::new(NoopEngine(1.0)), limits)
                     .expect("limits validate");
             assert_eq!(
                 component.resources().general_task_hold_bound,
@@ -1429,6 +1664,289 @@ mod tests {
                 "max_waiting_queries {max_waiting_queries}"
             );
         }
+    }
+
+    #[test]
+    fn local_job_inputs_are_declared_as_retained_resident_memory() {
+        let limits = SynapseLimits {
+            max_queued_jobs: 1,
+            max_queued_request_bytes: 8 * 1024 * 1024,
+            ..SynapseLimits::default()
+        };
+        let expected = limits
+            .max_retained_result_bytes
+            .checked_add(bundle::max_queued_input_bytes(&limits).unwrap())
+            .and_then(|bytes| bytes.checked_add(bundle::max_retained_input_bytes(&limits).unwrap()))
+            .unwrap();
+        let component =
+            SynapseComponent::ready_with_engine(lane(), Arc::new(NoopEngine(1.0)), limits)
+                .expect("limits validate");
+
+        assert_eq!(
+            component.resources().retained_resident_bytes,
+            expected,
+            "local input retention is reserved outside ingress"
+        );
+    }
+
+    #[test]
+    fn local_input_charge_mismatch_is_an_unsupported_shape() {
+        assert_eq!(
+            local_input_charge_mismatch(2, 1),
+            Some(SubmitOutcome::Refused("unsupported_shape"))
+        );
+        assert_eq!(local_input_charge_mismatch(1, 1), None);
+    }
+
+    #[tokio::test]
+    async fn overflowing_unvalidated_limits_fail_initialization_without_panicking() {
+        let limits = SynapseLimits {
+            max_queued_jobs: usize::MAX,
+            max_queued_request_bytes: u64::MAX,
+            max_batch_items: usize::MAX,
+            ..SynapseLimits::default()
+        };
+        let component = SynapseComponent::new(Some(SynapseConfig {
+            bundle_dir: PathBuf::from("unused"),
+            bundle_manifest_sha256: None,
+            ort_library: PathBuf::from("unused"),
+            ort_library_sha256: String::new(),
+            limits,
+        }));
+        let declaration = component.resources().retained_resident_bytes;
+        let initialized = SecondaryComponent::initialize(&component).await;
+
+        assert!(
+            declaration == u64::MAX && initialized.is_err(),
+            "unvalidated declaration={declaration}, initialize={initialized:?}"
+        );
+    }
+
+    #[test]
+    fn large_unvalidated_item_count_does_not_delay_construction() {
+        let limits = SynapseLimits {
+            max_batch_items: 1_000_000_000_000,
+            ..SynapseLimits::default()
+        };
+        let (sent, received) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let component = SynapseComponent::new(Some(SynapseConfig {
+                bundle_dir: PathBuf::from("unused"),
+                bundle_manifest_sha256: None,
+                ort_library: PathBuf::from("unused"),
+                ort_library_sha256: String::new(),
+                limits,
+            }));
+            let _ = sent.send(component.resources().retained_resident_bytes);
+        });
+
+        received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("construction must not iterate over the configured item count");
+    }
+
+    #[tokio::test]
+    async fn maximal_retained_result_limit_declares_failure_without_panicking() {
+        let limits = SynapseLimits {
+            max_retained_result_bytes: u64::MAX,
+            ..SynapseLimits::default()
+        };
+        let component = SynapseComponent::new(Some(SynapseConfig {
+            bundle_dir: PathBuf::from("unused"),
+            bundle_manifest_sha256: None,
+            ort_library: PathBuf::from("unused"),
+            ort_library_sha256: String::new(),
+            limits,
+        }));
+
+        assert_eq!(component.resources().retained_resident_bytes, u64::MAX);
+        let error = SecondaryComponent::initialize(&component)
+            .await
+            .expect_err("the combined resource declaration must be representable");
+        assert!(
+            error
+                .to_string()
+                .contains("combined local input and retained result capacity overflows"),
+            "{error}"
+        );
+    }
+
+    struct CountingEngine(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl EmbeddingEngine for CountingEngine {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
+        }
+    }
+
+    #[tokio::test]
+    async fn local_input_budget_refuses_before_copy_and_recovers_after_release() {
+        let limits = SynapseLimits {
+            max_queued_jobs: 1,
+            max_queued_request_bytes: 8 * 1024 * 1024,
+            ..SynapseLimits::default()
+        };
+        let queued_capacity = bundle::max_queued_input_bytes(&limits).unwrap() as usize;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let component = SynapseComponent::ready_with_engine(
+            lane(),
+            Arc::new(CountingEngine(Arc::clone(&calls))),
+            limits,
+        )
+        .unwrap();
+        let admitted = component
+            .preflight_embedding_for_lane(&lane(), "local input")
+            .unwrap();
+        assert_eq!(
+            component
+                .submit_admitted(&admitted, &"x".repeat(jobs::MAX_ITEM_ID_BYTES + 1))
+                .unwrap(),
+            SubmitOutcome::Refused("unsupported_shape")
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let capacity = component.inner.local_inputs.capacity();
+        assert!(
+            capacity > queued_capacity,
+            "local capacity must also retain completed-job metadata"
+        );
+        let held = component.inner.local_inputs.try_charge(capacity).unwrap();
+
+        assert_eq!(
+            component.submit_admitted(&admitted, "item").unwrap(),
+            SubmitOutcome::Full
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(held);
+
+        let cpu = component.inner.cpu.acquire().await.unwrap();
+        let SubmitOutcome::Queued { job_id } =
+            component.submit_admitted(&admitted, "item").unwrap()
+        else {
+            panic!("released local budget admits work");
+        };
+        let charged = component.inner.local_inputs.available();
+        assert_eq!(
+            charged,
+            capacity - local_input_charge_bound("item", "local input").unwrap(),
+            "queued input holds its exact owned charge"
+        );
+        drop(cpu);
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            component.poll_admitted(&lane(), &job_id, "item", "local input"),
+            PollOutcome::Page(_)
+        ));
+        assert_eq!(
+            component.inner.local_inputs.available(),
+            capacity
+                - jobs::retained_input_bytes(
+                    protocol::CANONICAL_REQUEST_KEY_BYTES,
+                    std::iter::once(("item".len(), jobs::CONTENT_SHA256_BYTES)),
+                ),
+            "completion keeps only key and item metadata"
+        );
+        component.inner.jobs.clear();
+        assert_eq!(component.inner.local_inputs.available(), capacity);
+    }
+
+    #[tokio::test]
+    async fn retained_local_replay_bypasses_saturated_input_budget() {
+        let component = SynapseComponent::ready_with_engine(
+            lane(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits {
+                max_queued_jobs: 1,
+                max_queued_request_bytes: 8 * 1024 * 1024,
+                ..SynapseLimits::default()
+            },
+        )
+        .unwrap();
+        let cpu = Arc::clone(&component.inner.cpu)
+            .acquire_owned()
+            .await
+            .unwrap();
+        let admitted = component
+            .preflight_embedding_for_lane(&lane(), "retained replay")
+            .unwrap();
+        let SubmitOutcome::Queued { job_id } =
+            component.submit_admitted(&admitted, "item").unwrap()
+        else {
+            panic!("first submit must queue")
+        };
+        let saturation = component
+            .inner
+            .local_inputs
+            .try_charge(component.inner.local_inputs.available())
+            .unwrap();
+
+        assert_eq!(
+            component.submit_admitted(&admitted, "item").unwrap(),
+            SubmitOutcome::Queued { job_id }
+        );
+
+        component.inner.jobs.clear();
+        drop(saturation);
+        drop(cpu);
+        component.inner.closing.cancel();
+        component.inner.tracker.close();
+        component.inner.tracker.wait().await;
+    }
+
+    #[test]
+    fn retained_local_conflict_precedes_input_budget_refusal() {
+        let component = SynapseComponent::ready_with_engine(
+            lane(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits {
+                max_queued_jobs: 1,
+                max_queued_request_bytes: 8 * 1024 * 1024,
+                ..SynapseLimits::default()
+            },
+        )
+        .unwrap();
+        let admitted = component
+            .preflight_embedding_for_lane(&lane(), "expected payload")
+            .unwrap();
+        let expected_digest = protocol::sha256_hex(admitted.text().as_bytes());
+        let key = local_key(&lane(), "item", &expected_digest);
+        let conflicting_digest = protocol::sha256_hex(b"different payload");
+        assert!(matches!(
+            component.inner.jobs.admit_uncharged_for_tests(
+                key,
+                vec![local_item(
+                    "different",
+                    "different payload",
+                    conflicting_digest,
+                )],
+                1,
+            ),
+            jobs::AdmitOutcome::Admitted { .. }
+        ));
+        let saturation = component
+            .inner
+            .local_inputs
+            .try_charge(component.inner.local_inputs.available())
+            .unwrap();
+
+        assert_eq!(
+            component.submit_admitted(&admitted, "item").unwrap(),
+            SubmitOutcome::Refused("idempotency_conflict")
+        );
+
+        component.inner.jobs.clear();
+        drop(saturation);
     }
 
     #[test]
@@ -1449,7 +1967,7 @@ mod tests {
     fn embed_blocking_shares_the_cpu_permit_and_reports_a_held_lane() {
         let component = SynapseComponent::ready_with_engine(
             lane(),
-            Arc::new(NoopEngine),
+            Arc::new(NoopEngine(1.0)),
             SynapseLimits {
                 max_queued_request_bytes: 8 * 1024 * 1024,
                 ..SynapseLimits::default()
@@ -1479,7 +1997,7 @@ mod tests {
     async fn shutdown_disables_the_lane_for_late_callers() {
         let component = SynapseComponent::ready_with_engine(
             lane(),
-            Arc::new(NoopEngine),
+            Arc::new(NoopEngine(1.0)),
             SynapseLimits {
                 max_queued_request_bytes: 8 * 1024 * 1024,
                 ..SynapseLimits::default()
@@ -1519,6 +2037,114 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn local_jobs_are_keyed_by_the_admitting_lane() {
+        let lane_a = lane();
+        let mut lane_b = lane_a.clone();
+        lane_b.model = "replacement".to_owned();
+        lane_b.fingerprint = "b2".repeat(32);
+        lane_b.table_epoch += 1;
+        let component = SynapseComponent::ready_with_engine(
+            lane_a.clone(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits::default(),
+        )
+        .unwrap();
+        let permit = component.inner.cpu.acquire().await.unwrap();
+        let mut jobs = Vec::new();
+        for identity in [&lane_a, &lane_b] {
+            let admitted = component
+                .preflight_embedding(EmbeddingInputLimits::of_lane(identity), "same text")
+                .unwrap();
+            let submitted = component.submit_admitted(&admitted, "same-item").unwrap();
+            assert_eq!(
+                component.submit_admitted(&admitted, "same-item").unwrap(),
+                submitted,
+                "a retained job is idempotent within its lane"
+            );
+            let SubmitOutcome::Queued { job_id } = submitted else {
+                panic!("submission must queue")
+            };
+            jobs.push(job_id);
+            component
+                .replace_ready_with_engine_for_test(lane_b.clone(), Arc::new(NoopEngine(-1.0)))
+                .unwrap();
+        }
+        assert_ne!(
+            jobs[0], jobs[1],
+            "a replacement lane must get a distinct job"
+        );
+        drop(permit);
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        mark_failing(&component.inner, "test failure".to_owned());
+        for ((identity, job), expected) in
+            [&lane_a, &lane_b].into_iter().zip(&jobs).zip([1.0, -1.0])
+        {
+            let PollOutcome::Page(page) =
+                component.poll_admitted(identity, job, "same-item", "same text")
+            else {
+                panic!("settled jobs must remain pollable under their admitted lane")
+            };
+            assert_eq!(
+                page.vectors[0].2.as_ref(),
+                &[expected],
+                "worker must retain its engine"
+            );
+            let other_job = if job == &jobs[0] { &jobs[1] } else { &jobs[0] };
+            assert!(matches!(
+                component.poll_admitted(identity, other_job, "same-item", "same text"),
+                PollOutcome::KeyMismatch
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_key_cannot_poll_local_job() {
+        let identity = lane();
+        let component = SynapseComponent::ready_with_engine(
+            identity.clone(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits::default(),
+        )
+        .unwrap();
+        let admitted = component
+            .preflight_embedding(EmbeddingInputLimits::of_lane(&identity), "text")
+            .unwrap();
+        let SubmitOutcome::Queued { job_id } =
+            component.submit_admitted(&admitted, "item").unwrap()
+        else {
+            panic!("submission must queue")
+        };
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            component.poll_admitted(&identity, &job_id, "item", "text"),
+            PollOutcome::Page(_)
+        ));
+        let wire_key = protocol::canonical_request_key(
+            &identity,
+            &[local_item("item", "text", protocol::sha256_hex(b"text"))],
+        );
+        assert!(
+            matches!(
+                component.inner.jobs.poll(&job_id, &wire_key, None),
+                PollOutcome::KeyMismatch
+            ),
+            "a wire canonical key must not poll a local job"
+        );
+    }
+
     #[test]
     fn load_failures_route_invariants_to_failing_and_artifacts_to_disabled() {
         match lane_state_after_load(Err(InferenceError::Invariant("bad norm".to_owned()))) {
@@ -1530,9 +2156,53 @@ mod tests {
             _ => panic!("an artifact failure must disable the lane"),
         }
         assert!(matches!(
-            lane_state_after_load(Ok(ReadyLane::new(Arc::new(NoopEngine), lane()))),
+            lane_state_after_load(Ok(ReadyLane::new(Arc::new(NoopEngine(1.0)), lane()))),
             LaneState::Ready(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn local_poll_uses_frozen_identity_even_when_the_lane_fails() {
+        let identity = lane();
+        let component = SynapseComponent::ready_with_engine(
+            identity.clone(),
+            Arc::new(NoopEngine(1.0)),
+            SynapseLimits::default(),
+        )
+        .unwrap();
+        let admitted = component
+            .preflight_embedding(EmbeddingInputLimits::of_lane(&identity), "text")
+            .unwrap();
+        let SubmitOutcome::Queued { job_id } =
+            component.submit_admitted(&admitted, "item").unwrap()
+        else {
+            panic!("submission must queue")
+        };
+        component.inner.tracker.close();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            component.inner.tracker.wait(),
+        )
+        .await
+        .unwrap();
+        mark_failing(&component.inner, "test failure".to_owned());
+        let PollOutcome::Page(page) = component.poll_admitted(&identity, &job_id, "item", "text")
+        else {
+            panic!("settled result must not depend on lane availability")
+        };
+        assert_eq!(page.vectors[0].2.as_ref(), &[1.0]);
+        let mut wrong_lane = identity.clone();
+        wrong_lane.table_epoch += 1;
+        for (lane, item, text) in [
+            (&wrong_lane, "item", "text"),
+            (&identity, "other", "text"),
+            (&identity, "item", "other"),
+        ] {
+            assert!(matches!(
+                component.poll_admitted(lane, &job_id, item, text),
+                PollOutcome::KeyMismatch
+            ));
+        }
     }
 
     struct GatedCountEngine {
@@ -1582,6 +2252,50 @@ mod tests {
             .expect("limits validate"),
         );
         (component, entered_rx, release_tx)
+    }
+
+    #[test]
+    fn frozen_preflight_settles_count_failures_and_panics() {
+        for error in [
+            InferenceError::Input("private input".to_owned()),
+            InferenceError::Execution("private input".to_owned()),
+            InferenceError::Artifact("private input".to_owned()),
+            InferenceError::Invariant("private input".to_owned()),
+        ] {
+            let kind = InferenceFailureKind::from(&error);
+            let (component, _entered, release) = gated_count_component();
+            release.send(error).unwrap();
+            assert_eq!(
+                component.preflight_embedding_for_lane(&lane(), "private input"),
+                Err(DenseUnavailable::CountUnavailable(kind))
+            );
+            match (kind, component.status()) {
+                (
+                    InferenceFailureKind::Input | InferenceFailureKind::Execution,
+                    SynapseStatus::Ready(_),
+                ) => {}
+                (InferenceFailureKind::Artifact, SynapseStatus::Disabled { reason }) => {
+                    assert_eq!(reason, "token counting declared the artifact unusable");
+                }
+                (InferenceFailureKind::Invariant, SynapseStatus::Failing { reason }) => {
+                    assert_eq!(reason, "token counting failed an invariant");
+                }
+                (_, state) => panic!("unexpected state for {kind:?}: {state:?}"),
+            }
+        }
+
+        let (component, _entered, release) = gated_count_component();
+        drop(release);
+        assert_eq!(
+            component.preflight_embedding_for_lane(&lane(), "private input"),
+            Err(DenseUnavailable::CountUnavailable(
+                InferenceFailureKind::Invariant
+            ))
+        );
+        let SynapseStatus::Failing { reason } = component.status() else {
+            panic!("a counter panic quarantines the frozen lane");
+        };
+        assert_eq!(reason, "token counting panicked");
     }
 
     #[tokio::test]
