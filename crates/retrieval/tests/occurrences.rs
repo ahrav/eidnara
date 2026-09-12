@@ -1317,7 +1317,12 @@ fn a_different_identity_cannot_be_installed_over_an_existing_projection() {
     let store = open(dir.path());
     store
         .with_conn_fenced(|conn| {
-            for schema_version in [retrieval::SCHEMA_VERSION + 1, 0, u32::MAX] {
+            for schema_version in [
+                retrieval::SCHEMA_VERSION - 1,
+                retrieval::SCHEMA_VERSION + 1,
+                0,
+                u32::MAX,
+            ] {
                 let mut wrong_version = identity();
                 wrong_version.schema_version = schema_version;
                 assert_eq!(

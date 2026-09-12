@@ -39,6 +39,23 @@ pub struct EligibilityCandidate {
     pub artifact_digest: Option<String>,
 }
 
+impl EligibilityCandidate {
+    /// Validates identity fields without acquiring a kernel reader.
+    pub fn validate(&self) -> Result<(), KernelError> {
+        if self.object_id.is_empty() || self.object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES {
+            return Err(KernelError::InvalidInput);
+        }
+        if self
+            .artifact_digest
+            .as_deref()
+            .is_some_and(|digest| !is_artifact_digest(digest))
+        {
+            return Err(KernelError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
 /// The exact `project` term value a stored scope must carry for its rows to serve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectScope {
@@ -186,18 +203,7 @@ pub(crate) fn check_bounds(candidates: &[EligibilityCandidate]) -> Result<(), Ke
         return Err(KernelError::InvalidInput);
     }
     for candidate in candidates {
-        if candidate.object_id.is_empty()
-            || candidate.object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES
-        {
-            return Err(KernelError::InvalidInput);
-        }
-        if candidate
-            .artifact_digest
-            .as_deref()
-            .is_some_and(|digest| !is_artifact_digest(digest))
-        {
-            return Err(KernelError::InvalidInput);
-        }
+        candidate.validate()?;
     }
     Ok(())
 }

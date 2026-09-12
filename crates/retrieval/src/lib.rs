@@ -12,6 +12,7 @@
 //! Payloads are never logged; refusals name identities and sizes, not content.
 
 pub mod batch;
+pub mod dispatch;
 pub mod vectors;
 
 use std::collections::HashMap;
@@ -31,7 +32,7 @@ use storage::GuardedConn;
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.

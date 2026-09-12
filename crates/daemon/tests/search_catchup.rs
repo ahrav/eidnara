@@ -1784,7 +1784,8 @@ fn quarantine_between_ack_request_and_kernel_write_preserves_the_checkpoint() {
     let error = driver
         .run_episode(&consumer, &bounds(), 3, &mut |event| {
             if matches!(event, EpisodeEvent::AcknowledgementRequested { .. }) && !quarantined {
-                projection.enter_quarantine_for_test(QuarantineKind::Integrity, "checkpoint doubt");
+                projection
+                    .enter_quarantine_for_test(QuarantineKind::Integrity, &"checkpoint doubt");
                 quarantined = true;
             }
         })

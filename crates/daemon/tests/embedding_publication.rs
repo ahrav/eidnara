@@ -1105,7 +1105,7 @@ fn a_quarantine_entered_after_the_guard_stops_the_commit() {
         &mut |event| {
             // The test-only hook places doubt after the vector insert while the projection connection is held. The transaction rolls back the write.
             if event == PublicationEvent::VectorStaged {
-                projection.enter_quarantine_for_test(QuarantineKind::Integrity, "peer doubt");
+                projection.enter_quarantine_for_test(QuarantineKind::Integrity, &"peer doubt");
             }
         },
     );
@@ -2109,7 +2109,7 @@ fn quarantine_during_reconciliation_refuses_a_durable_completion() {
                 if event == quarantine_at {
                     projection.enter_quarantine_for_test(
                         QuarantineKind::Integrity,
-                        "reconciliation test",
+                        &"reconciliation test",
                     );
                 }
             },

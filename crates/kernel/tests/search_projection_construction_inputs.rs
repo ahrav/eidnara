@@ -262,8 +262,8 @@ fn fault_maps_define_each_marker_once_and_mention_no_undefined_marker() {
         total += defined.len();
         union.extend(unique);
     }
-    assert_eq!(total, 63);
-    assert_eq!(union.len(), 63);
+    assert_eq!(total, 65);
+    assert_eq!(union.len(), 65);
 
     let sites = matrix["marker_definition_sites"]
         .as_object()

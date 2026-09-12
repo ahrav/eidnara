@@ -184,8 +184,12 @@ impl SearchProjection {
     /// Forces quarantine without constructing a storage failure, so tests can
     /// place the state change at an exact writer boundary.
     #[cfg(feature = "test-support")]
-    pub fn enter_quarantine_for_test(&self, kind: QuarantineKind, detail: &str) -> Quarantine {
-        self.enter_quarantine(kind, &detail)
+    pub fn enter_quarantine_for_test(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        self.enter_quarantine(kind, error)
     }
 
     /// Bounds the page cache and keeps transient sort and index storage in
