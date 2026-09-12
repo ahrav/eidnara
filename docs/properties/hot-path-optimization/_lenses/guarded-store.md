@@ -25,8 +25,8 @@ durability, or a schema/version ledger.
 
 [mutex]: ../../../../crates/storage/src/lib.rs#L240-L277
 [read]: ../../../../crates/storage/src/lib.rs#L305-L321
-[write]: ../../../../crates/storage/src/lib.rs#L369-L433
-[scope]: ../../../../crates/storage/src/lib.rs#L887-L969
-[cache]: ../../../../crates/storage/src/lib.rs#L722-L730
+[write]: ../../../../crates/storage/src/lib.rs#L370-L434
+[scope]: ../../../../crates/storage/src/lib.rs#L1057-L1139
+[cache]: ../../../../crates/storage/src/lib.rs#L818-L825
 [facade]: ../../../../crates/memory-store/src/lib.rs#L5563-L5586
-[snapshot]: ../../../../crates/storage/src/lib.rs#L4796-L4833
+[snapshot]: ../../../../crates/storage/src/lib.rs#L5432-L5469

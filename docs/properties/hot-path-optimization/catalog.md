@@ -314,8 +314,16 @@ temp-shadow statement cached before that callback's main DDL is refused
 afterwards; a panicking read or fenced callback returns the connection to
 the unrestricted mode and rolls its partial write back; and baseline text with
 a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
-format-marker delete is refused by the store connection's gate. No
-baseline-versus-candidate trace over interleaved facade callers runs.
+format-marker delete is refused by the store connection's gate. With the
+snapshot keyed on the schema and data versions, a rename through a second
+connection is observed by the next callback even when the schema version is
+written back, a maintenance-left temp shadow is still refused, a panicking
+maintenance callback still discards the snapshot and re-arms the pin, a
+rescan under an unchanged schema version flushes the cached statements and
+reloads the parsed schema, a
+second connection cannot leave WAL while the store is open, and the
+durability pin runs once per connection until the maintenance path re-arms it. No baseline-versus-candidate trace over interleaved facade
+callers runs.
 Guarantee: Cached statements and reduced callback setup preserve each call's
 current read/write, schema, fencing, and applicable facade authority.
 Check: `always` - Across identical authority-transition traces, baseline and
@@ -638,7 +646,7 @@ them without creating implementation tickets.
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L934
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [read-callback]: ../../../crates/storage/src/lib.rs#L305-L321
-[write-callback]: ../../../crates/storage/src/lib.rs#L369-L433
+[write-callback]: ../../../crates/storage/src/lib.rs#L370-L434
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4031-L4058
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338

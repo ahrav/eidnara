@@ -147,15 +147,22 @@ Checks added with the mode-gated authorizer (implementation base
 | [Store statements stay uncached][surface-guard-test] | No fence or durability-pin statement is found in the statement cache after an open. | unaudited |
 | [Maintenance flush survives a panic][flush-unwind-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a maintenance callback creates main `late` and panics before returning; no temp `late` is created. Failed with `Ok(())` before the flush moved into a drop guard. | unaudited |
 | [Unrestricted statements do not reach guarded callbacks][gate-tests] | A fence upsert prepared unrestricted is reused without re-authorization until the cache is flushed, then refused; every `deny_baseline_escapes` denial is reachable; nested mode entry is an assertion in every build. | unaudited |
+| [Schema snapshot keyed on the schema and data versions][snapshot-key-test] | An unchanged key reuses the snapshot; a rename replaces it; maintenance discards it at an unchanged key; a foreign commit that writes the old schema version back still moves the key; defensive mode neutralizes `schema_version` and `writable_schema` writes; an oversized snapshot is not retained; the release comparison rescans only when the version moved. | unaudited |
+| [Durability pin once per connection][pin-test] | A fenced write does not re-run the pin; the first fenced write after maintenance re-pins `synchronous=FULL`; a panicking maintenance callback still re-arms the pin and discards the snapshot. | unaudited |
+| [Foreign rename observed][rename-test] | After an `ALTER TABLE ... RENAME` on a second connection, the next callback denies a temp shadow of the new name, allows the old one, and still refuses a maintenance-left shadow. | unaudited |
+| [Rescan flushes cached statements][rescan-flush-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a second connection creates main `late` and writes the old schema version back; no temp `late` is created. Failed with `Ok(())` before the rescan flushed the cache. | unaudited |
+| [Rescan reloads the parsed schema][parsed-schema-test] | After a second connection renames `kv` to `kv2` and writes the old schema version back, the next fenced callback resolves `kv2` and gets `no such table` for `kv`; failed with `no such table: kv2` before the rescan reset the parsed schema. | unaudited |
+| [Unretained policy still flushes][unretained-policy-test] | A `CREATE TEMP TABLE late (x)` cached under an oversized foreign schema is refused `not authorized` after a second connection creates main `late` and writes back the schema version the store last saw; no temp `late` is created. Failed with `Ok(())` while the retained snapshot survived an oversized replacement. | unaudited |
+| [Foreign journal-mode switch refused][foreign-wal-test] | A second connection's `PRAGMA journal_mode = DELETE` returns the unchanged `wal` mode or a `DatabaseBusy` error while the store is open and idle; the store's next fenced write still runs in WAL without re-running the pin. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4472-L4562
-[read-witness]: ../../../crates/storage/src/lib.rs#L4564-L4598
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L4600-L4628
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4630-L4686
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4688-L4722
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4724-L4749
-[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L4751-L4793
-[gate-tests]: ../../../crates/storage/src/lib.rs#L1985-L2087
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4880-L4977
+[read-witness]: ../../../crates/storage/src/lib.rs#L5031-L5060
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L5067-L5090
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L5096-L5148
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L5154-L5184
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L5191-L5211
+[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L5213-L5255
+[gate-tests]: ../../../crates/storage/src/lib.rs#L2162-L2501
 
 ## History render
 
@@ -287,26 +294,26 @@ that no related check exists anywhere in the repository.
 [upload-cap-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L910
 [upload-finish-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L965
 [upload-keep-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1103
-[scope-install]: ../../../crates/storage/src/lib.rs#L887-L909
-[scope-restore]: ../../../crates/storage/src/lib.rs#L911-L969
+[scope-install]: ../../../crates/storage/src/lib.rs#L1057-L1082
+[scope-restore]: ../../../crates/storage/src/lib.rs#L1084-L1139
 [facade-scope]: ../../../crates/memory-store/src/lib.rs#L5563-L5586
-[shadow-create-test]: ../../../crates/storage/src/lib.rs#L2918
-[shadow-test]: ../../../crates/storage/src/lib.rs#L2964
-[lower-test]: ../../../crates/storage/src/lib.rs#L3009
-[schema-test]: ../../../crates/storage/src/lib.rs#L3055
-[unwind-test]: ../../../crates/storage/src/lib.rs#L3694
-[durability-test]: ../../../crates/storage/src/lib.rs#L3716
-[read-escape-test]: ../../../crates/storage/src/lib.rs#L3784
-[tx-escape-test]: ../../../crates/storage/src/lib.rs#L3834
-[fence-row-test]: ../../../crates/storage/src/lib.rs#L3881
-[format-test]: ../../../crates/storage/src/lib.rs#L3881
-[reentry-test]: ../../../crates/storage/src/lib.rs#L4106
-[cached-test]: ../../../crates/storage/src/lib.rs#L4418
-[snapshot-test]: ../../../crates/storage/src/lib.rs#L4796-L4833
-[read-tx-test]: ../../../crates/storage/src/lib.rs#L4836
-[attach-test]: ../../../crates/storage/src/lib.rs#L4869
-[pragma-test]: ../../../crates/storage/src/lib.rs#L4902
-[rollback-test]: ../../../crates/storage/src/lib.rs#L4966
+[shadow-create-test]: ../../../crates/storage/src/lib.rs#L3333
+[shadow-test]: ../../../crates/storage/src/lib.rs#L3379
+[lower-test]: ../../../crates/storage/src/lib.rs#L3424
+[schema-test]: ../../../crates/storage/src/lib.rs#L3470
+[unwind-test]: ../../../crates/storage/src/lib.rs#L4109
+[durability-test]: ../../../crates/storage/src/lib.rs#L4131
+[read-escape-test]: ../../../crates/storage/src/lib.rs#L4199
+[tx-escape-test]: ../../../crates/storage/src/lib.rs#L4249
+[fence-row-test]: ../../../crates/storage/src/lib.rs#L4296
+[format-test]: ../../../crates/storage/src/lib.rs#L4296
+[reentry-test]: ../../../crates/storage/src/lib.rs#L4521
+[cached-test]: ../../../crates/storage/src/lib.rs#L4833
+[snapshot-test]: ../../../crates/storage/src/lib.rs#L5432-L5469
+[read-tx-test]: ../../../crates/storage/src/lib.rs#L5472
+[attach-test]: ../../../crates/storage/src/lib.rs#L5505
+[pragma-test]: ../../../crates/storage/src/lib.rs#L5538
+[rollback-test]: ../../../crates/storage/src/lib.rs#L5602
 [inner-guard]: ../../../crates/daemon/src/decay_render.rs#L324-L338
 [outer-guard]: ../../../crates/daemon/src/m0_compose.rs#L185-L215
 [oldest-test]: ../../../crates/daemon/src/decay_render.rs#L509
@@ -357,16 +364,16 @@ that no related check exists anywhere in the repository.
 [upload-cleared]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1375
 [upload-discard]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1397
 [reentry-guard]: ../../../crates/storage/src/lib.rs#L240-L277
-[fenced-guard]: ../../../crates/storage/src/lib.rs#L369-L433
-[checkpoint-test]: ../../../crates/storage/src/lib.rs#L4022
-[persist-test]: ../../../crates/storage/src/lib.rs#L2918
-[read-write-test]: ../../../crates/storage/src/lib.rs#L3669
-[maintenance-test]: ../../../crates/storage/src/lib.rs#L4022
-[udf-test]: ../../../crates/storage/src/lib.rs#L4054
-[stale-precheck]: ../../../crates/storage/src/lib.rs#L2509
-[negative-fence]: ../../../crates/storage/src/lib.rs#L4995
-[handover-test]: ../../../crates/storage/src/lib.rs#L2509
-[equal-epoch]: ../../../crates/storage/src/lib.rs#L3339
+[fenced-guard]: ../../../crates/storage/src/lib.rs#L370-L434
+[checkpoint-test]: ../../../crates/storage/src/lib.rs#L4437
+[persist-test]: ../../../crates/storage/src/lib.rs#L3333
+[read-write-test]: ../../../crates/storage/src/lib.rs#L4084
+[maintenance-test]: ../../../crates/storage/src/lib.rs#L4437
+[udf-test]: ../../../crates/storage/src/lib.rs#L4469
+[stale-precheck]: ../../../crates/storage/src/lib.rs#L2924
+[negative-fence]: ../../../crates/storage/src/lib.rs#L5631
+[handover-test]: ../../../crates/storage/src/lib.rs#L2924
+[equal-epoch]: ../../../crates/storage/src/lib.rs#L3754
 [core-branches]: ../../../crates/cache-stability/src/lib.rs#L221-L287
 [soft-producer]: ../../../crates/daemon/src/transform.rs#L4455-L4507
 [newest-tier]: ../../../crates/daemon/src/decay_render.rs#L384
@@ -410,3 +417,10 @@ that no related check exists anywhere in the repository.
 [shared-catalog]: ../shared-primitives/catalog.md
 [transform-catalog]: ../daemon/transform/catalog.md
 [memory-catalog]: ../memory-store/catalog.md
+[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2258-L2392
+[pin-test]: ../../../crates/storage/src/lib.rs#L2400-L2492
+[rename-test]: ../../../crates/storage/src/lib.rs#L4984-L5024
+[rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5299-L5338
+[foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5262-L5292
+[unretained-policy-test]: ../../../crates/storage/src/lib.rs#L5383-L5429
+[parsed-schema-test]: ../../../crates/storage/src/lib.rs#L5344-L5377

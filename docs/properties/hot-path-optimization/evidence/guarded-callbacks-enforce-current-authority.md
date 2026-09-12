@@ -63,14 +63,17 @@ At the discovery baseline no authority-transition experiment ran.
 
 Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969`; bundled SQLite
 3.51.3 through rusqlite 0.39.0.
-Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/428)
-and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+Preservation authority: implementation tickets
+[#428](https://github.com/ahrav/eidnara/issues/428) (mode gate) and
+[#429](https://github.com/ahrav/eidnara/issues/429) (schema-version keyed
+snapshot and once-per-connection durability pin), and the
+[parent specification](https://github.com/ahrav/eidnara/issues/350).
 
 The store installs [one authorizer per connection][gate-install] at open. The
 authorizer reads a [connection mode][mode] under the store's lock:
 `Unrestricted` allows everything, `Guarded` applies `deny_scope_escapes`
-against the main-schema names captured at callback entry, and `Baseline`
-applies `deny_baseline_escapes`. The four situations the specification names
+against the main-schema names of the [schema snapshot][snapshot] the callback
+took at entry, and `Baseline` applies `deny_baseline_escapes`. The four situations the specification names
 map onto three policies: a read-only callback and a fenced write share the
 `Guarded` policy and differ only by `query_only`, which SQLite checks when a
 statement runs. A callback [enters its mode][scope-install] after the
@@ -82,13 +85,72 @@ fence, pins durability, and claims inside the immediate transaction. The
 [baseline DDL][apply] on a pristine file runs under `Baseline`; the marker and
 version writes that follow run under `Unrestricted`.
 
+The [snapshot][snapshot] is [keyed][snapshot-cache] on the header schema
+version and the pager data version, read at callback entry inside the
+callback's transaction. Any main-schema DDL on any connection bumps the schema
+version, so the [rename test][rename-test] shows the callback after a foreign
+`ALTER TABLE ... RENAME` denying a temp shadow of the new name and allowing the
+old one. The schema version alone is not an integrity key: it is a stored
+header field a foreign connection can write back, and a `writable_schema`
+edit moves it not at all. Two mechanisms close that. The data version is
+computed by the pager and stored nowhere, and every foreign commit moves it,
+so the [forged-version test][forge-test] shows a rename followed by a write of
+the old schema version still rescanned. SQLite expires a cached statement only
+when the schema cookie moves, so that rescan also [flushes the statement
+cache][snapshot-cache] when it changes the main-schema names under an unchanged
+schema version; the [rescan-flush test][rescan-flush-test] shows a cached
+`CREATE TEMP TABLE late (x)` refused `not authorized` after a foreign
+`CREATE TABLE late` that wrote the old schema version back, with no temp
+`late` created. The same forged cookie leaves SQLite's parsed schema stale,
+so that rescan also runs `PRAGMA writable_schema = RESET`; the
+[parsed-schema test][parsed-schema-test] shows a callback after a foreign
+rename plus a written-back version resolving `kv2` and refusing `kv`. An
+oversized snapshot also clears the retained one, so the
+comparison never runs against a policy older than the cached statements; the
+[unretained-policy test][unretained-policy-test] caches the statement under an
+oversized foreign schema, restores the cookie the store last saw, and shows
+the same refusal. On the store connection
+[defensive mode][defensive] turns `PRAGMA schema_version = N` and
+`PRAGMA writable_schema = ON` into no-ops, which the
+[defensive test][defensive-test] pins. The temp-schema shadow scan stays
+uncached: the temp schema has no version to key on, it is normally empty, and
+the rename test shows a shadow that maintenance leaves is still refused. At
+release the [infrastructure comparison][infra-check] is satisfied by an
+unchanged schema version and rescans otherwise; the guarded policy denies every
+statement that could move the version inside a callback, so the rescan branch
+is a defense against an authorizer gap, and the [release test][release-test]
+exercises both branches directly.
+
+The durability pin [runs once per connection][pin]: at open, and again only
+after the maintenance path, whose [exit guard][maintenance-exit] discards the
+snapshot, re-arms the pin, and flushes the statement cache, including when the
+callback unwinds. The [pin test][pin-test] shows a fenced write leaving a
+raw-connection `synchronous=OFF` alone and the first fenced write after
+maintenance re-pinning `FULL`; the [unwind test][unwind-test] shows a
+panicking maintenance callback still re-arming the pin, discarding the
+snapshot, and leaving its temp shadow to be refused. The
+[read-durability test][durability-test] keeps the maintenance-lowers,
+fenced-re-pins case, and the journal-mode refusal is unchanged. Another
+connection cannot leave WAL while this one holds the database open, and
+`synchronous` is connection-local, so the pin holds between maintenance
+callbacks; the [foreign-WAL test][foreign-wal-test] accepts a second
+connection's `PRAGMA journal_mode = DELETE` returning the unchanged `wal` mode
+or a `DatabaseBusy` error while the store is idle between callbacks, and
+shows the next fenced write still in WAL. A snapshot is retained only within
+[`SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`][bound], measured over the collections'
+heap including hashbrown buckets, the trailing control group, and the `Arc`
+counts, which the daemon adds to its declared
+retained-resident total once per storage connection; the
+[bound test][bound-test] shows an oversized snapshot serving its callback
+without being kept.
+
 SQLite evaluates the authorizer at prepare time, and a statement taken from
 the cache is not re-authorized. The gate keeps that safe by construction:
 
 - Only guarded callbacks populate the cache. `MaintenanceConn` exposes no
   cached preparation, the store's own fence and pragma statements run through
   uncached `execute` and `query_row`, and the [maintenance path flushes the
-  cache][flush] through a [drop guard][flush-guard] when its callback ends,
+  cache][flush] through a [drop guard][maintenance-exit] when its callback ends,
   on return and on unwind. The [internal gate tests][gate-tests]
   pin both halves: an unrestricted-prepared fence upsert is reused without
   re-authorization when the cache is not flushed, and is refused with
@@ -146,40 +208,66 @@ the mechanism; the latency effect is a W1 measurement and is not claimed here.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p storage --locked` passed 68 tests after the change: the 58 that
-passed before it, four internal gate tests, and six store-level tests added
-here. The denial-matrix tests that existed at the baseline pass unchanged.
+`cargo test -p storage --locked` passed 68 tests after the mode gate: the 58
+that passed before it, four internal gate tests, and six store-level tests. The
+denial-matrix tests that existed at the baseline pass unchanged. After the
+schema-version keyed snapshot and the once-per-connection pin the same command
+passed 76 tests: seven internal tests (key reuse and replacement, defensive
+mode, forged version, retained bound, release comparison, pin, maintenance
+unwind) and the rename test were added.
 
 After the flush moved into a drop guard, `cargo test -p storage --locked`
 passed 72 tests at `perf/mode-gated-authorizer` merged with `origin/main`:
 the 68 above, three tests the merge brought in, and the flush-on-unwind test.
 Review-time verification: the new test failed with `Ok(())` in place of
-`not authorized` before the guard and passes with it. The anchors below are to
-the live tree at that state.
+`not authorized` before the guard and passes with it. On this branch the
+flush is one action of the maintenance exit guard, and the same command
+passes 80 tests: the 76 above, the three from `origin/main`, and the
+flush-on-unwind test. With the rescan flush, the parsed-schema reload, the
+unretained-policy check, and the foreign-WAL check it passes 84 tests. The
+anchors below are to the live tree at that state.
 
 [lock]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L195-L209
 [read]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L229-L245
 [write]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L290-L316
 [live-read]: ../../../../crates/storage/src/lib.rs#L305-L321
-[live-write]: ../../../../crates/storage/src/lib.rs#L369-L433
+[live-write]: ../../../../crates/storage/src/lib.rs#L370-L434
 [scope]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L624-L705
 [cache]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L487-L498
 [facade]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5563-L5586
 [notes]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5999-L6025
 [scope-owners]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4772-L4823
-[mode]: ../../../../crates/storage/src/lib.rs#L709-L720
-[gate-install]: ../../../../crates/storage/src/lib.rs#L1317
-[flush]: ../../../../crates/storage/src/lib.rs#L334-L343
-[flush-guard]: ../../../../crates/storage/src/lib.rs#L522-L535
-[scope-install]: ../../../../crates/storage/src/lib.rs#L867-L969
-[mode-hold]: ../../../../crates/storage/src/lib.rs#L770-L779
-[apply]: ../../../../crates/storage/src/lib.rs#L1824-L1862
-[gate-tests]: ../../../../crates/storage/src/lib.rs#L1985-L2087
-[probe]: ../../../../crates/storage/src/lib.rs#L4472-L4562
-[read-witness]: ../../../../crates/storage/src/lib.rs#L4564-L4598
-[temp-write]: ../../../../crates/storage/src/lib.rs#L4600-L4628
-[restore-test]: ../../../../crates/storage/src/lib.rs#L4630-L4686
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L4688-L4722
-[surface-test]: ../../../../crates/storage/src/lib.rs#L4724-L4749
-[flush-test]: ../../../../crates/storage/src/lib.rs#L4751-L4793
-[cached-test]: ../../../../crates/storage/src/lib.rs#L4418-L4460
+[mode]: ../../../../crates/storage/src/lib.rs#L717-L729
+[gate-install]: ../../../../crates/storage/src/lib.rs#L1494
+[flush]: ../../../../crates/storage/src/lib.rs#L334-L344
+[scope-install]: ../../../../crates/storage/src/lib.rs#L1037-L1139
+[mode-hold]: ../../../../crates/storage/src/lib.rs#L940-L942
+[apply]: ../../../../crates/storage/src/lib.rs#L2001-L2039
+[gate-tests]: ../../../../crates/storage/src/lib.rs#L2162-L2501
+[probe]: ../../../../crates/storage/src/lib.rs#L4880-L4977
+[read-witness]: ../../../../crates/storage/src/lib.rs#L5031-L5060
+[temp-write]: ../../../../crates/storage/src/lib.rs#L5067-L5090
+[restore-test]: ../../../../crates/storage/src/lib.rs#L5096-L5148
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L5154-L5184
+[surface-test]: ../../../../crates/storage/src/lib.rs#L5191-L5211
+[flush-test]: ../../../../crates/storage/src/lib.rs#L5213-L5255
+[cached-test]: ../../../../crates/storage/src/lib.rs#L4833
+[snapshot]: ../../../../crates/storage/src/lib.rs#L737-L747
+[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L884-L906
+[infra-check]: ../../../../crates/storage/src/lib.rs#L1112-L1127
+[bound]: ../../../../crates/storage/src/lib.rs#L771
+[rename-test]: ../../../../crates/storage/src/lib.rs#L4984-L5024
+[pin-test]: ../../../../crates/storage/src/lib.rs#L2400-L2438
+[bound-test]: ../../../../crates/storage/src/lib.rs#L2349-L2370
+[durability-test]: ../../../../crates/storage/src/lib.rs#L4131-L4196
+[forge-test]: ../../../../crates/storage/src/lib.rs#L2313-L2343
+[defensive]: ../../../../crates/storage/src/lib.rs#L835
+[defensive-test]: ../../../../crates/storage/src/lib.rs#L2287-L2307
+[release-test]: ../../../../crates/storage/src/lib.rs#L2376-L2392
+[pin]: ../../../../crates/storage/src/lib.rs#L912-L928
+[maintenance-exit]: ../../../../crates/storage/src/lib.rs#L526-L535
+[unwind-test]: ../../../../crates/storage/src/lib.rs#L2443-L2492
+[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5299-L5338
+[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5262-L5292
+[unretained-policy-test]: ../../../../crates/storage/src/lib.rs#L5383-L5429
+[parsed-schema-test]: ../../../../crates/storage/src/lib.rs#L5344-L5377
