@@ -764,7 +764,7 @@ fn retirement_does_not_wait_out_its_budget_behind_the_writer() {
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let kernel = &corpus.kernel;
-    let report = std::thread::scope(|scope| {
+    let (report, waited) = std::thread::scope(|scope| {
         // Holds the kernel writer until released, well after the episode's deadline.
         scope.spawn(move || {
             let _ = kernel.commit(intent("hold-writer"), |_| {
@@ -774,18 +774,25 @@ fn retirement_does_not_wait_out_its_budget_behind_the_writer() {
             });
         });
         held_rx.recv().unwrap();
+        // The holder lets go only long after the deadline; an episode that returns sooner did not wait it out.
         scope.spawn(move || {
-            std::thread::sleep(Duration::from_millis(900));
+            std::thread::sleep(Duration::from_secs(5));
             release_tx.send(()).unwrap();
         });
-        GitReconciler::new(&corpus.kernel)
+        let started = Instant::now();
+        let report = GitReconciler::new(&corpus.kernel)
             .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
-            .unwrap()
+            .unwrap();
+        (report, started.elapsed())
     });
     assert_eq!(
         report.end,
         ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Retirement)),
         "{report:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(4),
+        "waited {waited:?} for the writer"
     );
     assert_eq!(report.retired, 0);
     assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
