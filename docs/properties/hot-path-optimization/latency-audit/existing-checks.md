@@ -94,7 +94,7 @@ not the handler.
 | [`tag_baseline_cache_refuses_an_insert_larger_than_its_budget`][t-tag-refusal] | An oversized insert is refused. A replacement with spare source capacity removes the old entry and charge while loaded rows remain usable; readmission charges once. | unaudited |
 | [`claude_code_first_requested_surface_tags_bootstrap_pass_one`][t-tag-bootstrap] | Initial active minting and replay preserve rendered bytes. | unaudited |
 | [`newest_tag_block_set_isolates_protected_and_applied_pending_rows`][t-tag-protection] | Bootstrap mints tag 29 without displacing stored tag 5 from protection. Stored rank 21 is dropped, while rank 20 and the second block at the newest stored ordinal stay pending. | unaudited |
-| [`measurement_is_identical_with_cold_and_warm_token_cache`][t-hyg-cold] | Cold and warm memo output is identical; warm reuse skips token-cache lookup. Clearing both caches preserves output. | unaudited |
+| [`measurement_is_identical_with_cold_and_warm_token_cache`][t-hyg-cold] | Cold and warm memo output is identical; warm memo reuse skips token-cache lookup. A fresh memo over the warm token cache preserves the full result with three lookups, three hits, and no tokenization. Clearing both caches preserves output. | unaudited |
 | [`parity_golden_matches_ts_reference_across_full_corpus`][t-hyg-golden] | U and T match the TypeScript golden within tokenizer tolerance; the band matches exactly. Cold/warm full results equal the Rust characterization digest. Its pre-memo provenance is agent-witnessed and transcript-only, not independently reexecuted or artifact-hash verified. | unaudited |
 | [`hygiene_digest_and_token_key_use_kind_prefixed_content`][t-hyg-key] | A poisoned projection-digest token entry is not reused. The independent text-prefixed digest is the reported hash and token key. | unaudited |
 | [`memo_preserves_each_derived_digest_domain`][t-hyg-domains] | Independent text, input, output, file, and excluded digest formulas match cold and warm memo entries and differ from projection hashes. | unaudited |
@@ -107,7 +107,7 @@ not the handler.
 | [`distinct_sessions_neither_block_nor_evict_each_other_up_to_the_limit`][t-hyg-overlap] | Sixteen distinct sessions reach a channel barrier while all hold their memo locks; each stays resident and warm afterwards. | unaudited |
 | [`all_memo_sessions_near_budget_match_independent_retained_accounting`][t-hyg-pool-bound] | All sixteen sessions refuse part of a 4,000-block walk. Recomputed string, bucket, table, and per-session allocation charges match counters and the status metrics using the same capacity-to-bucket model as production. The bound is 16 MiB plus fixed containers after operations, not peak allocation, allocator RSS, or independently verified hashbrown layout. | unaudited |
 | [`production_transform_reuses_hygiene_memo_and_recounts_only_edited_block`][t-hyg-production] | An isolated process runs the production transform entry: cold 0/3 hits/misses, unchanged 3/0, single-edit 2/1; the parent asserts the child ran exactly one test. | unaudited |
-| [`module_status_memory_metrics_match_budget_accounting_and_falsy_semantics`][t-hyg-status] | `status` reports `tail_hygiene_memo` charged bytes, session count, and refused inserts alongside the other retention classes. | unaudited |
+| [`module_status_memory_metrics_match_budget_accounting_and_falsy_semantics`][t-hyg-status] | After a shared memo clear, `status` reports bounded `tail_hygiene_memo` charged bytes and unsigned session-count and refused-insert fields alongside the other retention classes. Parallel tests may repopulate the table; private-table tests check exact populated counts. | unaudited |
 | [`shared_row_iterator_matches_slice_for_protected_legacy_orphan`][t-hyg-iterator] | Arc-row iterator and original slice measurements agree exactly on the frozen orphan fixture with two protected tags; orphan tag 2 has nonzero T and zero U. | unaudited |
 | [selection_differential.rs][t-seldiff] | Optimized selection equals the frozen reference over generated `SelItem`s. | unaudited |
 
@@ -499,18 +499,18 @@ not a claim that no related check exists anywhere in the repository.
 [t-tag-bootstrap]: ../../../../crates/daemon/src/transform.rs#L21710
 [t-tag-protection]: ../../../../crates/daemon/src/transform.rs#L23611
 [t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L1148
-[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L2281
-[t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L2377
-[t-hyg-key]: ../../../../crates/daemon/src/tail_hygiene.rs#L1208
-[t-hyg-domains]: ../../../../crates/daemon/src/tail_hygiene.rs#L1256
-[t-hyg-invalidates]: ../../../../crates/daemon/src/tail_hygiene.rs#L1357
-[t-hyg-bounds]: ../../../../crates/daemon/src/tail_hygiene.rs#L1497
-[t-hyg-prefix]: ../../../../crates/daemon/src/tail_hygiene.rs#L1629
-[t-hyg-payload]: ../../../../crates/daemon/src/tail_hygiene.rs#L1687
-[t-hyg-table]: ../../../../crates/daemon/src/tail_hygiene.rs#L1757
-[t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1846
-[t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1896
-[t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1961
+[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L2290
+[t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L2386
+[t-hyg-key]: ../../../../crates/daemon/src/tail_hygiene.rs#L1217
+[t-hyg-domains]: ../../../../crates/daemon/src/tail_hygiene.rs#L1265
+[t-hyg-invalidates]: ../../../../crates/daemon/src/tail_hygiene.rs#L1366
+[t-hyg-bounds]: ../../../../crates/daemon/src/tail_hygiene.rs#L1506
+[t-hyg-prefix]: ../../../../crates/daemon/src/tail_hygiene.rs#L1638
+[t-hyg-payload]: ../../../../crates/daemon/src/tail_hygiene.rs#L1696
+[t-hyg-table]: ../../../../crates/daemon/src/tail_hygiene.rs#L1766
+[t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1855
+[t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1905
+[t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1970
 [t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L19976
 [t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22578
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81

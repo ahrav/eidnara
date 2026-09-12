@@ -1,11 +1,11 @@
-//! Selection cost scales with reclaimable identities. Each eligible identity appears once; ordering and the limit apply to the combined eligible set.
+//! Selection bounds inspected job rows, including live identities; continuation cost excludes the scanned prefix.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 
 use retrieval::batch::{VectorGeneration, register_generation};
 use retrieval::dispatch::{EpisodeGrant, Recovery, authorize_recovery};
-use retrieval::identity_sweep::{Candidate, candidates, candidates_sql, reclaim};
+use retrieval::identity_sweep::{Candidate, CandidatePage, candidates, candidates_sql, reclaim};
 use rusqlite::StatementStatus;
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
@@ -96,33 +96,55 @@ fn tombstone(conn: &GuardedConn<'_>, occurrence: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Exactly one identity, `gone`, is eligible; the `referenced` others are kept.
-fn seed(store: &SqliteStore, referenced: usize) {
+fn seed(store: &SqliteStore, count: usize, tombstoned: bool) {
     store
         .with_conn_fenced(|conn| {
             install_generations(conn)?;
-            for index in 0..referenced {
-                let occurrence = format!("live-{index:06}");
-                embedded(conn, &occurrence, CURRENT, &format!("job-{occurrence}"))?;
+            for index in 0..count {
+                let occurrence = format!("occurrence-{index:06}");
+                embedded(conn, &occurrence, CURRENT, &format!("job-{index:06}"))?;
+                if tombstoned {
+                    tombstone(conn, &occurrence)?;
+                }
             }
-            embedded(conn, "gone", CURRENT, "job-gone")?;
-            tombstone(conn, "gone")
+            Ok(())
         })
         .unwrap();
 }
 
 /// VDBE steps are a deterministic cost measure, unlike wall-clock time.
-fn steps(store: &SqliteStore, limit: usize) -> i32 {
+fn measured_page(store: &SqliteStore, limit: usize, after: Option<&str>) -> (CandidatePage, i32) {
     store
         .with_conn(|conn| {
-            let mut statement = conn.prepare(&candidates_sql())?;
-            let found: Vec<String> = statement
-                .query_map(rusqlite::params![limit as i64, None::<String>], |row| {
-                    row.get(0)
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            assert_eq!(found, vec!["gone".to_string()]);
-            Ok(statement.get_status(StatementStatus::VmStep))
+            let page = candidates(conn, NonZeroUsize::new(limit).unwrap(), after).unwrap();
+            let mut statement = conn.prepare(&candidates_sql(after.is_some()))?;
+            let limit = i64::try_from(limit).unwrap();
+            let mut rows = match after {
+                Some(after) => statement.query(rusqlite::params![limit, after])?,
+                None => statement.query([limit])?,
+            };
+            let mut inspected = 0;
+            let mut last_job_id = None;
+            let mut eligible = Vec::new();
+            while let Some(row) = rows.next()? {
+                let job_id: String = row.get(5)?;
+                if row.get::<_, bool>(6)? {
+                    eligible.push(job_id.clone());
+                }
+                last_job_id = Some(job_id);
+                inspected += 1;
+            }
+            drop(rows);
+            assert_eq!(page.inspected, inspected);
+            assert_eq!(page.last_job_id, last_job_id);
+            assert_eq!(
+                page.candidates
+                    .iter()
+                    .map(|c| &c.job_id)
+                    .collect::<Vec<_>>(),
+                eligible.iter().collect::<Vec<_>>()
+            );
+            Ok((page, statement.get_status(StatementStatus::VmStep)))
         })
         .unwrap()
 }
@@ -140,20 +162,95 @@ fn pairs(found: &[Candidate]) -> Vec<(String, String)> {
 }
 
 #[test]
-fn selection_cost_does_not_grow_with_referenced_finished_jobs() {
+fn selection_cost_is_bounded_for_live_and_eligible_job_pages() {
+    for tombstoned in [false, true] {
+        let mut costs = Vec::new();
+        for count in [500, 2_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open(dir.path());
+            seed(&store, count, tombstoned);
+
+            let mut page_costs = Vec::new();
+            for start in [0, 16, count - 16, count - 3, count] {
+                let after = start.checked_sub(1).map(|index| format!("job-{index:06}"));
+                let (page, steps) = measured_page(&store, 16, after.as_deref());
+                let inspected = 16.min(count - start);
+                assert_eq!(page.inspected, inspected);
+                assert_eq!(
+                    page.candidates.len(),
+                    if tombstoned { inspected } else { 0 }
+                );
+                assert_eq!(
+                    page.last_job_id,
+                    (inspected > 0).then(|| format!("job-{:06}", start + inspected - 1))
+                );
+                let expected: Vec<String> = if tombstoned {
+                    (start..start + inspected)
+                        .map(|index| format!("job-{index:06}"))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    page.candidates
+                        .iter()
+                        .map(|c| &c.job_id)
+                        .collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>()
+                );
+                eprintln!(
+                    "tombstoned={tombstoned} jobs={count} start={start} inspected={inspected} steps={steps}"
+                );
+                page_costs.push(steps);
+            }
+            for &steps in &page_costs[2..] {
+                assert!(
+                    steps <= page_costs[1] * 2,
+                    "deep page or EOF scans the prefix: {page_costs:?}"
+                );
+            }
+            costs.push(page_costs);
+        }
+        for (small, large) in costs[0].iter().zip(&costs[1]) {
+            assert!(
+                large <= &(small * 2),
+                "four times the backlog increases page cost: {costs:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_selection_cost_does_not_grow_with_tombstone_history() {
     let small = tempfile::tempdir().unwrap();
     let large = tempfile::tempdir().unwrap();
     let small_store = open(small.path());
     let large_store = open(large.path());
-    seed(&small_store, 500);
-    seed(&large_store, 2_000);
+    seed(&small_store, 500, true);
+    seed(&large_store, 2_000, true);
+    for store in [&small_store, &large_store] {
+        store
+            .with_conn_fenced(|conn| {
+                conn.execute("DELETE FROM occurrence_vectors", [])?;
+                conn.execute("DELETE FROM embedding_jobs", [])?;
+                Ok(())
+            })
+            .unwrap();
+    }
 
-    let small_steps = steps(&small_store, 1);
-    let large_steps = steps(&large_store, 1);
-    assert!(
-        large_steps <= small_steps * 2,
-        "four times the referenced jobs cost {large_steps} steps against {small_steps}: selection walks the job table"
-    );
+    for after in [None, Some("job-000499")] {
+        let (small_page, small_steps) = measured_page(&small_store, 16, after);
+        let (large_page, large_steps) = measured_page(&large_store, 16, after);
+        assert_eq!(small_page, CandidatePage::default());
+        assert_eq!(large_page, CandidatePage::default());
+        eprintln!(
+            "empty jobs after={after:?}: 500 tombstones={small_steps} steps, 2000 tombstones={large_steps} steps"
+        );
+        assert!(
+            large_steps <= small_steps * 2,
+            "four times the tombstone history cost {large_steps} steps against {small_steps}"
+        );
+    }
 }
 
 #[test]
@@ -171,7 +268,7 @@ fn an_identity_eligible_on_both_counts_is_named_once() {
         .with_conn(|conn| Ok(candidates(conn, NonZeroUsize::new(10).unwrap(), None).unwrap()))
         .unwrap();
     assert_eq!(
-        pairs(&found),
+        pairs(&found.candidates),
         vec![("twice".to_string(), RETIRED.to_string())]
     );
 }
@@ -195,14 +292,21 @@ fn the_limit_and_order_span_both_eligibility_sources() {
         .with_conn(|conn| Ok(candidates(conn, NonZeroUsize::new(3).unwrap(), None).unwrap()))
         .unwrap();
     assert_eq!(
-        pairs(&found),
+        pairs(&found.candidates),
         vec![
             ("gone-a".to_string(), CURRENT.to_string()),
             ("retired-b".to_string(), RETIRED.to_string()),
             ("gone-c".to_string(), CURRENT.to_string()),
         ]
     );
-    assert!(found.iter().all(|candidate| candidate.has_vector));
+    assert_eq!(found.inspected, 3);
+    assert_eq!(found.last_job_id.as_deref(), Some("job-3"));
+    assert!(
+        found
+            .candidates
+            .iter()
+            .all(|candidate| candidate.has_vector)
+    );
 }
 
 #[test]
@@ -239,10 +343,10 @@ fn reclaim_removes_a_recovered_jobs_consumed_authorization() {
 
             let selected = candidates(conn, NonZeroUsize::new(1).unwrap(), None).unwrap();
             assert_eq!(
-                pairs(&selected),
+                pairs(&selected.candidates),
                 vec![("recovered".to_string(), CURRENT.to_string())]
             );
-            let result = reclaim(conn, &selected);
+            let result = reclaim(conn, &selected.candidates);
             assert!(
                 result.is_ok(),
                 "a consumed recovery authorization must not block reclamation: {result:?}"

@@ -256,7 +256,7 @@ Execution provenance: 2026-09-12, working tree merging `0cf2fb3a` into
 [live-combined]: ../../../../../crates/daemon/src/transform.rs#L3438-L3446
 [live-hygiene]: ../../../../../crates/daemon/src/transform.rs#L8503-L8567
 [live-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L565-L580
-[live-iterator-test]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1274
+[live-iterator-test]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1283
 [live-bootstrap-test]: ../../../../../crates/daemon/src/transform.rs#L21707
 [live-protection-test]: ../../../../../crates/daemon/src/transform.rs#L23557
 [live-refusal-test]: ../../../../../crates/daemon/src/transform.rs#L11856

@@ -1197,7 +1197,16 @@ mod tests {
             before,
             "memo hit must skip token lookup"
         );
-        assert_eq!(cold, warm, "warm-cache measurement diverged from cold");
+        assert_eq!(cold, warm, "warm-memo measurement diverged from cold");
+        let warm_tokens = measure(&mut TailHygieneMemo::default());
+        assert_eq!(
+            cold, warm_tokens,
+            "warm-token-cache measurement diverged from cold"
+        );
+        let after = crate::token_cache::local_stats();
+        assert_eq!(after.calls - before.calls, 3);
+        assert_eq!(after.hits - before.hits, 3);
+        assert_eq!(after.tokenized_bytes, before.tokenized_bytes);
         crate::token_cache::clear();
         let recold = measure(&mut TailHygieneMemo::default());
         assert_eq!(cold, recold, "cache clear changed the measurement");

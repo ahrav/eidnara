@@ -60,15 +60,15 @@ other count.
 
 ## Timing windows and dependencies
 
-The process pool keeps a table of at most sixteen `(store namespace, session
-ID)` entries behind one table lock, which covers only lookup, insertion,
-least-recently-used eviction, and removal. Each session owns its memo behind
-its own lock inside a shared `Arc`, and that lock spans the measurement.
-Same-session calls serialize. Distinct sessions never block each other. A
-seventeenth session evicts the least recently used entry, causing cold misses
-for that session without changing measurement semantics. An in-flight walk
-keeps its evicted memo alive through the `Arc` until it returns; the table no
-longer charges it.
+The process pool keeps at most sixteen `(store namespace, session ID)` entries
+behind one table mutex. Each memo has its own lock inside a shared `Arc`, and
+that lock spans the measurement. Calls sharing one memo allocation serialize.
+Distinct-session walks can overlap, but share the table mutex and the global
+token-cache mutex on cold memo paths. Eviction or removal can let calls for
+the same identity use separate allocations. A seventeenth session evicts the
+least recently used entry, causing cold misses on its next lookup without
+changing measurement semantics. An in-flight walk keeps its evicted memo alive
+through the `Arc` until it returns; the table no longer charges it.
 
 Namespace-aware removal drops the entry matching both identity fields. Route
 invalidation, whose caller names only a session, removes that ID across
@@ -193,13 +193,14 @@ anchors above identify each branch.
 - Historical payoff evidence: The implementation pass did not execute
   benchmarks; the subsequent [frozen local payoff run](tail-hygiene-payoff.md)
   is complete.
-  The benchmark creates and primes the same memo owner used by measurement
-  before its callback and timed loop. Per-call table lookup, locking,
-  validity, accounting, and full-result construction/drop remain timed. The
-  timed loop measures the fully warm path only; cold walks, edits, and
-  refusals are not timed, and the 2,500-message cell is not reported. The
-  empty-core, empty-tag cell does not exercise caveman invalidation or populated
-  attribution, and U is zero.
+  Measured B uses the fixed-slot memo, created and primed before the callback
+  and timed loop. Slot selection, memo locking, validity checks, bookkeeping,
+  and full-result construction/drop remain timed. The linked benchmark and
+  wrapper show the current session-table source; this run does not measure
+  its table lookup or `Arc` clone. The timed loop measures the fully warm path
+  only; cold walks, edits, and refusals are not timed, and the 2,500-message
+  cell is not reported. The empty-core, empty-tag cell does not exercise
+  caveman invalidation or populated attribution, and U is zero.
 - Missing evidence: No independently replayable pre-memo characterization
   artifact, allocator/RSS validation, production workload, concurrent-session
   timing, or cold-call timing is established here.
@@ -256,7 +257,7 @@ anchors above identify each branch.
 [hyg-media-empty]: ../../../../../crates/daemon/src/tail_hygiene.rs#L917-L918
 [hyg-excluded-kind]: ../../../../../crates/daemon/src/tail_hygiene.rs#L931-L934
 [t-hyg-cold]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1148
-[t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L2281
+[t-hyg-golden]: ../../../../../crates/daemon/src/tail_hygiene.rs#L2290
 [count-digest]: ../../../../../crates/daemon/src/token_cache.rs#L103-L143
 [memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L417
 [caller]: ../../../../../crates/daemon/src/transform.rs#L4707-L4721
