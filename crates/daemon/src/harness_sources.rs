@@ -48,6 +48,9 @@ pub enum Representation {
     Text,
     ToolOutput,
     ToolError,
+    DecisionSummary,
+    Rationale,
+    Summary,
 }
 
 impl Representation {
@@ -56,9 +59,15 @@ impl Representation {
             Self::Text => "text",
             Self::ToolOutput => "tool_output",
             Self::ToolError => "tool_error",
+            Self::DecisionSummary => "decision_summary",
+            Self::Rationale => "rationale",
+            Self::Summary => "summary",
         }
     }
 }
+
+/// Units with this role take their admission classes from the source decision's own admission at publication instead of a role mapping.
+pub const CANONICAL_ROLE: &str = "canonical";
 
 /// One publishable occurrence: its class, its complete native identity in the class's field order, its canonical revision, and the exact text of the block.
 #[derive(Clone, PartialEq, Eq)]
@@ -87,11 +96,16 @@ impl std::fmt::Debug for SourceUnit {
 }
 
 impl SourceUnit {
-    fn value(&self, name: &str) -> &str {
+    fn identity_value(&self, name: &str) -> Option<&str> {
         self.identity
             .iter()
             .find(|(field, _)| *field == name)
-            .map_or("", |(_, value)| value.as_str())
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The actor a unit's commits and evidence are recorded under: the harness that produced it, or the canonical role for a unit derived from a kernel decision.
+    fn origin(&self) -> &str {
+        self.identity_value("harness").unwrap_or(CANONICAL_ROLE)
     }
 }
 
@@ -370,6 +384,9 @@ pub enum PublishError {
     /// The identity and revision conflict with stored bytes, domain, scope, role, sensitivity, or provider egress policy. Nothing is retained by this request.
     #[error("the identity and revision were already published under another request")]
     IdentityReused,
+    /// The decision a canonical unit derives from has no admission decision, so there are no classes to record the descriptor under. `evidence` is `None` when the refusal came before retention.
+    #[error("the canonical source has no admission decision")]
+    UnadmittedSource { evidence: Option<RetainedEvidence> },
     /// The native revision leads `observed_at` by more than [`MAX_REVISION_LEAD_MS`]. Publishing it would pin the lineage at a revision no later native record could advance, so it is refused before any byte is retained.
     #[error("the native revision {revision} leads the observation at {observed_at}")]
     RevisionAhead { revision: i64, observed_at: i64 },
@@ -388,6 +405,7 @@ pub enum PublishError {
 }
 
 const PRODUCER: &str = "eidnara-daemon/harness-sources";
+const CAUSE: &str = "source publication";
 
 /// How far a native millisecond timestamp may lead the caller's observation and still be accepted as a revision.
 pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
@@ -395,11 +413,12 @@ pub const MAX_REVISION_LEAD_MS: i64 = 60 * 60 * 1_000;
 /// How long `publish` waits for a kernel reader to consult the stored receipt before offering bytes to the store.
 const RECEIPT_WAIT: Duration = Duration::from_secs(30);
 
-/// Publishes units into one kernel under one domain and scope, checking existing scopes with [`ProjectScope::names_project`] before receipt replay. `egress` controls the provider policy for retained evidence.
+/// `egress` controls the provider policy for retained evidence.
 pub struct SourcePublisher<'a> {
     pub kernel: &'a KernelStore,
     pub domain_id: &'a str,
-    pub scope_id: &'a str,
+    /// `None` publishes unscoped rows that no project route serves.
+    pub scope_id: Option<&'a str>,
     pub egress: ProviderEgress,
     pub sensitivity: Sensitivity,
 }
@@ -430,7 +449,11 @@ impl SourcePublisher<'_> {
                 refusal: SourceDescriptorError::from(refusal),
                 evidence: None,
             })?;
-        if encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS) {
+        let rule = provenance(unit);
+        // A native timestamp may not lead the observation; a canonical revision is the kernel's own counter and is not judged against the clock.
+        if !rule.is_inherited()
+            && encoded.revision > observed_at.saturating_add(MAX_REVISION_LEAD_MS)
+        {
             return Err(PublishError::RevisionAhead {
                 revision: encoded.revision,
                 observed_at,
@@ -446,16 +469,23 @@ impl SourcePublisher<'_> {
             .as_bytes(),
         );
         let request_digest = self.request_digest(unit);
-        let harness = unit.value("harness").to_owned();
+        let origin = unit.origin().to_owned();
         let evidence_object_id = format!("srcev-object:{key}");
-        let provenance = provenance(unit);
-        let project =
-            ProjectScope::new(unit.value("project_id")).map_err(|error| PublishError::Kernel {
-                error,
-                evidence: None,
-            })?;
+        // Only a unit that names a project has a scope term to check; a canonical unit's scope is the decision's own.
+        let project = match unit.identity_value("project_id") {
+            Some(project_id) => {
+                Some(
+                    ProjectScope::new(project_id).map_err(|error| PublishError::Kernel {
+                        error,
+                        evidence: None,
+                    })?,
+                )
+            }
+            None => None,
+        };
         let check_scope = |envelope: &kernel::Envelope<'_>| {
-            if let Some(terms) = envelope.scope_terms(self.scope_id)?
+            if let (Some(project), Some(scope_id)) = (&project, self.scope_id)
+                && let Some(terms) = envelope.scope_terms(scope_id)?
                 && !project.names_project(Some(&terms))
             {
                 return Err(KernelError::NotFound);
@@ -466,16 +496,22 @@ impl SourcePublisher<'_> {
         let descriptor_intent = self.intent(
             &format!("source-descriptor:{key}"),
             &request_digest,
-            &harness,
+            &origin,
         );
-        let (_, stored) = self
+        let (_, (stored, provenance)) = self
             .kernel
             .preview(Instant::now() + RECEIPT_WAIT, |preview| {
                 check_scope(preview)?;
-                preview.stored_receipt(descriptor_intent.clone())
+                Ok((
+                    preview.stored_receipt(descriptor_intent.clone())?,
+                    rule.resolve(preview)?,
+                ))
             })
             .map_err(|error| match error {
                 KernelError::Conflict => PublishError::IdentityReused,
+                KernelError::NotFound if rule.is_inherited() => {
+                    PublishError::UnadmittedSource { evidence: None }
+                }
                 error => PublishError::Kernel {
                     error,
                     evidence: None,
@@ -494,14 +530,14 @@ impl SourcePublisher<'_> {
         let handle = self
             .kernel
             .ingest_exact_artifact(ArtifactIngestRequest {
-                intent: self.intent(&format!("source-evidence:{key}"), &request_digest, &harness),
+                intent: self.intent(&format!("source-evidence:{key}"), &request_digest, &origin),
                 payload: unit.text.as_bytes().to_vec(),
                 evidence_id: format!("srcev:{key}"),
                 object_id: evidence_object_id.clone(),
                 object_kind: "evidence".to_owned(),
                 domain_id: self.domain_id.to_owned(),
                 source_kind: unit.class.code().to_owned(),
-                source_id: format!("{harness}:{key}"),
+                source_id: format!("{origin}:{key}"),
                 source_revision: encoded.revision,
                 media_type: "text/plain".to_owned(),
                 retention_class: "canonical".to_owned(),
@@ -526,14 +562,18 @@ impl SourcePublisher<'_> {
             }
         };
         let mut outcome = None;
+        let mut committed_provenance = provenance;
         let receipt = self.kernel.commit(descriptor_intent, |envelope| {
             check_scope(envelope)?;
+            // The classes recorded are the ones the commit itself observes, so an admission change since the preview is not carried forward.
+            let (source_class, taint_class) = rule.resolve(envelope)?;
+            committed_provenance = (source_class, taint_class);
             let published = envelope
                 .publish_source_descriptor(&SourceDescriptorRequest {
                     occurrence: occurrence.clone(),
                     source_policy: SourceDescriptorPolicy::Native,
                     domain_id: self.domain_id,
-                    scope_id: Some(self.scope_id),
+                    scope_id: self.scope_id,
                     evidence_id: &handle.evidence_id,
                     artifact_digest: &handle.digest,
                     buffer: &unit.text,
@@ -547,14 +587,14 @@ impl SourcePublisher<'_> {
             envelope.record_admission(AdmissionRequest {
                 candidate_id: None,
                 subject_object_id: Some(published.object_id.clone()),
-                source_class: Some(provenance.0),
-                taint_class: Some(provenance.1),
+                source_class: Some(source_class),
+                taint_class: Some(taint_class),
                 event: AdmissionEvent {
                     kind: EventKind::Other,
-                    trigger_object_id: None,
+                    trigger_object_id: rule.subject().map(str::to_owned),
                     approval_object_id: None,
                     evidence_id: Some(handle.evidence_id.clone()),
-                    reason: "harness source publication".to_owned(),
+                    reason: CAUSE.to_owned(),
                 },
             })?;
             let result = published.object_id.clone();
@@ -568,7 +608,7 @@ impl SourcePublisher<'_> {
                 evidence_object_id,
                 replaced_object_id: published.replaced_object_id,
                 replayed: receipt.replayed,
-                provenance,
+                provenance: committed_provenance,
             }),
             // A receipt committed between the preview and this commit replays here; it ran no operation, and its result is the object id the first publication returned.
             (Ok(receipt), _) => Ok(Published {
@@ -582,8 +622,16 @@ impl SourcePublisher<'_> {
             (Err(error), outcome) => {
                 let error = match outcome {
                     Some(Err(SourceDescriptorError::Kernel(error))) => error,
+                    None if error == KernelError::NotFound && rule.is_inherited() => {
+                        return Err(PublishError::UnadmittedSource {
+                            evidence: Some(RetainedEvidence {
+                                object_id: evidence_object_id,
+                                retired: None,
+                            }),
+                        });
+                    }
                     Some(Err(refusal)) => {
-                        let evidence = Some(self.retire_evidence(&key, &request_digest, &harness));
+                        let evidence = Some(self.retire_evidence(&key, &request_digest, &origin));
                         return Err(PublishError::Descriptor { refusal, evidence });
                     }
                     _ => error,
@@ -657,7 +705,7 @@ impl SourcePublisher<'_> {
             operation_key: operation.to_owned(),
             request_digest: request_digest.to_owned(),
             actor: harness.to_owned(),
-            cause: "harness source publication".to_owned(),
+            cause: CAUSE.to_owned(),
         }
     }
 
@@ -667,13 +715,14 @@ impl SourcePublisher<'_> {
         for part in [
             unit.text.as_str(),
             self.domain_id,
-            self.scope_id,
+            self.scope_id.unwrap_or_default(),
             unit.role.as_str(),
             self.sensitivity.as_str(),
         ] {
             bytes.extend_from_slice(&(part.len() as u64).to_be_bytes());
             bytes.extend_from_slice(part.as_bytes());
         }
+        bytes.push(u8::from(self.scope_id.is_some()));
         bytes.push(match self.egress {
             ProviderEgress::RemoteAllowed => 0,
             ProviderEgress::LocalOnly => 1,
@@ -682,14 +731,58 @@ impl SourcePublisher<'_> {
     }
 }
 
-/// Admission provenance follows the native role: user text is explicit, assistant text is model inference, and every tool string is an untrusted tool result.
-fn provenance(unit: &SourceUnit) -> (SourceClass, TaintClass) {
+/// Where a unit's admission classes come from.
+enum ProvenanceRule {
+    Fixed(SourceClass, TaintClass),
+    /// The classes are the named decision's own admission, read in the transaction that records them.
+    Inherited {
+        subject: String,
+    },
+}
+
+impl ProvenanceRule {
+    fn is_inherited(&self) -> bool {
+        matches!(self, Self::Inherited { .. })
+    }
+
+    fn subject(&self) -> Option<&str> {
+        match self {
+            Self::Fixed(..) => None,
+            Self::Inherited { subject } => Some(subject),
+        }
+    }
+
+    /// `NotFound` when the inherited subject has no admission decision.
+    fn resolve(
+        &self,
+        envelope: &kernel::Envelope<'_>,
+    ) -> Result<(SourceClass, TaintClass), KernelError> {
+        match self {
+            Self::Fixed(source, taint) => Ok((*source, *taint)),
+            Self::Inherited { subject } => envelope
+                .subject_admission(subject)?
+                .map(|(prior, _)| (prior.source_class, prior.taint_class))
+                .ok_or(KernelError::NotFound),
+        }
+    }
+}
+
+/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, user text is explicit, and other text is model inference. The caller has encoded the unit, so the class's identity field is present.
+fn provenance(unit: &SourceUnit) -> ProvenanceRule {
     match (unit.class, unit.role.as_str()) {
-        (OccurrenceClass::RawToolSpans, _) => (
+        (OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory, _) => {
+            ProvenanceRule::Inherited {
+                subject: unit
+                    .identity_value(unit.class.identity_fields()[0])
+                    .expect("encode verified every identity field")
+                    .to_owned(),
+            }
+        }
+        (OccurrenceClass::RawToolSpans, _) => ProvenanceRule::Fixed(
             SourceClass::TrustedToolResult,
             TaintClass::ToolUntrustedOutput,
         ),
-        (_, "user") => (SourceClass::ExplicitUser, TaintClass::UserExplicit),
-        _ => (SourceClass::ModelInference, TaintClass::AssistantInference),
+        (_, "user") => ProvenanceRule::Fixed(SourceClass::ExplicitUser, TaintClass::UserExplicit),
+        _ => ProvenanceRule::Fixed(SourceClass::ModelInference, TaintClass::AssistantInference),
     }
 }

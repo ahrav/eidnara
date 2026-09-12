@@ -14,9 +14,9 @@
 use std::num::NonZeroUsize;
 
 use kernel::{
-    ARTIFACT_DELETION_SOURCE_KIND, CommitPageBounds, CommitReadError, CommitReadRequest,
-    CompleteCommit, ExportWindow, KernelError, KernelStore, PageEnd, SourceExportError,
-    SourceHoldAdmission, SourceHoldBinding, SourceHoldError, SourcePageBounds, SourceRow,
+    ARTIFACT_DELETION_SOURCE_KIND, CommitPageBounds, CommitReadError, CompleteCommit, ExportWindow,
+    KernelError, KernelStore, SourceExportError, SourceHoldAdmission, SourceHoldBinding,
+    SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::{
@@ -24,6 +24,7 @@ use retrieval::batch::{
     batch_from_rows, read_checkpoint, row_identities,
 };
 
+use crate::commit_stream::{CommitStreamBlocked, CommitWalk, drive_commit_pages, outcome_unknown};
 use crate::search_projection::{
     SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
 };
@@ -191,6 +192,33 @@ impl From<Blocked> for Stop {
     }
 }
 
+impl From<CommitStreamBlocked> for Blocked {
+    fn from(blocked: CommitStreamBlocked) -> Self {
+        match blocked {
+            CommitStreamBlocked::NegativeTime { now } => Blocked::NegativeTime { now },
+            CommitStreamBlocked::Read(error) => Blocked::Read(error),
+            CommitStreamBlocked::OversizedCommit {
+                commit_seq,
+                rows,
+                payload_bytes,
+            } => Blocked::OversizedCommit {
+                commit_seq,
+                rows,
+                payload_bytes,
+            },
+            CommitStreamBlocked::TargetUnreachable { after, target } => {
+                Blocked::TargetUnreachable { after, target }
+            }
+        }
+    }
+}
+
+impl From<CommitStreamBlocked> for Stop {
+    fn from(blocked: CommitStreamBlocked) -> Self {
+        Stop::Blocked(blocked.into())
+    }
+}
+
 impl From<CatchUpError> for Stop {
     fn from(error: CatchUpError) -> Self {
         Stop::Failed(error)
@@ -341,63 +369,36 @@ impl<'a> SearchCatchUp<'a> {
             self.acknowledge(consumer, local, now, observer)?;
             report.acknowledged_through = local;
         }
+        let target = report.target;
         let mut after = local;
-        while after < report.target {
-            let page = self
-                .kernel
-                .read_complete_commits(
-                    &CommitReadRequest {
-                        consumer_id: consumer.binding.consumer_id.clone(),
-                        incarnation,
-                        after_commit: after,
-                        through_commit: report.target,
-                    },
-                    bounds.commits,
-                )
-                .map_err(|error| match error {
-                    CommitReadError::Kernel(error) => Stop::from(error),
-                    error => Blocked::Read(error).into(),
-                })?;
-            let last = match page.end {
-                PageEnd::Oversized {
-                    commit_seq,
-                    rows,
-                    payload_bytes,
-                } => {
-                    return Err(Blocked::OversizedCommit {
-                        commit_seq,
-                        rows,
-                        payload_bytes,
+        drive_commit_pages(
+            self.kernel,
+            CommitWalk {
+                consumer_id: &consumer.binding.consumer_id,
+                incarnation,
+                now,
+                after: local,
+                target,
+                bounds: bounds.commits,
+            },
+            |page| {
+                // The export delivers creations, supersessions, and retirements; a deletion arrives only as a control row, and the batch it would need is not built here.
+                if let Some(deletion) = first_deletion(&page.commits) {
+                    return Err(Blocked::DeletionUnpropagated {
+                        commit_seq: deletion,
                     }
                     .into());
                 }
-                PageEnd::Exhausted => true,
-                PageEnd::Deferred { .. } => false,
-            };
-            // The target is a commit the kernel had at capture, so an empty page or an exhausted page below it means the commit log lost commits.
-            if page.commits.is_empty() || (last && page.through < report.target) {
-                return Err(Blocked::TargetUnreachable {
-                    after,
-                    target: report.target,
-                }
-                .into());
-            }
-            // The export delivers creations, supersessions, and retirements; a deletion arrives only as a control row, and the batch it would need is not built here.
-            if let Some(deletion) = first_deletion(&page.commits) {
-                return Err(Blocked::DeletionUnpropagated {
-                    commit_seq: deletion,
-                }
-                .into());
-            }
-            let through = page.through;
-            self.apply_window(consumer, bounds, after, through, now, observer)?;
-            report.batches_applied += 1;
-            report.commits_consumed += page.commits.len();
-            self.acknowledge(consumer, through, now, observer)?;
-            report.acknowledged_through = through;
-            after = through;
-        }
-        Ok(())
+                let through = page.through;
+                self.apply_window(consumer, bounds, after, through, now, observer)?;
+                report.batches_applied += 1;
+                report.commits_consumed += page.commits.len();
+                self.acknowledge(consumer, through, now, observer)?;
+                report.acknowledged_through = through;
+                after = through;
+                Ok::<(), Stop>(())
+            },
+        )
     }
 
     /// Reads the projection's checkpoint; the checkpoint's hold id must match `consumer.hold_id`.
@@ -687,16 +688,6 @@ fn first_deletion(commits: &[CompleteCommit]) -> Option<i64> {
                 .any(|row| row.source_kind == ARTIFACT_DELETION_SOURCE_KIND)
         })
         .map(|commit| commit.commit_seq)
-}
-
-/// An acknowledgement that failed this way may still have committed, because the failure can strike after the kernel's COMMIT or while waiting for its writer, so the durable checkpoint decides.
-/// This is wider than [`KernelError::is_retryable`]: `Io` and `Deadline` are not safe to blindly retry, but they leave the outcome unknown all the same.
-/// Every other kernel error is raised before the write begins or reports a definite rollback.
-fn outcome_unknown(error: KernelError) -> bool {
-    matches!(
-        error,
-        KernelError::Busy | KernelError::Held | KernelError::Io | KernelError::Deadline
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

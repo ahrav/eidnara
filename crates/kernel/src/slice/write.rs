@@ -19,6 +19,14 @@ use crate::object_write::{
 use crate::redaction::{RedactedField, identity_field, redact};
 use crate::{KernelError, Sensitivity, map_sqlite};
 
+/// Every `change_kind` an outbox row of `object_kind` `decision` can carry, in the order the writers below name them: insert, event append, correct, retire.
+pub const DECISION_CHANGE_KINDS: [&str; 4] = [
+    "decision_insert",
+    "decision_event_append",
+    "decision_correct",
+    "decision_retire",
+];
+
 struct RedactedDecision {
     decision_id: RedactedField,
     object_id: RedactedField,
@@ -119,7 +127,7 @@ impl Envelope<'_> {
         let outcome = spec.outcome();
         self.changes.push(PendingChange {
             object: spec.object_row(self.commit_seq),
-            kind: "decision_insert",
+            kind: DECISION_CHANGE_KINDS[0],
             replaced_object_id: None,
             redactions: spec.text_fields(),
             audit: None,
@@ -235,7 +243,7 @@ impl Envelope<'_> {
         )?;
         self.changes.push(PendingChange {
             object,
-            kind: "decision_event_append",
+            kind: DECISION_CHANGE_KINDS[1],
             replaced_object_id: None,
             redactions: event_fields,
             audit: Some(serde_json::json!({
@@ -343,7 +351,7 @@ impl Envelope<'_> {
         redactions.push(("replaced_object_id".to_string(), replaced_object_id.clone()));
         self.changes.push(PendingChange {
             object,
-            kind: "decision_correct",
+            kind: DECISION_CHANGE_KINDS[2],
             replaced_object_id: Some(replaced_object_id.text.clone()),
             redactions,
             audit: None,
@@ -521,7 +529,7 @@ impl Envelope<'_> {
         self.changes.push(PendingChange {
             object,
             kind: match object_kind {
-                "decision" => "decision_retire",
+                "decision" => DECISION_CHANGE_KINDS[3],
                 _ => "observation_retire",
             },
             replaced_object_id: None,

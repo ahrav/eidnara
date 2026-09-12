@@ -95,9 +95,10 @@ pub use scope::{
 };
 pub use slice::{
     ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot,
-    DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionRow,
-    DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload,
-    ObservationRow, ObservationSpec, ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
+    DECISION_CHANGE_KINDS, DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec,
+    DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec,
+    ObservationPayload, ObservationRow, ObservationSpec, ObservationWriteOutcome,
+    RetirementOutcome, SliceSnapshot,
 };
 pub use source_descriptor::{
     MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,

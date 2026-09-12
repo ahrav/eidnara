@@ -256,7 +256,7 @@ impl Corpus {
         SourcePublisher {
             kernel: &self.kernel,
             domain_id: "domain",
-            scope_id: SCOPE,
+            scope_id: Some(SCOPE),
             egress: ProviderEgress::LocalOnly,
             sensitivity: Sensitivity::Normal,
         }
@@ -1115,7 +1115,7 @@ fn publication_missing_scope_preserves_evidence_until_scope_is_created() {
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     let publisher = SourcePublisher {
-        scope_id: MISSING_SCOPE,
+        scope_id: Some(MISSING_SCOPE),
         ..corpus.publisher()
     };
     let unit = pi_units(&pi_session(), &pi_user("pi-u1", "recoverable scope", 100))
@@ -1275,7 +1275,7 @@ fn equal_text_stays_distinct_and_revisions_replay_or_succeed_atomically() {
     assert_eq!(corpus.kernel.staged_artifacts_for_test(), staged);
     // The same unit published into another scope is a conflict too: a receipt never moves a row.
     let elsewhere = SourcePublisher {
-        scope_id: "project:b",
+        scope_id: Some("project:b"),
         ..corpus.publisher()
     };
     assert!(matches!(
