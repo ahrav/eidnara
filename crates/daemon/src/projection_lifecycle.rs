@@ -124,6 +124,28 @@ impl LifecycleIntent {
     }
 }
 
+/// `record` rejects and `read` marks unavailable intents with invalid transition, `authorization_ref`, and cause combinations.
+fn check_authorization(
+    transition: Transition,
+    authorization_ref: Option<&str>,
+    cause: Cause,
+) -> Result<(), IntentRefusal> {
+    match (transition, authorization_ref, cause) {
+        (Transition::AuthorizedRecovery, None, _) => Err(IntentRefusal::MissingAuthorization),
+        (_, Some(reference), _) if !valid_authorization_ref(reference) => {
+            Err(IntentRefusal::InvalidAuthorization)
+        }
+        (Transition::AuthorizedRecovery, Some(_), cause) if cause != Cause::DisabledRecovery => {
+            Err(IntentRefusal::IllegalCombination)
+        }
+        (Transition::Rebuilding, Some(_), _)
+        | (Transition::Rebuilding, None, Cause::DisabledRecovery) => {
+            Err(IntentRefusal::IllegalCombination)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// What the control record holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlState {
@@ -161,6 +183,9 @@ pub enum IntentRefusal {
     /// A live store holds the disposable family's storage lease; nothing was removed.
     #[error("a live projection holds the disposable family")]
     FamilyHeld,
+    /// The encoded record exceeds [`MAX_RECORD_BYTES`]; nothing was written.
+    #[error("the encoded record exceeds the size cap")]
+    Oversized,
     #[error("control record I/O failed: {0}")]
     Io(String),
     /// The rename succeeded and the directory sync did not; the new record is visible now and may or may not survive power loss. The caller reads the record again rather than retrying the write.
@@ -206,10 +231,11 @@ impl ProjectionLifecycle {
     /// Returns the I/O error when the directory cannot be created or is not owner-only.
     pub fn open(data_home: &Path) -> io::Result<Self> {
         let dir = data_home.join(CONTROL_DIR);
-        if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&dir)
-            && error.kind() != io::ErrorKind::AlreadyExists
-        {
-            return Err(error);
+        match fs::DirBuilder::new().mode(0o700).create(&dir) {
+            // Sync `data_home` to make the new `dir` entry durable.
+            Ok(()) => File::open(data_home)?.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
         let dir_fd = open_directory(&dir)?;
         // The umask may have narrowed the requested mode; the directory is set to exactly owner-only.
@@ -303,8 +329,17 @@ impl ProjectionLifecycle {
             return ControlState::Unavailable(error.kind().to_string());
         }
         match serde_json::from_slice::<LifecycleIntent>(&bytes) {
-            Ok(intent) if intent.schema == SCHEMA => ControlState::Intent(intent),
-            Ok(intent) => ControlState::Unavailable(format!("schema {}", intent.schema)),
+            Ok(intent) if intent.schema != SCHEMA => {
+                ControlState::Unavailable(format!("schema {}", intent.schema))
+            }
+            Ok(intent) => match check_authorization(
+                intent.transition,
+                intent.authorization_ref.as_deref(),
+                intent.cause,
+            ) {
+                Ok(()) => ControlState::Intent(intent),
+                Err(refusal) => ControlState::Unavailable(refusal.to_string()),
+            },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
         }
     }
@@ -320,28 +355,11 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
-        match (
+        check_authorization(
             request.transition,
-            &request.authorization_ref,
+            request.authorization_ref.as_deref(),
             request.cause,
-        ) {
-            (Transition::AuthorizedRecovery, None, _) => {
-                return Err(IntentRefusal::MissingAuthorization);
-            }
-            (_, Some(reference), _) if !valid_authorization_ref(reference) => {
-                return Err(IntentRefusal::InvalidAuthorization);
-            }
-            (Transition::AuthorizedRecovery, Some(_), cause)
-                if cause != Cause::DisabledRecovery =>
-            {
-                return Err(IntentRefusal::IllegalCombination);
-            }
-            (Transition::Rebuilding, Some(_), _)
-            | (Transition::Rebuilding, None, Cause::DisabledRecovery) => {
-                return Err(IntentRefusal::IllegalCombination);
-            }
-            _ => {}
-        }
+        )?;
         if request.allowance == 0 {
             return Err(IntentRefusal::AllowanceExhausted);
         }
@@ -453,6 +471,9 @@ impl ProjectionLifecycle {
         let io = io_refusal;
         let bytes =
             serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+        if bytes.len() as u64 > MAX_RECORD_BYTES {
+            return Err(IntentRefusal::Oversized);
+        }
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());

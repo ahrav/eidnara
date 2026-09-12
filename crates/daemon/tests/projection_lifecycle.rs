@@ -543,7 +543,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
 
     type Corruption = fn(&Path);
-    let corruptions: [(&str, Corruption); 5] = [
+    let corruptions: [(&str, Corruption); 6] = [
         ("truncated", |path: &Path| {
             let mut bytes = fs::read(path).unwrap();
             bytes.truncate(bytes.len() / 2);
@@ -564,6 +564,11 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         }),
         ("oversized", |path: &Path| {
             fs::write(path, vec![b' '; 64 * 1024 + 1]).unwrap();
+        }),
+        ("recovery without authorization", |path: &Path| {
+            let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["transition"] = Value::from("AuthorizedRecovery");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
     ];
     for (name, corrupt) in corruptions {
@@ -598,6 +603,23 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
             "{name}: an untrusted record deletes nothing"
         );
     }
+
+    // `record` rejects a request whose serialized record exceeds `MAX_RECORD_BYTES` before writing it.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    assert_eq!(
+        lifecycle.record(
+            &open,
+            &LifecycleRequest {
+                attempt_id: "a".repeat(64 * 1024),
+                ..rebuild_request()
+            },
+            NOW
+        ),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    assert!(!record_path(dir.path()).exists());
 
     // A well-formed record the daemon did not write: a symlink to one.
     let dir = tempfile::tempdir().unwrap();
