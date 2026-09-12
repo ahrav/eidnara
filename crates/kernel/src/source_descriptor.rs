@@ -15,6 +15,7 @@ use super::KernelStore;
 use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
+use super::source_hold::{Descriptors, descriptor_rows_sql};
 use super::source_identity::{
     self, EncodedOccurrence, Occurrence, OccurrenceClass, OccurrenceRefusal, encode,
     encode_preserving_span, payload_id, select, well_formed_value,
@@ -549,7 +550,7 @@ pub struct LiveDescriptor {
 }
 
 impl KernelStore {
-    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`, read through the registry's descriptor page index. Every row is re-encoded from its stored identity before it is returned, so a row whose identity does not round-trip is refused rather than handed to a caller that may retire it.
+    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`. The page uses the export's liveness predicate, so a descriptor whose cited evidence was deleted is absent here as it is from every export snapshot. A row whose stored identity does not re-encode to itself is refused rather than handed to a caller that may retire it.
     ///
     /// # Errors
     ///
@@ -567,25 +568,22 @@ impl KernelStore {
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
-        let mut statement = tx
-            .prepare_cached(
-                "SELECT o.object_id,o.domain_id,b.observation_payload
-                 FROM object_registry o
-                 JOIN observations b ON b.object_id=o.object_id
-                 WHERE o.source_kind=?1 AND o.object_id GLOB 'srcdesc:*'
-                   AND o.object_kind='observation' AND b.observation_kind=?2
-                   AND o.created_commit_seq<=?3
-                   AND (o.invalidated_commit_seq IS NULL OR o.invalidated_commit_seq>?3)
-                   AND o.object_id>?4
-                 ORDER BY o.object_id
-                 LIMIT ?5",
-            )
-            .map_err(map_sqlite)?;
+        let sql = format!(
+            "SELECT o.object_id,o.domain_id,b.observation_payload
+             {rows}
+               AND o.source_kind=?1 AND o.object_kind='observation'
+               AND {live}
+               AND o.object_id>?3
+             ORDER BY o.object_id
+             LIMIT ?4",
+            rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
+            live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+        );
+        let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
         let raw: Vec<(String, String, Vec<u8>)> = statement
             .query_map(
                 rusqlite::params![
                     class.code(),
-                    SOURCE_DESCRIPTOR_KIND,
                     requested,
                     after.unwrap_or(""),
                     limit.saturating_add(1)

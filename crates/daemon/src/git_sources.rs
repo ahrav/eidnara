@@ -48,6 +48,9 @@ pub enum GitRefusal {
     Open,
     #[error("the repository's object format is not supported")]
     UnsupportedObjectFormat,
+    /// The repository has a shallow boundary, so a traversal from its refs cannot reach every ancestor the object store holds.
+    #[error("the repository is shallow")]
+    Shallow,
     #[error("{0} is not a full lowercase object id of the repository's format")]
     MalformedOid(String),
     #[error("object {0} is missing")]
@@ -81,17 +84,23 @@ pub struct GitSelection {
     pub dispositions: Vec<GitDisposition>,
 }
 
-fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
+pub(crate) fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
     match hash {
         gix::hash::Kind::Sha1 => Ok("sha1"),
         _ => Err(GitRefusal::UnsupportedObjectFormat),
     }
 }
 
-/// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
-fn open(path: &Path) -> Result<gix::Repository, GitRefusal> {
-    let mut repo =
-        gix::open_opts(path, gix::open::Options::isolated()).map_err(|_| GitRefusal::Open)?;
+/// Opens the repository with only its own configuration, with replacement refs ignored so a `refs/replace` entry cannot stand in for a selected id, and with `max_object_bytes` as the object store's allocation limit.
+pub(crate) fn open(
+    path: &Path,
+    max_object_bytes: NonZeroU64,
+) -> Result<gix::Repository, GitRefusal> {
+    let options = gix::open::Options::isolated().config_overrides([format!(
+        "gitoxide.objects.allocLimit={}",
+        max_object_bytes.get()
+    )]);
+    let mut repo = gix::open_opts(path, options).map_err(|_| GitRefusal::Open)?;
     repo.objects.ignore_replacements = true;
     Ok(repo)
 }
@@ -130,7 +139,7 @@ pub fn read_selection(
             max: bounds.max_commits.get(),
         });
     }
-    let repo = open(&binding.path)?;
+    let repo = open(&binding.path, bounds.max_object_bytes)?;
     let hash = repo.object_hash();
     let format = object_format(hash)?;
     let mut seen = HashSet::new();

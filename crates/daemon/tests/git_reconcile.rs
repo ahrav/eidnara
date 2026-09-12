@@ -9,18 +9,21 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use daemon::git_reconcile::{
-    GitReconciler, InventoryBounds, ReconcileBlocked, ReconcileEnd, ReconcilePhase,
+    GitReconciler, InventoryBounds, Probe, ReconcileBlocked, ReconcileEnd, ReconcilePhase,
     ReconcileReport, ReconcileScope,
 };
-use daemon::git_sources::{GitReadBounds, GitRefusal, RepositoryBinding, read_selection};
-use daemon::harness_sources::{Representation, SourcePublisher, SourceUnit};
+use daemon::git_sources::{
+    COMMIT_ROLE, GIT_COMMIT_REVISION, GitReadBounds, GitRefusal, RepositoryBinding, read_selection,
+};
+use daemon::harness_sources::{Published, Representation, SourcePublisher, SourceUnit};
 use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
-    CommitIntent, Dimension, DomainSpec, ExportWindow, KernelStore, ProviderEgress, ScopeSpec,
-    ScopeTermSpec, Sensitivity, SourceHold, SourceHoldAdmission, SourceHoldBinding,
-    SourceHoldBounds, SourcePageBounds, SourceRow,
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, CommitIntent,
+    Dimension, DomainSpec, ExportWindow, KernelStore, ProviderEgress, ScopeSpec, ScopeTermSpec,
+    Sensitivity, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourcePageBounds, SourceRow,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
@@ -57,8 +60,10 @@ fn intent(key: &str) -> CommitIntent {
 fn bounds() -> InventoryBounds {
     InventoryBounds {
         page_rows: NonZeroUsize::new(2).unwrap(),
+        max_scanned: NonZeroUsize::new(64).unwrap(),
         max_retained: NonZeroUsize::new(16).unwrap(),
         max_commits: NonZeroUsize::new(16).unwrap(),
+        max_object_bytes: NonZeroU64::new(4096).unwrap(),
     }
 }
 
@@ -155,7 +160,26 @@ impl Repo {
 
     /// Rewrites a loose ref in place, as a force-push or reset does.
     fn point_ref(&self, name: &str, oid: &str) {
-        std::fs::write(self.root.join(".git").join(name), format!("{oid}\n")).unwrap();
+        let path = self.root.join(".git").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{oid}\n")).unwrap();
+    }
+
+    /// Appends `section` to the repository's own config, which an isolated open still reads.
+    fn append_config(&self, section: &str) {
+        let path = self.root.join(".git/config");
+        let mut config = std::fs::read_to_string(&path).unwrap();
+        config.push_str(section);
+        std::fs::write(path, config).unwrap();
+    }
+
+    /// Marks `oid` as a shallow boundary, as `git fetch --depth` does on an existing clone.
+    fn set_shallow(&self, oid: &str) {
+        std::fs::write(self.root.join(".git/shallow"), format!("{oid}\n")).unwrap();
+    }
+
+    fn clear_shallow(&self) {
+        std::fs::remove_file(self.root.join(".git/shallow")).unwrap();
     }
 
     fn binding(&self) -> RepositoryBinding {
@@ -261,20 +285,67 @@ impl Corpus {
     }
 
     /// Publishes every commit of `oids` from `repo` under `repository_id` as a retained source.
-    fn publish_as(&self, repo: &Repo, repository_id: &str, oids: &[String]) {
+    fn publish_as(&self, repo: &Repo, repository_id: &str, oids: &[String]) -> Vec<Published> {
         let binding = RepositoryBinding {
             repository_id: repository_id.to_string(),
             path: repo.root.clone(),
         };
         let selection = read_selection(&binding, oids, read_bounds()).unwrap();
         assert_eq!(selection.units.len(), oids.len());
-        for unit in &selection.units {
-            self.publisher().publish(unit, NOW).unwrap();
-        }
+        selection
+            .units
+            .iter()
+            .map(|unit| self.publisher().publish(unit, NOW).unwrap())
+            .collect()
     }
 
-    fn publish(&self, repo: &Repo, oids: &[String]) {
-        self.publish_as(repo, REPO, oids);
+    fn publish(&self, repo: &Repo, oids: &[String]) -> Vec<Published> {
+        self.publish_as(repo, REPO, oids)
+    }
+
+    fn publish_foreign_format(&self, object_format: &str, oid: &str) -> Published {
+        let unit = SourceUnit {
+            class: OccurrenceClass::GitCommits,
+            identity: vec![
+                ("repository_id", REPO.to_string()),
+                ("object_format", object_format.to_string()),
+                ("oid", oid.to_string()),
+            ],
+            revision: GIT_COMMIT_REVISION.to_string(),
+            representation: Representation::CommitMessage,
+            text: "foreign format\n".to_string(),
+            role: COMMIT_ROLE.to_string(),
+        };
+        self.publisher().publish(&unit, NOW).unwrap()
+    }
+
+    /// Deletes the artifact behind `published`, which invalidates the evidence and leaves the descriptor row untouched.
+    fn delete_evidence(&self, published: &Published, key: &str) {
+        let evidence_id = published
+            .evidence_object_id
+            .strip_prefix("srcev-object:")
+            .map(|key| format!("srcev:{key}"))
+            .unwrap();
+        self.kernel
+            .delete_artifact(ArtifactDeletionRequest {
+                intent: intent(key),
+                identity: ArtifactDeletionIdentity::EvidenceId(evidence_id),
+                kind: ArtifactDeletionKind::Delete,
+                operator_id: None,
+                target_locator: None,
+                reason: None,
+                deleted_at: NOW,
+            })
+            .unwrap();
+    }
+
+    fn retire_descriptor(&self, object_id: &str, key: &str) {
+        self.kernel
+            .commit(intent(key), |envelope| {
+                envelope.retire_observation(object_id)?;
+                Ok(String::new())
+            })
+            .unwrap();
     }
 
     /// Publishes one message occurrence, a source of another class the reconciler must never touch.
@@ -745,7 +816,7 @@ fn incomplete_scans_retire_nothing() {
 
     // A ref that moves after the walk, and a budget cancelled after the walk, both leave the excluded commit alone.
     let moved = GitReconciler::new(&corpus.kernel)
-        .with_after_traversal_for_test(|| repo.point_ref(MAIN, &c1))
+        .with_probe_for_test(Probe::AfterTraversal, || repo.point_ref(MAIN, &c1))
         .run_episode(&repo.scope(&[MAIN]), bounds(), &unbounded())
         .unwrap();
     assert_eq!(
@@ -756,7 +827,7 @@ fn incomplete_scans_retire_nothing() {
     repo.point_ref(MAIN, &c2);
     let budget = unbounded();
     let cancelled_late = GitReconciler::new(&corpus.kernel)
-        .with_after_traversal_for_test(|| budget.cancel())
+        .with_probe_for_test(Probe::AfterTraversal, || budget.cancel())
         .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
         .unwrap();
     assert_eq!(
@@ -782,4 +853,188 @@ fn incomplete_scans_retire_nothing() {
         before,
         "no incomplete scan retired a source"
     );
+}
+
+/// A repository whose object graph is substituted, cut, shadowed, oversized, or of another format than its retained rows is refused whole: a `refs/replace` entry the repository's own config enables, a shallow boundary, a permitted ref given as a partial name that a tag shadows, a commit object above the byte bound, and a retained row of another object format each end the episode without retiring a commit that the true history reaches.
+#[test]
+fn traversal_refuses_substituted_cut_shadowed_or_foreign_graphs() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    let c2 = repo.commit(MAIN, &[&c1], "two\n", 2);
+    let c3 = repo.commit(MAIN, &[&c2], "three\n", 3);
+    corpus.publish(&repo, &[c1.clone(), c2.clone(), c3.clone()]);
+    let before = corpus.live_oids();
+    assert_eq!(before.len(), 3);
+
+    // `refs/replace/<c2>` names a rootless commit; gix 0.87.1 loads replacement refs when the repository's own config carries `core.useReplaceRefs = false`. Read through the replacement, `c2` has no parent and `c1` looks unreachable although `main` reaches it.
+    let orphan = repo.commit("refs/heads/orphan", &[], "orphan\n", 9);
+    repo.point_ref(&format!("refs/replace/{c2}"), &orphan);
+    repo.append_config("[core]\n\tuseReplaceRefs = false\n");
+    let replaced = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert_eq!(replaced.end, ReconcileEnd::Complete, "{replaced:?}");
+    assert_eq!(
+        (
+            replaced.retained,
+            replaced.reachable,
+            replaced.preserved,
+            replaced.retired
+        ),
+        (3, Some(3), 3, 0),
+        "the walk follows the true parents, not the replacement"
+    );
+    assert_eq!(corpus.live_oids(), before);
+
+    // A shallow boundary at `c2` cuts `c1` out of the walk while its object is still in the store.
+    repo.set_shallow(&c2);
+    let shallow = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert_eq!(
+        shallow.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Repository(GitRefusal::Shallow)),
+        "{shallow:?}"
+    );
+    assert_eq!((shallow.reachable, shallow.retired), (None, 0));
+    repo.clear_shallow();
+    assert_eq!(corpus.live_oids(), before);
+
+    // A tag named `main` pointing at `c1` shadows the branch when the permitted ref is only a partial name.
+    repo.point_ref("refs/tags/main", &c1);
+    let partial = corpus.reconcile(&repo.scope(&["main"]));
+    assert_eq!(
+        partial.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::RefUnresolved("main".to_string())),
+        "{partial:?}"
+    );
+    assert_eq!((partial.reachable, partial.retired), (None, 0));
+    let full = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert_eq!(full.end, ReconcileEnd::Complete, "{full:?}");
+    assert_eq!(full.retired, 0);
+    assert_eq!(corpus.live_oids(), before);
+
+    // A retained row of another object format cannot be judged by a sha1 walk: it is not unreachable, it is unjudgeable.
+    let foreign_oid = "f".repeat(64);
+    let foreign_row = corpus.publish_foreign_format("sha256", &foreign_oid);
+    let mut with_foreign = before.clone();
+    with_foreign.insert(foreign_oid);
+    assert_eq!(corpus.live_oids(), with_foreign);
+    let foreign = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert_eq!(
+        foreign.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::ObjectFormatMismatch("sha256".to_string())),
+        "{foreign:?}"
+    );
+    assert_eq!(foreign.retired, 0);
+    assert_eq!(corpus.live_oids(), with_foreign);
+    corpus.retire_descriptor(&foreign_row.object_id, "retire-foreign");
+    assert_eq!(corpus.live_oids(), before);
+
+    // A commit object above the byte bound is refused by the object store before the walk reads it, so the episode ends unreadable instead of walking a truncated graph.
+    let big = repo.commit(MAIN, &[&c3], &"m".repeat(8192), 4);
+    repo.commit(MAIN, &[&big], "cap\n", 5);
+    let oversized = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert!(
+        matches!(
+            oversized.end,
+            ReconcileEnd::Blocked(ReconcileBlocked::Repository(GitRefusal::Unreadable(_)))
+        ),
+        "{oversized:?}"
+    );
+    assert_eq!((oversized.reachable, oversized.retired), (None, 0));
+    assert_eq!(corpus.live_oids(), before);
+}
+
+/// The inventory is bounded and cancellable on its own, agrees with the export about which descriptors are live, and reports only the descriptors its commits invalidated.
+#[test]
+fn inventory_is_bounded_and_agrees_with_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    let c2 = repo.commit(MAIN, &[&c1], "two\n", 2);
+    let f1 = repo.commit(FEATURE, &[&c1], "feature\n", 4);
+    let published = corpus.publish(&repo, &[c1.clone(), c2.clone(), f1.clone()]);
+    let beta = Repo::init(&dir.path().join("beta"));
+    let b1 = beta.commit(MAIN, &[], "beta\n", 7);
+    corpus.publish_as(&beta, "repo-beta", std::slice::from_ref(&b1));
+    let before = corpus.live_oids();
+    assert_eq!(before.len(), 3);
+
+    // The class holds four live rows across two repositories; a scan bound of three ends the episode before the repository's rows are all found, although its retained bound of sixteen is far away.
+    let scanned = GitReconciler::new(&corpus.kernel)
+        .run_episode(
+            &repo.scope(&[MAIN]),
+            InventoryBounds {
+                max_scanned: NonZeroUsize::new(3).unwrap(),
+                ..bounds()
+            },
+            &unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        scanned.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::ScannedExceeded { max: 3 }),
+        "{scanned:?}"
+    );
+    assert_eq!((scanned.retained, scanned.retired), (0, 0));
+
+    // A budget cancelled after the first inventory page stops the inventory itself, not the traversal after it.
+    let budget = unbounded();
+    let cancelled = GitReconciler::new(&corpus.kernel)
+        .with_probe_for_test(Probe::AfterInventoryPage, || budget.cancel())
+        .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+        .unwrap();
+    assert_eq!(
+        cancelled.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Inventory)),
+        "{cancelled:?}"
+    );
+    assert_eq!((cancelled.retained, cancelled.retired), (0, 0));
+    assert_eq!(corpus.live_oids(), before);
+
+    // A descriptor whose evidence was deleted is absent from every export snapshot, so the inventory does not count or retire it either.
+    corpus.delete_evidence(&published[2], "delete-f1");
+    assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
+    let page = corpus
+        .kernel
+        .live_source_descriptors(
+            OccurrenceClass::GitCommits,
+            corpus.kernel.tip().unwrap(),
+            None,
+            NonZeroUsize::new(64).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(page.rows.len(), 3, "two alpha rows and the beta row");
+    let after_delete = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert_eq!(after_delete.end, ReconcileEnd::Complete, "{after_delete:?}");
+    assert_eq!(
+        (
+            after_delete.retained,
+            after_delete.preserved,
+            after_delete.retired
+        ),
+        (2, 2, 0)
+    );
+
+    // A descriptor another writer retired between the inventory and the retirement page is skipped by the page's commit, and the report counts only what the commit invalidated.
+    let c4 = repo.commit(MAIN, &[&c2], "four\n", 5);
+    let c5 = repo.commit(MAIN, &[&c4], "five\n", 6);
+    let late = corpus.publish(&repo, &[c4.clone(), c5.clone()]);
+    repo.point_ref(MAIN, &c2);
+    let c5_object = late[1].object_id.clone();
+    let counted = GitReconciler::new(&corpus.kernel)
+        .with_probe_for_test(Probe::AfterTraversal, || {
+            corpus.retire_descriptor(&c5_object, "retire-c5")
+        })
+        .run_episode(&repo.scope(&[MAIN]), bounds(), &unbounded())
+        .unwrap();
+    assert_eq!(counted.end, ReconcileEnd::Complete, "{counted:?}");
+    assert_eq!(
+        (counted.retained, counted.preserved, counted.retired),
+        (4, 2, 1),
+        "c4 is retired by the episode; c5 was retired by the other writer"
+    );
+    assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
 }
