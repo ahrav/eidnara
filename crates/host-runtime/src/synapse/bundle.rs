@@ -10,7 +10,7 @@ use super::{SynapseLimits, jobs};
 
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 /// MAX_MODEL_BYTES covers the ONNX graph and all external initializers.
-const MAX_MODEL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const MAX_MODEL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SIDE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXTERNAL_INITIALIZERS: usize = 16;
 const MAX_ARTIFACT_NAME_BYTES: usize = 255;
@@ -401,8 +401,8 @@ fn validate_manifest(manifest: &BundleManifest) -> Result<(), BundleError> {
 /// The startup budget must include `jobs::job_input_bytes` for each admitted job.
 /// `jobs::job_input_bytes` includes both key copies, decoded ID/hash capacities, and admission-time metadata copies.
 /// `max_queued_request_bytes` alone can permit scratch exhaustion because it excludes the per-job runtime charge.
-/// `per_waiter_charge_bound` uses the runtime accounting on worst-case-shaped inputs to avoid duplicated formulas drifting apart.
-fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
+/// The queue cap uses runtime accounting on worst-case-shaped inputs.
+pub(crate) fn max_queued_input_bytes(limits: &SynapseLimits) -> Option<u64> {
     let worst_item = jobs::BatchItem {
         id: worst_decoded(jobs::MAX_ITEM_ID_BYTES),
         content_sha256: worst_decoded(jobs::CONTENT_SHA256_BYTES),
@@ -417,12 +417,13 @@ fn max_queued_metadata_bytes(limits: &SynapseLimits) -> Option<u64> {
     let per_job = per_item
         .checked_mul(u64::try_from(limits.max_batch_items).ok()?)?
         .checked_add(per_job_key)?;
-    u64::try_from(limits.max_queued_jobs)
+    let metadata = u64::try_from(limits.max_queued_jobs)
         .ok()?
-        .checked_mul(per_job)
+        .checked_mul(per_job)?;
+    limits.max_queued_request_bytes.checked_add(metadata)
 }
 
-/// The input charge includes `String` capacity, so worst-case fields carry the twice-decoded-length capacity that `per_waiter_charge_bound` assumes.
+/// The input charge includes `String` capacity, so decoded fields carry their worst retained capacity.
 fn worst_decoded(len: usize) -> String {
     let mut decoded = String::with_capacity(len.saturating_mul(2));
     decoded.extend(std::iter::repeat_n('a', len));
@@ -431,20 +432,24 @@ fn worst_decoded(len: usize) -> String {
 
 /// `protocol::is_lower_hex_64` admits only 64-byte request keys, so this shape has every admitted key's length.
 fn canonical_key_shape() -> String {
-    "a".repeat(64)
+    "a".repeat(super::protocol::CANONICAL_REQUEST_KEY_BYTES)
 }
 
 /// The worst retained charge for one completed job, computed by the runtime rule on the largest item shape.
-fn max_retained_job_bytes(limits: &SynapseLimits) -> u64 {
-    let item_lens = std::iter::repeat_n(
-        (jobs::MAX_ITEM_ID_BYTES, jobs::CONTENT_SHA256_BYTES),
-        limits.max_batch_items,
-    );
-    u64::try_from(jobs::retained_input_bytes(
+fn max_retained_job_bytes(limits: &SynapseLimits) -> Option<u64> {
+    jobs::max_retained_input_bytes(
         canonical_key_shape().len(),
-        item_lens,
-    ))
-    .expect("one job's retained charge fits u64")
+        limits.max_batch_items,
+        jobs::MAX_ITEM_ID_BYTES,
+        jobs::CONTENT_SHA256_BYTES,
+    )
+    .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+pub(crate) fn max_retained_input_bytes(limits: &SynapseLimits) -> Option<u64> {
+    u64::try_from(limits.max_retained_jobs)
+        .ok()?
+        .checked_mul(max_retained_job_bytes(limits)?)
 }
 
 /// The worst `embed.result` request charge, computed by the runtime rule on maximal decoded fields.
@@ -600,12 +605,11 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
     let waiter_bound = limits
         .per_waiter_charge_bound()
         .ok_or_else(|| err("per-query resident charge bound overflows"))?;
-    let queued_metadata = max_queued_metadata_bytes(limits)
-        .ok_or_else(|| err("worst-case queued job metadata overflows"))?;
+    let queued_inputs = max_queued_input_bytes(limits)
+        .ok_or_else(|| err("worst-case queued job input bytes overflow"))?;
     let required_scratch = query_slots
         .checked_mul(waiter_bound)
-        .and_then(|queries| queries.checked_add(limits.max_queued_request_bytes))
-        .and_then(|used| used.checked_add(queued_metadata))
+        .and_then(|queries| queries.checked_add(queued_inputs))
         .and_then(|used| used.checked_add(worst_parse_reservation))
         .ok_or_else(|| err("combined query and queue resident bound overflows"))?;
     if required_scratch > reservable_scratch {
@@ -619,8 +623,8 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
     // The validator prevents retained metadata from exceeding its reserved scratch-pool slice.
     // Overflowing the retained-metadata reservation can starve the worst advertised request until expiry.
     // Completing batches can exhaust the retained-metadata reservation without new requests.
-    let retained_worst =
-        (limits.max_retained_jobs as u64).saturating_mul(max_retained_job_bytes(limits));
+    let retained_worst = max_retained_input_bytes(limits)
+        .ok_or_else(|| err("worst-case retained job metadata overflows"))?;
     if retained_worst > crate::config::RETAINED_METADATA_RESERVED_BYTES {
         return Err(err(format!(
             "worst-case retained job metadata ({retained_worst} bytes) exceeds its reserved \
@@ -628,6 +632,17 @@ pub(crate) fn validate_limits(limits: &SynapseLimits) -> Result<(), BundleError>
             crate::config::RETAINED_METADATA_RESERVED_BYTES
         )));
     }
+    let local_inputs = queued_inputs
+        .checked_add(retained_worst)
+        .ok_or_else(|| err("combined local input capacity overflows"))?;
+    if local_inputs > tokio::sync::Semaphore::MAX_PERMITS as u64 {
+        return Err(err(
+            "combined local input capacity exceeds the permit limit",
+        ));
+    }
+    local_inputs
+        .checked_add(limits.max_retained_result_bytes)
+        .ok_or_else(|| err("combined local input and retained result capacity overflows"))?;
     Ok(())
 }
 
@@ -1350,7 +1365,6 @@ mod tests {
         let limits = SynapseLimits {
             max_batch_items: 150,
             max_batch_text_bytes: 1024 * 1024,
-            max_retained_result_bytes: u64::MAX,
             ..SynapseLimits::default()
         };
         let error = validate_test_serving(&manifest, &limits)
@@ -1360,7 +1374,6 @@ mod tests {
         let limits = SynapseLimits {
             max_batch_items: 150,
             max_batch_text_bytes: 1024 * 1024,
-            max_retained_result_bytes: u64::MAX,
             max_retained_jobs: 32,
             ..SynapseLimits::default()
         };
