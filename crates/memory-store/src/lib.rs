@@ -5554,6 +5554,18 @@ impl MemoryStore {
             .unwrap_or(0)
     }
 
+    /// How many times the connection has run the `cache_state` scalar select through the
+    /// statement cache on the handle the probe observed; every scalar `meta` read (the
+    /// publication floor, the revert epoch, the historian phase) adds to it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cache_state_scalar_runs(&self) -> i32 {
+        self.inner
+            .statement_runs()
+            .get(CACHE_STATE_META_SCALAR_SELECT.trim())
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, MemoryStoreError> {
         let inner = open_sqlite(descriptor, BASELINE)?;
         let note_caller_project = Arc::new(Mutex::new(None::<NoteCallerScope>));
