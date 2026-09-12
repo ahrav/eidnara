@@ -15798,6 +15798,45 @@ mod tests {
         );
     }
 
+    /// Refusal after scanning a substituted value leaves the detection in the caller-provided
+    /// vector.
+    #[test]
+    fn a_refusal_after_a_substitution_leaves_its_detection_in_the_callers_vector() {
+        // Object members are walked in `serde_json::Map` order, so the value entry's key
+        // sorts before the refusing key.
+        let mut keyed = ModuleMeta::default();
+        keyed.block_identity_by_mid.insert(
+            "a-mid".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "password=earlier-value".to_string(),
+                byte_fingerprint: "fp".to_string(),
+            }],
+        );
+        keyed.block_identity_by_mid.insert(
+            "password=key-secret".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "fp".to_string(),
+            }],
+        );
+        let mut detections = Vec::new();
+        let refused = prepare_json_content_collecting(
+            &serde_json::to_string(&keyed).unwrap(),
+            JsonScanPolicy::DurablePreserveIdentities,
+            &mut detections,
+        );
+        assert!(
+            matches!(refused, Err(MemoryStoreError::Redaction(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            detections.len(),
+            1,
+            "the earlier value must be scanned before the key refuses, so the caller holds a \
+             detection it must not record"
+        );
+    }
+
     /// The value-only scanner finds nothing in `{"credential":"fixture"}`, so a receipt built
     /// from its detections alone would report no finding for bytes the key gate replaced.
     #[test]

@@ -133,4 +133,4 @@ for the drain function rather than the `sometimes` witness the record's
 guarantee names. A handler-pass run with all three kinds due is still open.
 
 [drain-live]: ../../../../../crates/memory-store/src/lib.rs#L11235-L11293
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L19831-L19970
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L19870-L20009

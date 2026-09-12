@@ -219,12 +219,12 @@ branch as well and passing in isolation.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2616-L2624
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2432
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16440-L16482
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16479-L16521
 [receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6888
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16406-L16435
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16445-L16474
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2772
 [retire]: ../../../../../crates/memory-store/src/lib.rs#L8832
 [overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8786
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16263-L16401
-[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24736-L24780
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16302-L16440
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24765-L24809
 [receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6897

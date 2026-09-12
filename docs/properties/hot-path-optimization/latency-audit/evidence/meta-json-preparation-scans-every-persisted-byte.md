@@ -148,36 +148,46 @@ re-serializes otherwise. The two places the walk judges a subtree whole
 without descending, an identity-named value and an integrity-named value, run
 the [key validation][keys-live] over that subtree, so a secret-bearing key
 under `{"signature": {...}}` or `{"id": {...}}` is still refused. The
-[wrapper][collecting-live] that callers use asserts in debug builds that clean
-output equals the input and that a change left a detection for the receipt.
+[wrapper][collecting-live] that callers use asserts in debug builds that a
+change left a detection for the receipt; byte identity of clean output is the
+clean branch's construction rather than an assertion.
 
 The order in which a document with two independent faults reports its error
 can differ from the baseline, where every key was validated before any value;
 the outcome on one fault is unchanged and detections gathered before a refusal
-are discarded with the refused write, as before.
+are discarded with the refused write, as before. `serde_json::Value` walks
+object members in `serde_json::Map` order, so a value precedes a refusing key
+only when its own key sorts first; a fixture that plants the value under a
+later-sorting key never reaches the refusal with a detection in hand.
 
 The [unit test][unit-live] shows clean input returned byte for byte with
 `changed` false, a substitution with `changed` true and one recorded detection,
 and refusals for a secret-bearing key under an integrity-named and under an
-identity-named container. The [store test][store-live] shows, through
-`commit`, clean `meta` stored equal to `serde_json::to_string` of the value, a
-secret planted in a `block_identity_by_mid` entry's value substituted and
-recorded on the `meta` scan, and a secret planted in a `block_identity_by_mid`
-key refused with no row stored. Duplicate object names remain refused by
-[`parse_json_with_unique_names`][unique-live] and its existing test.
+identity-named container. The [refusal-ordering test][refusal-live] serializes
+the store test's `keyed` fixture, a `block_identity_by_mid` map whose `a-mid`
+entry carries a value secret and whose second key is itself a secret, and shows
+the caller's vector holding one detection when `prepare_json_content_collecting`
+returns the refusal. The [store test][store-live] shows, through `commit`,
+clean `meta` stored equal to `serde_json::to_string` of the value, a secret
+planted in a `block_identity_by_mid` entry's value substituted and recorded on
+the `meta` scan, and the same `keyed` fixture refused with no row stored and
+the `meta` detection count unchanged, so the detection the walk gathered before
+the refusal was discarded rather than recorded. Duplicate object names remain
+refused by [`parse_json_with_unique_names`][unique-live] and its existing test.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p memory-store --locked` passed 176 tests including the two above;
-`cargo test -p daemon --locked` passed 1012, the two `dreamer_run_task_bounds_*`
-tests failing under full-suite load on the base branch as well and passing in
-isolation.
+`cargo test -p memory-store --locked` passed 177 tests including the three
+above; `cargo test -p daemon --locked` passed 1012, the two
+`dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+branch as well and passing in isolation.
 
-[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3225-L3410
-[changed]: ../../../../../crates/memory-store/src/lib.rs#L3402
-[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3403-L3409
-[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3275
-[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3219
-[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3414
-[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15582
-[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L701
+[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3223-L3415
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3403
+[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3409-L3414
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3273
+[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3217
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3419
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15590
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15592-L15629
+[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L720

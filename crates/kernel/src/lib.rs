@@ -12,6 +12,7 @@ pub mod applicability;
 mod backup;
 mod cas;
 mod commit_read;
+mod current_input;
 mod durable_fs;
 mod eligibility;
 mod envelope;
@@ -66,6 +67,10 @@ pub use cas::{
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
     CommitReadTarget, CompleteCommit, PageEnd,
+};
+pub use current_input::{
+    CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
+    StaleCurrentInput, StaleInput,
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
