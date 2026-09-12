@@ -597,10 +597,10 @@ call site.
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8171-L8188
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8194-L8261
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8181-L8198
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
 [h-call]: ../../../../../crates/daemon/src/lib.rs#L8250-L8256
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8520-L8546
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8540-L8564
 [respond]: ../../../../../crates/daemon/src/lib.rs#L14462
 [emit-call]: ../../../../../crates/daemon/src/lib.rs#L14521-L14539
 [emit]: ../../../../../crates/daemon/src/lib.rs#L14543-L14565

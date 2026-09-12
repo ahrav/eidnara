@@ -170,7 +170,7 @@ Guarantee: A concurrent peer store of the same shape yields stale bytes, never
 a mixed-size data race, and a receiver never reads uninitialized process
 memory as payload.
 Fault/timing angle: The zero-fill at [`to_vec:331`][to-vec-fill] is what makes
-the `Vec` initialized before any early `Err` return at [`:334-345`][to-vec];
+the `Vec` initialized before any early `Err` return at [`:328-348`][to-vec];
 replacing it with capacity plus `set_len` or `MaybeUninit` moves the
 initialization proof onto the span-length checks, which run per span. A
 `memcpy` replacement would form a reference over peer-writable memory, which
@@ -198,7 +198,7 @@ Check: `always` - for every [`DirectFrame`][direct-frame] handed to
 [`publish_direct`][publish-direct], either the serializer writes exactly
 `body_len` bytes and `commit(body_len)` publishes one frame whose header `len`
 equals `body_len`, or no frame becomes visible to the peer: a short write
-fails `commit` with `Underfill` ([`:2551-2555`][commit-underfill]), an
+fails `commit` with `Underfill` ([`:2533-2570`][commit-underfill]), an
 over-write fails [`ReservationWriter::write`][res-writer] through
 [`ProducerReservation::write`][res-write] with `Overflow`, a serializer `Err`
 or panic drops the reservation, and each path runs
@@ -298,7 +298,7 @@ Guarantee: No ingest publishes bytes that would raise the on-disk regular-file
 sum under `objects` above `artifact_cap`, and a refused ingest leaves no
 reservation row and no published object.
 Fault/timing angle: The temp file is written and synced under `tmp`
-([`:382-402`][ingest-temp]) before the lock and before the check, so `tmp`
+([`:379-405`][ingest-temp]) before the lock and before the check, so `tmp`
 bytes are never counted and a refused ingest still cost one full write; two
 ingests serialize on the writer lock, so the walk cannot race a concurrent
 publish, but it does race the health sampler's lock-free walk. A counter

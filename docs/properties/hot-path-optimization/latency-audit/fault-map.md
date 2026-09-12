@@ -188,7 +188,7 @@ in the records' open questions.
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12542-L12557
 [pageapply]: ../../../../crates/daemon/src/lib.rs#L9483-L9491
 [expand]: ../../../../crates/daemon/src/lib.rs#L4187-L4279
-[hook]: ../../../../crates/daemon/src/lib.rs#L8291-L8301
+[hook]: ../../../../crates/daemon/src/lib.rs#L8308-L8316
 [timeout]: ../../../../packages/opencode-plugin/src/shared/with-timeout.ts#L2
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494

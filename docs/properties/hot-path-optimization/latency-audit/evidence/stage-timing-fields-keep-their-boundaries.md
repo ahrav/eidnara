@@ -25,7 +25,7 @@ can shrink a number without making anything faster.
   object; all 22 exist in the struct. Its [`stage`][ts-stage-fn] helper
   prints `n/a` only when the key is absent or non-finite, so a present zero
   prints as `0.0`.
-- The handler assigns 25 fields at [`:8538-8562`][h-timings]. Fourteen are
+- The handler assigns 25 fields at [`:8540-8564`][h-timings]. Fourteen are
   millisecond durations from `Instant` pairs taken on the handler task:
   `handler_total` from `handler_started_at`, the request-to-handler gap,
   the pass-state load, delta expand, side-channel drain, receive trace, cache lookup and store,
@@ -112,7 +112,7 @@ not a runtime assertion.
 [snap-add]: ../../../../../crates/daemon/src/transform.rs#L2384
 [snap-once]: ../../../../../crates/daemon/src/transform.rs#L2863
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8520-L8546
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8540-L8564
 [prepare]: ../../../../../crates/daemon/src/lib.rs#L5043-L5373
 [respond]: ../../../../../crates/daemon/src/lib.rs#L14462
 [emit]: ../../../../../crates/daemon/src/lib.rs#L14543-L14565

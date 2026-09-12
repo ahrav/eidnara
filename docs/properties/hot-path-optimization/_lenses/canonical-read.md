@@ -29,7 +29,7 @@ the baseline. Skipped corrupt-row error observability remains unresolved.
 a performance claim. No query-plan experiment runs here.
 
 [pass]: ../../../../crates/daemon/src/lib.rs#L8182-L8262
-[retry]: ../../../../crates/daemon/src/lib.rs#L8323-L8425
+[retry]: ../../../../crates/daemon/src/lib.rs#L8329-L8433
 [sql]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
 [read]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
 [convert]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212

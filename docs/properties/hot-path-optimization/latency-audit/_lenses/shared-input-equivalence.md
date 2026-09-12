@@ -21,7 +21,7 @@ rebuilt from the projection cache by [`reattach_messages_prefix`][reattach],
 which clones every `Arc<WireBlock>` payload and rebuilds each message shell
 with [`WireMessage::from_parts`][from-parts] (so the shell has no retained
 `original`), and the native prefix is deep-copied from `Vec<Arc<Value>>` into
-`Vec<Value>` at [`:4228-4231`][native-deep]. Inside
+`Vec<Value>` at [`:4262-4265`][native-deep]. Inside
 [`apply_once`][apply-head], [`normalize_synthetic_todo_ingress`][normalize]
 clones the whole request when any non-synthetic message carries a
 [`synthetic_todo_`][todo-prefix] call or result id and sets
@@ -34,7 +34,7 @@ un-normalized `parsed` to [`boundary_messages`][boundary-call] and to
 charges `parsed.messages`, and
 [`attach_native_messages_incremental`][native-attach] filters
 `request.messages` by the un-normalized flag at
-[`:13138-13143`][newest-assistant]. With compaction disabled
+[`:13196-13201`][newest-assistant]. With compaction disabled
 ([default true][compaction-default]) the pass returns through
 [`apply_additive_only`][additive] before normalization runs.
 
@@ -54,14 +54,14 @@ messages at [`:393`][inc-skip]. Consumers of the projection copy again:
 [`BoundaryBlock`][boundary-block],
 [`tail_for_selection.clone()`][tail-clone] copies the whole `Vec<SelItem>`,
 [`taggable_source`][taggable] text becomes `source_bytes: Vec<u8>` on every
-minted [`TagRow`][tagrow] ([`:7164-7169`][mint-input]), and
+minted [`TagRow`][tagrow] ([`:7167-7172`][mint-input]), and
 [`measure_tail_hygiene`][hygiene] builds a fresh content `String` per part and
 hashes `kind_name`, NUL, `content` in [`part_measurement`][part-measure].
 On output, [`ServedMessage::from_message_reusing`][served-reusing] computes
 `canonical_bytes = to_vec(to_value(&message))`, which sorts object keys because
 the workspace enables only [`raw_value`][serde-features] on `serde_json`, and
 the prepared transform output writes exactly those bytes per served segment
-([`PreparedSegment::served`][segment-served], [`:14448-14454`][segments]).
+([`PreparedSegment::served`][segment-served], [`:14506-14512`][segments]).
 `Serialize for` [`WireMessage`][ser-msg] and [`WireBlock`][ser-block] replay
 the retained `original` when present, and a `meta` edit does not clear it
 ([`:210-216`][meta-doc]). The tag baseline is a process cache of
@@ -80,8 +80,8 @@ Clone sites in scope, what reads the copy, and whether the copy is mutated:
 | [`native-deep`][native-deep] | `Value` per native prefix message | none | sidecar decode (which [copies each raw message again][raw-clone] into [`HarnessMessageMeta.raw`][decode-sidecar]), `native_ingress_chunks` equality, retained-bytes accounting |
 | [`prefix-copy`][prefix-copy] | `FlatBlock` per cached prefix block | none | the incremental `FlatProjection` |
 | [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323][sel-consume], [boundary.rs:1729][boundary-consume], [injection.rs:403][injection-consume]) | reductions, historian tool summaries, todo capture |
-| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7361`][active-match], caveman source at [`:5699-5702`][caveman-source] |
-| [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4932-4942`][commit-inputs] |
+| [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7364`][active-match], caveman source at [`:5702-5705`][caveman-source] |
+| [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4935-4945`][commit-inputs] |
 | [`part-measure`][part-measure] | content `String` per part | none | hygiene `content_hash`, token cache key, `T`/`U` |
 | [`served-reusing`][served-reusing] | `Value` tree plus bytes per served message | none | wire bytes, `canonical_hash`, `output_identity`, native message keys |
 
@@ -216,7 +216,7 @@ while the JSON stays equal; a message with `original` is unaffected.
 message through serde instead of [`PreparedSegment::served`][segment-served]
 emits the other form; the handler avoids this only because it takes
 `messages` out of the response before `to_value(response)`
-([`:14427-14442`][segments-take]). The same message therefore already has
+([`:14485-14500`][segments-take]). The same message therefore already has
 two canonical forms depending on whether its shell came from the harness or
 from [`reattach`][reattach], which the
 [`reattach_keeps_block_level_original_but_rebuilds_the_message_shell`][t-reattach]
@@ -298,7 +298,7 @@ and
 assert every committed `TagRow.source_bytes` equals the block's
 [`taggable_source`][taggable] text bytes exactly. `always` because the
 cache entry is read on the next pass of the same session and a stale or
-speculative row changes the active-tag match at [`:7361`][active-match].
+speculative row changes the active-tag match at [`:7364`][active-match].
 Guarantee: Pass-local mint rows never become visible through the tag
 baseline cache, and every visible row's `source_bytes` is byte-equal to the
 projected text it tags.
@@ -420,7 +420,7 @@ both sides and neither resolved here:
   [`assemble_historian_firing`][assemble] together with the normalized
   `result.projection`. In the full-array lane a replayed todo message is a
   `BoundaryMsg` whose every block is filtered out by `!block.synthetic`
-  ([`:16597`][boundary-filter]) and its ordinal counts in
+  ([`:16646`][boundary-filter]) and its ordinal counts in
   [`build_historian_chunk`][chunk-build]; in the delta lane the same message
   is rebuilt from `message_meta` with `synthetic: true` and is excluded by
   the message filter. The transform catalog's `synthetic-strip` record
@@ -439,7 +439,7 @@ both sides and neither resolved here:
 [tc-synthetic]: ../../../daemon/transform/catalog.md#synthetic-strip-precedes-every-coverage-read
 [tc-tagnum]: ../../../daemon/transform/catalog.md#speculative-tag-numbering-has-two-authorities
 [r1]: ../../catalog.md#prepared-field-output-and-audit-policy-agree
-[arc-parsed]: ../../../../../crates/daemon/src/lib.rs#L8171
+[arc-parsed]: ../../../../../crates/daemon/src/lib.rs#L8190
 [expand]: ../../../../../crates/daemon/src/lib.rs#L4187-L4279
 [native-deep]: ../../../../../crates/daemon/src/lib.rs#L4262-L4265
 [store-pc]: ../../../../../crates/daemon/src/lib.rs#L4332-L4375
@@ -450,7 +450,7 @@ both sides and neither resolved here:
 [encode-full]: ../../../../../crates/daemon/src/lib.rs#L13039-L13082
 [ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13084-L13128
 [gate-native]: ../../../../../crates/daemon/src/lib.rs#L13130-L13137
-[native-attach]: ../../../../../crates/daemon/src/lib.rs#L13140-L13152
+[native-attach]: ../../../../../crates/daemon/src/lib.rs#L8481-L8510
 [newest-assistant]: ../../../../../crates/daemon/src/lib.rs#L13196-L13201
 [native-diff]: ../../../../../crates/daemon/src/lib.rs#L13373-L13390
 [segments-take]: ../../../../../crates/daemon/src/lib.rs#L14485-L14500

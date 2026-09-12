@@ -40,7 +40,7 @@ never of the allocation or the lane that produced them.
   `i` exactly when [`chunk.value.as_ref() == message`][chunk-eq], a value test.
   [`remember_message`][remember] appends to `order` only on first sight;
   [`decode_opencode_sidecar_incremental`][sidecar-inc] copies the prior order,
-  then appends suffix mids not already present ([`:277-291`][sidecar-merge]),
+  then appends suffix mids not already present ([`:288-310`][sidecar-merge]),
   and takes `mid_pins` from the suffix only.
 - [`ServedMessage::from_message_reusing`][served-reusing] computes
   `canonical_bytes = to_vec(to_value(&message))`, `canonical_hash` as its
