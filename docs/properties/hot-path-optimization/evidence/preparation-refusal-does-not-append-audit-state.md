@@ -55,9 +55,9 @@ The bound and rollback tests are [unaudited][checks]; no new experiment runs.
 - Conclusion: The two observation boundaries must remain separate; the
   in-memory witness is unresolved and must be added by the test handoff.
 
-[bound]: ../../../../crates/memory-store/src/lib.rs#L465
-[prepare]: ../../../../crates/memory-store/src/lib.rs#L2204-L2243
-[execute]: ../../../../crates/memory-store/src/lib.rs#L2245-L2271
-[refusal]: ../../../../crates/memory-store/src/lib.rs#L8921-L8931
-[test]: ../../../../crates/memory-store/src/lib.rs#L22694-L22725
+[bound]: ../../../../crates/memory-store/src/lib.rs#L550
+[prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
+[execute]: ../../../../crates/memory-store/src/lib.rs#L2330-L2356
+[refusal]: ../../../../crates/memory-store/src/lib.rs#L9223-L9233
+[test]: ../../../../crates/memory-store/src/lib.rs#L23204-L23235
 [checks]: ../existing-checks.md#redaction-ownership

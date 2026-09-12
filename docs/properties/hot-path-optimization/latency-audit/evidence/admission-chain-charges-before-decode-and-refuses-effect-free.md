@@ -124,21 +124,21 @@ because the decoded type exposes no copy count.
 - Conclusion: needs human input.
 
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11812-L11834
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15479-L15495
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15434-L15462
-[copies]: ../../../../../crates/daemon/src/lib.rs#L15415-L15424
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15465-L15470
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15472-L15477
-[freeze]: ../../../../../crates/daemon/src/lib.rs#L8043-L8044
-[routechan]: ../../../../../crates/daemon/src/lib.rs#L8052-L8055
-[accept]: ../../../../../crates/daemon/src/lib.rs#L8073
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11858-L11880
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15525-L15541
+[footprint]: ../../../../../crates/daemon/src/lib.rs#L15480-L15508
+[copies]: ../../../../../crates/daemon/src/lib.rs#L15461-L15470
+[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15511-L15516
+[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15518-L15523
+[freeze]: ../../../../../crates/daemon/src/lib.rs#L8080-L8081
+[routechan]: ../../../../../crates/daemon/src/lib.rs#L8089-L8092
+[accept]: ../../../../../crates/daemon/src/lib.rs#L8110
 [ticket]: ../../../../../crates/daemon/src/lib.rs#L581-L638
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9432-L9440
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9478-L9486
 [hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9324-L9330
-[settle]: ../../../../../crates/daemon/src/lib.rs#L12079-L12094
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12491-L12506
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9370-L9376
+[settle]: ../../../../../crates/daemon/src/lib.rs#L12125-L12140
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12537-L12552
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
 [reserve]: ../../../../../crates/host-runtime/src/handler.rs#L474-L484

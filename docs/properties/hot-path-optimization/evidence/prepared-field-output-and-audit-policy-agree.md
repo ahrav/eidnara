@@ -60,9 +60,9 @@ No six-policy experiment runs here; this record is not exercised.
 - Conclusion: The matrix and output rules are resolved; fixture selection
   remains unresolved for `/testing:test-strategy`.
 
-[prepare]: ../../../../crates/memory-store/src/lib.rs#L2204-L2243
-[audit]: ../../../../crates/memory-store/src/lib.rs#L2350-L2424
-[units]: ../../../../crates/memory-store/src/lib.rs#L3428-L3494
-[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8306
-[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L8921-L8931
-[test]: ../../../../crates/memory-store/src/lib.rs#L18171-L18212
+[prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
+[audit]: ../../../../crates/memory-store/src/lib.rs#L2435-L2509
+[units]: ../../../../crates/memory-store/src/lib.rs#L3550-L3616
+[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8608
+[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L9223-L9233
+[test]: ../../../../crates/memory-store/src/lib.rs#L18813-L18854

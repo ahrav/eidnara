@@ -189,22 +189,24 @@ refused by [`parse_json_with_unique_names`][unique-live] and its
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p memory-store --locked` passed 177 tests including the three
-above; `cargo test -p daemon --locked` passed 1012, the two
-`dreamer_run_task_bounds_*` tests failing under full-suite load on the base
-branch as well and passing in isolation.
+At the merged tree `39f706b6`, `cargo test -p memory-store --locked` passed
+every test in each binary: 144 in the library, 5 in `baseline.rs`, 8 in
+`dreamer_ledger.rs`, and 22 in `production_redaction.rs`, the three above
+among them. `cargo test -p daemon --locked` passed 1021; the two
+`dreamer_run_task_bounds_*` tests fail under full-suite load on the base
+branch as well and pass in isolation.
 
-[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3296-L3488
-[changed]: ../../../../../crates/memory-store/src/lib.rs#L3451-L3454
-[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3474-L3475
-[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3480-L3481
-[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3482-L3487
-[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3346-L3359
-[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3384-L3394
-[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3461-L3467
-[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3280-L3290
-[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3556-L3558
-[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15952-L15964
-[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15772-L15825
-[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15827-L15864
+[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3394-L3586
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3549-L3552
+[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3572-L3573
+[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3578-L3579
+[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3580-L3585
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3444-L3457
+[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3378-L3388
+[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3559-L3565
+[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3378-L3388
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3654-L3656
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L16206-L16218
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L16026-L16079
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L16081-L16118
 [store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

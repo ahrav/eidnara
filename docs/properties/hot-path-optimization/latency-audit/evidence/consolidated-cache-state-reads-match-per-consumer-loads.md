@@ -248,25 +248,25 @@ the timing test, the durable-phase test, and the extended interleave test, the
 two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
-[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8119
-[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6503-L6515
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4780-L4781
-[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3506-L3510
-[delta]: ../../../../../crates/daemon/src/lib.rs#L4205
-[lookup]: ../../../../../crates/daemon/src/lib.rs#L4316
-[last-response]: ../../../../../crates/daemon/src/lib.rs#L4639-L4671
-[active]: ../../../../../crates/daemon/src/lib.rs#L4608-L4630
-[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8220
+[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8121
+[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6651-L6663
+[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4885-L4886
+[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3507-L3511
+[delta]: ../../../../../crates/daemon/src/lib.rs#L4206
+[lookup]: ../../../../../crates/daemon/src/lib.rs#L4317
+[last-response]: ../../../../../crates/daemon/src/lib.rs#L4641-L4673
+[active]: ../../../../../crates/daemon/src/lib.rs#L4609-L4632
+[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8222
 [pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
-[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4807-L4808
-[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8215
-[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6596-L6611
-[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6558-L6570
-[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6576-L6590
-[select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4785-L4801
-[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15461-L15678
-[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15685-L15713
-[load-count]: ../../../../../crates/daemon/src/lib.rs#L24693-L24745
-[timing-test]: ../../../../../crates/daemon/src/lib.rs#L24751-L24763
-[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24769-L24782
+[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4912-L4913
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8217
+[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6744-L6759
+[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6706-L6718
+[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6724-L6738
+[select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4890-L4906
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15688-L15905
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15912-L15940
+[load-count]: ../../../../../crates/daemon/src/lib.rs#L24695-L24747
+[timing-test]: ../../../../../crates/daemon/src/lib.rs#L24753-L24765
+[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24771-L24784

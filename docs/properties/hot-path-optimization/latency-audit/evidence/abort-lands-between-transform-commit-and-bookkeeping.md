@@ -93,19 +93,19 @@ with completion.
 - Missing evidence: A worker design and its completion channel.
 - Conclusion: needs human input.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2915-L2918
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8146-L8200
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8209
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8216-L8221
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8231-L8239
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8251-L8341
-[await-a]: ../../../../../crates/daemon/src/lib.rs#L8270
-[await-b]: ../../../../../crates/daemon/src/lib.rs#L8296
-[await-c]: ../../../../../crates/daemon/src/lib.rs#L8322
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8394
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8405-L8410
-[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4944-L4982
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6276-L6303
+[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2916-L2919
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8190-L8252
+[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8264
+[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8271-L8276
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8309-L8317
+[emergency]: ../../../../../crates/daemon/src/lib.rs#L8253-L8343
+[await-a]: ../../../../../crates/daemon/src/lib.rs#L8324
+[await-b]: ../../../../../crates/daemon/src/lib.rs#L8350
+[await-c]: ../../../../../crates/daemon/src/lib.rs#L8324
+[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8439
+[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8450-L8455
+[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4947-L4985
+[load]: ../../../../../crates/memory-store/src/lib.rs#L6619-L6646
 [host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955
 [host-close]: ../../../../../crates/host-runtime/src/dispatch.rs#L1239-L1259
 [e3]: ../../catalog.md#request-close-overlaps-live-work

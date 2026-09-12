@@ -113,15 +113,15 @@ stored compartments at 74/75/76 tokens. The test drives a SOFT plan and checks
 its SOFT-or-HARD result. This is bounded characterization, not evidence that
 these shapes represent production traffic.
 
-[plan-select]: ../../../../../crates/daemon/src/transform.rs#L3803-L3821
-[m0-unit]: ../../../../../crates/daemon/src/transform.rs#L4225
-[m0-unit-refold]: ../../../../../crates/daemon/src/transform.rs#L4415
-[m0-count]: ../../../../../crates/daemon/src/transform.rs#L4306-L4311
-[m1-count]: ../../../../../crates/daemon/src/transform.rs#L4312-L4317
-[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4318-L4324
+[plan-select]: ../../../../../crates/daemon/src/transform.rs#L3806-L3824
+[m0-unit]: ../../../../../crates/daemon/src/transform.rs#L4228
+[m0-unit-refold]: ../../../../../crates/daemon/src/transform.rs#L4418
+[m0-count]: ../../../../../crates/daemon/src/transform.rs#L4309-L4314
+[m1-count]: ../../../../../crates/daemon/src/transform.rs#L4315-L4320
+[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4321-L4327
 [m1-struct]: ../../../../../crates/daemon/src/m1_compose.rs#L92-L101
 [m1-compose]: ../../../../../crates/daemon/src/m1_compose.rs#L160-L237
 [m1-pieces]: ../../../../../crates/daemon/src/m1_compose.rs#L174-L222
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8163-L8166
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8207-L8210

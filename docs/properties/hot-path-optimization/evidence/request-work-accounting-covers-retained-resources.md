@@ -71,8 +71,8 @@ Include refusal and ownership transfer, not equality between unrelated counters.
 [decode]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L692-L763
 [finish]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L787-L815
 [checks]: ../existing-checks.md#execution-lifecycle
-[parse]: ../../../../crates/daemon/src/lib.rs#L11805-L11826
-[footprint]: ../../../../crates/daemon/src/lib.rs#L15408-L15454
+[parse]: ../../../../crates/daemon/src/lib.rs#L11851-L11872
+[footprint]: ../../../../crates/daemon/src/lib.rs#L15454-L15500
 [input]: ../../../../crates/host-runtime/src/handler.rs#L277-L295
 [resident]: ../../../../crates/host-runtime/src/handler.rs#L474-L490
 [caps]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L43-L82
