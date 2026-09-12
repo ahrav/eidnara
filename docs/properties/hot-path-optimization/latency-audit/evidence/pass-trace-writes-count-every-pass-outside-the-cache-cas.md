@@ -228,7 +228,10 @@ under the pass owner and is retired by the next pass, so the
 receipt across five passes that repeat both. A `scheduler_full_array_fingerprint`
 is stored only inside a `scheduler_interesting` entry, so its scan
 [joins the history owner][fingerprint-retained] only when that entry is
-written. Only `commit_transform` appends interesting entries, so the
+written and the fingerprint fits the diagnostic byte bound that the entry
+applies; an oversized fingerprint is scanned but not stored, so its scan stays
+the live pass's and evicts nothing, as the
+[oversized-fingerprint test][fingerprint-bound-test] shows. Only `commit_transform` appends interesting entries, so the
 fingerprint receipts and the fingerprint-bearing entries share one order, and
 each append keeps exactly as many fingerprint receipts as the ring still holds
 fingerprint-bearing entries; the [fingerprint test][fingerprint-test] shows
@@ -270,26 +273,27 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2438
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16844-L16886
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16850-L16892
 [receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7046
 [receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7076-L7088
-[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16822-L16839
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16788-L16817
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16828-L16845
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16794-L16823
 [pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2857
 [retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2860
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L9041-L9047
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L9047-L9053
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2638-L2680
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8975-L8980
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16626-L16783
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16953-L17052
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8981-L8986
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16632-L16789
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16959-L17058
 [history-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
-[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9130-L9158
-[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17319-L17382
-[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9161-L9174
-[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17057-L17102
-[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8957-L8964
-[fingerprint-evict-test]: ../../../../../crates/memory-store/src/lib.rs#L17159-L17208
-[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17107-L17154
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24628-L24651
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9136-L9166
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17390-L17453
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9167-L9180
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17063-L17108
+[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8960-L8970
+[fingerprint-evict-test]: ../../../../../crates/memory-store/src/lib.rs#L17165-L17214
+[fingerprint-bound-test]: ../../../../../crates/memory-store/src/lib.rs#L17219-L17279
+[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17113-L17160
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24699-L24722
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
 [receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7055

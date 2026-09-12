@@ -206,7 +206,7 @@ branch as well and pass in isolation.
 [walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3565-L3571
 [collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3384-L3394
 [unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3660-L3662
-[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L16250-L16262
-[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L16070-L16123
-[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L16125-L16162
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L16256-L16268
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L16076-L16129
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L16131-L16168
 [store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

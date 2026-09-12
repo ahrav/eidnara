@@ -8954,7 +8954,13 @@ impl MemoryStore {
             })
             .transpose()?;
         let history_scans = history_scans_start..write.scans.len();
-        if let (Some(_), Some(fingerprint_scan)) = (&scheduler_interesting_json, fingerprint_scan) {
+        // Stored only when the interesting entry is written and the fingerprint fits the
+        // diagnostic bound that `from_observation` applies; otherwise the scan is the live
+        // pass's alone.
+        let fingerprint_stored = scheduler_interesting_json.is_some()
+            && scheduler_full_array_fingerprint
+                .is_some_and(|fingerprint| fingerprint.len() <= MAX_FULL_ARRAY_FINGERPRINT_BYTES);
+        if let (true, Some(fingerprint_scan)) = (fingerprint_stored, fingerprint_scan) {
             write.reassign_scans_in(
                 fingerprint_scan..fingerprint_scan + 1,
                 "session",
@@ -9148,7 +9154,7 @@ impl MemoryStore {
                 )?;
                 let keep = usize::try_from(stored_fingerprints)
                     .unwrap_or(0)
-                    .saturating_sub(usize::from(fingerprint_scan.is_some()));
+                    .saturating_sub(usize::from(fingerprint_stored));
                 evictions.push(("scheduler_full_array_fingerprint", keep));
             }
             if first_divergence.is_some() {
@@ -17204,6 +17210,71 @@ mod tests {
         assert_eq!(
             receipts, stored,
             "no receipt outlives the entry that stored its fingerprint"
+        );
+    }
+
+    /// A fingerprint longer than the diagnostic bound is scanned but not stored, so it earns
+    /// no history receipt and evicts none.
+    #[test]
+    fn an_oversized_fingerprint_neither_keeps_nor_evicts_a_history_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let version = store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    scheduler_applied_reductions: true,
+                    scheduler_full_array_fingerprint: Some("fp-short"),
+                    ..base_commit(None, &core, &meta)
+                },
+            )
+            .unwrap();
+        let first = field_scan_ids(&store, "ses", &field);
+        assert_eq!(first.len(), 1);
+        let oversized = "f".repeat(MAX_FULL_ARRAY_FINGERPRINT_BYTES + 1);
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    scheduler_applied_reductions: true,
+                    scheduler_full_array_fingerprint: Some(&oversized),
+                    ..base_commit(Some(version), &core, &meta)
+                },
+            )
+            .unwrap();
+        let after = field_scan_ids(&store, "ses", &field);
+        assert!(
+            after.is_superset(&first),
+            "the stored fingerprint's receipt survives an oversized one, got {after:?} after {first:?}"
+        );
+        assert_eq!(
+            after.len(),
+            2,
+            "the oversized fingerprint's scan stays as the live pass's receipt only"
+        );
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    ..base_commit(Some(version + 1), &core, &meta)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            field_scan_ids(&store, "ses", &field),
+            first,
+            "the next pass retires the oversized fingerprint's pass-owned receipt"
         );
     }
 
