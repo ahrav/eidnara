@@ -4696,13 +4696,20 @@ fn apply_once(
     let hygiene_tag_rows =
         tag_rows_for_hygiene(&projection, &tag_rows, &tag_overlay, !tagging_active);
     let tail_hygiene_started_at = Instant::now();
-    let hygiene_measurement = measure_tail_hygiene(
-        &projection,
-        &core,
-        meta.coverage_ordinal,
-        hygiene_tag_rows.iter().map(Arc::as_ref),
-        req.protected_tags,
-        &protected_block_ids,
+    let hygiene_measurement = crate::tail_hygiene::hygiene_memos().with_session(
+        store.tag_cache_namespace(),
+        &req.session_id,
+        |memo| {
+            measure_tail_hygiene(
+                &projection,
+                &core,
+                meta.coverage_ordinal,
+                hygiene_tag_rows.iter().map(Arc::as_ref),
+                req.protected_tags,
+                &protected_block_ids,
+                memo,
+            )
+        },
     );
     timings.tail_hygiene = elapsed_ms(tail_hygiene_started_at);
     let current_hygiene_baseline = if is_bust_pass {
@@ -22672,6 +22679,57 @@ pub(crate) mod tests {
             ),
             &spine(),
         );
+    }
+
+    #[test]
+    fn production_transform_reuses_hygiene_memo_and_recounts_only_edited_block() {
+        const CHILD: &str = "EIDNARA_HYGIENE_MEMO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "transform::tests::production_transform_reuses_hygiene_memo_and_recounts_only_edited_block", "--nocapture"])
+                .env(CHILD, "1")
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        let output_cache = Mutex::new(SerializedOutputCache::default());
+        let make_request = |middle| {
+            req(
+                "hygiene-production",
+                "cfg0",
+                vec![
+                    item("a", 1, "first text"),
+                    item("b", 2, middle),
+                    item("c", 3, "last text"),
+                ],
+            )
+        };
+        for (middle, expected) in [
+            ("original", (0, 3)),
+            ("original", (3, 0)),
+            ("modified", (2, 1)),
+        ] {
+            let before = crate::tail_hygiene::local_memo_stats();
+            let response = transform_with_projection_cached(
+                &store,
+                &make_request(middle),
+                &ctx,
+                &output_cache,
+                None,
+            )
+            .unwrap();
+            assert_eq!(response.response.status, TransformStatus::Ok);
+            let after = crate::tail_hygiene::local_memo_stats();
+            assert_eq!((after.0 - before.0, after.1 - before.1), expected);
+        }
     }
 
     #[test]

@@ -10,7 +10,8 @@ This is a focused inventory of checks bearing on the audit surfaces this area
 covers, not a replacement for the existing catalogs or for the parent's
 [inventory](../existing-checks.md). Every listed check is **unaudited**.
 Descriptions identify what the source checks, not whether the oracle is
-sufficient. No historical exercise claim is imported and no check runs here.
+sufficient. The discovery inventory imports no historical exercise claim and
+runs no checks. Dated implementation evidence below is separate from that audit.
 This is a working-tree inventory against the source baseline. Each section
 ends with an explicit "none found" list and the areas the lenses flagged as
 suspiciously quiet, so an omitted category is not mistaken for absent tests.
@@ -86,8 +87,16 @@ not the handler.
 | [`tag_baseline_cache_refuses_an_insert_larger_than_its_budget`][t-tag-refusal] | An oversized insert is refused. A replacement with spare source capacity removes the old entry and charge while loaded rows remain usable; readmission charges once. | unaudited |
 | [`claude_code_first_requested_surface_tags_bootstrap_pass_one`][t-tag-bootstrap] | Initial active minting and replay preserve rendered bytes. | unaudited |
 | [`newest_tag_block_set_isolates_protected_and_applied_pending_rows`][t-tag-protection] | Bootstrap mints tag 29 without displacing stored tag 5 from protection. Stored rank 21 is dropped, while rank 20 and the second block at the newest stored ordinal stay pending. | unaudited |
-| [`measurement_is_identical_with_cold_and_warm_token_cache`][t-hyg-cold] | Hygiene output is independent of token cache state. | unaudited |
-| [`parity_golden_matches_ts_reference_across_full_corpus`][t-hyg-golden] | U and T match the TypeScript golden within tokenizer tolerance; the band matches exactly. | unaudited |
+| [`measurement_is_identical_with_cold_and_warm_token_cache`][t-hyg-cold] | Cold and warm memo output is identical; warm reuse skips token-cache lookup. Clearing both caches preserves output. | unaudited |
+| [`parity_golden_matches_ts_reference_across_full_corpus`][t-hyg-golden] | U and T match the TypeScript golden within tokenizer tolerance; the band matches exactly. Cold/warm full results equal the Rust characterization digest. Its pre-memo provenance is agent-witnessed and transcript-only, not independently reexecuted or artifact-hash verified. | unaudited |
+| [`hygiene_digest_and_token_key_use_kind_prefixed_content`][t-hyg-key] | A poisoned projection-digest token entry is not reused. The independent text-prefixed digest is the reported hash and token key. | unaudited |
+| [`memo_preserves_each_derived_digest_domain`][t-hyg-domains] | Independent text, input, output, file, and excluded digest formulas match cold and warm memo entries and differ from projection hashes. | unaudited |
+| [`memo_rechecks_caveman_identity_payload_and_context`][t-hyg-invalidates] | Same-ID content edits, caveman identity/payload and first-duplicate selection, tags, protection, coverage, reduction, role, and synthetic status preserve fresh-measurement equality. | unaudited |
+| [`memo_bounds_sessions_bytes_resets_and_oversize_bypass`][t-hyg-bounds] | Interleaving, removal, oversize multiblock walks, and empty projections preserve complete results. Prune, reinsert, replacement, and reset preserve recomputed counters under the production capacity-to-bucket model, not an allocator measurement. | unaudited |
+| [`memo_slot_collisions_namespace_reentry_and_poison_are_cold_misses`][t-hyg-slots] | Forced collision and namespace A/B/A replace mismatched occupants. A panic with torn accounting is recovered by use, namespace removal, ID-only removal, and reset; results equal uncached measurement. | unaudited |
+| [`noncolliding_memo_sessions_overlap_inside_slot_locks`][t-hyg-overlap] | Two noncolliding sessions reach a channel barrier while both slot locks are held. | unaudited |
+| [`all_memo_slots_near_budget_match_independent_retained_accounting`][t-hyg-pool-bound] | All sixteen slots hold near-budget memos. Recomputed string, bucket, and container charges match counters using the same capacity-to-bucket model as production. The bound is 16 MiB plus fixed containers after operations, not peak allocation, allocator RSS, or independently verified hashbrown layout. | unaudited |
+| [`production_transform_reuses_hygiene_memo_and_recounts_only_edited_block`][t-hyg-production] | An isolated process runs the production transform entry: cold 0/3 hits/misses, unchanged 3/0, single-edit 2/1. | unaudited |
 | [`shared_row_iterator_matches_slice_for_protected_legacy_orphan`][t-hyg-iterator] | Arc-row iterator and original slice measurements agree exactly on the frozen orphan fixture with two protected tags; orphan tag 2 has nonzero T and zero U. | unaudited |
 | [selection_differential.rs][t-seldiff] | Optimized selection equals the frozen reference over generated `SelItem`s. | unaudited |
 
@@ -96,6 +105,17 @@ None found: a test that a `Served` prepared segment writes
 delta body replaying a synthetic pair; a test that runs either differential gate from `crates/daemon/tests/`
 or `crates/daemon/benches/` (`cfg!(test)` is false there and no file sets the
 variables).
+
+The [B4 evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md)
+separates the release-accessor prerequisite repair from the transcript-only
+pre-memo characterization. The [local payoff receipt](evidence/tail-hygiene-payoff.md)
+records three A/A pairs and five A/B pairs, without retries or discarded runs.
+It meets the ticket-local rule with a 73.1659% warm-call time reduction. Median
+and p95 describe batch-average call times, not individual-call latency. The
+external collector retains build, host, commands, hashes, and raw receipts;
+this is not an automated CI performance guarantee. The controller reports all
+14 local gates passed, with logs at `/tmp/opencode/hygiene-memo-*.log`.
+No gates or benchmarks run during this documentation update.
 
 The shared-shell campaign extends the complex native replay with request-shell
 pointer checks, fresh/reattached/shared projection equality, served-byte equality,
@@ -434,9 +454,17 @@ not a claim that no related check exists anywhere in the repository.
 [t-tag-refusal]: ../../../../crates/daemon/src/transform.rs#L11845
 [t-tag-bootstrap]: ../../../../crates/daemon/src/transform.rs#L21761
 [t-tag-protection]: ../../../../crates/daemon/src/transform.rs#L23762
-[t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L801
-[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L1110
-[t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L1180
+[t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L1054
+[t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L2027
+[t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L2123
+[t-hyg-key]: ../../../../crates/daemon/src/tail_hygiene.rs#L1114
+[t-hyg-domains]: ../../../../crates/daemon/src/tail_hygiene.rs#L1162
+[t-hyg-invalidates]: ../../../../crates/daemon/src/tail_hygiene.rs#L1263
+[t-hyg-bounds]: ../../../../crates/daemon/src/tail_hygiene.rs#L1403
+[t-hyg-slots]: ../../../../crates/daemon/src/tail_hygiene.rs#L1599
+[t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1689
+[t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1721
+[t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22685
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8224-L8232

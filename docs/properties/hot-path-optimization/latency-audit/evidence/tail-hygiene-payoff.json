@@ -1,0 +1,70 @@
+{
+  "kind": "local-payoff-receipt-index",
+  "evidence_root": "/tmp/opencode/tail-hygiene-payoff",
+  "workspace": "/local/home/ahrav/scratch/eidnara",
+  "cell": "tail_hygiene/measure/1400msgs_2KiB_mixed",
+  "scope": "Warm repeated in-process calls on one synthetic cell, exact builds and host; no production, concurrency, cold-call, total-session, or CI guarantee",
+  "source_base": "d487b5549458796df1820a3a799ffb4bfb7146fa",
+  "source_base_role": "Release-accessor repair only, not memo implementation",
+  "original_failed_base": "2b83194f0185cdc9b13a8e7a6003b864cb618ce8",
+  "arms": {
+    "A": {
+      "binary": "target/hygiene-before/release/deps/hot_path-c149ac66da8b63fb",
+      "binary_sha256": "d214810c2c5e9fc820becd6b740994e436faf8cab781d2315207c8980cfe17e8",
+      "source_manifest_sha256": "8a40d4cbe7fea489cb5756845f5b3ffe7ffe339b50745b0ac0f154f49cec32f5"
+    },
+    "B": {
+      "source_state": "Source base plus uncommitted candidate-source.patch",
+      "binary": "target/hygiene-after/release/deps/hot_path-c149ac66da8b63fb",
+      "binary_sha256": "771a492632fd0fa0ce257e3e68e7d3425d3a8399463606ca10229cd1cb0fa5e0",
+      "source_manifest_sha256": "85bd52a378388d5a988add5f2ec9e364eaf1f53c806cc1652730c41df33d8ccd",
+      "source_patch_sha256": "9de449cc1e30e053b7787714861179ba39792415a98fe5244441f41b84303c09"
+    }
+  },
+  "schedule": {
+    "aa_orders": ["AB", "BA", "AB"],
+    "aa_b_label_is_a": true,
+    "ab_orders": ["AB", "BA", "AB", "BA", "AB"],
+    "samples_per_process": 20,
+    "cpu": 0,
+    "retries": 0,
+    "discarded_observations": 0,
+    "added_pairs": 0
+  },
+  "result": {
+    "status": "COMPLETE",
+    "ticket_local_payoff": "YES",
+    "batch_summary": "median and nearest-rank p95 of times/iters; not individual-call latency",
+    "N_log_span": 0.1658994523568077,
+    "minimum_log_gain": 1.310897753908875,
+    "mean_log_gain": 1.3154977945163326,
+    "twice_sample_sd": 0.010872346514671818,
+    "geometric_B_over_A": 0.2683407114517186,
+    "time_reduction_percent": 73.16592885482814,
+    "conditional_paired_t_95_ratio_interval": [0.26653553754286746, 0.27015811132064715]
+  },
+  "receipt_paths": {
+    "aa": "raw/aa-p{1,2,3}-{A,B}/receipt.json",
+    "ab": "raw/ab-p{1,2,3,4,5}-{A,B}/receipt.json",
+    "samples_per_attempt": "criterion/tail_hygiene_measure/1400msgs_2KiB_mixed/new/sample.json",
+    "hash_index": "ab-checksums.json"
+  },
+  "files_sha256": {
+    "plan.md": "39d83752d684f39e356ddb69cb5b1101baffeac46aecb6cdf24a555349ca1f89",
+    "plan-repaired.md": "e667eda22299a93ee4ff665b6b0cec400fb872c896a696449ea3d5d9f20d3685",
+    "aa-summary.json": "73d6bb6015b360eae02a01c34e8e53087e158bd82ac8e5b616c7ad81f9bf9408",
+    "ab-summary.json": "a64fb41e0daee8902c1489c6956c42a5102281da851b8bf25adb93d3818acbba",
+    "pr-summary.md": "68ba3005b120803a8572b40c54c853f36a54be9a2b272f87f7c22b56ee6d55b9",
+    "candidate-build.json": "e92727f313efc1cb5ed2955de5288c223846cdb13724e867807d1f33de0f2eed",
+    "repaired-build.json": "1acd27f6666a55010437eccab4fd5918d8eb500b776230104cbf5c8b4b6a0f10",
+    "ab-checksums.json": "f906a214ea71271f7ec659dba69ec044a795ffc5a032d667e57f4b75c8e7c5eb",
+    "candidate-source.patch": "9de449cc1e30e053b7787714861179ba39792415a98fe5244441f41b84303c09",
+    "candidate.patch": "34c3c48cd9186075df853249f3d0048adf35ba36c64455320797b5a2252824f5",
+    "repair.patch": "d38af4f5d80f494a1183fede732ea0b0891cad9041cd2db30dd28da44458d155"
+  },
+  "provenance_limits": [
+    "Pre-memo characterization is agent-witnessed transcript-only evidence, not independently reexecuted or artifact-hash verified",
+    "Private effective environments remain in scratch receipts and require redaction before publication",
+    "This manifest indexes local evidence; it neither archives raw receipts nor creates a CI retention guarantee"
+  ]
+}

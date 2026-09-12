@@ -30,7 +30,10 @@ authorize implementation or create tickets.
 - The supplied scope is the audit and in-repository code, documents, tests,
   and history. External plans and incident reports were not supplied. Final
   scope confirmation remains pending; this does not mean none exist.
-- No tests, campaigns, or benchmarks ran as part of this work.
+- No tests, campaigns, or benchmarks ran as part of the discovery audit.
+  The B4 implementation and local payoff evidence are a separate, dated update
+  in [the B4 evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md)
+  and [the payoff receipt](evidence/tail-hygiene-payoff.md).
 - `portfolio-evaluation.md` in this directory records the fresh evaluation
   and, under "Disposition", what was applied from it.
 
@@ -532,8 +535,12 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - Cold-versus-warm cache identity and the TypeScript
-golden exist; nothing states the digest input against the projection digest.
+Exercised: yes - Cold and warm memo walks match the frozen full-result digest.
+Independent kind-prefixed digest assertions, a poisoned projection token key,
+and content, caveman, context, namespace, reset, and eviction cases pass.
+Fixed-slot collision and poison recovery preserve cold-reference results.
+Noncolliding sessions overlap inside slot locks, and production transforms
+reuse unchanged measurements while recounting only an edited block.
 Guarantee: The hygiene digest is a function of the part kind and derived
 content and is never the projection `content_hash`.
 Check: `always` - For every hygiene part, `content_hash ==
@@ -541,15 +548,19 @@ hex(sha256(kind_name ++ "\0" ++ content))` where `content` is the derived
 part string ([caveman-substituted and reminder-stripped text][hyg-text],
 [`to_string(input)`][hyg-input], or [`tool_output_content`][hyg-output]);
 excluded parts hash `"excluded\0" ++ block.bytes` on the pre-match branch
-(`tail_hygiene.rs:513-526`) and the kind-level branch (`:601-604`), and
+(`tail_hygiene.rs:767-790`) and the kind-level branch (`:837-840`), and
 `"excluded\0" ++ content` with the derived empty or drop-sentinel content on
-the text, tool-result, and media branches (`:542-543`, `:569-570`,
-`:584-585`, through `excluded_part` at `:280-289`); the token cache is keyed
+the text, tool-result, and media branches (`:798-799`, `:811-812`,
+`:823-824`, through `excluded_part` at `:530-532`); the token cache is keyed
 by that digest ([`count_with_digest`][count-digest] at
-[`tail_hygiene.rs:264`][th-cwd]); and the measurement is identical with a
-cold and a warm token cache. `always` because the digest is both the reported
+[`tail_hygiene.rs:520`][th-cwd]); and the measurement is identical with a
+cold and a warm memo. `always` because the digest is both the reported
 hash and the cache key on every measured pass.
-Fault/timing angle: None in time. A shortcut substitutes
+Fault/timing angle: Each hashed slot serializes its occupant's measurement
+and eviction. Noncolliding slots run independently. Poison recovery discards
+the occupant and interrupted accounting before clearing poison. Reset walks
+slots one at a time; concurrent fills may repopulate, subject to normal validity.
+A shortcut substitutes
 `FlatBlock.content_hash` for the hygiene digest; the two hash different
 inputs (full serialized `WireBlock` versus kind-prefixed derived content), so
 every reported `content_hash` changes and the cache key mixes counts of the
@@ -558,15 +569,30 @@ a different cache, the boundary [`token_count`][token-count], which counts
 `block.bytes`.
 Required faults and enabling state: A tail with text, tool call, tool result
 in text and content variants, media, an excluded reduced block, and a
-caveman-substituted text block; the same input measured twice.
+caveman-substituted text block; the same input measured twice, then edited
+under the same block ID. Change caveman identity and payload, protection,
+coverage, reduction, role, and synthetic status independently. Interleave
+sessions, force slot collisions, change the store namespace A/B/A, panic during
+a fill, reset, evict, and exceed byte limits with multiple blocks. Fill all
+sixteen slots near budget and recompute their retained-byte counters using the
+same capacity-to-bucket model as production. This checks accounting, not actual
+allocator RSS or hashbrown internals. The 16 MiB plus fixed-container bound is
+post-operation retained storage, not peak allocation.
 Confidence: high - [Evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md).
 [`part_measurement`][part-measure] and [`measure_tail_hygiene`][hygiene] are
 source-verified; W3 owns the key-domain non-aliasing clause.
 Existing check: [Shared-input checks](existing-checks.md#shared-input-equivalence)
-include the cold-versus-warm identity and the parity golden; all unaudited.
+include cold/warm identity, the frozen full-result digest, explicit digest and
+token-key separation, invalidation, and bounded retention; all unaudited.
 Impact: Reported hygiene hashes and cached token counts silently change
 meaning.
-Open questions: None.
+Open questions: None for the ticket-local payoff decision. The
+[fixed three-pair A/A and five-pair A/B run](evidence/tail-hygiene-payoff.md)
+meets both predeclared retention conditions and reports a 73.1659% reduction
+in warm-call time. This does not establish production, concurrent-session,
+cold-call, or total session latency. The frozen characterization has
+agent-witnessed, transcript-only pre-memo provenance, not an independently
+reexecuted or artifact-hash-verified characterization run.
 
 ### replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
 
@@ -2319,7 +2345,7 @@ oracle. The following notes define the evidence to request, not tickets.
 | [B1][b1] | Selection inputs, native prefix chunks, snapshot fallback, and sidecar order/pins are checked. Extend integration coverage for sorted-key served output. |
 | [B2][b2] | Typed-flag reference and delta comparisons run. Extend the finite observer corpus when new replay shapes appear. |
 | [B3][b3] | Failed-commit rollback and clean-source equality are exercised. Resolve equality semantics for detected secrets. |
-| [B4][b4] | State the digest input explicitly against `FlatBlock.content_hash`. |
+| [B4][b4] | Digest separation and memo correctness checks pass; the controller's local payoff run is pending. |
 | [B5][b5] | The constructed delta-turn witness fires. A production plugin body remains unobserved. |
 | [C1][c1] | Pair a narrow read with `MemoryStore::load` over malformed and defaulted rows; observe the post-commit `row_version`. |
 | [C2][c2] | Inject a `pass_trace` failure beside a commit; count breadcrumbs across reject, stable, and rerun passes. |
@@ -2471,7 +2497,7 @@ evaluation of this area and its disposition are recorded in
 [segments]: ../../../../crates/daemon/src/lib.rs#L14445-L14452
 [cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16567
 [sel-kind]: ../../../../crates/daemon/src/lib.rs#L16629
-[token-count]: ../../../../crates/daemon/src/lib.rs#L2028-L2050
+[token-count]: ../../../../crates/daemon/src/lib.rs#L2035-L2059
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
@@ -2502,12 +2528,12 @@ evaluation of this area and its disposition are recorded in
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1745
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1792
 [shell-metadata]: ../../../../crates/daemon/src/wire.rs#L1704
-[hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L215-L234
-[part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L242-L278
-[th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L264
-[hygiene]: ../../../../crates/daemon/src/tail_hygiene.rs#L472-L526
-[hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L536-L554
-[hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L555-L565
+[hyg-output]: ../../../../crates/daemon/src/tail_hygiene.rs#L478-L497
+[part-measure]: ../../../../crates/daemon/src/tail_hygiene.rs#L505-L528
+[th-cwd]: ../../../../crates/daemon/src/tail_hygiene.rs#L520
+[hygiene]: ../../../../crates/daemon/src/tail_hygiene.rs#L722-L879
+[hyg-text]: ../../../../crates/daemon/src/tail_hygiene.rs#L792-L803
+[hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L804-L807
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L267-L307
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L283-L305

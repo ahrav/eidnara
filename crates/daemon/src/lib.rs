@@ -153,17 +153,25 @@ pub mod bench_internals {
         tag_rows: &[TagRow],
         protected_tags: usize,
         protected_block_ids: &HashSet<String>,
+        memo: &HygieneMemo,
     ) -> (i64, i64) {
-        let measurement = crate::tail_hygiene::measure_tail_hygiene(
-            projection,
-            core,
-            coverage_ordinal,
-            tag_rows,
-            protected_tags,
-            protected_block_ids,
-        );
+        let measurement = memo.0.with_session(0, "benchmark", |memo| {
+            crate::tail_hygiene::measure_tail_hygiene(
+                projection,
+                core,
+                coverage_ordinal,
+                tag_rows,
+                protected_tags,
+                protected_block_ids,
+                memo,
+            )
+        });
         (measurement.u, measurement.t)
     }
+
+    /// Owns hygiene memos reused across warm benchmark calls.
+    #[derive(Default)]
+    pub struct HygieneMemo(crate::tail_hygiene::HygieneMemos);
 
     /// Returns how many leading memories fit the supplied token budget.
     pub fn trim_memories_to_budget(memories: &[CanonicalMemory], budget_tokens: f64) -> usize {
@@ -2235,7 +2243,7 @@ const _: () = assert!(
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
-/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, staged state-sync seeds, staged transform pages, retained completed-page responses, active projection and snapshot leases, the process-global token-count cache, and staged state-import bytes from ingress accounting.
+/// A zero declaration excludes the transform-serving caches, snapshot cache, boundary-token cache, tail-hygiene memos, staged state-sync seeds, staged transform pages, retained completed-page responses, active projection and snapshot leases, the process-global token-count cache, and staged state-import bytes from ingress accounting.
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
@@ -2243,6 +2251,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
     + BOUNDARY_TOKEN_CACHE_BUDGET_BYTES as u64
+    + tail_hygiene::MEMO_RETAINED_BYTES_BOUND as u64
     + STATE_SYNC_SEED_MAX_STAGED_BYTES as u64
     + TRANSFORM_PAGE_MAX_STAGED_BYTES as u64
     + TRANSFORM_PAGE_COMPLETED_BUDGET_BYTES as u64
@@ -3941,6 +3950,7 @@ impl Handler {
                 .lock()
                 .expect("boundary token cache mutex")
                 .remove(&session_id);
+            tail_hygiene::hygiene_memos().remove_session(&session_id);
             self.prompt_surface_epochs
                 .lock()
                 .expect("prompt surface epoch mutex")
@@ -4420,6 +4430,7 @@ impl Handler {
             .lock()
             .expect("boundary token cache mutex")
             .remove(session);
+        tail_hygiene::hygiene_memos().remove_session(session);
         self.prompt_surface_epochs
             .lock()
             .expect("prompt surface epoch mutex")
@@ -6060,6 +6071,7 @@ impl Handler {
             .lock()
             .expect("boundary token cache mutex")
             .remove(&session_id);
+        tail_hygiene::hygiene_memos().remove(store.tag_cache_namespace(), &session_id);
         self.transform_snapshots
             .lock()
             .expect("transform snapshots mutex")
@@ -11942,6 +11954,7 @@ impl CompositeComponent for Handler {
             .lock()
             .expect("boundary token cache mutex") =
             BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES);
+        tail_hygiene::hygiene_memos().clear();
         *self.state_sync_seeds.lock().expect("state sync seed mutex") =
             StateSyncSeedCoordinator::default();
         *self.transform_pages.lock().expect("transform page mutex") =
