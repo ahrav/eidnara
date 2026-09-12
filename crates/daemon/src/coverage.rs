@@ -82,7 +82,7 @@ pub enum CoverageError {
     Kernel(#[from] KernelError),
 }
 
-/// Reads the projection's live candidates, its observation, and the candidates' covered subset in one read transaction, then judges the candidates in one kernel batch.
+/// Reads the projection's observation, its live candidates, and the candidates' covered subset in one read transaction, then judges the candidates in one kernel batch. `kernel_incarnation_id` names the incarnation of `kernel`.
 ///
 /// # Errors
 ///
@@ -99,8 +99,13 @@ pub fn observe_coverage(
     let max_live = NonZeroUsize::new(bounds.max_live().min(MAX_ELIGIBILITY_CANDIDATES))
         .expect("a nonzero bound stays nonzero");
     let observed = projection.read(|conn| {
-        // Candidates first, so an oversized live set returns
-        // `TooManyLiveOccurrences` before the coverage observation runs.
+        // The observation walks at most its bound per class, so it refuses an
+        // oversized class before the candidate read sorts that class.
+        let report =
+            match retrieval::coverage::observe(conn, kernel_incarnation_id, generation, bounds)? {
+                Ok(report) => report,
+                Err(unavailable) => return Ok(Err(ReportUnavailable::Projection(unavailable))),
+            };
         let candidates = match live_candidates(conn, None, max_live) {
             Ok(candidates) => candidates,
             Err(ProjectionError::TooManyRecords { count }) => {
@@ -108,11 +113,6 @@ pub fn observe_coverage(
             }
             Err(error) => return Err(error),
         };
-        let report =
-            match retrieval::coverage::observe(conn, kernel_incarnation_id, generation, bounds)? {
-                Ok(report) => report,
-                Err(unavailable) => return Ok(Err(ReportUnavailable::Projection(unavailable))),
-            };
         let covered = retrieval::coverage::covered_among(
             conn,
             generation,

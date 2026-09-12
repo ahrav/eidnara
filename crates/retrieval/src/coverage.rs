@@ -125,6 +125,22 @@ pub fn observe(
     let Some(checkpoint) = read_checkpoint(conn, kernel_incarnation_id)? else {
         return Ok(Err(CoverageUnavailable::NoCheckpoint));
     };
+    // The same four fields `bind_lane` compares.
+    let built_for = (
+        identity.embedding_model.as_str(),
+        identity.tokenizer_fingerprint.as_str(),
+        identity.vector_dimension,
+        identity.generation_epoch,
+    );
+    let requested = (
+        generation.embedding_model.as_str(),
+        generation.tokenizer_fingerprint.as_str(),
+        generation.vector_dimension,
+        generation.generation_epoch,
+    );
+    if built_for != requested {
+        return Ok(Err(CoverageUnavailable::GenerationMismatch));
+    }
     match registered_generation(conn, generation)? {
         Some(registered) if !registered.identity_matches => {
             return Ok(Err(CoverageUnavailable::GenerationMismatch));

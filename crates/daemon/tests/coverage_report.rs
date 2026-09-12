@@ -789,6 +789,33 @@ fn incoherent_observations_are_unavailable_and_empty_classes_are_known_empty() {
         mismatch,
         ReportUnavailable::Projection(CoverageUnavailable::GenerationMismatch)
     );
+    // A registered generation whose identity differs from the projection's is unavailable, like the unregistered one above.
+    let unservable = VectorGeneration {
+        generation_id: "gen-other-model".to_string(),
+        tokenizer_fingerprint: "c".repeat(64),
+        ..generation()
+    };
+    empty
+        .write(|conn| {
+            register_generation(conn, &unservable, 1)?;
+            Ok(())
+        })
+        .unwrap();
+    let unservable = observe_coverage(
+        &empty,
+        &corpus.kernel,
+        &corpus.kernel_incarnation_id(),
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        &unservable,
+        bounds(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(
+        unservable,
+        ReportUnavailable::Projection(CoverageUnavailable::GenerationMismatch)
+    );
 
     corpus.publish(&message("m-1", 1, "one"));
     corpus.publish(&message("m-2", 1, "two"));
@@ -874,5 +901,40 @@ fn incoherent_observations_are_unavailable_and_empty_classes_are_known_empty() {
     assert_eq!(
         corpus.observe(&projection).unwrap_err(),
         ReportUnavailable::Projection(CoverageUnavailable::RetiredGeneration)
+    );
+}
+
+/// The per-class walk refuses an oversized class before the candidate read runs.
+#[test]
+fn oversized_class_is_refused_by_the_bounded_walk_before_the_candidate_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    for index in 0..6 {
+        corpus.publish(&message(&format!("m-{index}"), 1, "text"));
+    }
+    let hold = corpus.capture();
+    let projection = corpus.bootstrap(dir.path(), &hold);
+    // Six live messages exceed the per-class bound and the five-row total the candidate read admits.
+    let refused = observe_coverage(
+        &projection,
+        &corpus.kernel,
+        &corpus.kernel_incarnation_id(),
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        &generation(),
+        CoverageBounds {
+            max_live_per_class: NonZeroUsize::new(1).unwrap(),
+            max_tombstoned_per_class: NonZeroUsize::new(64).unwrap(),
+        },
+    )
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(
+        refused,
+        ReportUnavailable::Projection(CoverageUnavailable::OverBound {
+            class: OccurrenceClass::Messages,
+            max: 1
+        })
     );
 }
