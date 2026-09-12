@@ -52,24 +52,32 @@ describe("buildHiddenAgentConfig", () => {
         permission: { edit: "allow" },
         tools: { bash: true },
         prompt: "x",
+        system: "user system",
     };
 
-    it("clamps step limits to the cap and merges user permission, tools, and prompt", () => {
+    it("clamps step limits to the cap and merges user permission, tools, prompt, and system", () => {
         const config = buildHiddenAgentConfig("p", ["ctx_search"], 40, overrides);
         expect(config.steps).toBe(40);
         expect(config.maxSteps).toBe(5);
         expect(config.permission).toEqual({ "*": "deny", ctx_search: "allow", edit: "allow" });
         expect((config as Record<string, unknown>).tools).toEqual({ bash: true });
         expect(config.prompt).toBe("x");
+        expect((config as Record<string, unknown>).system).toBe("user system");
         expect(config.mode).toBe("primary");
         expect(config.hidden).toBe(true);
+
+        // An override above the cap on maxSteps alone clamps it and leaves steps at the cap.
+        const clamped = buildHiddenAgentConfig("p", ["ctx_search"], 40, { maxSteps: 100_000 });
+        expect(clamped.maxSteps).toBe(40);
+        expect(clamped.steps).toBe(40);
     });
 
-    it("drops user permission, tools, and prompt overrides when permissions are locked", () => {
+    it("drops user permission, tools, prompt, and system overrides when permissions are locked", () => {
         const config = buildHiddenAgentConfig("p", ["ctx_search"], 40, overrides, "label", true);
         expect(config.permission).toEqual({ "*": "deny", ctx_search: "allow" });
         expect("edit" in config.permission).toBe(false);
         expect("tools" in config).toBe(false);
+        expect("system" in config).toBe(false);
         expect(config.prompt).toBe("p");
         expect(config.steps).toBe(40);
         expect(config.maxSteps).toBe(5);

@@ -1351,28 +1351,33 @@ mod tests {
         drop(second);
     }
 
+    /// A symlink at the runtime directory or at its managed ancestor is refused, and the link target never receives host files.
     #[test]
-    fn symlinked_runtime_dir_fails_closed() {
-        let root = temp_root();
-        let elsewhere = temp_root();
-        let dir = runtime_dir_path(Some(root.path())).expect("resolve");
-        std::fs::create_dir_all(dir.parent().expect("parent")).expect("create parents");
-        symlink(elsewhere.path(), &dir).expect("symlink runtime dir");
+    fn symlinked_runtime_dir_or_ancestor_fails_closed() {
+        for link_at in ["run", "eidnara"] {
+            let root = temp_root();
+            let elsewhere = temp_root();
+            let dir = runtime_dir_path(Some(root.path())).expect("resolve");
+            let link = if link_at == "run" {
+                std::fs::create_dir_all(dir.parent().expect("parent")).expect("create parents");
+                dir.clone()
+            } else {
+                dir.parent().expect("parent").to_path_buf()
+            };
+            symlink(elsewhere.path(), &link).expect("symlink runtime component");
 
-        assert!(InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).is_err());
-    }
-
-    #[test]
-    fn symlinked_runtime_ancestor_fails_closed() {
-        let root = temp_root();
-        let elsewhere = temp_root();
-        symlink(elsewhere.path(), root.path().join("eidnara")).expect("symlink runtime ancestor");
-
-        assert!(InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).is_err());
-        assert!(
-            !elsewhere.path().join("run").exists(),
-            "the symlink target must not receive host files"
-        );
+            assert!(
+                InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).is_err(),
+                "symlinked {link_at} must be refused"
+            );
+            assert!(
+                std::fs::read_dir(elsewhere.path())
+                    .expect("list link target")
+                    .next()
+                    .is_none(),
+                "the symlink target must not receive host files (symlinked {link_at})"
+            );
+        }
     }
 
     #[test]
@@ -1424,19 +1429,6 @@ mod tests {
             meta.file_type().is_file(),
             "publication must be a real file"
         );
-    }
-
-    #[test]
-    fn cleanup_removes_only_our_own_publication() {
-        let root = temp_root();
-        let mut guard = InstanceGuard::acquire(Some(root.path()), TEST_DIGEST).expect("acquire");
-        guard
-            .publish(&guard.dir_path().join("setup.sock"), "eidnara-host/test")
-            .expect("publish");
-        let file = published(&guard);
-        assert!(file.exists());
-        guard.remove_publication();
-        assert!(!file.exists(), "our own publication must be removed");
     }
 
     /// The setup socket is unlinked through the runtime-directory descriptor and only while the name still resolves to the registered inode, matching the publication fence.

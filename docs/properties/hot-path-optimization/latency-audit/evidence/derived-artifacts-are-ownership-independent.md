@@ -27,7 +27,7 @@ never of the allocation or the lane that produced them.
   from the same block for their consumers to agree.
 - The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2919-2921`][prefix-call] when a reusable projection exists and
+  [`:2910-2912`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
@@ -130,7 +130,10 @@ accounting](shared-selection-and-pressure-accounting.md).
 Both production selection constructors borrow the projected wire input.
 The pointer-identity test fails on the clone-based baseline and passes on
 the borrowed representation, including a selection clone and historian input.
-The unchanged selection reference passes all 18 differential tests.
+The unchanged selection reference passes all 18 differential tests. The
+`tool_input` versus `wire.kind()` question from the discovery snapshot is
+resolved by removal: `FlatBlock` no longer carries a separate input copy, so
+there is one projected input and no pair of fields to drift apart.
 
 The sidecar test compares full and incremental order, metadata, and pins over
 three generations with repeated IDs. It also checks sparse prefixes: map
@@ -149,10 +152,12 @@ native implementation.
   ingress chunks or the full request snapshot. The request wire decoder also
   owns `Arc<Value>` values. JSON fields and serialization remain unchanged.
 - [Shared decode][shared-decode] borrows parts and retains each envelope in
-  `HarnessMessageMeta::raw` through an `Arc` clone. The value-slice decoder
-  keeps its entry interface and delegates to that same decoder. Full-native
-  encoding reads the shared request values without materializing a value
-  array. Pi adapts to the common sidecar field without changing its output.
+  `HarnessMessageMeta::raw` through an `Arc` clone. It is the only compiled
+  production decoder; the value-slice adapters that wrap owned fixtures in
+  fresh `Arc`s are test-only, so no shipped path can reintroduce that copy.
+  Full-native encoding reads the shared request values without materializing
+  a value array. Pi adapts to the common sidecar field without changing its
+  output.
 - [Ingress accounting][shared-ingress] retains the value-equality test when
   sharing an encoded chunk. An unequal encoded output cannot become the raw
   ingress prefix. Request accounting uses request allocation sizes, not the
@@ -302,6 +307,18 @@ measurement gate for this work. Full workspace tests, cross-process campaigns,
 and independent reviews remain controller work. Historical execution evidence
 above is retained; this file exceeds the method's length target to preserve it.
 
+The projection bench corpus is built from typed parts, so its shells carry no
+retained message JSON. Under shared shells that input takes the `Arc::clone`
+branch on every message, a path a decoded request never takes because
+`WireMessage::deserialize` always retains its JSON. A guard added to the
+[bench corpus helper][bench-ingress] first failed on that shape, then passed
+once the helper round-trips the corpus through `serde_json`. `projection/full`
+measures the canonical-shell rebuild that a cold request pays. A separate
+[`projection/reattached_prefix`][bench-reattached] cell keeps the typed corpus
+and asserts every projected block points into a corpus shell, so it measures the
+share path a reattached prefix takes. `cargo test --bench hot_path` passes with
+both cells. These are shape corrections to the bench input, not measurements.
+
 ### Shell metadata preservation and review disposition
 
 The [reattachment test][shell-metadata] includes nonempty `origin` and
@@ -439,27 +456,49 @@ After restoring positional equality, focused reruns use
 (35). All pass; the filters overlap. The controller reports its full 14-gate
 pass before this restoration. That result does not stand in for these reruns.
 
+### Parent integration verification
+
+Integration base: `32829851fd2bb69e9390db7dd5be92eef5d8bc40`.
+Parent: `dc0cb3bac870058f66dfd681c1d275981e4f5925`.
+
+The merged source preserves canonical serialization, positional equality, and
+the lazy absent-index digest lookup alongside the parent's dead-field removal,
+shared-input accounting, and test deduplication. It compiles without restoring
+removed test helpers or changing production source. The focused daemon command
+`cargo test -p daemon --lib --all-features --locked` passes with filters
+`served_` (17), `canonical` (21), `fingerprint` (11), `differential` (8), and
+`parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline` (1). Filters
+overlap; the earlier execution counts remain historical.
+
+Workspace all-target/all-feature Clippy passes with `--locked -- -D warnings`.
+The bound differential golden and both historical and integrated payoff
+receipts, including their JSON sidecars, are byte-identical to the parent.
+No benchmark or environment capture runs during this integration. Full
+repository gates remain controller work.
+
 [canonical-constructor]: ../../../../../crates/daemon/src/transform.rs#L164-L227
 [canonical-encoder]: ../../../../../crates/daemon/src/served_json.rs#L112-L141
-[canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L892
+[canonical-identity]: ../../../../../crates/daemon/src/wire.rs#L882
 [canonical-original]: ../../../../../crates/memory-store/src/lib.rs#L232-L264
-[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13891
+[canonical-receipts]: ../../../../../crates/daemon/src/transform.rs#L13797
 [canonical-retention]: ../../../../../crates/daemon/src/transform.rs#L255-L282
 [canonical-request-charge]: ../../../../../crates/daemon/src/lib.rs#L11811-L11833
-[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L14036
+[canonical-source]: ../../../../../crates/daemon/src/transform.rs#L13942
 [canonical-once]: ../../../../../crates/daemon/src/served_json.rs#L148
 
+[bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
+[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L102-L135
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
-[shell-build]: ../../../../../crates/daemon/src/wire.rs#L546-L565
+[shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
-[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L214-L243
+[shell-reattach]: ../../../../../crates/daemon/src/wire.rs#L212-L241
 [shell-size]: ../../../../../crates/daemon/src/retained_size.rs#L243-L253
-[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1745
-[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L950
-[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1704
+[shell-sharing]: ../../../../../crates/daemon/src/wire.rs#L1746
+[shell-charge]: ../../../../../crates/daemon/src/wire.rs#L955
+[shell-metadata]: ../../../../../crates/daemon/src/wire.rs#L1705
 
 [shared-expansion]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L4157
-[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L56
+[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
 [shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
 [shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20654
 [shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20873
@@ -476,8 +515,8 @@ pass before this restoration. That result does not stand in for these reruns.
 [fp-reuse]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/wire.rs#L833-L842
 [served-reusing]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L164-L216
 [ser-served]: https://github.com/ahrav/eidnara/blob/e1a0d06a/crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
+[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2016
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2031
 [prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
 [sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
 [sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16629
@@ -488,8 +527,8 @@ pass before this restoration. That result does not stand in for these reruns.
 [segments-take]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14428-L14443
 [segments]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14448-L14454
 [t-astro]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20954
-[sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L302
-[sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L278-L300
+[sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L272-L312
+[sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
 [serde-features]: ../../../../../Cargo.toml#L47

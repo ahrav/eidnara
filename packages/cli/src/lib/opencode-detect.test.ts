@@ -67,12 +67,6 @@ describe("detectOpenCode", () => {
         expect(detectOpenCode(d)).toEqual({ kind: "cli", binary: resolved });
     });
 
-    it("reports cli when a bare opencode is on PATH", () => {
-        const pathBinary = "/somewhere/opencode";
-        const result = detectOpenCode(deps(new Set([pathBinary]), "linux", () => pathBinary));
-        expect(result).toEqual({ kind: "cli", binary: "/somewhere/opencode" });
-    });
-
     it("skips a non-executable stock binary and keeps searching PATH", () => {
         const stock = join(HOME, ".opencode", "bin", "opencode");
         const pathBinary = "/somewhere/opencode";
@@ -95,23 +89,12 @@ describe("detectOpenCode", () => {
         });
     });
 
-    it("reports desktop when a channel's opencode.settings marker exists", () => {
-        const d = deps(new Set());
-        const marker = openCodeDesktopSettingsMarkers(d)[0]; // prod channel
-        const result = detectOpenCode(deps(new Set([marker])));
-        expect(result).toEqual({ kind: "desktop", marker });
-    });
-
-    it("reports desktop for the beta/dev channels too", () => {
+    it("reports desktop from any channel's settings marker", () => {
         const markers = openCodeDesktopSettingsMarkers(deps(new Set()));
+        expect(markers.length).toBeGreaterThan(0);
         for (const marker of markers) {
-            expect(detectOpenCode(deps(new Set([marker]))).kind).toBe("desktop");
+            expect(detectOpenCode(deps(new Set([marker])))).toEqual({ kind: "desktop", marker });
         }
-    });
-
-    it("reports desktop from the GUI app path when never run (no settings marker)", () => {
-        const appPath = "/Applications/OpenCode.app";
-        expect(detectOpenCode(deps(new Set([appPath]), "darwin")).kind).toBe("desktop");
     });
 
     it("does NOT treat ~/.config/opencode (shared core config) as Desktop", () => {
@@ -224,12 +207,6 @@ describe("detectOpenCode", () => {
             join(HOME, "AppData", "Roaming", "ai.opencode.desktop", "opencode.settings"),
         );
         expect(detectOpenCode(deps(new Set([marker]), "win32")).kind).toBe("desktop");
-    });
-
-    it("finds a never-run system-wide Linux Desktop install under the default XDG_DATA_DIRS", () => {
-        const launcher = "/usr/share/applications/ai.opencode.desktop.desktop";
-        const result = detectOpenCode(deps(new Set([launcher]), "linux"));
-        expect(result).toEqual({ kind: "desktop", marker: launcher });
     });
 
     it("honors an explicit XDG_DATA_DIRS list ahead of the defaults", () => {

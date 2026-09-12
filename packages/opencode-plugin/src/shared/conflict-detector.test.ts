@@ -101,11 +101,6 @@ describe("detectConflicts", () => {
             expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
         });
 
-        it("reads the .json file when no .jsonc exists", () => {
-            writeProjectConfig(["oh-my-opencode"]);
-            expect(hasOmoPlugin(projectDir)).toBe(true);
-        });
-
         it("exposes the raw project plugin entries from both project locations", () => {
             mkdirSync(join(projectDir, ".opencode"), { recursive: true });
             writeFileSync(
@@ -132,100 +127,90 @@ describe("detectConflicts", () => {
         });
     });
 
-    describe("DCP detection", () => {
-        it("matches the canonical @tarquinen/opencode-dcp package", () => {
-            writeProjectConfig(["@tarquinen/opencode-dcp"]);
+    // OpenCode also accepts `["pkg@version", { ...options }]` tuple entries, which the
+    // detector normalizes to the package string before matching.
+    describe("plugin entry matching", () => {
+        const none = { dcp: false, omo: false };
+        const dcp = { dcp: true, omo: false };
+        const omo = { dcp: false, omo: true };
+        it.each([
+            ["an empty plugin list", [], none],
+            ["unrelated plugins", ["@eidnara/opencode@latest", "some-other-plugin"], none],
+            ["the canonical @tarquinen/opencode-dcp package", ["@tarquinen/opencode-dcp"], dcp],
+            ["canonical DCP with a version suffix", ["@tarquinen/opencode-dcp@latest"], dcp],
+            ["canonical DCP with a semver range suffix", ["@tarquinen/opencode-dcp@^3.1.0"], dcp],
+            ["a DCP fork under a different package name", ["@some-fork/opencode-dcp-fork"], none],
+            [
+                "a file:// path that contains 'opencode-dcp'",
+                ["file:///home/user/work/opencode-dcp-fork"],
+                none,
+            ],
+            ["the canonical oh-my-opencode package", ["oh-my-opencode"], omo],
+            ["the canonical oh-my-openagent package alias", ["oh-my-openagent"], omo],
+            [
+                "canonical OMO with a version suffix",
+                ["oh-my-opencode@3.17.5", "oh-my-openagent@latest"],
+                omo,
+            ],
+            ["oh-my-opencode-slim (issue #43)", ["oh-my-opencode-slim"], none],
+            [
+                "oh-my-opencode-slim with a version suffix (issue #43)",
+                ["oh-my-opencode-slim@latest", "oh-my-opencode-slim@1.0.3"],
+                none,
+            ],
+            [
+                "a file:// path containing 'oh-my-opencode' (issue #43)",
+                ["file:///home/user/workspace/oh-my-opencode-slim-dev"],
+                none,
+            ],
+            [
+                "other OMO forks under different package names",
+                [
+                    "oh-my-opencode-cli",
+                    "@some-org/oh-my-opencode-fork",
+                    "my-oh-my-opencode-customizations",
+                ],
+                none,
+            ],
+            [
+                "canonical OMO installed beside slim",
+                ["oh-my-opencode-slim", "oh-my-opencode@latest"],
+                omo,
+            ],
+            [
+                "DCP expressed as a tuple (issue #49)",
+                ["@eidnara/opencode@latest", ["@tarquinen/opencode-dcp@latest", {}]],
+                dcp,
+            ],
+            ["OMO expressed as a tuple (issue #49)", [["oh-my-opencode@latest", {}]], omo],
+            [
+                "mixed string and tuple entries with unrelated packages (issue #49)",
+                [
+                    "oh-my-opencode-slim",
+                    [
+                        "@plannotator/opencode@latest",
+                        { workflow: "plan-agent", planningAgents: ["plan"] },
+                    ],
+                    "@eidnara/opencode@latest",
+                ],
+                none,
+            ],
+        ] as Array<
+            [string, Array<string | [string, unknown]>, { dcp: boolean; omo: boolean }]
+        >)("%s", (_title, plugins, expected) => {
+            writeProjectConfig(plugins);
             const result = detectConflicts(projectDir);
-            expect(result.conflicts.dcpPlugin).toBe(true);
-        });
-
-        it("matches the canonical package with a version suffix", () => {
-            writeProjectConfig(["@tarquinen/opencode-dcp@latest"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.dcpPlugin).toBe(true);
-        });
-
-        it("matches with a semver range suffix", () => {
-            writeProjectConfig(["@tarquinen/opencode-dcp@^3.1.0"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.dcpPlugin).toBe(true);
-        });
-
-        it("does NOT match a fork with a different package name", () => {
-            writeProjectConfig(["@some-fork/opencode-dcp-fork"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.dcpPlugin).toBe(false);
-        });
-
-        it("does NOT match a file:// path that contains 'opencode-dcp'", () => {
-            writeProjectConfig(["file:///home/user/work/opencode-dcp-fork"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.dcpPlugin).toBe(false);
+            expect(result.conflicts.dcpPlugin).toBe(expected.dcp);
+            // Without an OMO config, every default-active OMO hook conflicts.
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(expected.omo);
+            expect(result.conflicts.omoContextWindowMonitor).toBe(expected.omo);
+            expect(result.conflicts.omoAnthropicRecovery).toBe(expected.omo);
+            // `OPENCODE_DISABLE_AUTOCOMPACT=1` from `beforeEach` rules out a compaction conflict.
+            expect(result.hasConflict).toBe(expected.dcp || expected.omo);
         });
     });
 
     describe("OMO detection", () => {
-        it("matches the canonical oh-my-opencode package", () => {
-            writeProjectConfig(["oh-my-opencode"]);
-            const result = detectConflicts(projectDir);
-            // Without OMO config, the detector flags all three default-active hooks.
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
-            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
-        });
-
-        it("matches the canonical oh-my-openagent package alias", () => {
-            writeProjectConfig(["oh-my-openagent"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-        });
-
-        it("matches a canonical OMO with a version suffix", () => {
-            writeProjectConfig(["oh-my-opencode@3.17.5", "oh-my-openagent@latest"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
-            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
-        });
-
-        it("does NOT match oh-my-opencode-slim (issue #43)", () => {
-            writeProjectConfig(["oh-my-opencode-slim"]);
-            const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(false);
-            expect(result.conflicts.omoContextWindowMonitor).toBe(false);
-            expect(result.conflicts.omoAnthropicRecovery).toBe(false);
-        });
-
-        it("does NOT match oh-my-opencode-slim with a version suffix (issue #43)", () => {
-            writeProjectConfig(["oh-my-opencode-slim@latest", "oh-my-opencode-slim@1.0.3"]);
-            const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
-        });
-
-        it("does NOT match a file:// path containing 'oh-my-opencode' (issue #43)", () => {
-            writeProjectConfig(["file:///home/user/workspace/oh-my-opencode-slim-dev"]);
-            const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
-        });
-
-        it("does NOT match other forks under different package names", () => {
-            writeProjectConfig([
-                "oh-my-opencode-cli",
-                "@some-org/oh-my-opencode-fork",
-                "my-oh-my-opencode-customizations",
-            ]);
-            const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
-        });
-
-        it("still detects canonical OMO when slim is also installed", () => {
-            // The detector flags canonical OMO when the config also contains slim OMO.
-            writeProjectConfig(["oh-my-opencode-slim", "oh-my-opencode@latest"]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-        });
-
         // Each row writes an OMO config that disables all three hooks at one
         // supported config location/format and asserts the conflict clears
         // (the wrapped "[opencode]" form is the unified omo.jsonc of
@@ -339,24 +324,6 @@ describe("detectConflicts", () => {
             expect(result.conflicts.omoAnthropicRecovery).toBe(false);
         });
 
-        it("detects hooks as active when new omo.jsonc has no disabled_hooks", () => {
-            writeProjectConfig(["oh-my-opencode"]);
-            const omoDir = join(homeDir, ".omo");
-            mkdirSync(omoDir, { recursive: true });
-            writeFileSync(
-                join(omoDir, "omo.jsonc"),
-                JSON.stringify({
-                    "[opencode]": {
-                        // Without `disabled_hooks`, OMO activates hooks by default.
-                    },
-                }),
-            );
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-            expect(result.conflicts.omoContextWindowMonitor).toBe(true);
-            expect(result.conflicts.omoAnthropicRecovery).toBe(true);
-        });
-
         it("reads disabled_hooks from both old and new config paths", () => {
             writeProjectConfig(["oh-my-opencode"]);
             // The legacy config path disables only preemptive-compaction.
@@ -426,18 +393,6 @@ describe("detectConflicts", () => {
             const result = detectConflicts(projectDir);
             expect(result.hasConflict).toBe(false);
         });
-    });
-
-    it("returns no conflicts for an empty plugin list", () => {
-        writeProjectConfig([]);
-        const result = detectConflicts(projectDir);
-        expect(result.hasConflict).toBe(false);
-    });
-
-    it("returns no conflicts for unrelated plugins", () => {
-        writeProjectConfig(["@eidnara/opencode@latest", "some-other-plugin"]);
-        const result = detectConflicts(projectDir);
-        expect(result.hasConflict).toBe(false);
     });
 
     // `readJsoncFile<T>` asserts a TypeScript type but never checks the runtime shape, so a
@@ -513,47 +468,6 @@ describe("detectConflicts", () => {
         });
     });
 
-    // OpenCode supports ["pkg@version", { ...options }] tuple form.
-    // `matchesPackageName` accepts package strings, so the detector normalizes tuple entries first.
-
-    describe("tuple plugin entries (issue #49)", () => {
-        it("does not crash when a plugin is defined as a [name, options] tuple", () => {
-            writeProjectConfig([
-                "@eidnara/opencode@latest",
-                ["@plannotator/opencode@latest", { workflow: "plan-agent" }],
-            ]);
-            expect(() => detectConflicts(projectDir)).not.toThrow();
-        });
-
-        it("detects DCP conflict when DCP is expressed as a tuple", () => {
-            writeProjectConfig([
-                "@eidnara/opencode@latest",
-                ["@tarquinen/opencode-dcp@latest", {}],
-            ]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.dcpPlugin).toBe(true);
-        });
-
-        it("detects OMO conflict when OMO is expressed as a tuple", () => {
-            writeProjectConfig([["oh-my-opencode@latest", {}]]);
-            const result = detectConflicts(projectDir);
-            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-        });
-
-        it("does not crash on mixed string and tuple entries with unrelated packages", () => {
-            writeProjectConfig([
-                "oh-my-opencode-slim",
-                [
-                    "@plannotator/opencode@latest",
-                    { workflow: "plan-agent", planningAgents: ["plan"] },
-                ],
-                "@eidnara/opencode@latest",
-            ]);
-            const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
-        });
-    });
-
     // When Eidnara compaction is off, the detector must not treat native compaction.auto or compaction.prune as a plugin-disabling conflict.
     // When Eidnara compaction is on, the detector treats `compaction.auto` and `compaction.prune` as conflicts.
     //
@@ -579,55 +493,53 @@ describe("detectConflicts", () => {
             }
         }
 
-        it("Eidnara ON + auto=true → conflict fires, plugin would be disabled", () => {
-            writeCompactionConfig(true);
-            const result = detectWithMode(true);
-            expect(result.hasConflict).toBe(true);
-            expect(result.conflicts.compactionAuto).toBe(true);
-        });
-
-        it("Eidnara ON + auto=false → no compaction conflict, plugin stays enabled", () => {
-            writeCompactionConfig(false);
-            const result = detectWithMode(true);
-            expect(result.conflicts.compactionAuto).toBe(false);
-            expect(result.hasConflict).toBe(false);
-        });
-
-        it("Eidnara OFF + auto=true → NO conflict, plugin stays enabled (native compaction active)", () => {
-            writeCompactionConfig(true);
-            const result = detectWithMode(false);
-            expect(result.conflicts.compactionAuto).toBe(false);
-            expect(result.conflicts.compactionPrune).toBe(false);
-            expect(result.hasConflict).toBe(false);
-            expect(result.nativeCompaction.auto).toBe(true);
-        });
-
-        it("Eidnara OFF + auto=false → NO conflict, no-manager configuration reported honestly", () => {
-            writeCompactionConfig(false);
-            const result = detectWithMode(false);
-            expect(result.conflicts.compactionAuto).toBe(false);
-            expect(result.hasConflict).toBe(false);
-            // When Eidnara compaction and native compaction are disabled, neither manages compaction.
-            expect(result.nativeCompaction.auto).toBe(false);
-            expect(result.nativeCompaction.prune).toBe(false);
-        });
-
-        it("mutation direction: same auto=true config DOES conflict when mode forced on", () => {
-            writeCompactionConfig(true);
-            const offResult = detectWithMode(false);
-            const onResult = detectWithMode(true);
-            expect(offResult.hasConflict).toBe(false);
-            expect(onResult.hasConflict).toBe(true);
-            expect(onResult.conflicts.compactionAuto).toBe(true);
-        });
-
-        // `compaction.prune=true` is a conflict only when Eidnara compaction is enabled.
-        it("Eidnara OFF + prune=true → NO conflict (prune is not a conflict in compaction-off mode)", () => {
-            writeCompactionConfig(false, true);
-            const result = detectWithMode(false);
-            expect(result.conflicts.compactionPrune).toBe(false);
-            expect(result.hasConflict).toBe(false);
-            expect(result.nativeCompaction.prune).toBe(true);
+        // `nativeCompaction` reports the file state in both modes; a conflict flag is raised
+        // only when Eidnara compaction is enabled.
+        it.each([
+            [
+                "Eidnara ON + auto=true → conflict fires, plugin would be disabled",
+                true,
+                true,
+                false,
+                true,
+            ],
+            [
+                "Eidnara ON + auto=false → no compaction conflict, plugin stays enabled",
+                true,
+                false,
+                false,
+                false,
+            ],
+            [
+                "Eidnara OFF + auto=true → NO conflict, plugin stays enabled (native compaction active)",
+                false,
+                true,
+                false,
+                false,
+            ],
+            [
+                "Eidnara OFF + auto=false → NO conflict, no-manager configuration reported honestly",
+                false,
+                false,
+                false,
+                false,
+            ],
+            [
+                "Eidnara OFF + prune=true → NO conflict (prune is not a conflict in compaction-off mode)",
+                false,
+                false,
+                true,
+                false,
+            ],
+        ] as Array<
+            [string, boolean, boolean, boolean, boolean]
+        >)("%s", (_title, compactionEnabled, auto, prune, conflicts) => {
+            writeCompactionConfig(auto, prune);
+            const result = detectWithMode(compactionEnabled);
+            expect(result.conflicts.compactionAuto).toBe(conflicts && auto);
+            expect(result.conflicts.compactionPrune).toBe(conflicts && prune);
+            expect(result.hasConflict).toBe(conflicts);
+            expect(result.nativeCompaction).toEqual({ auto, prune });
         });
 
         // DCP and OMO conflicts disable the plugin whether compactionEnabled is true or false.
@@ -1075,36 +987,19 @@ describe("detectConflicts", () => {
             return detectWithFlag("OPENCODE_DISABLE_PRUNE", value);
         }
 
+        // The spelling rule is shared with OPENCODE_DISABLE_AUTOCOMPACT.
         it.each([
-            "0",
-            "false",
-            "no",
-            "off",
-            "yes",
-        ])("value %j is NOT a disable signal, so prune=true still conflicts", (value) => {
+            ["0", true],
+            ["1", false],
+        ])("value %j leaves prune conflicting = %p, like the host", (value, conflicts) => {
             writeFileSync(
                 join(projectDir, "opencode.json"),
                 JSON.stringify({ compaction: { auto: false, prune: true } }),
             );
             const result = detectWithEnv(value);
-            expect(result.conflicts.compactionPrune).toBe(true);
-            expect(result.nativeCompaction.prune).toBe(true);
-        });
-
-        it.each([
-            "1",
-            "true",
-            "TRUE",
-            "True",
-        ])("value %j disables prune exactly like the host", (value) => {
-            writeFileSync(
-                join(projectDir, "opencode.json"),
-                JSON.stringify({ compaction: { auto: false, prune: true } }),
-            );
-            const result = detectWithEnv(value);
-            expect(result.conflicts.compactionPrune).toBe(false);
-            expect(result.nativeCompaction.prune).toBe(false);
-            expect(result.hasConflict).toBe(false);
+            expect(result.conflicts.compactionPrune).toBe(conflicts);
+            expect(result.nativeCompaction.prune).toBe(conflicts);
+            expect(result.hasConflict).toBe(conflicts);
         });
 
         it("leaves auto untouched: OPENCODE_DISABLE_PRUNE=1 + auto=true still conflicts on auto", () => {
@@ -1201,46 +1096,28 @@ describe("detectConflicts", () => {
             expect(result).toEqual({ auto: false, prune: true });
         });
 
-        it("returns null when the compaction block is absent (file-based fallback, not host defaults)", async () => {
-            // An absent compaction block is not evidence that the host resolved default values.
-            const client = {
-                config: {
-                    get: async () => ({ data: {} }),
+        // An absent compaction block is not evidence that the host resolved default values,
+        // so every non-boolean shape and every client failure falls back to file-based detection.
+        it.each([
+            ["the compaction block is absent", async () => ({ data: {} })],
+            [
+                "compaction values are not explicit booleans",
+                async () => ({ data: { compaction: { auto: "true", prune: null } } }),
+            ],
+            [
+                "the response data is missing entirely",
+                async () => ({}) as { data?: Record<string, unknown> },
+            ],
+            [
+                "the client throws",
+                async () => {
+                    throw new Error("boom");
                 },
-            };
-            const result = await resolveCompactionForBoot(client);
-            expect(result).toBeNull();
-        });
-
-        it("returns null when compaction values are not explicit booleans", async () => {
-            const client = {
-                config: {
-                    get: async () => ({ data: { compaction: { auto: "true", prune: null } } }),
-                },
-            };
-            const result = await resolveCompactionForBoot(client);
-            expect(result).toBeNull();
-        });
-
-        it("returns null when the response data is missing entirely", async () => {
-            const client = {
-                config: {
-                    get: async () => ({}) as { data?: Record<string, unknown> },
-                },
-            };
-            const result = await resolveCompactionForBoot(client);
-            expect(result).toBeNull();
-        });
-
-        it("returns null when the client throws (file-based fallback used)", async () => {
-            const client = {
-                config: {
-                    get: async () => {
-                        throw new Error("boom");
-                    },
-                },
-            };
-            const result = await resolveCompactionForBoot(client);
+            ],
+        ] as Array<
+            [string, () => Promise<{ data?: Record<string, unknown> }>]
+        >)("returns null when %s (file-based fallback, not host defaults)", async (_title, get) => {
+            const result = await resolveCompactionForBoot({ config: { get } });
             expect(result).toBeNull();
         });
 

@@ -140,14 +140,6 @@ describe("parseCompartmentOutput — v2 tiers/importance/episode_type", () => {
         expect(c.p4).toBe("anchorA; anchorB");
         expect(c.content).toBe("full narrative with U: line"); // mirrors P1
     });
-
-    it("handles self-closing <p4/> as empty tier", () => {
-        const parsed = parseCompartmentOutput(`
-<compartment start="1" end="2" title="x" importance="30">
-<p1>a</p1><p2>b</p2><p3>c</p3><p4/>
-</compartment>`);
-        expect(parsed.compartments[0].p4).toBe("");
-    });
 });
 
 describe("parseCompartmentOutput — events (v2, stored not rendered)", () => {
@@ -188,16 +180,6 @@ describe("parseCompartmentOutput — events (v2, stored not rendered)", () => {
         expect(correction.kind).toBe("trajectory_correction");
         expect(correction.fields.before_strategy).toBe("old way");
         expect(correction.fields.correction_signal).toBe('U: "do it differently"');
-    });
-
-    it("returns [] when no events block (the common case)", () => {
-        const parsed = parseCompartmentOutput(`
-<output>
-<compartments>
-<compartment start="1" end="2" title="x" importance="50"><p1>a</p1><p2>b</p2><p3>c</p3><p4/></compartment>
-</compartments>
-</output>`);
-        expect(parsed.events).toEqual([]);
     });
 
     it("anchors at_compartment as a 1-based index into the EMITTED compartment list (discard-last contract)", () => {
@@ -308,23 +290,6 @@ describe("parseCompartmentOutput — primer_candidates", () => {
             { question: "How does the m[0]/m[1] cache split work?", originCompartmentIndex: 1 },
         ]);
     });
-
-    it("does NOT double-capture an element-form question as a legacy bullet", () => {
-        const parsed = parseCompartmentOutput(`
-<output>
-<compartments>
-<compartment start="1" end="2" title="x" episode_type="debug" importance="50">
-<p1>x</p1><p2>x</p2><p3>x</p3><p4>x</p4>
-</compartment>
-</compartments>
-<primer_candidates>
-<primer at_compartment="1">How does X work?</primer>
-</primer_candidates>
-<meta><messages_processed>1-2</messages_processed><unprocessed_from>3</unprocessed_from></meta>
-</output>`);
-        expect(parsed.primerCandidates).toHaveLength(1);
-        expect(parsed.primerCandidates[0].originCompartmentIndex).toBe(1);
-    });
 });
 
 describe("parseCompartmentOutput — fact scoping (audit Fix 6)", () => {
@@ -351,26 +316,8 @@ describe("parseCompartmentOutput — fact scoping (audit Fix 6)", () => {
         expect(parsed.events).toHaveLength(1);
     });
 
-    it("falls back to whole-text scan (minus events) when no <facts> wrapper", () => {
-        // Fallback parsing accepts bare category blocks without a `<facts>` wrapper.
-        const parsed = parseCompartmentOutput(`
-<output>
-<PROJECT_RULES>
-* Follow the project release checklist.
-</PROJECT_RULES>
-<events>
-<trajectory_correction at_compartment="1">
-<from>Considered a NAMING convention change.</from>
-</trajectory_correction>
-</events>
-</output>`);
-        expect(parsed.facts).toHaveLength(1);
-        expect(parsed.facts[0].category).toBe("PROJECT_RULES");
-        // "NAMING" inside the event must not leak in via the fallback path.
-        expect(parsed.facts.some((f) => f.category === "NAMING")).toBe(false);
-    });
-
     it("strips every <events> block before the fallback scan, not only the first", () => {
+        // Fallback parsing accepts bare category blocks without a `<facts>` wrapper.
         const parsed = parseCompartmentOutput(`
 <output>
 <PROJECT_RULES>

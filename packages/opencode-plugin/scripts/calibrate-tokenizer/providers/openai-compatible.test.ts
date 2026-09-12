@@ -51,11 +51,8 @@ describe("measureOpenAICompatible", () => {
         }
     });
 
-    it("routes MiniMax global calibration requests", async () => {
+    it("routes MiniMax global and China calibration requests to their regional endpoints", async () => {
         await expectProviderEndpoint("minimax", "https://api.minimax.io/v1/chat/completions");
-    });
-
-    it("routes MiniMax China calibration requests", async () => {
         await expectProviderEndpoint("minimax-cn", "https://api.minimaxi.com/v1/chat/completions");
     });
 });

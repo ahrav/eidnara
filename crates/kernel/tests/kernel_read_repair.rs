@@ -199,32 +199,12 @@ fn failed_check_appends_observation_event_and_job_in_one_commit() {
         .expect("block recorded");
     assert!(block.blocked());
     assert_eq!(block.observation_kind, OBSERVATION_KIND_STALE);
-}
 
-#[test]
-fn recorded_block_survives_daemon_restart() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repo_dir = tempfile::tempdir().unwrap();
-    let (_fixture, _tip) = seeded_checkout(repo_dir.path());
-    {
-        let store = seed_store(store_dir.path());
-        let engine = ApplicabilityEngine::new();
-        let query = QueryContext::default();
-        let scope = ScopeMatchContext::new();
-        let candidates = [failing_candidate()];
-        engine
-            .evaluate(
-                &store,
-                &request(repo_dir.path(), &query, &scope, &candidates),
-                &EvalBudget::unbounded(),
-            )
-            .unwrap();
-    }
-    // AE6: reopen the store as a fresh process with empty caches.
-    let store = KernelStore::open(store_dir.path()).unwrap();
-    let tip = store.known_as_of(0).unwrap().tip;
-    let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
-    let block = store
+    // Reopening verifies the block persists.
+    drop(store);
+    let reopened = KernelStore::open(store_dir.path()).unwrap();
+    assert_eq!(reopened.known_as_of(0).unwrap().tip, tip);
+    let persisted = reopened
         .applicability_block_state(
             TARGET_OBJECT,
             snapshot.identity(),
@@ -233,7 +213,7 @@ fn recorded_block_survives_daemon_restart() {
         )
         .unwrap()
         .expect("block persisted");
-    assert!(block.blocked());
+    assert!(persisted.blocked());
 }
 
 #[test]
@@ -1019,78 +999,20 @@ fn hold_readers<'scope>(
     held.wait();
 }
 
-/// The clearing append is what lifts a durable block. When it cannot land,
-/// every other reader still sees the block, so this request cannot label the
-/// object current and auto-inject it.
+/// A failed clearing append leaves the durable block in place, so `append_pending` remains true.
+///
+/// The repair pass commits per object. An expired deadline stops the batch;
+/// unreached objects retain their blocks and cannot be labeled current.
 ///
 /// Holding the writer past the retrieval deadline also proves the repair stops
 /// at its own bound: `Mutex::lock` has no timeout, so acquiring the writer
 /// without one would return `DeadlineMissed` only after the holder finished.
 #[test]
-fn a_clearing_append_that_cannot_commit_leaves_the_object_uncertain() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repo_dir = tempfile::tempdir().unwrap();
-    let store = seed_store(store_dir.path());
-    let (fixture, _tip) = seeded_checkout(repo_dir.path());
-    let query = QueryContext::default();
-    let scope = ScopeMatchContext::new();
-    let candidates = [feature_candidate(TARGET_OBJECT)];
-    ApplicabilityEngine::new()
-        .evaluate(
-            &store,
-            &request(repo_dir.path(), &query, &scope, &candidates),
-            &EvalBudget::unbounded(),
-        )
-        .unwrap();
-    git_fixtures::write_worktree_file(&fixture.repo, "src/feature.rs", "pub fn f() {}\n");
-
-    let held = std::sync::Barrier::new(2);
-    let started = Instant::now();
-    let report = std::thread::scope(|threads| {
-        hold_writer(
-            threads,
-            &store,
-            &held,
-            "hold-domain",
-            Duration::from_millis(1_500),
-        );
-        let budget = EvalBudget::new(
-            Some(Instant::now() + Duration::from_millis(200)),
-            Default::default(),
-        );
-        let report = ApplicabilityEngine::new()
-            .evaluate(
-                &store,
-                &request(repo_dir.path(), &query, &scope, &candidates),
-                &budget,
-            )
-            .unwrap();
-        (report, started.elapsed())
-    });
-    let (report, elapsed) = report;
-    assert_eq!(
-        *report.appends().next().expect("an append").1,
-        AppendOutcome::DeadlineMissed
-    );
-    assert_eq!(report.objects[0].state, ApplicabilityState::Uncertain);
-    assert!(
-        report.auto_injectable().next().is_none(),
-        "an object whose block was not cleared must not auto-inject"
-    );
-    assert!(
-        elapsed < Duration::from_millis(1_400),
-        "the repair returned at its own deadline rather than at the holder's, took {elapsed:?}"
-    );
-}
-
-/// The repair pass commits per object, so an expired deadline has to stop the
-/// batch instead of attempting a commit for every remaining object.
-#[test]
 fn the_repair_pass_stops_when_the_deadline_expires_mid_batch() {
     let store_dir = tempfile::tempdir().unwrap();
     let repo_dir = tempfile::tempdir().unwrap();
     let store = seed_store(store_dir.path());
-    let (_fixture, _tip) = seeded_checkout(repo_dir.path());
+    let (fixture, _tip) = seeded_checkout(repo_dir.path());
     store
         .commit(intent("second-target", '5'), |envelope| {
             envelope.insert_decision(DecisionSpec {
@@ -1121,8 +1043,20 @@ fn the_repair_pass_stops_when_the_deadline_expires_mid_batch() {
         feature_candidate(TARGET_OBJECT),
         feature_candidate("second-target"),
     ];
+    // The initial evaluation records a durable block for both objects while
+    // the file is absent.
+    ApplicabilityEngine::new()
+        .evaluate(
+            &store,
+            &request(repo_dir.path(), &query, &scope, &candidates),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    git_fixtures::write_worktree_file(&fixture.repo, "src/feature.rs", "pub fn f() {}\n");
+
     let held = std::sync::Barrier::new(2);
-    let report = std::thread::scope(|threads| {
+    let started = Instant::now();
+    let (report, elapsed) = std::thread::scope(|threads| {
         hold_writer(
             threads,
             &store,
@@ -1134,14 +1068,19 @@ fn the_repair_pass_stops_when_the_deadline_expires_mid_batch() {
             Some(Instant::now() + Duration::from_millis(200)),
             Default::default(),
         );
-        ApplicabilityEngine::new()
+        let report = ApplicabilityEngine::new()
             .evaluate(
                 &store,
                 &request(repo_dir.path(), &query, &scope, &candidates),
                 &budget,
             )
-            .unwrap()
+            .unwrap();
+        (report, started.elapsed())
     });
+    assert!(
+        elapsed < Duration::from_millis(1_400),
+        "the repair returned at its own deadline rather than at the holder's, took {elapsed:?}"
+    );
     assert_eq!(
         report.objects.len(),
         2,
@@ -1155,6 +1094,27 @@ fn the_repair_pass_stops_when_the_deadline_expires_mid_batch() {
     assert_eq!(
         *report.appends().next().expect("an append").1,
         AppendOutcome::DeadlineMissed
+    );
+    assert_eq!(
+        report.objects[0].append,
+        Some(AppendOutcome::DeadlineMissed)
+    );
+    for object in &report.objects {
+        assert_eq!(
+            object.state,
+            ApplicabilityState::Uncertain,
+            "{} kept a current label with its block standing",
+            object.object_id
+        );
+        assert!(
+            object.append_pending,
+            "{} reports no outstanding append while its clear is unwritten",
+            object.object_id
+        );
+    }
+    assert!(
+        report.auto_injectable().next().is_none(),
+        "an object whose block was not cleared must not auto-inject"
     );
 }
 
@@ -1305,97 +1265,6 @@ fn a_confirmed_cache_entry_still_repairs_after_a_clear() {
     );
 }
 
-/// The deadline can expire before the pass reaches every object. An object it
-/// never reached must not keep a current label while its block stands.
-#[test]
-fn objects_the_repair_pass_never_reached_do_not_stay_current() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repo_dir = tempfile::tempdir().unwrap();
-    let store = seed_store(store_dir.path());
-    let (fixture, _tip) = seeded_checkout(repo_dir.path());
-    store
-        .commit(intent("blocked-second", '6'), |envelope| {
-            envelope.insert_decision(DecisionSpec {
-                decision_id: "decision-4".to_string(),
-                object_id: "second-blocked".to_string(),
-                domain_id: DOMAIN.to_string(),
-                proposition_id: None,
-                scope_id: None,
-                anchor_id: None,
-                evidence_id: None,
-                decision_kind: "adr".to_string(),
-                payload: DecisionPayload {
-                    summary: "second".to_string(),
-                    rationale: "fixture".to_string(),
-                },
-                source_kind: "fixture".to_string(),
-                source_id: "decision-4".to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Normal,
-            })?;
-            Ok(String::new())
-        })
-        .unwrap();
-
-    let query = QueryContext::default();
-    let scope = ScopeMatchContext::new();
-    let candidates = [
-        feature_candidate(TARGET_OBJECT),
-        feature_candidate("second-blocked"),
-    ];
-    // Record a durable block for both objects while the file is absent.
-    ApplicabilityEngine::new()
-        .evaluate(
-            &store,
-            &request(repo_dir.path(), &query, &scope, &candidates),
-            &EvalBudget::unbounded(),
-        )
-        .unwrap();
-    // Both now classify current, so both need their blocks cleared.
-    git_fixtures::write_worktree_file(&fixture.repo, "src/feature.rs", "pub fn f() {}\n");
-
-    let held = std::sync::Barrier::new(2);
-    let report = std::thread::scope(|threads| {
-        hold_writer(
-            threads,
-            &store,
-            &held,
-            "unreached-domain",
-            Duration::from_millis(1_500),
-        );
-        let budget = EvalBudget::new(
-            Some(Instant::now() + Duration::from_millis(200)),
-            Default::default(),
-        );
-        ApplicabilityEngine::new()
-            .evaluate(
-                &store,
-                &request(repo_dir.path(), &query, &scope, &candidates),
-                &budget,
-            )
-            .unwrap()
-    });
-    assert_eq!(
-        report.appends().count(),
-        1,
-        "the first append consumed the deadline"
-    );
-    for object in &report.objects {
-        assert_eq!(
-            object.state,
-            ApplicabilityState::Uncertain,
-            "{} kept a current label with its block standing",
-            object.object_id
-        );
-        assert!(
-            object.append_pending,
-            "{} reports no outstanding append while its clear is unwritten",
-            object.object_id
-        );
-    }
-    assert!(report.auto_injectable().next().is_none());
-}
-
 /// End to end over the committed row: a check path carrying secret-shaped and
 /// JSON-punctuation bytes still produces a payload the reducer decodes. The
 /// pre-redaction and bound that keep it that way are proven in the unit tests
@@ -1534,7 +1403,7 @@ fn a_held_reader_pool_does_not_outlast_the_evaluation_deadline() {
 }
 
 #[test]
-fn a_held_reader_pool_does_not_outlast_the_single_object_reducer_deadline() {
+fn a_held_reader_pool_does_not_outlast_a_reducer_deadline_or_a_raised_interrupt() {
     let store_dir = tempfile::tempdir().unwrap();
     let repo_dir = tempfile::tempdir().unwrap();
     let store = seed_store(store_dir.path());
@@ -1542,29 +1411,55 @@ fn a_held_reader_pool_does_not_outlast_the_single_object_reducer_deadline() {
     let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
     let known_as_of = store.known_as_of(0).unwrap().tip;
 
+    let interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let started = Instant::now();
     let held = std::sync::Barrier::new(2);
-    let (outcome, elapsed) = std::thread::scope(|threads| {
+    let (by_deadline, by_interrupt, elapsed) = std::thread::scope(|threads| {
         hold_readers(threads, &store, &held, Duration::from_millis(1_500));
-        let budget = EvalBudget::new(
+        let deadline = EvalBudget::new(
             Some(Instant::now() + Duration::from_millis(200)),
             Default::default(),
         );
-        let outcome = store.applicability_block_state(
+        let by_deadline = store.applicability_block_state(
             TARGET_OBJECT,
             snapshot.identity(),
             known_as_of,
-            &budget,
+            &deadline,
         );
-        (outcome, started.elapsed())
+        assert!(
+            started.elapsed() < Duration::from_millis(1_400),
+            "the reducer returned at the holder's release rather than at its own deadline"
+        );
+
+        let raiser = threads.spawn({
+            let interrupt = std::sync::Arc::clone(&interrupt);
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        let interrupt_only = EvalBudget::new(None, std::sync::Arc::clone(&interrupt));
+        let by_interrupt = store
+            .applicability_block_states_as_of_tip(
+                &[TARGET_OBJECT],
+                snapshot.identity(),
+                &interrupt_only,
+            )
+            .map(|(_, states)| states);
+        raiser.join().unwrap();
+        (by_deadline, by_interrupt, started.elapsed())
     });
     assert!(
-        elapsed < Duration::from_millis(1_400),
-        "the reducer returned at the holder's release rather than at its own deadline, took {elapsed:?}"
+        matches!(by_deadline, Err(KernelError::Deadline)),
+        "a held pool is a deadline outcome, got {by_deadline:?}"
     );
     assert!(
-        matches!(outcome, Err(KernelError::Deadline)),
-        "a held pool is a deadline outcome, got {outcome:?}"
+        matches!(by_interrupt, Err(KernelError::Deadline)),
+        "a raised interrupt is a deadline outcome, got {by_interrupt:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(1_400),
+        "acquisition stopped on the interrupt rather than on the holder, took {elapsed:?}"
     );
 }
 
@@ -2100,44 +1995,6 @@ fn an_unreadable_row_degrades_only_its_own_object() {
             .objects
             .iter()
             .all(|object| object.state.blocks_auto_injection())
-    );
-}
-
-/// A budget can carry a shared interrupt with no deadline, and that flag is then
-/// the whole cancellation mechanism. Acquiring a connection must observe it.
-#[test]
-fn an_interrupt_only_budget_stops_a_blocked_reader_acquisition() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repo_dir = tempfile::tempdir().unwrap();
-    let store = seed_store(store_dir.path());
-    let (_fixture, _tip) = seeded_checkout(repo_dir.path());
-    let snapshot = snapshot_checkout(repo_dir.path(), &EvalBudget::unbounded()).unwrap();
-
-    let interrupt = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let budget = EvalBudget::new(None, std::sync::Arc::clone(&interrupt));
-    let started = Instant::now();
-    let held = std::sync::Barrier::new(2);
-    let (error, elapsed) = std::thread::scope(|threads| {
-        hold_readers(threads, &store, &held, Duration::from_millis(1_500));
-        // Cancellation is raised while every reader is occupied.
-        let raiser = threads.spawn({
-            let interrupt = std::sync::Arc::clone(&interrupt);
-            move || {
-                std::thread::sleep(Duration::from_millis(150));
-                interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        });
-        let error = store
-            .applicability_block_states_as_of_tip(&[TARGET_OBJECT], snapshot.identity(), &budget)
-            .map(|(_, states)| states)
-            .unwrap_err();
-        raiser.join().unwrap();
-        (error, started.elapsed())
-    });
-    assert_eq!(error, KernelError::Deadline);
-    assert!(
-        elapsed < Duration::from_millis(1_400),
-        "acquisition stopped on the interrupt rather than on the holder, took {elapsed:?}"
     );
 }
 
@@ -2877,58 +2734,4 @@ fn a_foreign_source_id_is_not_a_repair_identity() {
         block.repair_identity
     );
     assert_ne!(block.repair_identity, operation_key);
-}
-
-/// A clearing repair that does not land leaves the clear owed. A current
-/// classification carries `append_pending` false, so the demotion has to set it
-/// or the report says nothing is outstanding while the block still stands.
-#[test]
-fn an_unresolved_clearing_repair_reports_an_outstanding_append() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repo_dir = tempfile::tempdir().unwrap();
-    let store = seed_store(store_dir.path());
-    let (fixture, _tip) = seeded_checkout(repo_dir.path());
-    let query = QueryContext::default();
-    let scope = ScopeMatchContext::new();
-    let candidates = [feature_candidate(TARGET_OBJECT)];
-    ApplicabilityEngine::new()
-        .evaluate(
-            &store,
-            &request(repo_dir.path(), &query, &scope, &candidates),
-            &EvalBudget::unbounded(),
-        )
-        .unwrap();
-    git_fixtures::write_worktree_file(&fixture.repo, "src/feature.rs", "pub fn f() {}\n");
-
-    // The writer is held past the deadline, so the clearing append cannot land.
-    let held = std::sync::Barrier::new(2);
-    let report = std::thread::scope(|threads| {
-        hold_writer(
-            threads,
-            &store,
-            &held,
-            "pending-domain",
-            Duration::from_millis(1_500),
-        );
-        let budget = EvalBudget::new(
-            Some(Instant::now() + Duration::from_millis(200)),
-            Default::default(),
-        );
-        ApplicabilityEngine::new()
-            .evaluate(
-                &store,
-                &request(repo_dir.path(), &query, &scope, &candidates),
-                &budget,
-            )
-            .unwrap()
-    });
-    assert_eq!(
-        report.objects[0].append,
-        Some(AppendOutcome::DeadlineMissed)
-    );
-    assert!(
-        report.objects[0].append_pending,
-        "the clear is still owed, so an append is outstanding"
-    );
-    assert!(report.auto_injectable().next().is_none());
 }

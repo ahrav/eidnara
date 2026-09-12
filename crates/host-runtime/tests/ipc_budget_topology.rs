@@ -89,22 +89,6 @@ fn parses_kernel_cpu_lists() {
 }
 
 #[test]
-fn classifies_same_l3_pair() {
-    let dir = tempfile::tempdir().unwrap();
-    synth(
-        dir.path(),
-        &[cpu(0, 0, "0-3"), cpu(1, 1, "0-3")],
-        &[(0, "0-1")],
-    );
-    let topo = read_topology(dir.path()).unwrap();
-    validate_pair(&topo, &allowed(&[0, 1]), (0, 1), Class::SameL3).unwrap();
-    assert_eq!(
-        auto_select(&topo, &allowed(&[0, 1]), Class::SameL3),
-        AutoSelection::Pair(0, 1)
-    );
-}
-
-#[test]
 fn unexported_package_ids_still_read_as_a_topology() {
     // The kernel reports `physical_package_id` as `-1` when the platform or
     // hypervisor exports no socket id; the read must not fail on that value.

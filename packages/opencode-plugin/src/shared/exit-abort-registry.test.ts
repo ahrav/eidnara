@@ -15,24 +15,22 @@ function registryListener(): () => void {
 }
 
 describe("exit-abort-registry", () => {
-    it("adds exactly ONE process exit listener no matter how many controllers register", () => {
-        registerExitAbort(new AbortController());
-        registerExitAbort(new AbortController());
-        registerExitAbort(new AbortController());
-        expect(process.listenerCount("exit") - baseline).toBe(1);
-    });
-
-    it("aborts every registered controller when the exit listener fires", () => {
+    it("adds ONE exit listener for any number of controllers, aborts them all when it fires, and empties the set", () => {
         const a = new AbortController();
         const b = new AbortController();
+        const c = new AbortController();
         registerExitAbort(a);
         registerExitAbort(b);
+        registerExitAbort(c);
+        expect(process.listenerCount("exit") - baseline).toBe(1);
 
         // The test invokes the registry listener directly because emitting 'exit' ends the test process.
         registryListener()();
 
         expect(a.signal.aborted).toBe(true);
         expect(b.signal.aborted).toBe(true);
+        expect(c.signal.aborted).toBe(true);
+        expect(exitAbortRegistrySize()).toBe(0);
         expect(process.listenerCount("exit") - baseline).toBe(1);
     });
 
@@ -65,13 +63,6 @@ describe("exit-abort-registry", () => {
         controller.abort();
         registerExitAbort(controller);
         expect(exitAbortRegistrySize()).toBe(before);
-    });
-
-    it("empties the set when the exit listener aborts every controller", () => {
-        registerExitAbort(new AbortController());
-        registerExitAbort(new AbortController());
-        registryListener()();
-        expect(exitAbortRegistrySize()).toBe(0);
     });
 
     it("registering the same controller twice adds it once", () => {

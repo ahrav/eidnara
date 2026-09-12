@@ -106,7 +106,7 @@ describe("Pi status dialog", () => {
         expect(detail.inputTokens).toBe(50_000);
     });
 
-    it("maps the daemon status onto usage, compartments, pending drops, hygiene, and historian", () => {
+    it("maps the daemon status onto usage, compartments, pending drops, hygiene, and historian and holds storage-only fields neutral", () => {
         const sessionId = "ses-status-daemon";
         const detail = buildPiStatusDetail(
             fakePi,
@@ -132,18 +132,7 @@ describe("Pi status dialog", () => {
                 detail.conversationTokens +
                 detail.toolDefinitionTokens,
         ).toBe(42_000);
-    });
-
-    it("holds storage-only fields at their neutral value", () => {
-        const sessionId = "ses-status-neutral";
-        const detail = buildPiStatusDetail(
-            fakePi,
-            reservedWindowContext(sessionId) as never,
-            deps(),
-            sessionId,
-            fakeKernelResolver().kernel.snapshot("explicit_search"),
-            DAEMON_STATUS,
-        );
+        // The daemon reports none of the storage-backed counters, so they stay at their neutral value.
         expect(detail).toMatchObject({
             memoryBlockCount: 0,
             sessionNoteCount: 0,

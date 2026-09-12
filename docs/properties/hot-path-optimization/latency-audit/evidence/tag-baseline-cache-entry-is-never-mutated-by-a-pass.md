@@ -40,7 +40,7 @@ numbering split; this record covers the cache entry's immutability and the
 - Mint inputs are built at [`:7156-7161`][mint-input] with
   `source_bytes: source.as_bytes().to_vec()` from [`taggable_source`][taggable],
   which returns the text of a user or assistant `Text` block or the first text
-  of a tool result. The active-tag match at [`:7350`][active-match] compares
+  of a tool result. The active-tag match at [`:7353`][active-match] compares
   `row.source_bytes == source.as_bytes()` for the same predicate.
 - The commit takes mint inputs from `tag_rows[tag_mint_start..]`
   ([`:4924-4934`][commit-inputs]). The store numbers each new row from
@@ -56,7 +56,7 @@ numbering split; this record covers the cache entry's immutability and the
 
 A design appends to the shared vector in place. The cache entry now holds mint
 rows numbered by the pass, not the store. On the next pass `snapshot` returns
-them; the active-tag match at [`:7350`][active-match] treats a speculative row
+them; the active-tag match at [`:7353`][active-match] treats a speculative row
 as active, and if the mint commit failed the row never existed. A design that
 stores the pass's `Arc` back before commit has the same window. A design that
 changes the `source_bytes` capture so it no longer equals the projected text
@@ -93,7 +93,7 @@ isolation ([`t-interleave`][t-interleave]); none fails a mint commit.
 - Findings: The store either refuses the insert on a detection or, for an
   existing row, records the refusal and keeps the input bytes. No document
   states that a stored `source_bytes` equals its projected text; the active
-  match at [`:7350`][active-match] depends on it.
+  match at [`:7353`][active-match] depends on it.
 - Missing evidence: A written statement in R1 or here.
 - Conclusion: needs human input.
 
@@ -202,6 +202,34 @@ Execution provenance: 2026-09-11, working tree based on `9d04c24b`.
   `--all-targets --locked -- -D warnings` and scoped Rustfmt checks pass.
   These results do not replace the controller's final affected gate.
 
+### Parent-merge verification
+
+Execution provenance: 2026-09-12, working tree merging `0cf2fb3a` into
+`2b83194f`. The earlier command counts above remain historical results.
+
+- The merge retains the parent's test deduplication, including removal of
+  the provenance-only mutation test. The shared-row iterator, mint-tail
+  sharing, rollback, capacity, and bootstrap-protection checks remain.
+  The auto-merged transform compiles without further source changes.
+- Live anchors here and the conflicting catalog and check-inventory anchors
+  are refreshed against the merged source. Discovery links remain pinned to
+  the original baseline commit.
+- `cargo test -p daemon --lib --all-features --locked -- tag_baseline tag_mint
+  tail_hygiene differential_goldens
+  claude_code_first_requested_surface_tags_bootstrap_pass_one
+  transform_projection_tag_numbers_include_same_pass_mints
+  mint_scope_matches_overlay_scope_and_captures_exact_source pending`
+  passes 56 tests, with zero failures and one ignored manual timing test.
+- `cargo test -p daemon --all-features --locked --test caveman_differential
+  --test selection_differential --test historian_truncate_differential`
+  passes 24 tests with zero failures.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  passes. `rustfmt --edition 2024 --check` on `tail_hygiene.rs` and
+  `transform.rs`, and `git diff --check`, pass.
+- `differential_goldens.rs` is byte-identical to incoming parent `0cf2fb3a`,
+  Git blob `7a32a3236bd3102dc764cd36616edfd7920c736c`. No schema, wire,
+  guard, benchmark, or storage changes are added by this resolution.
+
 [tc-tagnum]: ../../../daemon/transform/catalog.md#speculative-tag-numbering-has-two-authorities
 [r1]: ../../catalog.md#prepared-field-output-and-audit-policy-agree
 [load-call]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/crates/daemon/src/transform.rs#L3002
@@ -224,21 +252,21 @@ Execution provenance: 2026-09-11, working tree based on `9d04c24b`.
 [live-entry]: ../../../../../crates/daemon/src/transform.rs#L6828-L6853
 [live-baseline]: ../../../../../crates/daemon/src/transform.rs#L3034-L3035
 [live-protection]: ../../../../../crates/daemon/src/transform.rs#L3696-L3709
-[live-tail]: ../../../../../crates/daemon/src/transform.rs#L7942-L7950
+[live-tail]: ../../../../../crates/daemon/src/transform.rs#L7943-L7953
 [live-combined]: ../../../../../crates/daemon/src/transform.rs#L3430-L3438
-[live-hygiene]: ../../../../../crates/daemon/src/transform.rs#L8492-L8556
+[live-hygiene]: ../../../../../crates/daemon/src/transform.rs#L8495-L8559
 [live-measure]: ../../../../../crates/daemon/src/tail_hygiene.rs#L471-L486
 [live-iterator-test]: ../../../../../crates/daemon/src/tail_hygiene.rs#L1180
-[live-bootstrap-test]: ../../../../../crates/daemon/src/transform.rs#L21761
-[live-protection-test]: ../../../../../crates/daemon/src/transform.rs#L23762
-[live-refusal-test]: ../../../../../crates/daemon/src/transform.rs#L11845
+[live-bootstrap-test]: ../../../../../crates/daemon/src/transform.rs#L21441
+[live-protection-test]: ../../../../../crates/daemon/src/transform.rs#L23275
+[live-refusal-test]: ../../../../../crates/daemon/src/transform.rs#L11848
 [live-commit]: ../../../../../crates/daemon/src/transform.rs#L4951-L4960
 [live-load]: ../../../../../crates/daemon/src/transform.rs#L6951-L7013
 [live-charge]: ../../../../../crates/daemon/src/transform.rs#L6918-L6934
-[live-charge-test]: ../../../../../crates/daemon/src/transform.rs#L11882
-[live-interleave]: ../../../../../crates/daemon/src/transform.rs#L22713
-[live-sharing]: ../../../../../crates/daemon/src/transform.rs#L22760
-[live-rollback]: ../../../../../crates/daemon/src/transform.rs#L22797
+[live-charge-test]: ../../../../../crates/daemon/src/transform.rs#L11885
+[live-interleave]: ../../../../../crates/daemon/src/transform.rs#L22344
+[live-sharing]: ../../../../../crates/daemon/src/transform.rs#L22391
+[live-rollback]: ../../../../../crates/daemon/src/transform.rs#L22428
 [live-prepared]: ../../../../../crates/memory-store/src/lib.rs#L8234-L8249
 [live-bytes]: ../../../../../crates/memory-store/src/lib.rs#L2079-L2086
 [live-policy]: ../../../../../crates/memory-store/src/lib.rs#L2204-L2233

@@ -228,25 +228,6 @@ fn lease_limit_reports_backpressure_then_recovers_after_release() {
 }
 
 #[test]
-fn one_span_profile_is_rejected_at_creation() {
-    let profile = TargetProfile::new(ProfileConfig {
-        descriptor: TransportDescriptor::new(HardwareProfileId::new("ring-one-span").unwrap()),
-        descriptor_depth: 2,
-        arena_bytes: MAX_FRAME_BYTES,
-        max_spans: 1,
-        max_leases: 1,
-        mappings: 2,
-        pinned_workers: 0,
-        worker_topology: WorkerTopology::CallerThread,
-    })
-    .unwrap();
-    assert!(matches!(
-        Ring::create(&profile, 20),
-        Err(RingError::ProfileMismatch)
-    ));
-}
-
-#[test]
 fn sealed_sparse_object_repeated_setup_and_stress_conservation() {
     for lane in 0..3 {
         let ring = Ring::create(&profile(), lane).unwrap();

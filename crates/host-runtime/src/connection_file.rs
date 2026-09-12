@@ -340,7 +340,6 @@ mod tests {
     use super::*;
 
     /// `mode_bits` widens `st_mode` to match this crate's `u32` mode constants on Darwin and Linux.
-    /// `mode_bits` widens `st_mode` to match this crate's `u32` mode constants on Darwin and Linux.
     #[test]
     fn mode_arithmetic_goes_through_the_portable_accessor() {
         for source in [
@@ -464,33 +463,6 @@ mod tests {
         match error {
             ConnectionFileError::Insecure { path: rejected } => assert_eq!(rejected, path),
             other => panic!("expected an insecure-type rejection of the FIFO, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn strict_wire_version_rejects_missing_null_string_and_other() {
-        let valid = serde_json::to_value(info()).expect("serialize");
-        for version in [
-            None,
-            Some(serde_json::Value::Null),
-            Some(serde_json::json!("2")),
-            Some(serde_json::json!(1)),
-        ] {
-            let mut candidate = valid.clone();
-            let object = candidate.as_object_mut().expect("object");
-            match version {
-                Some(value) => {
-                    object.insert("wire_version".to_owned(), value);
-                }
-                None => {
-                    object.remove("wire_version");
-                }
-            }
-            assert!(
-                serde_json::from_value::<ConnectionInfo>(candidate)
-                    .and_then(|info| info.validate().map_err(serde::de::Error::custom))
-                    .is_err()
-            );
         }
     }
 

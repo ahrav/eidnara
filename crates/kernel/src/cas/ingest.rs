@@ -1428,22 +1428,19 @@ mod verify_object_tests {
         assert_eq!(kind(&prepared, b"offered", false), None);
     }
 
+    /// Bytes this attempt published are torn; a pre-existing object that
+    /// does not hash to the digest is bit rot. Both are corruption.
     #[test]
-    fn bytes_this_attempt_published_that_differ_are_corruption() {
+    fn differing_bytes_are_corruption_on_both_publication_outcomes() {
         let prepared = prepared(b"offered");
-        assert_eq!(
-            kind(&prepared, b"torn", true),
-            Some(ArtifactErrorKind::CorruptObject)
-        );
-    }
-
-    #[test]
-    fn a_pre_existing_object_that_does_not_hash_to_the_digest_is_corruption() {
-        let prepared = prepared(b"offered");
-        assert_eq!(
-            kind(&prepared, b"bit rot", false),
-            Some(ArtifactErrorKind::CorruptObject)
-        );
+        let cases = [(b"torn".as_slice(), true), (b"bit rot".as_slice(), false)];
+        for (stored, published_new) in cases {
+            assert_eq!(
+                kind(&prepared, stored, published_new),
+                Some(ArtifactErrorKind::CorruptObject),
+                "stored={stored:?}, published_new={published_new}"
+            );
+        }
     }
 
     #[test]

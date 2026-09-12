@@ -54,13 +54,13 @@ describe("boundDynamicField", () => {
 });
 
 describe("packed search text rendering", () => {
-    it("freezes the under-budget shape", () => {
+    it("freezes the under-budget shape with full delivery accounting", () => {
         const results: KernelMemorySearchResult[] = [
             memoryResult(7, "always use bd for tracking"),
             antiMemoryResult(),
         ];
-        const text = formatSearchResults("queue", results);
-        expect(text).toBe(
+        const packed = packSearchResults("queue", results);
+        expect(packed.text).toBe(
             [
                 'Found 2 results for "queue":',
                 "",
@@ -71,12 +71,18 @@ describe("packed search text rendering", () => {
                 `⚠ Previously rejected: Redis. Reason: it creates split ownership. Verify before proceeding: confirm the rejection no longer applies to session caching. (see mem_${"c".repeat(32)})`,
             ].join("\n"),
         );
+        expect(packed.delivered).toEqual(results);
+        expect(packed.omittedCount).toBe(0);
+        expect(packed.reason).toBe("delivered");
+        expect(packed.tokenCount).toBe(estimateTokens(packed.text));
     });
 
-    it("keeps the empty-result message unchanged", () => {
-        expect(formatSearchResults("nothing", [])).toBe(
-            'No results found for "nothing" in project memories.',
-        );
+    it("keeps the empty-result message unchanged and reports the empty reason", () => {
+        const packed = packSearchResults("nothing", []);
+        expect(packed.text).toBe('No results found for "nothing" in project memories.');
+        expect(packed.delivered).toEqual([]);
+        expect(packed.omittedCount).toBe(0);
+        expect(packed.reason).toBe("empty-results");
     });
 
     it("renders an anti-memory rationale after the warning line and omits it when absent", () => {
@@ -102,15 +108,18 @@ describe("packed search text rendering", () => {
         expect(Buffer.byteLength(text, "utf8")).toBeLessThan(MAX_RENDER_FIELD_BYTES + 200);
     });
 
-    it("keeps a ranked prefix of complete blocks under the token budget", () => {
+    it("keeps a ranked prefix of complete blocks under the token budget and delivers exactly those results", () => {
         const filler = Array.from({ length: 300 }, (_, index) =>
             ((index * 2654435761) % 36).toString(36),
         ).join(" ");
         const results = Array.from({ length: 50 }, (_, index) =>
             memoryResult(index + 1, `${filler} tail-${index}`),
         );
-        const text = formatSearchResults("big", results);
-        expect(estimateTokens(text)).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
+        const packed = packSearchResults("big", results);
+        const text = packed.text;
+        expect(packed.reason).toBe("delivered");
+        expect(packed.tokenCount).toBe(estimateTokens(text));
+        expect(packed.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
 
         const shownBlocks = (text.match(/\[\d+\] \[memory\]/g) ?? []).length;
         expect(shownBlocks).toBeGreaterThan(0);
@@ -122,9 +131,14 @@ describe("packed search text rendering", () => {
         expect(text).toContain(
             `(${50 - shownBlocks} results omitted to fit the output budget — refine the query or lower the limit)`,
         );
-        // Every shown block carries its tail marker.
-        for (let index = 0; index < shownBlocks; index += 1) {
+        expect(packed.delivered).toEqual(results.slice(0, shownBlocks));
+        expect(packed.omittedCount).toBe(50 - shownBlocks);
+        for (const [index, delivered] of packed.delivered.entries()) {
+            expect(text).toContain(`id=${delivered.objectId}`);
             expect(text).toContain(`tail-${index}`);
+        }
+        for (let index = shownBlocks; index < 50; index += 1) {
+            expect(text).not.toContain(`tail-${index}`);
         }
     });
 
@@ -148,50 +162,6 @@ describe("packed search text rendering", () => {
 });
 
 describe("packSearchResults", () => {
-    it("packs under-budget results with full delivery accounting", () => {
-        const results: KernelMemorySearchResult[] = [
-            memoryResult(7, "always use bd for tracking"),
-            antiMemoryResult(),
-        ];
-        const packed = packSearchResults("queue", results);
-        expect(packed.delivered).toEqual(results);
-        expect(packed.omittedCount).toBe(0);
-        expect(packed.reason).toBe("delivered");
-        expect(packed.tokenCount).toBe(estimateTokens(packed.text));
-    });
-
-    it("reports empty results with the empty reason", () => {
-        const packed = packSearchResults("nothing", []);
-        expect(packed.delivered).toEqual([]);
-        expect(packed.omittedCount).toBe(0);
-        expect(packed.reason).toBe("empty-results");
-    });
-
-    it("delivers exactly the results whose complete blocks were rendered when over budget", () => {
-        const filler = Array.from({ length: 300 }, (_, index) =>
-            ((index * 2654435761) % 36).toString(36),
-        ).join(" ");
-        const results = Array.from({ length: 50 }, (_, index) =>
-            memoryResult(index + 1, `${filler} tail-${index}`),
-        );
-        const packed = packSearchResults("big", results);
-        expect(packed.reason).toBe("delivered");
-        expect(packed.tokenCount).toBe(estimateTokens(packed.text));
-        expect(packed.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
-
-        const shownBlocks = (packed.text.match(/\[\d+\] \[memory\]/g) ?? []).length;
-        expect(packed.delivered.length).toBe(shownBlocks);
-        expect(packed.delivered).toEqual(results.slice(0, shownBlocks));
-        expect(packed.omittedCount).toBe(50 - shownBlocks);
-        for (const delivered of results.slice(0, shownBlocks)) {
-            expect(packed.text).toContain(`id=${delivered.objectId}`);
-        }
-        for (const [index, omitted] of results.slice(shownBlocks).entries()) {
-            void omitted;
-            expect(packed.text).not.toContain(`tail-${shownBlocks + index}`);
-        }
-    });
-
     it("counts a preamble against the budget so a near-limit result set stays under it", () => {
         const filler = Array.from({ length: 300 }, (_, index) =>
             ((index * 2654435761) % 36).toString(36),

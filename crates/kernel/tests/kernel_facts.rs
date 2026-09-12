@@ -78,17 +78,6 @@ fn main_file_bytes_names_the_main_file_and_family_bytes_adds_every_sidecar() {
 }
 
 #[test]
-fn no_consumers_report_absent_lag_rather_than_zero() {
-    let root = private_dir();
-    let store = KernelStore::open(root.path()).unwrap();
-    insert_domain(&store, 1);
-    let facts = store.facts(i64::MAX).unwrap();
-    assert_eq!(facts.minimum_required_checkpoint, None);
-    assert_eq!(facts.commit_lag, None);
-    assert_eq!(facts.outbox_lag.oldest_unconsumed_age_ms, None);
-}
-
-#[test]
 fn lag_uses_slowest_consumer_and_oldest_age_grows_exactly() {
     let root = private_dir();
     let store = KernelStore::open(root.path()).unwrap();
@@ -220,14 +209,23 @@ fn lag_uses_outbox_positions_and_the_required_consumer_minimum() {
 }
 
 #[test]
-fn no_consumers_report_absent_position_lag_and_count_retained_rows() {
+fn no_consumers_report_absent_lag_rather_than_zero_and_count_retained_rows() {
     let root = private_dir();
     let store = KernelStore::open(root.path()).unwrap();
     insert_domains(&store, 1, 8);
+    // With no registered consumer, unpublished rows have no lag or unconsumed age.
+    let unpublished = store.facts(i64::MAX).unwrap();
+    assert_eq!(unpublished.minimum_required_checkpoint, None);
+    assert_eq!(unpublished.commit_lag, None);
+    assert_eq!(unpublished.outbox_lag.position_lag, None);
+    assert_eq!(unpublished.outbox_lag.oldest_unconsumed_age_ms, None);
+
     store.mark_outbox_published_through(8, 1).unwrap();
     let facts = store.facts(1).unwrap();
+    assert_eq!(facts.minimum_required_checkpoint, None);
     assert_eq!(facts.outbox_lag.position_lag, None);
     assert_eq!(facts.commit_lag, None);
+    assert_eq!(facts.outbox_lag.oldest_unconsumed_age_ms, None);
     assert_eq!(facts.retained_outbox_rows, 8);
     let lag = store.outbox_lag(1).unwrap();
     assert_eq!(lag.position_lag, None);

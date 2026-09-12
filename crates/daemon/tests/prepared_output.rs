@@ -2,9 +2,7 @@ use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use daemon::dispatch::{
-    MAX_WIRE_BODY_BYTES, PreparedOutcome, PreparedOutput, PreparedOutputError, PreparedSegment,
-};
+use daemon::dispatch::{MAX_WIRE_BODY_BYTES, PreparedOutput, PreparedOutputError, PreparedSegment};
 use serde_json::json;
 
 fn reserved_vec(output: &PreparedOutput) -> Result<Vec<u8>, PreparedOutputError> {
@@ -100,20 +98,6 @@ fn cached_bytes_copy_only_after_destination_reservation() {
     assert_eq!(destination.bytes, expected);
 }
 
-#[test]
-fn typed_errors_and_stream_markers_have_no_prepared_body() {
-    let error = PreparedOutcome::Error {
-        code: "invalid_params".to_string(),
-        message: "bad request".to_string(),
-    };
-    let streamed = PreparedOutcome::Streamed;
-    let response = PreparedOutcome::Response(PreparedOutput::json(json!({"ok": true})));
-
-    assert!(matches!(error, PreparedOutcome::Error { .. }));
-    assert!(matches!(streamed, PreparedOutcome::Streamed));
-    assert!(matches!(response, PreparedOutcome::Response(_)));
-}
-
 #[derive(Default)]
 struct CountingSink {
     written: usize,
@@ -176,37 +160,6 @@ fn cap_plus_one_and_arithmetic_overflow_fail_before_write() {
         overflow.measure(),
         Err(PreparedOutputError::LengthOverflow)
     ));
-}
-
-fn settle_with_cancellation(
-    output: &PreparedOutput,
-    cancel_before_reserve: bool,
-    reserve: bool,
-    cancel_before_write: bool,
-) -> Option<Vec<u8>> {
-    let measured = output.measure().ok()?;
-    if cancel_before_reserve || !reserve {
-        return None;
-    }
-    let mut destination = Vec::with_capacity(measured.len());
-    if cancel_before_write {
-        return None;
-    }
-    measured.write_to(&mut destination).ok()?;
-    Some(destination)
-}
-
-#[test]
-fn cancellation_before_reservation_or_write_emits_nothing() {
-    let output = PreparedOutput::json(json!({"ok": true}));
-    assert_eq!(settle_with_cancellation(&output, true, true, false), None);
-    assert_eq!(settle_with_cancellation(&output, false, true, true), None);
-}
-
-#[test]
-fn reserve_denial_emits_nothing() {
-    let output = PreparedOutput::cached_bytes(b"cached".to_vec());
-    assert_eq!(settle_with_cancellation(&output, false, false, false), None);
 }
 
 struct FailAfter {

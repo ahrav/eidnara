@@ -19,50 +19,36 @@ describe("extractLatestAssistantText", () => {
         ).toBeNull();
     });
 
-    it("picks the newest assistant message by time.created regardless of array order", () => {
-        const messages = [assistant("T9", 9), assistant("T1", 1), assistant("T5", 5)];
-        expect(extractLatestAssistantText(messages)).toBe("T9");
-    });
-
-    it("breaks timestamp ties toward the later array position", () => {
-        expect(
-            extractLatestAssistantText([
-                assistant("OLDEST", 1000),
-                assistant("MIDDLE", 1000),
-                assistant("NEWEST", 1000),
-            ]),
-        ).toBe("NEWEST");
-    });
-
-    it("falls back to array order when no message carries a timestamp", () => {
-        expect(
-            extractLatestAssistantText([
-                assistant("OLDEST"),
-                assistant("MIDDLE"),
-                assistant("NEWEST"),
-            ]),
-        ).toBe("NEWEST");
-    });
-
-    it("ranks a timestamped message above an untimestamped one", () => {
-        expect(extractLatestAssistantText([assistant("T5", 5), assistant("NOTIME")])).toBe("T5");
-    });
-
-    it("ranks a zero timestamp above an absent one", () => {
-        expect(extractLatestAssistantText([assistant("T0", 0), assistant("NOTIME")])).toBe("T0");
-    });
-
-    it("treats NaN and infinite timestamps as absent", () => {
-        expect(extractLatestAssistantText([assistant("NAN", Number.NaN)])).toBe("NAN");
-        expect(extractLatestAssistantText([assistant("T5", 5), assistant("NAN", Number.NaN)])).toBe(
-            "T5",
-        );
-        expect(
-            extractLatestAssistantText([
-                assistant("INF", Number.POSITIVE_INFINITY),
-                assistant("T5", 5),
-            ]),
-        ).toBe("T5");
+    it("ranks by time.created, then array position, with zero above absent and NaN/infinite as absent", () => {
+        const cases: Array<[string, ReturnType<typeof assistant>[], string]> = [
+            [
+                "newest by time regardless of order",
+                [assistant("T9", 9), assistant("T1", 1), assistant("T5", 5)],
+                "T9",
+            ],
+            [
+                "ties break toward the later position",
+                [assistant("OLDEST", 1000), assistant("MIDDLE", 1000), assistant("NEWEST", 1000)],
+                "NEWEST",
+            ],
+            [
+                "array order when nothing is timestamped",
+                [assistant("OLDEST"), assistant("MIDDLE"), assistant("NEWEST")],
+                "NEWEST",
+            ],
+            ["timestamped above untimestamped", [assistant("T5", 5), assistant("NOTIME")], "T5"],
+            ["zero above absent", [assistant("T0", 0), assistant("NOTIME")], "T0"],
+            ["a lone NaN timestamp still yields its text", [assistant("NAN", Number.NaN)], "NAN"],
+            ["NaN ranks as absent", [assistant("T5", 5), assistant("NAN", Number.NaN)], "T5"],
+            [
+                "infinity ranks as absent",
+                [assistant("INF", Number.POSITIVE_INFINITY), assistant("T5", 5)],
+                "T5",
+            ],
+        ];
+        for (const [label, messages, expected] of cases) {
+            expect(extractLatestAssistantText(messages), label).toBe(expected);
+        }
     });
 
     it("reads a created getter once so validation and ranking see the same value", () => {

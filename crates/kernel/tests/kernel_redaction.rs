@@ -63,31 +63,48 @@ fn assert_absent_and_scan_is_live(root: &std::path::Path) {
 }
 
 #[test]
-fn commit_audit_text_too_large_to_inspect_is_rejected_rather_than_replaced() {
-    // Redaction replaces text it cannot inspect with one placeholder, so an oversized
-    // actor or cause would be committed as `<REDACTED:secret>` and the commit log
-    // would record a provenance it never received.
+fn commit_intent_text_that_is_blank_or_too_large_to_inspect_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     let oversized = "x".repeat(context_core::redaction::MAX_REDACTABLE_BYTES + 1);
+    type RedactionCase<'a> = (&'a str, &'a str, fn(&mut CommitIntent, String));
+    let cases: [RedactionCase<'_>; 6] = [
+        ("producer", "", |intent, text| intent.producer = text),
+        ("producer", "   ", |intent, text| intent.producer = text),
+        ("operation_key", "", |intent, text| {
+            intent.operation_key = text
+        }),
+        ("operation_key", "\t", |intent, text| {
+            intent.operation_key = text
+        }),
+        ("actor", oversized.as_str(), |intent, text| {
+            intent.actor = text
+        }),
+        ("cause", oversized.as_str(), |intent, text| {
+            intent.cause = text
+        }),
+    ];
 
-    for (label, mut intent) in [
-        ("actor", intent("oversized-actor", 'c')),
-        ("cause", intent("oversized-cause", 'd')),
-    ] {
-        if label == "actor" {
-            intent.actor = oversized.clone();
-        } else {
-            intent.cause = oversized.clone();
-        }
+    for (field, text, mutate) in cases {
+        let mut bad = intent("unused", 'a');
+        mutate(&mut bad, text.to_string());
         let error = store
-            .commit(intent, |envelope| {
+            .commit(bad, |envelope| {
                 envelope.insert_domain(domain())?;
                 Ok(String::new())
             })
             .unwrap_err();
-        assert_eq!(error, KernelError::InvalidInput, "{label}");
+        assert_eq!(
+            error,
+            KernelError::InvalidInput,
+            "{field} with {} bytes",
+            text.len()
+        );
     }
+    assert_eq!(
+        inspect_count(directory.path(), "SELECT COUNT(*) FROM commit_log"),
+        0
+    );
 }
 
 fn inspect_text(root: &std::path::Path, sql: &str) -> String {
@@ -268,14 +285,22 @@ fn shared_run_candidate(candidate_id: &str, offset: i64) -> StagingCandidateSpec
 }
 
 #[test]
-fn staging_run_is_inserted_once_and_reused_for_multiple_candidates() {
+fn staging_run_is_inserted_once_and_renewed_by_candidates_of_different_classifications() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    let second = shared_run_candidate("candidate-b", 5);
-    store
-        .stage_candidate(shared_run_candidate("candidate-a", 1))
-        .unwrap();
-    store.stage_candidate(second.clone()).unwrap();
+    let mut clean = shared_run_candidate("candidate-clean", 1);
+    clean.payload = "public source".to_string();
+    let mut secret = shared_run_candidate("candidate-secret", 5);
+    secret.payload = format!("payload {SECRET}");
+
+    assert_eq!(
+        store.stage_candidate(clean).unwrap().sensitivity,
+        Sensitivity::Normal
+    );
+    assert_eq!(
+        store.stage_candidate(secret.clone()).unwrap().sensitivity,
+        Sensitivity::Secret
+    );
 
     let connection = Connection::open_with_flags(
         directory.path().join("kernel.sqlite"),
@@ -305,9 +330,27 @@ fn staging_run_is_inserted_once_and_reused_for_multiple_candidates() {
         .unwrap();
     assert_eq!(
         renewal,
-        (second.recorded_at, second.lease_expires_at),
+        (secret.recorded_at, secret.lease_expires_at),
         "the later candidate renews the run"
     );
+    let run_class: String = connection
+        .query_row("SELECT sensitivity_class FROM extraction_runs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        run_class, "normal",
+        "run classification must not follow one candidate"
+    );
+    let mut classes = connection
+        .prepare("SELECT sensitivity_class FROM candidates ORDER BY candidate_id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    classes.sort();
+    assert_eq!(classes, ["normal", "secret"]);
 }
 
 #[test]
@@ -348,63 +391,37 @@ fn staging_run_reuse_with_changed_immutable_metadata_is_a_typed_conflict() {
 }
 
 #[test]
-fn one_run_accepts_candidates_with_different_classifications() {
+fn run_identity_fields_reject_blank_and_secret_bearing_values() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    let mut clean = shared_run_candidate("candidate-clean", 1);
-    clean.payload = "public source".to_string();
-    let mut secret = shared_run_candidate("candidate-secret", 2);
-    secret.payload = format!("payload {SECRET}");
-
-    assert_eq!(
-        store.stage_candidate(clean).unwrap().sensitivity,
-        Sensitivity::Normal
-    );
-    assert_eq!(
-        store.stage_candidate(secret).unwrap().sensitivity,
-        Sensitivity::Secret
-    );
-
-    let connection = Connection::open_with_flags(
-        directory.path().join("kernel.sqlite"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let run_class: String = connection
-        .query_row("SELECT sensitivity_class FROM extraction_runs", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        run_class, "normal",
-        "run classification must not follow one candidate"
-    );
-    let mut classes = connection
-        .prepare("SELECT sensitivity_class FROM candidates ORDER BY candidate_id")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    classes.sort();
-    assert_eq!(classes, ["normal", "secret"]);
-}
-
-#[test]
-fn run_identity_fields_reject_a_detected_secret() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    for mutate in [
-        |spec: &mut StagingCandidateSpec| spec.source_id = format!("src {SECRET}"),
-        |spec: &mut StagingCandidateSpec| spec.extractor = format!("tool {SECRET}"),
-    ] {
-        let mut spec = shared_run_candidate("candidate-a", 1);
+    type Mutation = (&'static str, fn(&mut StagingCandidateSpec));
+    let mutations: [Mutation; 6] = [
+        ("blank extractor", |spec| spec.extractor = "  ".to_string()),
+        ("blank source_kind", |spec| spec.source_kind = String::new()),
+        ("blank source_id", |spec| spec.source_id = "\t".to_string()),
+        ("blank candidate_kind", |spec| {
+            spec.candidate_kind = String::new()
+        }),
+        ("secret source_id", |spec| {
+            spec.source_id = format!("src {SECRET}")
+        }),
+        ("secret extractor", |spec| {
+            spec.extractor = format!("tool {SECRET}")
+        }),
+    ];
+    for (field, mutate) in mutations {
+        let mut spec = shared_run_candidate("candidate-invalid", 1);
         mutate(&mut spec);
         assert_eq!(
             store.stage_candidate(spec).unwrap_err(),
-            KernelError::InvalidInput
+            KernelError::InvalidInput,
+            "{field}"
         );
     }
+    assert_eq!(
+        inspect_count(directory.path(), "SELECT COUNT(*) FROM extraction_runs"),
+        0
+    );
 }
 
 #[test]
@@ -473,21 +490,17 @@ fn a_run_whose_lease_expires_exactly_now_is_not_resurrected() {
 }
 
 #[test]
-fn a_zero_duration_lease_is_invalid_input_not_a_conflict() {
+fn lease_durations_are_rejected_at_zero_and_beyond_the_one_hour_ceiling() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
-    let mut spec = shared_run_candidate("candidate-zero", 5);
-    spec.lease_expires_at = spec.recorded_at;
+    let mut zero = shared_run_candidate("candidate-zero", 5);
+    zero.lease_expires_at = zero.recorded_at;
     assert_eq!(
-        store.stage_candidate(spec).unwrap_err(),
-        KernelError::InvalidInput
+        store.stage_candidate(zero).unwrap_err(),
+        KernelError::InvalidInput,
+        "a zero-duration lease is invalid input, not a conflict"
     );
-}
 
-#[test]
-fn a_lease_beyond_the_one_hour_ceiling_is_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
     let mut over = shared_run_candidate("candidate-over", 1_000);
     over.lease_expires_at = over.recorded_at + 3_600_001;
     assert_eq!(
@@ -509,26 +522,6 @@ fn a_lease_beyond_the_one_hour_ceiling_is_rejected() {
     store.stage_candidate(exact).unwrap();
 }
 
-#[test]
-fn a_blank_commit_identity_component_is_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    for (producer, operation_key) in [("", "op"), ("   ", "op"), ("prod", ""), ("prod", "\t")] {
-        let mut bad = intent("unused", 'a');
-        bad.producer = producer.to_string();
-        bad.operation_key = operation_key.to_string();
-        assert_eq!(
-            store.commit(bad, |_| Ok(String::new())).unwrap_err(),
-            KernelError::InvalidInput,
-            "producer={producer:?} operation_key={operation_key:?}"
-        );
-    }
-    assert_eq!(
-        inspect_count(directory.path(), "SELECT COUNT(*) FROM commit_log"),
-        0
-    );
-}
-
 fn inspect_count(root: &std::path::Path, sql: &str) -> i64 {
     let connection =
         Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -537,7 +530,7 @@ fn inspect_count(root: &std::path::Path, sql: &str) -> i64 {
 }
 
 #[test]
-fn an_identical_restage_replays_instead_of_conflicting() {
+fn an_identical_restage_replays_and_renews_the_candidate_lease_with_its_run() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     let first = store
@@ -561,6 +554,34 @@ fn an_identical_restage_replays_instead_of_conflicting() {
         store.stage_candidate(changed).unwrap_err(),
         KernelError::Conflict,
         "mismatched content keeps its conflict"
+    );
+
+    // A later heartbeat on the unchanged candidate moves its lease with the run's.
+    store
+        .stage_candidate(shared_run_candidate("candidate-a", 5))
+        .unwrap();
+    let connection = Connection::open_with_flags(
+        directory.path().join("kernel.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let candidate: (i64, i64) = connection
+        .query_row(
+            "SELECT heartbeat_at,lease_expires_at FROM candidates",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let run: (i64, i64) = connection
+        .query_row(
+            "SELECT heartbeat_at,lease_expires_at FROM extraction_runs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        candidate, run,
+        "a replayed candidate must not keep an older lease than its run"
     );
 }
 
@@ -597,59 +618,6 @@ fn a_reused_candidate_id_does_not_collide_with_deleted_redaction_rows() {
 }
 
 #[test]
-fn two_payloads_differing_only_in_secret_bytes_are_not_the_same_replay() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    let other = "sk-ant-api03-ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
-    let mut first = shared_run_candidate("candidate-alias", 1);
-    first.payload = format!("payload {SECRET}");
-    let mut second = shared_run_candidate("candidate-alias", 1);
-    second.payload = format!("payload {other}");
-    // Both redact to the same text, so a redacted comparison would alias them.
-    store.stage_candidate(first).unwrap();
-    assert_eq!(
-        store.stage_candidate(second).unwrap_err(),
-        KernelError::Conflict
-    );
-}
-
-#[test]
-fn an_identical_restage_renews_the_candidate_lease_with_its_run() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    store
-        .stage_candidate(shared_run_candidate("candidate-a", 1))
-        .unwrap();
-    store
-        .stage_candidate(shared_run_candidate("candidate-a", 5))
-        .unwrap();
-
-    let connection = Connection::open_with_flags(
-        directory.path().join("kernel.sqlite"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let candidate: (i64, i64) = connection
-        .query_row(
-            "SELECT heartbeat_at,lease_expires_at FROM candidates",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    let run: (i64, i64) = connection
-        .query_row(
-            "SELECT heartbeat_at,lease_expires_at FROM extraction_runs",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        candidate, run,
-        "a replayed candidate must not keep an older lease than its run"
-    );
-}
-
-#[test]
 fn a_far_future_heartbeat_cannot_outrun_the_reaper() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
@@ -679,32 +647,6 @@ fn a_far_future_heartbeat_cannot_outrun_the_reaper() {
     current.recorded_at = now;
     current.lease_expires_at = now + 1_000;
     store.stage_candidate(current).unwrap();
-}
-
-#[test]
-fn blank_run_identity_fields_are_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    type Mutation = (&'static str, fn(&mut StagingCandidateSpec));
-    let mutations: [Mutation; 4] = [
-        ("extractor", |spec| spec.extractor = "  ".to_string()),
-        ("source_kind", |spec| spec.source_kind = String::new()),
-        ("source_id", |spec| spec.source_id = "\t".to_string()),
-        ("candidate_kind", |spec| spec.candidate_kind = String::new()),
-    ];
-    for (field, mutate) in mutations {
-        let mut spec = shared_run_candidate("candidate-blank", 1);
-        mutate(&mut spec);
-        assert_eq!(
-            store.stage_candidate(spec).unwrap_err(),
-            KernelError::InvalidInput,
-            "{field}"
-        );
-    }
-    assert_eq!(
-        inspect_count(directory.path(), "SELECT COUNT(*) FROM extraction_runs"),
-        0
-    );
 }
 
 #[test]
@@ -798,6 +740,15 @@ fn a_secret_bearing_candidate_is_not_replayed_from_a_lossy_payload() {
         store.stage_candidate(secret_spec(2)).unwrap_err(),
         KernelError::Conflict,
         "a redacted payload cannot prove an unchanged retry"
+    );
+    // Another secret redacts to the same text, so a redacted comparison would alias it.
+    let other_secret = "sk-ant-api03-ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+    let mut other = secret_spec(1);
+    other.payload = format!("payload {other_secret}");
+    assert_eq!(
+        store.stage_candidate(other).unwrap_err(),
+        KernelError::Conflict,
+        "payloads differing only in secret bytes are not the same replay"
     );
 
     // A detection-free candidate stays replayable, since its stored payload is exact.

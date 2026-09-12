@@ -55,23 +55,15 @@ describe("Broca-child guard in the plugin entry", () => {
         }
     });
 
-    test('guard values other than "1" do not trip the guard', async () => {
-        for (const value of ["0", "true", ""]) {
-            process.env.EIDNARA_BROCA_CHILD = value;
+    test('an unset guard or a value other than "1" proceeds into ordinary startup', async () => {
+        for (const value of [undefined, "0", "true", ""]) {
+            if (value === undefined) delete process.env.EIDNARA_BROCA_CHILD;
+            else process.env.EIDNARA_BROCA_CHILD = value;
             configLoadSpy.mockClear();
             const server = await freshPluginServer();
             await expect(server(minimalCtx())).rejects.toThrow(CHILD_GUARD_SENTINEL);
             expect(configLoadSpy).toHaveBeenCalledTimes(1);
+            expect(rpcStartSpy).not.toHaveBeenCalled();
         }
-    });
-
-    test("without the guard, ordinary startup proceeds into config load", async () => {
-        delete process.env.EIDNARA_BROCA_CHILD;
-        const server = await freshPluginServer();
-
-        // Unguarded startup reaches config load rather than returning at the child guard.
-        await expect(server(minimalCtx())).rejects.toThrow(CHILD_GUARD_SENTINEL);
-        expect(configLoadSpy).toHaveBeenCalledTimes(1);
-        expect(rpcStartSpy).not.toHaveBeenCalled();
     });
 });

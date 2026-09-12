@@ -69,7 +69,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
         ]);
     });
 
-    it("preserves numeric thresholds while redacting string and numeric secrets", () => {
+    it("redacts string and numeric secrets under credential keys while keeping thresholds and token budgets", () => {
         expect(
             sanitizeValue({
                 execute_threshold_tokens: 200000,
@@ -85,9 +85,7 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
             api_key: "<REDACTED>",
             password: "<REDACTED>",
         });
-    });
-
-    it("redacts a numeric PIN under a password-shaped key but keeps token budgets", () => {
+        // Credential-shaped keys redact numeric values except `api_key`, whose numeric value is a token budget.
         expect(
             sanitizeValue({
                 password: 123456,
@@ -105,9 +103,6 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
             api_key: 4096,
             enabled: true,
         });
-    });
-
-    it("redacts every credential-shaped key the shared vocabulary knows, plus cookies", () => {
         expect(
             sanitizeValue({
                 credential: "c",
@@ -316,22 +311,19 @@ describe("sanitizeString home handling", () => {
 });
 
 describe("piSessionIdFromFileName", () => {
-    it("strips Pi's timestamp prefix and the .jsonl suffix", () => {
-        expect(
-            piSessionIdFromFileName(
+    it("strips Pi's timestamp prefix and the .jsonl suffix but keeps the rest of the stem", () => {
+        const cases: [string, string][] = [
+            [
                 "2026-08-07T06-17-24-707Z_019fdade-87e3-7657-9ce7-65bee79b08e3.jsonl",
-            ),
-        ).toBe("019fdade-87e3-7657-9ce7-65bee79b08e3");
-    });
-
-    it("keeps underscores inside a caller-chosen id", () => {
-        expect(piSessionIdFromFileName("2026-08-07T06-17-24-707Z_my_session.jsonl")).toBe(
-            "my_session",
-        );
-    });
-
-    it("returns a file stem without a timestamp prefix unchanged", () => {
-        expect(piSessionIdFromFileName("customsession.jsonl")).toBe("customsession");
+                "019fdade-87e3-7657-9ce7-65bee79b08e3",
+            ],
+            // Underscores inside a caller-chosen id are not a second prefix separator.
+            ["2026-08-07T06-17-24-707Z_my_session.jsonl", "my_session"],
+            ["customsession.jsonl", "customsession"],
+        ];
+        for (const [fileName, sessionId] of cases) {
+            expect(piSessionIdFromFileName(fileName), fileName).toBe(sessionId);
+        }
     });
 });
 
@@ -542,7 +534,7 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.logFile).toEqual({ path: logDir, exists: false, sizeKb: 0 });
     });
 
-    it("diagnoses the .json config the Pi loader selects and sanitizes its parse error", async () => {
+    it("diagnoses the .json config the Pi loader selects, sanitizes its parse error, and reports discovery unavailable without a sessions directory", async () => {
         const { home, cwd, configHome } = isolateEnv();
         const userJson = join(configHome, "eidnara", "eidnara.json");
         writeFileSync(userJson, "{ not json");
@@ -555,6 +547,10 @@ describe("collectDiagnostics Pi path resolution", () => {
         expect(report.userConfig?.parseError).not.toContain(home);
         expect(report.projectConfig.path).toBe(join(cwd, ".eidnara", "eidnara.jsonc"));
         expect(report.projectConfig.exists).toBe(false);
+        // "unavailable" rather than an empty "ok": the append-only log may still hold
+        // records that no session directory can attribute, so the issue flow must ask first.
+        expect(report.recentSessions).toEqual([]);
+        expect(report.sessionDiscovery).toBe("unavailable");
     });
 
     it("keeps the raw slug as the label when a session file has no header", async () => {
@@ -647,17 +643,6 @@ describe("collectDiagnostics Pi path resolution", () => {
 
         expect(report.settings.hasEidnaraPackage).toBe(true);
         expect(report.conflicts.otherPiExtensions).toEqual(["npm:@eidnara/pi-extras"]);
-    });
-
-    it("reports discovery as unavailable when the sessions directory is missing", async () => {
-        const { cwd } = isolateEnv();
-
-        const report = await collectDiagnostics(cwd);
-
-        // The append-only log can outlive the sessions directory, so its
-        // records stay unattributable and the issue flow must ask first.
-        expect(report.recentSessions).toEqual([]);
-        expect(report.sessionDiscovery).toBe("unavailable");
     });
 
     it("reports discovery as unavailable when every session directory is unreadable", async () => {

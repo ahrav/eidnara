@@ -17,18 +17,14 @@ function recordingReduce(response: unknown = { ok: true, queued: 1 }) {
     return { calls, reduce };
 }
 
-async function callTool(
-    backends: PiRustToolBackends,
-    params: Record<string, unknown>,
-    options: { callId?: string; sessionId?: string } = {},
-) {
+async function callTool(backends: PiRustToolBackends, params: Record<string, unknown>) {
     const tool = createCtxReduceTool({ rustToolBackends: backends });
     const result = await tool.execute(
-        options.callId ?? "call-1",
+        "call-1",
         params as never,
         new AbortController().signal,
         undefined,
-        fakeContext(options.sessionId ?? "ses-reduce", "/repo/project") as never,
+        fakeContext("ses-reduce", "/repo/project") as never,
     );
     const text = (result.content[0] as { text: string }).text;
     return { result, text, isError: result.isError === true };
@@ -71,6 +67,10 @@ describe("Pi ctx_reduce tool", () => {
 
         await execute("call-2");
         expect(calls[2]?.commandId).not.toBe(calls[0]?.commandId);
+
+        await execute("c".repeat(200));
+        expect(calls[3]?.commandId).toMatch(/^pi-[0-9a-f]{64}$/);
+        expect(Buffer.byteLength(calls[3]?.commandId ?? "")).toBeLessThanOrEqual(128);
     });
 
     it("routes on the git root when invoked from a subdirectory, like the session commands", async () => {
@@ -90,13 +90,6 @@ describe("Pi ctx_reduce tool", () => {
         );
 
         expect(calls[0]?.projectRoot).toBe(realpathSync.native(repo));
-    });
-
-    it("hashes a command id longer than 128 bytes", async () => {
-        const { calls, reduce } = recordingReduce();
-        await callTool({ reduce }, { drop: "3" }, { callId: "c".repeat(200) });
-        expect(calls[0]?.commandId).toMatch(/^pi-[0-9a-f]{64}$/);
-        expect(Buffer.byteLength(calls[0]?.commandId ?? "")).toBeLessThanOrEqual(128);
     });
 
     it("accepts reduced compatibility fields alongside a real drop", async () => {

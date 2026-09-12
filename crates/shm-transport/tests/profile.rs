@@ -1,23 +1,11 @@
 use std::sync::Arc;
 
 use shm_transport::backend::ring::{Ring, RingError};
-use shm_transport::descriptor::{
-    DESCRIPTOR_SCHEMA_VERSION, HardwareProfileId, TransportDescriptor,
-};
+use shm_transport::descriptor::{HardwareProfileId, TransportDescriptor};
 use shm_transport::profile::{
     AdmissionController, AdmissionError, HostLimits, ProfileConfig, ResourceCharges, TargetProfile,
     WorkerTopology, host_test_ring_profile, ring_profile,
 };
-#[test]
-fn fixed_ring_identity_survives_profile_validation() {
-    let profile = ring_profile(HardwareProfileId::new("fixed-ring-contract").unwrap()).unwrap();
-
-    assert_eq!(
-        profile.descriptor().schema_version(),
-        DESCRIPTOR_SCHEMA_VERSION
-    );
-    assert!(profile.descriptor().hardware_matches("fixed-ring-contract"));
-}
 
 #[test]
 fn debug_redacts_profile_admission_and_quarantine_record() {

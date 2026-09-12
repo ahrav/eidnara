@@ -7,11 +7,8 @@ describe("token estimator", () => {
         expect(estimateTokens("")).toBe(0);
     });
 
-    it("returns a positive count for ordinary text", () => {
+    it("returns a positive count for ordinary text and for literal special-token strings", () => {
         expect(estimateTokens("bounded search queries")).toBeGreaterThan(0);
-    });
-
-    it("counts literal special-token strings without throwing", () => {
         expect(
             estimateTokens("tool output contains <EOT> and <|endoftext|> literally"),
         ).toBeGreaterThan(0);

@@ -186,11 +186,12 @@ describe("EidnaraConfigSchema", () => {
             expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
         });
 
-        it("parses both transform modes", () => {
+        it("parses ts and rust transform modes and rejects an unknown one", () => {
             expect(EidnaraConfigSchema.parse({ transform_mode: "ts" }).transform_mode).toBe("ts");
             expect(EidnaraConfigSchema.parse({ transform_mode: "rust" }).transform_mode).toBe(
                 "rust",
             );
+            expect(() => EidnaraConfigSchema.parse({ transform_mode: "wasm" })).toThrow();
         });
 
         it("parses a configuration that still carries a removed key without failing", () => {
@@ -204,14 +205,6 @@ describe("EidnaraConfigSchema", () => {
             expect("dreamer" in result).toBe(false);
             expect("embedding" in result).toBe(false);
             expect("auto_update" in result).toBe(false);
-        });
-
-        it("accepts an explicitly configured Pi subagent extension allowlist", () => {
-            expect(
-                EidnaraConfigSchema.parse({
-                    pi: { subagent_extensions: ["provider-package", "./local.ts"] },
-                }).pi,
-            ).toEqual({ subagent_extensions: ["provider-package", "./local.ts"] });
         });
 
         it("fills the default for a per-model percentage map that omits it", () => {
@@ -233,7 +226,7 @@ describe("EidnaraConfigSchema", () => {
         });
 
         it("rejects language values that are not two letters or do not name a language", () => {
-            for (const language of ["english", "e", "t1", "", "zz"]) {
+            for (const language of ["english", "Turkish", "tur", "e", "t1", "<x>", "", "zz"]) {
                 const result = EidnaraConfigSchema.safeParse({ language });
                 expect([language, result.success]).toEqual([language, false]);
                 // The shape check aborts before the ISO lookup so a malformed value reports one issue.
@@ -274,10 +267,6 @@ describe("EidnaraConfigSchema", () => {
     });
 
     describe("validation", () => {
-        it("rejects an unknown transform mode", () => {
-            expect(() => EidnaraConfigSchema.parse({ transform_mode: "wasm" })).toThrow();
-        });
-
         it("rejects malformed prompt-surface model keys and empty override text", () => {
             const malformedKeys = [
                 "",
@@ -333,17 +322,12 @@ describe("EidnaraConfigSchema", () => {
             ).toBe(false);
         });
 
-        it("rejects empty Pi subagent extension entries", () => {
-            expect(() =>
-                EidnaraConfigSchema.parse({ pi: { subagent_extensions: ["  "] } }),
-            ).toThrow();
-        });
-
-        it("rejects whitespace-only trimmed path and model fields but keeps trimming valid ones", () => {
+        it("rejects whitespace-only trimmed path, model, and Pi extension fields but keeps trimming valid ones", () => {
             const blank = [
                 { mural: { model: "   " } },
                 { models: { window_overlay_path: "\t" } },
                 { subc: { connection_file: " " } },
+                { pi: { subagent_extensions: ["  "] } },
             ];
             for (const input of blank) {
                 expect([input, EidnaraConfigSchema.safeParse(input).success]).toEqual([
@@ -363,32 +347,23 @@ describe("EidnaraConfigSchema", () => {
             ).toEqual(["ext"]);
         });
 
-        it("rejects protected_tags greater than 100", () => {
-            expect(() => EidnaraConfigSchema.parse({ protected_tags: 101 })).toThrow();
-        });
-
-        it("rejects protected_tags less than 1", () => {
-            expect(() => EidnaraConfigSchema.parse({ protected_tags: 0 })).toThrow();
-        });
-
-        it("accepts protected_tags boundary values", () => {
+        it("accepts protected_tags at both bounds and rejects numeric fields outside their schema ranges", () => {
             expect(EidnaraConfigSchema.parse({ protected_tags: 1 }).protected_tags).toBe(1);
             expect(EidnaraConfigSchema.parse({ protected_tags: 20 }).protected_tags).toBe(20);
-        });
+            expect(EidnaraConfigSchema.parse({ protected_tags: 100 }).protected_tags).toBe(100);
 
-        it("rejects clear_reasoning_age below minimum", () => {
-            expect(() => EidnaraConfigSchema.parse({ clear_reasoning_age: 9 })).toThrow();
-        });
-
-        it("rejects historian_timeout_ms below minimum", () => {
-            expect(() => EidnaraConfigSchema.parse({ historian_timeout_ms: 59_999 })).toThrow();
-        });
-
-        it("rejects non-code output language values", () => {
-            expect(() => EidnaraConfigSchema.parse({ language: "Turkish" })).toThrow(); // full name
-            expect(() => EidnaraConfigSchema.parse({ language: "tur" })).toThrow(); // 3-letter
-            expect(() => EidnaraConfigSchema.parse({ language: "zz" })).toThrow(); // unknown code
-            expect(() => EidnaraConfigSchema.parse({ language: "<x>" })).toThrow();
+            const outOfRange = [
+                { protected_tags: 0 },
+                { protected_tags: 101 },
+                { clear_reasoning_age: 9 },
+                { historian_timeout_ms: 59_999 },
+            ];
+            for (const input of outOfRange) {
+                expect([input, EidnaraConfigSchema.safeParse(input).success]).toEqual([
+                    input,
+                    false,
+                ]);
+            }
         });
     });
 });

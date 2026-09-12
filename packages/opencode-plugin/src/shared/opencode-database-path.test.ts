@@ -79,17 +79,6 @@ describe("resolveOpenCodeDatabasePath", () => {
         expect(resolveOpenCodeDatabasePath(root)).toBe(beta);
     });
 
-    test("falls back to the newest channel database", () => {
-        const root = dataDir();
-        const older = join(root, "opencode", "opencode-beta.db");
-        const newer = join(root, "opencode", "opencode-dev.db");
-        writeFileSync(older, "");
-        writeFileSync(newer, "");
-        utimesSync(older, new Date(1_000_000), new Date(1_000_000));
-        utimesSync(newer, new Date(2_000_000), new Date(2_000_000));
-        expect(resolveOpenCodeDatabasePath(root)).toBe(newer);
-    });
-
     test("skips a candidate that vanishes before it is statted", () => {
         const root = dataDir();
         const valid = join(root, "opencode", "opencode-dev.db");

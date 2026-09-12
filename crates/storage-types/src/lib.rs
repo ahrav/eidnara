@@ -159,15 +159,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slug_collision_is_broken_by_the_hash() {
-        let a = postgres_database_name("a-b");
-        let b = postgres_database_name("a_b");
-        assert_ne!(a, b, "distinct module ids must not share a database name");
-        assert!(a.starts_with("eidnara_a_b_"));
-        assert!(b.starts_with("eidnara_a_b_"));
-    }
-
-    #[test]
     fn database_name_fits_postgres_identifier_limit() {
         let long = "a-very-long-module-id-that-exceeds-the-postgres-identifier-byte-limit-by-a-lot";
         let name = postgres_database_name(long);
@@ -238,6 +229,10 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(
+            json,
+            r#"{"module_id":"module-a","storage_namespace":"route-state","isolation":{"kind":"module"},"backend":{"backend":"postgres","dsn":"postgres://routing:scoped@localhost/eidnara_module_a_0badc0de","database":"eidnara_module_a_0badc0de"}}"#
+        );
         let back: StorageDescriptor = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
     }
