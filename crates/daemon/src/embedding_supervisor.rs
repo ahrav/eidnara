@@ -155,6 +155,8 @@ pub struct EmbeddingSupervisor {
     dispatch_faults: Mutex<Vec<DispatchFault>>,
     #[cfg(feature = "test-support")]
     dispatch_tap: Mutex<Option<DispatchTap>>,
+    #[cfg(feature = "test-support")]
+    before_pass: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -183,6 +185,8 @@ impl EmbeddingSupervisor {
             dispatch_faults: Mutex::new(Vec::new()),
             #[cfg(feature = "test-support")]
             dispatch_tap: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            before_pass: Mutex::new(None),
         })
     }
 
@@ -190,6 +194,15 @@ impl EmbeddingSupervisor {
     #[cfg(feature = "test-support")]
     pub fn panic_next_slice_for_test(&self) {
         self.panic_next_slice.store(true, Ordering::SeqCst);
+    }
+
+    /// Runs `hook` on the slice thread after the backfill slice is admitted and before its pass begins.
+    #[cfg(feature = "test-support")]
+    pub fn before_pass_for_test(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self
+            .before_pass
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(hook));
     }
 
     /// Arms `fault` on the next backfill slice's dispatcher; several faults may be armed for one slice.
@@ -336,6 +349,22 @@ impl EmbeddingSupervisor {
                     let _ = fault;
                 }
                 let (mut admitted, mut published, mut dispositions) = (0, 0, 0);
+                #[cfg(feature = "test-support")]
+                if let Some(hook) = self
+                    .before_pass
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+                {
+                    hook();
+                }
+                // The slice thread cancels its own budget on a revoked grant, here before the pass's first write and again at every dispatch event, which the dispatcher raises before each job's admission; a gate closed at any point stops the work here, without waiting for the supervisor task to be scheduled.
+                let revoked = || {
+                    if invalidated.is_cancelled() {
+                        budget.cancel();
+                    }
+                };
+                revoked();
                 let end = dispatcher.run_pass(
                     EligibilityBinding {
                         project: &m.project,
@@ -354,10 +383,7 @@ impl EmbeddingSupervisor {
                         {
                             tap(&event);
                         }
-                        // The slice thread cancels its own budget on a revoked grant: the dispatcher reports each job's admission before its native call, so a gate closed between two jobs stops the second here, without waiting for the supervisor task to be scheduled.
-                        if invalidated.is_cancelled() {
-                            budget.cancel();
-                        }
+                        revoked();
                         match event {
                             // The host owns native work from submission, whatever the charge decides.
                             DispatchEvent::Submitted {

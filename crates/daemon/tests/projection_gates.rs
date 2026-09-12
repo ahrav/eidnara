@@ -947,3 +947,63 @@ async fn revocation_between_jobs_is_seen_on_the_slice_thread() {
         .unwrap()
         .unwrap();
 }
+
+/// A grant revoked after admission and before the pass begins is seen on the slice thread before the pass's first write: the lane is not bound and no job is admitted, even when the supervisor's cancellation branch cannot run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn revocation_before_the_pass_is_seen_before_its_first_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", "first text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let projection = Arc::new(projection);
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let gate = open_gate();
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        Maintained {
+            gate: Arc::clone(&gate),
+            kernel: Arc::clone(&corpus.kernel),
+            projection: Arc::clone(&projection),
+            synapse: Arc::clone(&synapse),
+            project: ProjectScope::new(PROJECT).unwrap(),
+            destination: ArtifactDestination::Remote,
+        },
+        slice_bounds(Duration::from_secs(30)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    let bound = Arc::new(AtomicUsize::new(0));
+    let seen_bound = Arc::clone(&bound);
+    supervisor.tap_dispatch_events_for_test(move |event| {
+        if matches!(event, DispatchEvent::Bound(_)) {
+            seen_bound.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let closer = Arc::clone(&gate);
+    supervisor.before_pass_for_test(move || closer.close());
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    tokio::spawn(async { std::thread::sleep(Duration::from_secs(1)) })
+        .await
+        .unwrap();
+
+    match ended(&mut events, SliceKind::Backfill).await {
+        SliceOutcome::Backfill { end, admitted, .. } => {
+            assert_eq!((end, admitted), (Some(Blocked::BudgetExhausted), 0));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        bound.load(Ordering::SeqCst),
+        0,
+        "the pass never bound its lane"
+    );
+    assert_eq!(engine.calls(), 0);
+
+    supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}
