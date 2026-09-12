@@ -97,9 +97,9 @@ subject and is not the witness.
 [rerun]: ../../../../../crates/daemon/src/lib.rs#L8264-L8271
 [prepare-b]: ../../../../../crates/daemon/src/lib.rs#L8336-L8338
 [floor-b]: ../../../../../crates/daemon/src/lib.rs#L8358-L8377
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34923
-[t-hook-install]: ../../../../../crates/daemon/src/lib.rs#L34942-L34945
-[t-hook-second]: ../../../../../crates/daemon/src/lib.rs#L35389-L35392
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34932
+[t-hook-install]: ../../../../../crates/daemon/src/lib.rs#L34951-L34954
+[t-hook-second]: ../../../../../crates/daemon/src/lib.rs#L35398-L35401
 [load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
 [publish]: ../../../../../crates/memory-store/src/lib.rs#L10559
 [publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10762-L10771

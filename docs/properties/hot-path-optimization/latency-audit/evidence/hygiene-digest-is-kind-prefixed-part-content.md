@@ -261,4 +261,4 @@ anchors above identify each branch.
 [memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L417
 [caller]: ../../../../../crates/daemon/src/transform.rs#L4699-L4713
 [declaration]: ../../../../../crates/daemon/src/lib.rs#L2250-L2269
-[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L137-L175
+[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L161-L199

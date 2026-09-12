@@ -141,9 +141,9 @@ covers narrow-read equivalence or `historian_active` on durable state.
 [hook]: ../../../../../crates/daemon/src/lib.rs#L8224-L8232
 [rerun]: ../../../../../crates/daemon/src/lib.rs#L8268-L8271
 [floor-b]: ../../../../../crates/daemon/src/lib.rs#L8358-L8377
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L22606
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34923
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L35691
+[t-cas]: ../../../../../crates/daemon/src/lib.rs#L22615
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L34932
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L35700
 [cas-retry]: ../../../../../crates/daemon/src/transform.rs#L1940-L1979
 [descent-load]: ../../../../../crates/daemon/src/transform.rs#L2910
 [descend]: ../../../../../crates/daemon/src/transform.rs#L2921-L2932

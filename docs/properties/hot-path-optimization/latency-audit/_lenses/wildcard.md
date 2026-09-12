@@ -578,10 +578,10 @@ call site.
 [hp-header]: ../../../../../crates/daemon/benches/hot_path.rs#L1-L10
 [hp-counts]: ../../../../../crates/daemon/benches/hot_path.rs#L29-L35
 [hp-tok]: ../../../../../crates/daemon/benches/hot_path.rs#L50-L66
-[hp-req]: ../../../../../crates/daemon/benches/hot_path.rs#L148-L161
-[hp-store]: ../../../../../crates/daemon/benches/hot_path.rs#L190-L195
-[hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L197-L230
-[hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L267-L269
+[hp-req]: ../../../../../crates/daemon/benches/hot_path.rs#L172-L185
+[hp-store]: ../../../../../crates/daemon/benches/hot_path.rs#L214-L219
+[hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L221-L254
+[hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L291-L293
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [bi-tc]: ../../../../../crates/daemon/src/lib.rs#L185-L193

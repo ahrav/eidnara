@@ -152,7 +152,7 @@ not mean each serialized message is exactly 2 KiB. Projection construction,
 tokenizer initialization, pool construction, and memo priming are outside
 timing. A's token cache already warms during Criterion warmup.
 
-The [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L137-L175)
+The [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
 owns and primes B's pool before the callback. Its
 [wrapper](../../../../../crates/daemon/src/lib.rs#L148-L174) uses the actual
 production memo table with namespace 0 and session ID `benchmark`. Session

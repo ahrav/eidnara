@@ -20919,6 +20919,12 @@ mod tests {
             serde_json::to_vec(&fresh.native_messages).unwrap(),
         );
         assert_eq!(second.messages(), fresh.messages());
+        for (reattached, fresh_message) in second.messages().iter().zip(fresh.messages()) {
+            assert_eq!(
+                reattached.canonical_bytes(),
+                fresh_message.canonical_bytes()
+            );
+        }
         assert!(second_stats.reused_messages >= 5, "{second_stats:?}");
         assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
         let second_sidecar = Arc::clone(
@@ -20957,6 +20963,9 @@ mod tests {
             serde_json::to_vec(shared_replay.messages()).unwrap(),
             serde_json::to_vec(second.messages()).unwrap()
         );
+        for (shared, reattached) in shared_replay.messages().iter().zip(second.messages()) {
+            assert_eq!(shared.canonical_bytes(), reattached.canonical_bytes());
+        }
         let mut edited_output = shared_replay.native_messages.clone().unwrap();
         let original_output = serde_json::to_vec(&shared_replay.native_messages).unwrap();
         Arc::make_mut(&mut edited_output[0])["alias_mutation"] = json!(true);

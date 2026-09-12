@@ -2538,11 +2538,11 @@ evaluation of this area and its disposition are recorded in
 [combined-tags]: ../../../../crates/daemon/src/transform.rs#L3430-L3438
 [mint-tail]: ../../../../crates/daemon/src/transform.rs#L7950-L7960
 [commit-mints]: ../../../../crates/daemon/src/transform.rs#L4958-L4967
-[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27673
-[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27424
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23246
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23519
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28691
+[t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27689
+[synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27440
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23278
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23551
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28707
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L186-L198
 [reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L367-L375
@@ -2559,7 +2559,7 @@ evaluation of this area and its disposition are recorded in
 [hyg-input]: ../../../../crates/daemon/src/tail_hygiene.rs#L898-L901
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
-[hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L137-L175
+[hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
 [sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
@@ -2747,7 +2747,7 @@ evaluation of this area and its disposition are recorded in
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../crates/daemon/benches/hot_path.rs#L1-L10
-[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L241-L274
+[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L265-L298
 [meta-bound]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [he-payload]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
@@ -2783,8 +2783,8 @@ evaluation of this area and its disposition are recorded in
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24069
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
 [native-sharing]: ../../../../crates/daemon/src/lib.rs#L20667
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20974
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21094
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20983
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21103
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L23750
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L23775
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L23910
@@ -2877,7 +2877,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L10981-L10985
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5900-L5909
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35840
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35842
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261

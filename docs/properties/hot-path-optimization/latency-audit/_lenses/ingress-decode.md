@@ -351,9 +351,9 @@ bodies opaque and states only the `invalid_params` cap codes
 [derivedup]: https://docs.rs/serde_derive/1.0.229/src/serde_derive/de/struct_.rs.html#269
 [t-cap]: ../../../../../crates/daemon/src/lib.rs#L18567-L18625
 [t-fp]: ../../../../../crates/daemon/src/lib.rs#L18627-L18691
-[t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L26568-L26623
-[t-shape]: ../../../../../crates/daemon/src/lib.rs#L32419-L32436
-[t-shape2]: ../../../../../crates/daemon/src/lib.rs#L32439-L32479
+[t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L26577-L26632
+[t-shape]: ../../../../../crates/daemon/src/lib.rs#L32428-L32445
+[t-shape2]: ../../../../../crates/daemon/src/lib.rs#L32448-L32488
 [t-envelope]: ../../../../../crates/daemon/src/transform.rs#L16162-L16188
 [t-meta]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../../crates/daemon/tests/direct_host.rs#L48-L128

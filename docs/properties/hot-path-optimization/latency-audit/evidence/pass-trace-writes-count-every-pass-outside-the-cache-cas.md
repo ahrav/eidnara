@@ -129,11 +129,11 @@ channel, the authority route read, and dreamer tasks only.
 [status-read]: ../../../../../crates/daemon/src/lib.rs#L6197-L6247
 [age]: ../../../../../crates/daemon/src/lib.rs#L6238
 [health-read]: ../../../../../crates/daemon/src/lib.rs#L7826-L7874
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23449
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23479
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23495
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23523
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23556
+[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23458
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L23488
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23504
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23532
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L23565
 [stable-call]: ../../../../../crates/daemon/src/transform.rs#L1819-L1843
 [t-sched]: ../../../../../crates/daemon/src/transform.rs#L13524
 [sched-test]: ../../../../../crates/daemon/src/transform.rs#L13567

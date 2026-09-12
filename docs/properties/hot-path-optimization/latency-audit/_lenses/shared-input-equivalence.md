@@ -460,11 +460,11 @@ both sides and neither resolved here:
 [sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16628-L16643
 [token-count]: ../../../../../crates/daemon/src/lib.rs#L2028-L2050
 [t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L20644
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20948
-[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L21678
-[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L21748
-[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L22220
-[t-dup]: ../../../../../crates/daemon/src/lib.rs#L22264
+[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20954
+[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L21687
+[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L21757
+[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L22229
+[t-dup]: ../../../../../crates/daemon/src/lib.rs#L22273
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [with-identity]: ../../../../../crates/daemon/src/transform.rs#L218-L225
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
@@ -550,4 +550,4 @@ both sides and neither resolved here:
 [serde-features]: ../../../../../Cargo.toml#L45
 [t-segments]: ../../../../../crates/daemon/tests/prepared_output.rs#L34-L54
 [t-seldiff]: ../../../../../crates/daemon/tests/selection_differential.rs#L1-L5
-[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L68-L110
+[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L68-L126
