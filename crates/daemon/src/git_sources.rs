@@ -48,6 +48,9 @@ pub enum GitRefusal {
     Open,
     #[error("the repository's object format is not supported")]
     UnsupportedObjectFormat,
+    /// The repository has a shallow boundary, so a traversal from its refs cannot reach every ancestor the object store holds.
+    #[error("the repository is shallow")]
+    Shallow,
     /// Stores the invalid entry's zero-based selection index rather than its unvalidated bytes.
     #[error("selection entry {0} is not a full lowercase object id of the repository's format")]
     MalformedOid(usize),
@@ -89,7 +92,7 @@ pub struct GitSelection {
 }
 
 /// `gix::hash::Kind` is non-exhaustive, so the wildcard refuses a hash kind this build does not read.
-fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
+pub(crate) fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
     match hash {
         gix::hash::Kind::Sha1 => Ok("sha1"),
         _ => Err(GitRefusal::UnsupportedObjectFormat),
@@ -108,11 +111,14 @@ fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
 
 /// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
 ///
-/// The per-object bound is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
-fn open(path: &Path, bounds: GitReadBounds) -> Result<gix::Repository, GitRefusal> {
+/// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
+pub(crate) fn open(
+    path: &Path,
+    max_object_bytes: NonZeroU64,
+) -> Result<gix::Repository, GitRefusal> {
     let options = gix::open::Options::isolated().config_overrides([format!(
         "gitoxide.objects.allocLimit={}",
-        bounds.max_object_bytes
+        max_object_bytes.get()
     )]);
     let mut repo = gix::open_opts(path, options).map_err(|error| {
         if declares_unsupported_object_format(&error) {
@@ -173,7 +179,7 @@ pub fn read_selection(
             max: bounds.max_commits.get(),
         });
     }
-    let repo = open(&binding.path, bounds)?;
+    let repo = open(&binding.path, bounds.max_object_bytes)?;
     let hash = repo.object_hash();
     let format = object_format(hash)?;
     let mut seen = HashSet::new();
