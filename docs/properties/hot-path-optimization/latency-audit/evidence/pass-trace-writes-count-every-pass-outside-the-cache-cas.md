@@ -210,7 +210,10 @@ not offset; the branch's stated cost claim is about the receive write, and the
 retirement is what keeps the pass-owned audit rows bounded. The retained
 owner's rows grow with the bytes they describe: one receipt per root, per
 history entry, and per divergence, on the same order as the completed-trace
-receipts. Lineage descent copies the source scope's live scans, which after
+receipts. The history rings keep 256 entries, so a pass that appends to a full
+ring [evicts the oldest retained receipt][ring-evict] for that field in the
+same transaction; the [ring test][ring-test] shows the receipt count for each
+ring field equal to its ring length across 296 passes. Lineage descent copies the source scope's live scans, which after
 retirement are the latest pass's scans plus the retained scans rather than
 every pass the source ever ran. The [retirement test][retire-test] shows the
 `field_scans` and `scan_owner_copies` counts flat across six passes, flat
@@ -240,16 +243,18 @@ as well.
 
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2629-L2637
 [audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2444
-[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16503-L16545
-[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6912
-[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16469-L16498
-[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2793
-[retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2796
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L8857
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16591-L16633
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L6985
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16557-L16586
+[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2863
+[retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L8930
 [prune]: ../../../../../crates/memory-store/src/lib.rs#L2644-L2686
-[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8809
-[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16326-L16464
-[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16584-L16683
-[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L23908-L23931
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8882
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16414-L16552
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16672-L16771
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9064-L9078
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L16871-L16934
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24065-L24088
 [outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24765-L24809
-[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6921
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6994

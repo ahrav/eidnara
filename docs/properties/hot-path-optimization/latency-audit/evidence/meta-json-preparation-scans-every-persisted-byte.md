@@ -194,17 +194,17 @@ above; `cargo test -p daemon --locked` passed 1012, the two
 `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
-[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3223-L3415
-[changed]: ../../../../../crates/memory-store/src/lib.rs#L3378-L3381
-[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3401-L3402
-[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3407-L3408
-[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3409-L3414
-[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3273-L3286
-[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3311-L3321
-[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3388-L3394
-[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3217
-[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3483-L3485
-[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15811-L15823
-[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15631-L15684
-[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15686-L15723
+[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3296-L3488
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3451-L3454
+[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3474-L3475
+[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3480-L3481
+[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3482-L3487
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3346-L3359
+[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3384-L3394
+[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3461-L3467
+[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3280-L3290
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3556-L3558
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15899-L15911
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15719-L15772
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15774-L15811
 [store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

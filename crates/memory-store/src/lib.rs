@@ -2772,6 +2772,76 @@ fn retire_active_scan_scope(
     retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
 }
 
+/// Keeps the newest `keep` retained receipts for `field_id` in the session's scope and
+/// prunes the scans that lost their last owner. Rowid order is insertion order among the
+/// surviving rows because SQLite assigns each new rowid above every existing one.
+fn evict_retained_ring_receipts(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    field_id: &str,
+    keep: usize,
+) -> rusqlite::Result<()> {
+    let owner_kind = DurableWriteFamily::CacheState.owner_kind();
+    let owner: Option<(String, String)> = tx
+        .prepare_cached(
+            "SELECT owners.owner_scope_id, owners.domain_owner_id
+               FROM scan_domain_owners owners
+               JOIN scan_owner_scopes scopes USING(owner_scope_id)
+              WHERE scopes.scope_kind = 'session' AND scopes.scope_key = ?1
+                AND owners.owner_kind = ?2 AND owners.owner_key = ?3",
+        )?
+        .query_row(
+            params![
+                active_scan_private_key("session", session_id),
+                owner_kind,
+                active_scan_private_key(owner_kind, CACHE_STATE_RETAINED_OWNER_KEY)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((owner_scope_id, domain_owner_id)) = owner else {
+        return Ok(());
+    };
+    let evicted = tx
+        .prepare_cached(
+            "SELECT copies.owner_copy_id, copies.scan_id, scans.scan_batch_id
+               FROM scan_owner_copies copies
+               JOIN field_scans scans USING(scan_id)
+              WHERE copies.domain_owner_id = ?1 AND copies.field_id = ?2
+              ORDER BY copies.rowid DESC LIMIT -1 OFFSET ?3",
+        )?
+        .query_map(
+            params![
+                domain_owner_id,
+                field_id,
+                i64::try_from(keep).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if evicted.is_empty() {
+        return Ok(());
+    }
+    tx.prepare_cached(
+        "DELETE FROM scan_owner_copies
+          WHERE owner_copy_id IN (SELECT value FROM json_each(?1))",
+    )?
+    .execute(params![json_id_array(
+        evicted.iter().map(|(copy_id, _, _)| copy_id.as_str())
+    )?])?;
+    let retired = evicted
+        .into_iter()
+        .map(|(_, scan_id, batch_id)| (scan_id, batch_id))
+        .collect::<Vec<_>>();
+    prune_retired_active_scan_audit(tx, &retired, &owner_scope_id)
+}
+
 /// Markers kept per store; the oldest is dropped past this many.
 #[cfg(any(test, feature = "test-support"))]
 const DUE_SIDE_CHANNEL_MARKER_CAP: usize = 64;
@@ -2794,6 +2864,9 @@ const CACHE_STATE_PASS_OWNER_KEY: &str = "cache_state_pass";
 
 /// Distinct from the `cache_state` key so legacy rows stay separable from live ones.
 const CACHE_STATE_RETAINED_OWNER_KEY: &str = "cache_state_retained";
+
+/// Mirrors the `256` and `255` literals in the `commit_transform` UPSERT.
+const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 
 fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
@@ -8988,6 +9061,21 @@ impl MemoryStore {
                      scheduler_interesting_json
                  ],
             )?;
+            // The UPSERT above dropped the oldest ring entry once the ring was full; the
+            // receipt for that entry goes with it, before this pass's receipt is persisted.
+            for (field_id, appended) in [
+                ("scheduler_observation", scheduler_observation_json.is_some()),
+                ("scheduler_interesting", scheduler_interesting_json.is_some()),
+            ] {
+                if appended {
+                    evict_retained_ring_receipts(
+                        tx,
+                        session_id,
+                        field_id,
+                        PASS_TRACE_HISTORY_RING_LEN - 1,
+                    )?;
+                }
+            }
             if let Some(project_root) = canonical_project_root.as_deref() {
                 // Durable root lineage is committed with the cache CAS, so a restart cannot
                 // authenticate a root that never produced the accepted session state.
@@ -16774,6 +16862,75 @@ mod tests {
         let third = field_copy_counts(&store, "ses", &retained);
         assert_eq!(third["project_root"], 3, "got {third:?}");
         assert_eq!(third["scheduler_observation"], 3, "got {third:?}");
+    }
+
+    /// The `pass_trace` history rings drop their oldest entry past 256, so a receipt for an
+    /// evicted entry describes bytes no longer stored; the retained receipts for each ring
+    /// field stay equal to the ring length once the ring is full.
+    #[test]
+    fn retained_history_receipts_are_evicted_with_their_ring_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let fields = ["scheduler_observation", "scheduler_interesting"];
+        let mut version = None;
+        for pass in 0..PASS_TRACE_HISTORY_RING_LEN + 40 {
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            scheduler_observation: Some(&observation),
+                            scheduler_applied_reductions: true,
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+            let (history_len, interesting_len): (i64, i64) = store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT json_array_length(scheduler_history), \
+                                json_array_length(scheduler_interesting_history) \
+                           FROM pass_trace WHERE session_id = 'ses'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap();
+            let counts = field_copy_counts(&store, "ses", &fields);
+            assert_eq!(
+                (
+                    counts["scheduler_observation"],
+                    counts["scheduler_interesting"]
+                ),
+                (history_len, interesting_len),
+                "pass {pass}: one retained receipt per stored ring entry, got {counts:?}"
+            );
+        }
+        let (scans, copies): (i64, i64) = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM field_scans), \
+                            (SELECT COUNT(*) FROM scan_owner_copies)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        let ring = i64::try_from(PASS_TRACE_HISTORY_RING_LEN).unwrap();
+        assert!(
+            scans <= 2 * ring + 8 && copies <= 2 * ring + 8,
+            "audit rows stay bounded by the two full rings plus the live pass, got {scans} scans and {copies} copies"
+        );
     }
 
     fn base_commit<'a>(

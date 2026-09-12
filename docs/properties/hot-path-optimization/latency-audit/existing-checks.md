@@ -204,7 +204,8 @@ not performance measurements or a full-workspace gate.
 | [`settled_pass_scan_audit_rows_are_retired_while_overlay_scans_remain`][t-retire] | Audit row counts stay flat across six passes, and again across passes after a historian publish bumped the row version; a tag mint's scans are added and kept; the pass owner, the retained owner, and the publish owner each hold exactly their own copies. | unaudited |
 | [`a_compartment_generation_conflict_keeps_the_live_pass_scan_audit_rows`][t-seq-conflict] | A pass that loses the compartment-generation check retires nothing; the live pass's rows and owner copies are unchanged. | unaudited |
 | [`a_clean_pass_trace_receive_records_no_scan_audit_rows`][t-receive] | A clean receive records no audit row; a detected identity on a known session still does. | unaudited |
-| [`retained_pass_fields_keep_their_scan_receipts_across_the_next_pass`][t-retained] | A second pass keeps the first pass's receipts for its root, scheduler observation, interesting observation, and divergence while both roots, both history entries, and the divergence stay stored; the replaced `meta` keeps one live receipt; a third pass adds to the retained receipts. | unaudited |
+| [`retained_pass_fields_keep_their_scan_receipts_across_the_next_pass`][t-retained-pass] | A second pass keeps the first pass's receipts for its root, scheduler observation, interesting observation, and divergence while both roots, both history entries, and the divergence stay stored; the replaced `meta` keeps one live receipt; a third pass adds to the retained receipts. | unaudited |
+| [`retained_history_receipts_are_evicted_with_their_ring_entries`][t-ring] | Across 296 passes the retained receipt count for `scheduler_observation` and `scheduler_interesting` equals each ring's length, so the audit rows stay bounded by the two full rings plus the live pass. | unaudited |
 | [`reassigning_a_scan_range_leaves_later_scans_under_the_default_owner`][t-reassign] | Reassigning a scan range to another owner leaves the write's default owner list alone, so a scan prepared afterwards carries only the default owner. | unaudited |
 | [`a_crash_between_delivery_and_retirement_redelivers_once_under_concurrent_drainers`][t-side-channel-crash] | An injected failure between insert and retirement rolls both back; rows read by a second drainer before the first retired them deliver nothing a second time; the outbox ends empty rather than marked; the C6 marker is recorded per kind. | unaudited |
 | [`pass_trace_counts_every_outcome_and_a_failed_receive_does_not_veto_the_commit`][t-outcome] | Rejected, committed, and stable passes count three receives; a receive whose UPSERT fails inside its own transaction leaves the commit intact. | unaudited |
@@ -534,9 +535,9 @@ not a claim that no related check exists anywhere in the repository.
 [t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36599
 [t-emergency]: ../../../../crates/daemon/src/lib.rs#L35828
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L23361
-[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L16453
-[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L16507
-[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L16576
+[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L16541
+[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L16595
+[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L16664
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-reject]: ../../../../crates/daemon/src/lib.rs#L24194
 [t-success]: ../../../../crates/daemon/src/lib.rs#L24496
@@ -544,20 +545,20 @@ not a claim that no related check exists anywhere in the repository.
 [t-frozen]: ../../../../crates/daemon/src/lib.rs#L24540
 [t-status]: ../../../../crates/daemon/src/lib.rs#L24580
 [t-divergence]: ../../../../crates/daemon/src/lib.rs#L32631
-[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L17467
+[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L17624
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13546
-[t-secret]: ../../../../crates/memory-store/src/lib.rs#L15376
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L18786
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18581
+[t-secret]: ../../../../crates/memory-store/src/lib.rs#L15464
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L18943
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18738
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36463
-[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L18904
-[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L20529
-[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15112
-[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L15029
-[t-container]: ../../../../crates/memory-store/src/lib.rs#L15129
-[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15166
+[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19061
+[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L20686
+[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15200
+[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L15117
+[t-container]: ../../../../crates/memory-store/src/lib.rs#L15217
+[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15254
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15309
+[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15397
 [t-sync]: ../../../../crates/storage/src/lib.rs#L3445
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
@@ -663,8 +664,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
-[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15553-L15770
-[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15777-L15805
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15641-L15858
+[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15865-L15893
 [t-load-count]: ../../../../crates/daemon/src/lib.rs#L24693-L24745
 [t-timing]: ../../../../crates/daemon/src/lib.rs#L24751-L24763
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24769-L24782
@@ -676,13 +677,14 @@ units); their links are to the live tree.
 The three preparation checks were added with the single-pass `meta`
 preparation; their links are to the live tree.
 
-[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15869-L15917
-[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L15922-L15956
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L15957-L16005
+[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16010-L16044
 [t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
-[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16420-L16558
-[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16563-L16592
-[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16597-L16639
-[t-retained]: ../../../../crates/memory-store/src/lib.rs#L16678-L16777
-[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24002-L24025
-[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20126-L20265
+[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16508-L16646
+[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16651-L16680
+[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16685-L16727
+[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16766-L16934
+[t-ring]: ../../../../crates/memory-store/src/lib.rs#L16871-L16934
+[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24159-L24182
+[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20283-L20422
 [t-outcome]: ../../../../crates/daemon/src/lib.rs#L24789-L24833
