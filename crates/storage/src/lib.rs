@@ -1407,7 +1407,7 @@ mod sqlite_backend {
     /// The database file and the journals SQLite keeps beside it. The lease sidecar is not a member: it outlives the database as the floor for the next writer epoch.
     const SQLITE_FAMILY_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 
-    /// Removes the descriptor's database and journals under the store's exclusive lease. A WAL-mode connection left open across the removal would keep committing into the unlinked inodes and, on close, unlink by path whatever replacement had been opened since; holding the exclusive lease excludes every live store, opener, and inspection for the duration.
+    /// Removes the descriptor's database and journals under the store's exclusive lease. A WAL-mode connection left open across the removal would keep committing into the unlinked inodes and, on close, unlink by path whatever replacement had been opened since; holding the exclusive lease excludes every live store, opener, and inspection of this descriptor for the duration.
     ///
     /// The parent directory is synced after the removal. The lease sidecar stays and its epoch is advanced by the acquisition. A missing parent directory removes nothing.
     ///
