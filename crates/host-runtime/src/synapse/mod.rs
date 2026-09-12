@@ -574,6 +574,11 @@ impl SynapseComponent {
         self.inner.jobs.retains(job_id)
     }
 
+    /// The table's status word for `job_id` (`queued`, `running`, `ready`, `failed`), or `None` once the table no longer holds it. `queued` and `running` mean native work this component still owns.
+    pub fn job_status(&self, job_id: &str) -> Option<&'static str> {
+        self.inner.jobs.status(job_id)
+    }
+
     /// Whether a result page served for `job_id` is still alive. The job's own retained result does not count; only a page a caller still holds does.
     pub fn holds_result_page(&self, job_id: &str) -> bool {
         self.inner.jobs.result_in_use(job_id)

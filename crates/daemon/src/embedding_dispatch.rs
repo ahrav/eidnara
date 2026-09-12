@@ -5,6 +5,7 @@
 //! The projection rows are the only queue. The job-table key binds the episode and text to the frozen lane identity, so duplicate admission and polling within that lane name the same work.
 //! `bind_lane` returns rows owned by another host incarnation to pending and leaves their attempts unchanged.
 //! Disposition failures enter `SearchProjection`'s shared quarantine, checked before host submission, terminal obsoletion, and disposition writes.
+//! One `EvalBudget` bounds a pass: its absolute deadline is the kernel guard's deadline and caps every result wait, and its sticky cancellation stops the pass at the next job, the next poll, or the moment before native work would start. A started local transaction runs to its bounded end, and its wait for the projection file is bounded by the store's own busy timeout rather than the budget; a started native call is never preempted, so a cancelled pass leaves its admitted row for a later pass to poll.
 
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
@@ -13,6 +14,7 @@ use host_runtime::synapse::{
     DenseUnavailable, InferenceFailureKind, LaneInfo, LaneUnavailableState, PollOutcome,
     SubmitOutcome, SynapseComponent, SynapseStatus, failure_is_permanent,
 };
+use kernel::applicability::EvalBudget;
 use kernel::{
     CurrentInputDescriptor, CurrentInputExpectation, EligibilityBinding, EligibilityCandidate,
     EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, StaleInput,
@@ -41,10 +43,8 @@ pub struct DispatchBounds {
     pub grant: EpisodeGrant,
     /// Added to the pass's frozen logical `now`; it is not a wall-clock duration.
     pub retry_after: i64,
-    /// Monotonic wait bound independent of the logical episode clock.
+    /// How long one job's result is awaited before the pass moves on to the next job; monotonic, independent of the logical episode clock, and only ever shortened by the budget's deadline.
     pub result_wait: Duration,
-    /// Monotonic guard-acquisition bound independent of the logical episode clock.
-    pub guard_deadline: Duration,
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -53,14 +53,32 @@ const MAX_ELIGIBILITY_PAGES_PER_PASS: usize = 2;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DispatchEvent {
     Bound(BindingOutcome),
+    /// A job entered a stage; `deadline` is the budget's own, so an adapter that renewed it would show a different instant here.
+    Stage {
+        job_id: String,
+        stage: Stage,
+        deadline: Instant,
+    },
+    /// The host accepted the job; native work may run from this point, whatever the charge that follows decides.
+    Submitted {
+        job_id: String,
+        host_job_id: String,
+    },
+    /// The charge did not bind the row to this host job: it rolled back, or the row had changed underneath it. The host still runs the job, but no row will ask for its result.
+    Orphaned {
+        job_id: String,
+        host_job_id: String,
+    },
     /// The host holds the job and the row's episode carries `attempts` charged so far; re-admission after a job-table eviction reports the same count.
     Admitted {
         job_id: String,
         host_job_id: String,
         attempts: u32,
     },
+    /// The vector is durable and the row is settled; `host_job_id` names the host job whose result it was, so a census can retire exactly that job.
     Published {
         job_id: String,
+        host_job_id: String,
         outcome: Publication,
     },
     Retried {
@@ -73,8 +91,20 @@ pub enum DispatchEvent {
     },
 }
 
+/// The stages of one job's path under a pass, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Admit,
+    Poll,
+    Publish,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blocked {
+    /// The pass's budget was cancelled or its deadline passed; unfinished rows keep their state.
+    BudgetExhausted,
+    /// The budget carries no deadline, so the kernel guard has no bound; a pass needs an absolute deadline.
+    UnboundedBudget,
     LaneUnavailable(LaneUnavailableState),
     ProjectionIdentity,
     /// The projection was built for a different product than the lane serves.
@@ -112,10 +142,14 @@ pub enum DispatchError {
 pub enum DispatchFault {
     /// The lane binding's store call fails before it runs.
     RefuseBinding,
+    /// The eligible-row read fails before it runs, after the lane is bound.
+    RefuseEligibilityRead,
     /// The admission charge's statement fails, so its transaction rolls back and the row stays pending.
     RefuseChargeStatement,
     /// The admission charge commits, then its reply arrives as a store failure.
     LoseChargeReply,
+    /// The ledger read that reconciles a lost charge reply fails, so the charge's outcome stays unknown.
+    RefuseLedgerRead,
     /// Injects a store failure after a successful obsoletion write.
     LoseObsoletionReply,
 }
@@ -130,6 +164,8 @@ enum LostChargeResolution {
 enum SubmitFailure {
     Unavailable(DenseUnavailable),
     Quarantined(Quarantine),
+    /// The budget ended between preflight and host admission, before any native work began.
+    BudgetExhausted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +237,7 @@ pub struct EmbeddingDispatcher<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
     synapse: &'a SynapseComponent,
-    fault: Option<DispatchFault>,
+    faults: Vec<DispatchFault>,
     scan_position: Option<ScanPosition>,
 }
 
@@ -215,15 +251,15 @@ impl<'a> EmbeddingDispatcher<'a> {
             kernel,
             projection,
             synapse,
-            fault: None,
+            faults: Vec::new(),
             scan_position: None,
         }
     }
 
-    /// Arms `fault` for the next store call it names; the fault is consumed when it fires.
+    /// Arms `fault` for the next store call it names; each armed fault is consumed when it fires, so several can be armed for one pass.
     #[cfg(feature = "test-support")]
     pub fn inject_fault_for_test(&mut self, fault: DispatchFault) {
-        self.fault = Some(fault);
+        self.faults.push(fault);
     }
 
     #[cfg(feature = "test-support")]
@@ -235,11 +271,12 @@ impl<'a> EmbeddingDispatcher<'a> {
     }
 
     fn take_fault(&mut self, fault: DispatchFault) -> bool {
-        if self.fault == Some(fault) {
-            self.fault = None;
-            true
-        } else {
-            false
+        match self.faults.iter().position(|armed| *armed == fault) {
+            Some(index) => {
+                self.faults.remove(index);
+                true
+            }
+            None => false,
         }
     }
 
@@ -256,16 +293,18 @@ impl<'a> EmbeddingDispatcher<'a> {
         &mut self,
         eligibility: EligibilityBinding<'_>,
         bounds: &DispatchBounds,
+        budget: &EvalBudget,
         now: i64,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
-        tokio::task::block_in_place(|| self.pass(eligibility, bounds, now, observer))
+        tokio::task::block_in_place(|| self.pass(eligibility, bounds, budget, now, observer))
     }
 
     fn pass(
         &mut self,
         eligibility: EligibilityBinding<'_>,
         bounds: &DispatchBounds,
+        budget: &EvalBudget,
         now: i64,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
@@ -283,6 +322,12 @@ impl<'a> EmbeddingDispatcher<'a> {
                 cursor: None,
                 revisit_at: None,
             });
+        }
+        let Some(deadline) = budget.deadline() else {
+            return Ok(Some(Blocked::UnboundedBudget));
+        };
+        if budget.is_exhausted() {
+            return Ok(Some(Blocked::BudgetExhausted));
         }
         let lane = match serving(self.synapse.status()) {
             Ok(lane) => lane,
@@ -302,6 +347,10 @@ impl<'a> EmbeddingDispatcher<'a> {
             BindingOutcome::Unbuilt => return Ok(Some(Blocked::ProjectionIdentity)),
             outcome => observer(DispatchEvent::Bound(outcome)),
         }
+        // The binding's busy wait may have outlived the budget; a read under an exhausted budget selects rows the first `drive` would refuse anyway.
+        if budget.is_exhausted() {
+            return Ok(Some(Blocked::BudgetExhausted));
+        }
         let page_limit = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES)
             .expect("the kernel eligibility limit is nonzero");
         let position = self
@@ -316,9 +365,14 @@ impl<'a> EmbeddingDispatcher<'a> {
         let mut selected = Vec::with_capacity(bounds.max_jobs.get());
         let mut terminal = Vec::with_capacity(bounds.max_jobs.get());
         for page_index in 0..MAX_ELIGIBILITY_PAGES_PER_PASS {
-            let page = self
-                .projection
-                .read(|conn| open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now));
+            let page = if self.take_fault(DispatchFault::RefuseEligibilityRead) {
+                Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                    "database is locked".to_owned(),
+                )))
+            } else {
+                self.projection
+                    .read(|conn| open_job_candidates(conn, scan_cursor.as_ref(), page_limit, now))
+            };
             let page = self.before_dispositions(page)?;
             if page.is_empty() {
                 let restart_at_beginning = page_index == 0 && scan_cursor.is_some();
@@ -426,10 +480,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 break;
             }
         }
-        let terminal_deadline = Instant::now() + bounds.guard_deadline;
-        if let Some(blocked) =
-            self.obsolete_candidates(&terminal, terminal_deadline, now, observer)?
-        {
+        if let Some(blocked) = self.obsolete_candidates(&terminal, deadline, now, observer)? {
             return Ok(Some(blocked));
         }
         let pass = Pass {
@@ -437,6 +488,8 @@ impl<'a> EmbeddingDispatcher<'a> {
             binding: &binding,
             eligibility,
             bounds,
+            budget,
+            deadline,
             now,
         };
         for job_id in &selected {
@@ -479,13 +532,16 @@ impl<'a> EmbeddingDispatcher<'a> {
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
+        if pass.budget.is_exhausted() {
+            return Ok(Some(Blocked::BudgetExhausted));
+        }
         self.check_quarantine()?;
         // A generation the lane does not serve is a model mismatch: the work is obsolete, not failed.
         if !pass.binding.serves(&job.generation) {
             return self.obsolete_identity(
                 job,
                 "generation_mismatch",
-                Instant::now() + pass.bounds.guard_deadline,
+                pass.deadline,
                 pass.now,
                 observer,
             );
@@ -508,6 +564,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                 }
             }
         };
+        pass.stage(job, Stage::Poll, observer);
         let mut readmitted = false;
         let mut started = Instant::now();
         loop {
@@ -515,10 +572,14 @@ impl<'a> EmbeddingDispatcher<'a> {
                 .synapse
                 .poll_admitted(pass.lane, &host_job_id, &item_id, &job.text)
             {
+                // The budget ended while the host still holds the job; the row stays admitted for a later pass to poll.
+                PollOutcome::Pending { .. } if pass.budget.is_exhausted() => {
+                    return Ok(Some(Blocked::BudgetExhausted));
+                }
                 PollOutcome::Pending { .. } if started.elapsed() < pass.bounds.result_wait => {
                     std::thread::sleep(POLL_INTERVAL);
                 }
-                // The host still holds the job; the row stays admitted for the next pass to poll.
+                // This job's wait is over; the pass moves on and a later pass polls the held job.
                 PollOutcome::Pending { .. } => return Ok(None),
                 PollOutcome::Page(page) => {
                     let Some((_, _, vector)) =
@@ -536,6 +597,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                             return self.completion_preflight_refusal(job, refusal, pass, observer);
                         }
                     };
+                    pass.stage(job, Stage::Publish, observer);
                     // `page` stays alive through publication so its lease keeps the result bytes counted while the vector is in use.
                     let input = match self.current_input(job, pass)? {
                         Ok(input) => input,
@@ -548,7 +610,7 @@ impl<'a> EmbeddingDispatcher<'a> {
                         input_bytes: job.text.len() as u64,
                         input_tokens: admitted.tokens().get(),
                     };
-                    return self.publish(job, &publication, pass, observer);
+                    return self.publish(job, &host_job_id, &publication, pass, observer);
                 }
                 PollOutcome::Failed { code, .. } if !failure_is_permanent(&code) => {
                     return self.retry(job, "execution_failure", pass, observer);
@@ -568,6 +630,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                             host_job_id = rebound;
                             readmitted = true;
                             started = Instant::now();
+                            // The replacement job is polled under its own poll stage, so the trace keeps the admit-poll-publish order per host job.
+                            pass.stage(job, Stage::Poll, observer);
                         }
                         Err(blocked) => return Ok(blocked),
                     }
@@ -595,6 +659,10 @@ impl<'a> EmbeddingDispatcher<'a> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(SubmitFailure::Quarantined(quarantine));
         }
+        // Native work must not start under a budget that already ended; this is the last check before the host owns the call.
+        if pass.budget.is_exhausted() {
+            return Err(SubmitFailure::BudgetExhausted);
+        }
         // The host item is the episode, so a new episode never reuses a job the table retains from a stopped one.
         self.synapse
             .submit_admitted(&admitted, item_id)
@@ -608,6 +676,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Result<(String, String), Option<Blocked>>, DispatchError> {
         let item_id = job.item_id();
+        pass.stage(job, Stage::Admit, observer);
         let host_job_id = match self.submit(job, &item_id, pass) {
             Ok(SubmitOutcome::Queued { job_id }) => job_id,
             Ok(SubmitOutcome::Full) => {
@@ -625,7 +694,15 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(SubmitFailure::Quarantined(quarantine)) => {
                 return Err(DispatchError::Quarantined(quarantine));
             }
+            Err(SubmitFailure::BudgetExhausted) => {
+                return Ok(Err(Some(Blocked::BudgetExhausted)));
+            }
         };
+        // The host owns native work from this point, whatever the charge that follows decides.
+        observer(DispatchEvent::Submitted {
+            job_id: job.job_id.clone(),
+            host_job_id: host_job_id.clone(),
+        });
         let charge = |conn: &storage::GuardedConn<'_>| {
             charge_admission(
                 conn,
@@ -659,22 +736,38 @@ impl<'a> EmbeddingDispatcher<'a> {
             {
                 return Err(self.enter_quarantine(QuarantineKind::Integrity, &error));
             }
-            Err(lost) => match self.projection.read(|conn| job_ledger(conn, &job.job_id)) {
-                Ok(Some(ledger)) => {
-                    match lost_charge_resolution(job.attempts, &host_job_id, &item_id, &ledger) {
-                        Some(LostChargeResolution::AlreadyCharged) => Admission::AlreadyCharged,
-                        Some(LostChargeResolution::Retry) => self.write(charge)?,
-                        Some(LostChargeResolution::Defer) => return Ok(Err(None)),
-                        None => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
+            // The charge's statement failed or its reply was lost: the row, not the error, says whether it committed. A pass that cannot learn the outcome stops dispatch without a word about the host job, whose claim stays open.
+            Err(lost) => {
+                let ledger = if self.take_fault(DispatchFault::RefuseLedgerRead) {
+                    Err(SearchProjectionError::Store(storage::StoreError::Backend(
+                        "database is locked".to_owned(),
+                    )))
+                } else {
+                    self.projection.read(|conn| job_ledger(conn, &job.job_id))
+                };
+                match ledger {
+                    Ok(Some(ledger)) => {
+                        match lost_charge_resolution(job.attempts, &host_job_id, &item_id, &ledger)
+                        {
+                            Some(LostChargeResolution::AlreadyCharged) => Admission::AlreadyCharged,
+                            Some(LostChargeResolution::Retry) => self.write(charge)?,
+                            Some(LostChargeResolution::Defer) => return Ok(Err(None)),
+                            None => {
+                                return Err(self.enter_quarantine(QuarantineKind::Storage, &lost));
+                            }
+                        }
                     }
+                    _ => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
                 }
-                _ => return Err(self.enter_quarantine(QuarantineKind::Storage, &lost)),
-            },
+            }
         };
         let attempts = match charged {
             Admission::Charged { attempts } => attempts,
             Admission::AlreadyCharged => job.attempts + 1,
-            Admission::EpisodeChanged => return Ok(Err(None)),
+            Admission::EpisodeChanged => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(None));
+            }
             Admission::Stopped(reason) => {
                 observer(DispatchEvent::Stopped {
                     job_id: job.job_id.clone(),
@@ -682,7 +775,10 @@ impl<'a> EmbeddingDispatcher<'a> {
                 });
                 return Ok(Err(None));
             }
-            Admission::NotPending => return Ok(Err(None)),
+            Admission::NotPending => {
+                self.orphan(job, &host_job_id, observer);
+                return Ok(Err(None));
+            }
         };
         observer(DispatchEvent::Admitted {
             job_id: job.job_id.clone(),
@@ -690,6 +786,19 @@ impl<'a> EmbeddingDispatcher<'a> {
             attempts,
         });
         Ok(Ok((host_job_id, item_id)))
+    }
+
+    /// Reports a host job the row will never ask for: its charge rolled back or the row changed underneath it.
+    fn orphan(
+        &self,
+        job: &DispatchJob,
+        host_job_id: &str,
+        observer: &mut dyn FnMut(DispatchEvent),
+    ) {
+        observer(DispatchEvent::Orphaned {
+            job_id: job.job_id.clone(),
+            host_job_id: host_job_id.to_owned(),
+        });
     }
 
     fn readmit(
@@ -700,6 +809,7 @@ impl<'a> EmbeddingDispatcher<'a> {
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Result<String, Option<Blocked>>, DispatchError> {
+        pass.stage(job, Stage::Admit, observer);
         let host_job_id = match self.submit(job, item_id, pass) {
             Ok(SubmitOutcome::Queued { job_id }) => job_id,
             Ok(SubmitOutcome::Full)
@@ -720,10 +830,18 @@ impl<'a> EmbeddingDispatcher<'a> {
             Err(SubmitFailure::Quarantined(quarantine)) => {
                 return Err(DispatchError::Quarantined(quarantine));
             }
+            Err(SubmitFailure::BudgetExhausted) => {
+                return Ok(Err(Some(Blocked::BudgetExhausted)));
+            }
         };
+        observer(DispatchEvent::Submitted {
+            job_id: job.job_id.clone(),
+            host_job_id: host_job_id.clone(),
+        });
         let rebound =
             self.write(|conn| rebind_host_job(conn, &job.job_id, evicted, &host_job_id, pass.now))?;
         if !rebound {
+            self.orphan(job, &host_job_id, observer);
             return Ok(Err(None));
         }
         observer(DispatchEvent::Admitted {
@@ -746,10 +864,9 @@ impl<'a> EmbeddingDispatcher<'a> {
             payload_id: job.payload_id.clone(),
             artifact_digest: job.source_artifact_digest.clone(),
         };
-        let deadline = Instant::now() + pass.bounds.guard_deadline;
         match self
             .kernel
-            .guard_current_input(&expectation, pass.eligibility, deadline)
+            .guard_current_input(&expectation, pass.eligibility, pass.deadline)
         {
             Ok(Ok(guard)) => Ok(Ok(guard.descriptor().clone())),
             // `WrongScope` is a verdict about the binding, not the input, so the row is left open under the wrong binding rather than obsoleted.
@@ -771,12 +888,13 @@ impl<'a> EmbeddingDispatcher<'a> {
     fn publish(
         &mut self,
         job: &DispatchJob,
+        host_job_id: &str,
         publication: &VectorPublication<'_>,
         pass: &Pass<'_>,
         observer: &mut dyn FnMut(DispatchEvent),
     ) -> Result<Option<Blocked>, DispatchError> {
         let mut publisher = EmbeddingPublisher::new(self.kernel, self.projection);
-        let deadline = Instant::now() + pass.bounds.guard_deadline;
+        let deadline = pass.deadline;
         match publisher.publish(
             publication,
             pass.eligibility,
@@ -787,6 +905,7 @@ impl<'a> EmbeddingDispatcher<'a> {
             Ok(outcome) => {
                 observer(DispatchEvent::Published {
                     job_id: job.job_id.clone(),
+                    host_job_id: host_job_id.to_owned(),
                     outcome,
                 });
                 Ok(None)
@@ -1051,7 +1170,19 @@ struct Pass<'a> {
     binding: &'a LaneBinding,
     eligibility: EligibilityBinding<'a>,
     bounds: &'a DispatchBounds,
+    budget: &'a EvalBudget,
+    deadline: Instant,
     now: i64,
+}
+
+impl Pass<'_> {
+    fn stage(&self, job: &DispatchJob, stage: Stage, observer: &mut dyn FnMut(DispatchEvent)) {
+        observer(DispatchEvent::Stage {
+            job_id: job.job_id.clone(),
+            stage,
+            deadline: self.deadline,
+        });
+    }
 }
 
 fn serving(status: SynapseStatus) -> Result<LaneInfo, LaneUnavailableState> {

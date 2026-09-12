@@ -1,11 +1,12 @@
 //! Bounded identity sweeps against a real kernel, a real projection, and an in-process Synapse host.
 //! An independent reference and holder ledger predicts every survivor; a genuinely unreferenced identity is gone after reopen; live work, shared payloads, and host-held jobs survive selection races and rechecks; a lost reclamation reply is reconciled without a second effect.
 
+mod support;
+
 use std::collections::BTreeSet;
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use daemon::embedding_dispatch::{Blocked, DispatchBounds, DispatchEvent, EmbeddingDispatcher};
@@ -15,456 +16,20 @@ use daemon::embedding_publication::{
 use daemon::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use daemon::search_projection::SearchProjection;
 use host_runtime::synapse::PollOutcome;
-use host_runtime::synapse::inference::InferenceError;
-use host_runtime::synapse::{
-    EmbedTokens, EmbeddingEngine, LaneInfo, SynapseComponent, SynapseLimits,
-};
-use kernel::source_identity::Occurrence;
-use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    CurrentInputDescriptor, Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow,
-    KernelStore, ProjectScope, ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec,
-    Sensitivity, SourceClass, SourceDescriptorRequest, SourceHoldAdmission, SourceHoldBinding,
-    SourceHoldBounds, SourcePageBounds, SourceRow, TaintClass,
-};
-use retrieval::batch::{
-    BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
-    row_identities,
-};
-use retrieval::dispatch::EpisodeGrant;
+use host_runtime::synapse::{SynapseComponent, SynapseLimits};
+use kernel::applicability::EvalBudget;
+use kernel::{CurrentInputDescriptor, ProjectScope};
+use retrieval::batch::{VectorGeneration, register_generation};
 use retrieval::identity_sweep::{Candidate, candidates, reclaim};
 use retrieval::vectors::encode;
-use retrieval::{
-    PersistBounds, ProjectionIdentity, Tombstone, TombstoneReason, install_identity,
-    tombstone_occurrence,
-};
 use rusqlite::{Connection, OpenFlags};
-use sha2::{Digest, Sha256};
+use support::embedding_fixtures::{
+    Corpus, DAY_MS, FINGERPRINT, GENERATION, GateGuard, NOW, PROJECT, TestEngine, bounds, budget,
+    component, eligibility, generation, inspect, lane, occurrence_of, search_path, tombstone,
+};
 
-const CONSUMER: &str = "search";
-const POLICY: &str = "source-policy.v1";
-const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const SCOPE: &str = "project:a";
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-const MODEL: &str = "tiny-test-model";
-const FINGERPRINT: &str = "a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234";
-const DIMS: usize = 8;
-const GENERATION: &str = "gen-1";
 /// The retired generation the sweep may reclaim from.
 const OLD_GENERATION: &str = "gen-0";
-const NOW: i64 = 1_000;
-
-type Gate = Arc<(Mutex<bool>, Condvar)>;
-
-struct GateGuard(Gate);
-
-/// A deterministic engine: one whitespace word is one token, the vector is derived from the text, and inference can be held at a gate; `completed` counts inferences that returned.
-struct TestEngine {
-    calls: AtomicUsize,
-    completed: AtomicUsize,
-    gate: Mutex<Option<Gate>>,
-}
-
-impl TestEngine {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            calls: AtomicUsize::new(0),
-            completed: AtomicUsize::new(0),
-            gate: Mutex::new(None),
-        })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    fn completed(&self) -> usize {
-        self.completed.load(Ordering::SeqCst)
-    }
-
-    fn block_calls(&self) -> GateGuard {
-        let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
-        *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
-        GateGuard(gate)
-    }
-
-    fn vector_for(text: &str) -> Vec<f32> {
-        let digest = Sha256::digest(text.as_bytes());
-        let mut vector: Vec<f32> = digest
-            .iter()
-            .take(DIMS)
-            .map(|b| f32::from(*b) + 1.0)
-            .collect();
-        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-        for v in &mut vector {
-            *v /= norm;
-        }
-        vector
-    }
-}
-
-impl GateGuard {
-    fn release(&self) {
-        *self.0.0.lock().unwrap() = true;
-        self.0.1.notify_all();
-    }
-}
-
-impl Drop for GateGuard {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-impl EmbeddingEngine for TestEngine {
-    fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
-        Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
-    }
-
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(gate) = self.gate.lock().unwrap().clone() {
-            let mut released = gate.0.lock().unwrap();
-            while !*released {
-                released = gate.1.wait(released).unwrap();
-            }
-        }
-        self.completed.fetch_add(1, Ordering::SeqCst);
-        Ok(texts.iter().map(|text| Self::vector_for(text)).collect())
-    }
-}
-
-fn lane(fingerprint: &str) -> LaneInfo {
-    LaneInfo {
-        model: MODEL.to_owned(),
-        fingerprint: fingerprint.to_owned(),
-        table_epoch: 1,
-        dims: DIMS,
-        execution_provider: "cpu",
-        max_tokens: 512,
-        max_text_bytes: 1024 * 1024,
-        provenance: serde_json::json!({"source": "deterministic test engine"}),
-        recommended_rows: 16,
-        recommended_token_budget: 8192,
-    }
-}
-
-fn component(engine: &Arc<TestEngine>, limits: SynapseLimits) -> SynapseComponent {
-    SynapseComponent::ready_with_engine(
-        lane(FINGERPRINT),
-        Arc::clone(engine) as Arc<dyn EmbeddingEngine>,
-        limits,
-    )
-    .unwrap()
-}
-
-fn generation() -> VectorGeneration {
-    VectorGeneration {
-        generation_id: GENERATION.to_string(),
-        embedding_model: MODEL.to_string(),
-        tokenizer_fingerprint: FINGERPRINT.to_string(),
-        vector_dimension: DIMS as u32,
-        generation_epoch: 1,
-    }
-}
-
-fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
-    ProjectionIdentity {
-        schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: kernel_incarnation_id.to_string(),
-        projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v2".to_string(),
-        limit_manifest_protocol_version: "limits.v1".to_string(),
-        embedding_model: MODEL.to_string(),
-        tokenizer_fingerprint: FINGERPRINT.to_string(),
-        vector_dimension: DIMS as u32,
-        generation_epoch: 1,
-    }
-}
-
-fn batch_bounds() -> BatchBounds {
-    BatchBounds {
-        persist: PersistBounds {
-            max_records: NonZeroUsize::new(64).unwrap(),
-            max_payload_bytes: NonZeroUsize::new(1 << 16).unwrap(),
-            max_tuple_bytes: NonZeroUsize::new(2048).unwrap(),
-        },
-        max_source_bytes: NonZeroUsize::new(1 << 16).unwrap(),
-        max_local_mutations: NonZeroUsize::new(64).unwrap(),
-        max_pending: NonZeroUsize::new(64).unwrap(),
-    }
-}
-
-fn grant(allowance: u32, deadline: i64) -> EpisodeGrant {
-    EpisodeGrant {
-        allowance: NonZeroU32::new(allowance).unwrap(),
-        deadline,
-    }
-}
-
-fn bounds(result_wait: Duration) -> DispatchBounds {
-    DispatchBounds {
-        max_jobs: NonZeroUsize::new(16).unwrap(),
-        grant: grant(3, NOW + DAY_MS),
-        retry_after: 10,
-        result_wait,
-        guard_deadline: Duration::from_secs(10),
-    }
-}
-
-fn eligibility(project: &ProjectScope) -> EligibilityBinding<'_> {
-    EligibilityBinding {
-        project,
-        destination: ArtifactDestination::Remote,
-    }
-}
-
-fn intent(key: &str) -> CommitIntent {
-    CommitIntent {
-        producer: "daemon-embedding-dispatch-test".to_string(),
-        operation_key: key.to_string(),
-        request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
-        actor: "test".to_string(),
-        cause: "proof".to_string(),
-    }
-}
-
-/// A kernel with one scoped, admitted project and the descriptors the test publishes into it.
-struct Corpus {
-    kernel: Arc<KernelStore>,
-}
-
-impl Corpus {
-    fn open(root: &Path) -> Self {
-        Self {
-            kernel: Arc::new(KernelStore::open(root.join("kernel")).unwrap()),
-        }
-    }
-
-    fn seed(&self) {
-        self.kernel
-            .commit(intent("seed"), |envelope| {
-                envelope.insert_domain(DomainSpec {
-                    domain_id: "domain".to_string(),
-                    object_id: "domain-object".to_string(),
-                    name: "Name".to_string(),
-                    source_kind: "fixture".to_string(),
-                    source_id: "domain".to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                })?;
-                envelope.insert_scope(ScopeSpec {
-                    scope_id: SCOPE.to_string(),
-                    object_id: SCOPE.to_string(),
-                    source_id: SCOPE.to_string(),
-                    domain_id: "domain".to_string(),
-                    source_kind: "kernel_route".to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                    terms: vec![ScopeTermSpec {
-                        dimension: Dimension::Project.as_str().to_string(),
-                        operator: "exact".to_string(),
-                        exact_value: Some(PROJECT.to_string()),
-                        ..ScopeTermSpec::default()
-                    }],
-                })?;
-                envelope.register_outbox_consumer(CONSUMER, 1)?;
-                Ok(String::new())
-            })
-            .unwrap();
-    }
-
-    fn tip(&self) -> i64 {
-        self.kernel.tip().unwrap()
-    }
-
-    /// Publishes one scoped, admitted message descriptor and returns its object id.
-    fn publish(&self, key: &str, text: &str) -> String {
-        let handle = self
-            .kernel
-            .ingest_exact_artifact(ArtifactIngestRequest {
-                intent: intent(&format!("artifact-{key}")),
-                payload: text.as_bytes().to_vec(),
-                evidence_id: format!("evidence-{key}"),
-                object_id: format!("evidence-object-{key}"),
-                object_kind: "evidence".to_string(),
-                domain_id: "domain".to_string(),
-                source_kind: "tool_output".to_string(),
-                source_id: format!("native/{key}"),
-                source_revision: 1,
-                media_type: "text/plain".to_string(),
-                retention_class: "canonical".to_string(),
-                retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: Some(RepositoryProvenance {
-                    repository_id: "repo".to_string(),
-                    revision: "abc123".to_string(),
-                }),
-            })
-            .unwrap();
-        let mut object = String::new();
-        self.kernel
-            .commit(intent(&format!("publish-{key}")), |envelope| {
-                let identity = [
-                    ("project_id", "proj-a"),
-                    ("harness", "opencode"),
-                    ("session_id", "sess-01"),
-                    ("message_id", key),
-                    ("block_index", "0"),
-                ];
-                let outcome = envelope
-                    .publish_source_descriptor(&SourceDescriptorRequest {
-                        source_policy: kernel::SourceDescriptorPolicy::Native,
-                        occurrence: Occurrence {
-                            class: "messages",
-                            identity: &identity,
-                            revision: "1",
-                            representation: "text",
-                            span: None,
-                        },
-                        domain_id: "domain",
-                        scope_id: Some(SCOPE),
-                        evidence_id: &handle.evidence_id,
-                        artifact_digest: &handle.digest,
-                        buffer: text,
-                        sensitivity: Sensitivity::Normal,
-                        observed_at: 1,
-                    })
-                    .unwrap();
-                envelope.record_admission(AdmissionRequest {
-                    candidate_id: None,
-                    subject_object_id: Some(outcome.object_id.clone()),
-                    source_class: Some(SourceClass::ExplicitUser),
-                    taint_class: Some(TaintClass::UserExplicit),
-                    event: AdmissionEvent {
-                        kind: EventKind::Other,
-                        trigger_object_id: None,
-                        approval_object_id: None,
-                        evidence_id: None,
-                        reason: "test".to_string(),
-                    },
-                })?;
-                object = outcome.object_id;
-                Ok(String::new())
-            })
-            .unwrap();
-        object
-    }
-
-    fn binding(&self) -> SourceHoldBinding {
-        SourceHoldBinding {
-            consumer_id: CONSUMER.to_string(),
-            lease_epoch: self.kernel.lease_epoch(),
-            source_policy_version: POLICY.to_string(),
-        }
-    }
-
-    /// Exports every descriptor live at a fresh S.
-    fn export(&self) -> Vec<SourceRow> {
-        let binding = self.binding();
-        let hold = self
-            .kernel
-            .capture_source_hold(
-                &binding,
-                SourceHoldBounds {
-                    max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
-                    admission: SourceHoldAdmission {
-                        max_references: NonZeroUsize::new(64).unwrap(),
-                        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                    },
-                    expiry_ms: NonZeroU64::new((20 * DAY_MS) as u64).unwrap(),
-                },
-            )
-            .unwrap();
-        let mut rows = Vec::new();
-        let mut cursor = None;
-        loop {
-            let page = self
-                .kernel
-                .export_source_page(
-                    &binding,
-                    &hold.hold_id,
-                    hold.captured_at,
-                    ExportWindow::Snapshot,
-                    cursor.as_ref(),
-                    SourcePageBounds {
-                        max_rows: NonZeroUsize::new(64).unwrap(),
-                        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                        max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                        max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
-                    },
-                )
-                .unwrap();
-            rows.extend(page.rows);
-            match page.next {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        self.kernel
-            .release_source_hold(&binding, &hold.hold_id, hold.captured_at)
-            .unwrap();
-        rows
-    }
-
-    /// Builds the projection from the current export and queues one pending job per message.
-    fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
-        let rows = self.export();
-        let projection = SearchProjection::open(data_home).unwrap();
-        let kernel_incarnation_id: String = Connection::open_with_flags(
-            data_home.join("kernel/kernel.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap()
-        .query_row(
-            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-        projection
-            .write(|conn| {
-                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
-                register_generation(conn, &generation(), 1)?;
-                Ok(())
-            })
-            .unwrap();
-        let identities = row_identities(&rows);
-        let snapshot = self.tip();
-        let batch = batch_from_rows(
-            &rows,
-            &identities,
-            MutationIdentity {
-                kernel_incarnation_id,
-                hold_id: "0123456789abcdef0123456789abcdef".to_string(),
-                snapshot_commit_seq: snapshot,
-                through_commit_seq: snapshot,
-            },
-            Some(GENERATION),
-        )
-        .unwrap();
-        projection.apply_batch(&batch, batch_bounds(), 2).unwrap();
-        (projection, rows)
-    }
-}
-
-fn occurrence_of<'a>(rows: &'a [SourceRow], object_id: &str) -> &'a str {
-    &rows
-        .iter()
-        .find(|row| row.object_id == object_id)
-        .unwrap()
-        .detail
-        .occurrence_id
-}
-
-fn search_path(data_home: &Path) -> PathBuf {
-    data_home.join("search").join("search.sqlite")
-}
-
-fn inspect(data_home: &Path) -> Connection {
-    Connection::open_with_flags(search_path(data_home), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
-}
 
 /// One real dispatch pass on a blocking thread of the test runtime, so the component's inference workers run while the pass polls.
 fn pass(
@@ -472,16 +37,25 @@ fn pass(
     projection: &SearchProjection,
     synapse: &SynapseComponent,
     bounds: &DispatchBounds,
+    wait: Duration,
     now: i64,
 ) -> (Option<Blocked>, Vec<DispatchEvent>) {
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut events = Vec::new();
+    let bounds = DispatchBounds {
+        result_wait: wait,
+        ..*bounds
+    };
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, projection, synapse);
     let end = tokio::task::block_in_place(|| {
         dispatcher
-            .run_pass(eligibility(&project), bounds, now, &mut |event| {
-                events.push(event)
-            })
+            .run_pass(
+                eligibility(&project),
+                &bounds,
+                &budget(Duration::from_secs(30)),
+                now,
+                &mut |event| events.push(event),
+            )
             .unwrap()
     });
     (end, events)
@@ -711,35 +285,17 @@ fn plant_retired_generation(
         .unwrap();
 }
 
-fn tombstone(projection: &SearchProjection, occurrence: &str, commit_seq: i64) {
-    projection
-        .write(|conn| {
-            tombstone_occurrence(
-                conn,
-                occurrence,
-                Tombstone {
-                    invalidated_commit_seq: commit_seq,
-                    reason: TombstoneReason::Retired,
-                },
-                NOW,
-            )?;
-            // The batch applier obsoletes open work for an occurrence that stopped being live; the same transition is applied here.
-            conn.execute(
-                "UPDATE embedding_jobs SET state='obsolete',updated_at=?2 WHERE occurrence_id=?1 AND state IN ('pending','admitted')",
-                rusqlite::params![occurrence, NOW],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-}
-
 fn sweep(
     projection: &SearchProjection,
     synapse: &SynapseComponent,
     limit: NonZeroUsize,
 ) -> SweepReport {
     let mut sweeper = IdentitySweeper::new(projection, synapse);
-    tokio::task::block_in_place(|| sweeper.run_sweep(limit).unwrap())
+    tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(limit, &budget(Duration::from_secs(30)))
+            .unwrap()
+    })
 }
 
 fn embed_all(corpus: &Corpus, projection: &SearchProjection, synapse: &SynapseComponent) -> usize {
@@ -747,7 +303,8 @@ fn embed_all(corpus: &Corpus, projection: &SearchProjection, synapse: &SynapseCo
         corpus,
         projection,
         synapse,
-        &bounds(Duration::from_secs(5)),
+        &bounds(),
+        Duration::from_secs(5),
         NOW,
     );
     events
@@ -964,6 +521,53 @@ async fn a_bounded_sweep_reclaims_at_most_its_limit() {
     assert!(inventory(dir.path()).is_empty());
 }
 
+/// A sweep whose budget is already spent selects nothing and says so: its report is distinguishable from an empty sweep, and the candidates wait for a budgeted sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spent_budget_reports_the_sweep_it_cut_short() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("a", "a text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    assert_eq!(embed_all(&corpus, &projection, &synapse), 1);
+    tombstone(&projection, occurrence_of(&rows, &object), 50);
+    let before = inventory(dir.path());
+    assert!(!before.is_empty());
+
+    let spent = EvalBudget::new(
+        Some(std::time::Instant::now() - Duration::from_millis(1)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let cut = tokio::task::block_in_place(|| sweeper.run_sweep(ten(), &spent).unwrap());
+    assert_eq!(
+        cut,
+        SweepReport {
+            budget_exhausted: true,
+            ..SweepReport::default()
+        }
+    );
+    assert_ne!(
+        cut,
+        SweepReport::default(),
+        "a cut sweep is not an empty one"
+    );
+    assert_eq!(inventory(dir.path()), before);
+
+    let swept = sweep(&projection, &synapse, ten());
+    assert_eq!(
+        (
+            swept.candidates,
+            swept.jobs_reclaimed,
+            swept.budget_exhausted
+        ),
+        (1, 1, false)
+    );
+    assert!(inventory(dir.path()).is_empty());
+}
+
 /// AC3: admission, completion, tombstoning, and a reader race candidate selection. Live work and the shared payload survive; a candidate that a concurrent writer reopened survives the recheck; an identity released after selection is reclaimable by the next sweep.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn races_with_selection_preserve_live_work_and_release_makes_candidates_reclaimable() {
@@ -1131,6 +735,7 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         .unwrap();
     let engine = TestEngine::new();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let synapse = component(
         &engine,
         SynapseLimits {
@@ -1143,7 +748,8 @@ async fn held_native_work_survives_until_the_host_releases_it() {
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_millis(50)),
+        &bounds(),
+        Duration::from_millis(50),
         NOW,
     );
     assert_eq!(
@@ -1173,7 +779,7 @@ async fn held_native_work_survives_until_the_host_releases_it() {
     assert_eq!(predicted(dir.path(), &synapse), inventory(dir.path()));
 
     // Native exit with the result leased in the table: still held, and the host proves the result is ready.
-    gate.release();
+    TestEngine::release(&gate);
     let settled = std::time::Instant::now();
     while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(5));
@@ -1244,16 +850,18 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let occurrence = occurrence_of(&rows, &object);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let synapse = component(&engine, SynapseLimits::default());
     // The pass returns with the row admitted while the host still runs the job.
     pass(
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_millis(50)),
+        &bounds(),
+        Duration::from_millis(50),
         NOW,
     );
-    gate.release();
+    TestEngine::release(&gate);
     let settled = std::time::Instant::now();
     while engine.completed() == 0 && settled.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(5));
@@ -1307,7 +915,11 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
                 if event == PublicationEvent::Reconciling {
                     tombstone(&projection, occurrence, 50);
                     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
-                    report = Some(sweeper.run_sweep(ten()).unwrap());
+                    report = Some(
+                        sweeper
+                            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+                            .unwrap(),
+                    );
                 }
             },
             PublicationFault::LoseLocalCommitReply,
@@ -1345,7 +957,7 @@ fn occurrences_in_job_order(data_home: &Path) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
+async fn resumed_candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
     for count in [3, 4] {
         let dir = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(dir.path());
@@ -1360,20 +972,47 @@ async fn candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
         }
         let engine = TestEngine::new();
         let synapse = component(&engine, SynapseLimits::default());
-        let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, None);
         let two = NonZeroUsize::new(2).unwrap();
         let before = inventory(dir.path());
         assert_eq!(
-            sweeper.run_sweep(two).unwrap(),
+            tokio::task::block_in_place(|| {
+                sweeper
+                    .run_sweep(two, &budget(Duration::from_secs(30)))
+                    .unwrap()
+            }),
             SweepReport {
                 inspected: 2,
                 ..SweepReport::default()
             }
         );
         assert_eq!(inventory(dir.path()), before);
+        let cursor = sweeper.cursor().map(str::to_owned);
+        assert_eq!(cursor, Some(job_id_of(dir.path(), &ordered[1])));
+        drop(sweeper);
 
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor.clone());
+        let cancelled = budget(Duration::from_secs(30));
+        cancelled.cancel();
         assert_eq!(
-            sweeper.run_sweep(two).unwrap(),
+            tokio::task::block_in_place(|| sweeper.run_sweep(two, &cancelled).unwrap()),
+            SweepReport {
+                budget_exhausted: true,
+                ..SweepReport::default()
+            }
+        );
+        assert_eq!(sweeper.cursor(), cursor.as_deref());
+        assert_eq!(inventory(dir.path()), before);
+        let cursor = sweeper.cursor().map(str::to_owned);
+        drop(sweeper);
+
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
+        assert_eq!(
+            tokio::task::block_in_place(|| {
+                sweeper
+                    .run_sweep(two, &budget(Duration::from_secs(30)))
+                    .unwrap()
+            }),
             SweepReport {
                 inspected: count - 2,
                 candidates: count - 2,
@@ -1386,16 +1025,32 @@ async fn candidate_free_pages_advance_to_eligible_jobs_and_wrap() {
                 .iter()
                 .all(|(o, _, _)| ordered[..2].contains(o))
         );
+        let cursor = sweeper.cursor().map(str::to_owned);
+        assert_eq!(cursor.is_some(), count == 4);
+        drop(sweeper);
         tombstone(&projection, &ordered[0], 60);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
         if count == 4 {
             assert_eq!(
-                sweeper.run_sweep(two).unwrap(),
+                tokio::task::block_in_place(|| {
+                    sweeper
+                        .run_sweep(two, &budget(Duration::from_secs(30)))
+                        .unwrap()
+                }),
                 SweepReport::default(),
                 "a full final page requires an EOF read before wrapping"
             );
         }
+        let cursor = sweeper.cursor().map(str::to_owned);
+        assert_eq!(cursor, None);
+        drop(sweeper);
+        let mut sweeper = IdentitySweeper::resuming(&projection, &synapse, cursor);
         assert_eq!(
-            sweeper.run_sweep(two).unwrap(),
+            tokio::task::block_in_place(|| {
+                sweeper
+                    .run_sweep(two, &budget(Duration::from_secs(30)))
+                    .unwrap()
+            }),
             SweepReport {
                 inspected: 2,
                 candidates: 1,
@@ -1428,12 +1083,14 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
     tombstone(&projection, &free_occurrence[0], 50);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
     let synapse = component(&engine, SynapseLimits::default());
     pass(
         &corpus,
         &projection,
         &synapse,
-        &bounds(Duration::from_millis(50)),
+        &bounds(),
+        Duration::from_millis(50),
         NOW,
     );
     for occurrence in held_occurrences {
@@ -1441,15 +1098,24 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
     }
 
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
+    let one = NonZeroUsize::new(1).unwrap();
     for occurrence in held_occurrences {
-        let report = sweeper.run_sweep(NonZeroUsize::new(1).unwrap()).unwrap();
+        let report = tokio::task::block_in_place(|| {
+            sweeper
+                .run_sweep(one, &budget(Duration::from_secs(30)))
+                .unwrap()
+        });
         assert_eq!(report.inspected, 1, "one job row is inspected");
         assert_eq!(report.candidates, 1, "one candidate is inspected");
         assert_eq!(report.held.len(), 1, "one held identity survives");
         assert_eq!(&report.held[0].occurrence_id, occurrence);
         assert_eq!(report.jobs_reclaimed, 0);
     }
-    let report = sweeper.run_sweep(NonZeroUsize::new(1).unwrap()).unwrap();
+    let report = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(one, &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(report.inspected, 1, "one job row is inspected");
     assert_eq!(report.candidates, 1, "one candidate is inspected");
     assert!(report.held.is_empty());
@@ -1463,7 +1129,6 @@ async fn held_candidates_do_not_starve_free_identities_behind_them() {
             .all(|(occurrence, _, _)| held_occurrences.contains(occurrence)),
         "only held identities remain"
     );
-    gate.release();
 }
 
 /// AC5: a reclamation whose COMMIT reply is lost is reconciled from the rows: the report matches what the store applied, a second sweep has no second effect, and the sweeper is not quarantined.
@@ -1488,7 +1153,11 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     blocker.busy_timeout(Duration::ZERO).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
-    let report = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
+    let report = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(
         (
             report.candidates,
@@ -1504,7 +1173,11 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
     // A reply lost after the write applied: the rows say the identity is gone, once.
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
     sweeper.lose_next_reclaim_reply_for_test();
-    let report = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
+    let report = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(
         (
             report.candidates,
@@ -1521,7 +1194,11 @@ async fn a_lost_reclaim_reply_is_reconciled_without_a_second_effect() {
             .any(|(o, _, _)| o == occurrence_of(&rows, &kept))
     );
     assert_eq!(required_vectors(dir.path()), required);
-    let again = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap());
+    let again = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap()
+    });
     assert_eq!(
         again,
         SweepReport {
@@ -1555,7 +1232,11 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
         .unwrap();
 
     let mut sweeper = IdentitySweeper::new(&projection, &synapse);
-    let error = tokio::task::block_in_place(|| sweeper.run_sweep(ten()).unwrap_err());
+    let error = tokio::task::block_in_place(|| {
+        sweeper
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap_err()
+    });
     let SweepError::Quarantined(quarantine) = error else {
         panic!("{error:?}");
     };
@@ -1572,7 +1253,11 @@ async fn a_sweep_quarantine_stops_a_fresh_writer_of_the_projection() {
         )
         .unwrap();
     let mut fresh = IdentitySweeper::new(&projection, &synapse);
-    let again = tokio::task::block_in_place(|| fresh.run_sweep(ten()).unwrap_err());
+    let again = tokio::task::block_in_place(|| {
+        fresh
+            .run_sweep(ten(), &budget(Duration::from_secs(30)))
+            .unwrap_err()
+    });
     assert!(matches!(again, SweepError::Quarantined(q) if q == quarantine));
     assert_eq!(
         inventory(dir.path()),
