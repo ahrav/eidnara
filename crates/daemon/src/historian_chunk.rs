@@ -25,6 +25,7 @@ use crate::historian_validate::{
     ChunkLine, HistorianChunk, MessageRange, StoredCompartmentRange, ValidateOptions,
 };
 use crate::wire::{BlockKind, FlatBlock, IngressMessage};
+use std::sync::Arc;
 
 /// `ChunkSnapshotOwnedItem` stores block identity and bytes used to fingerprint a historian chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,7 +349,7 @@ fn completed_tool_arc_ranges(blocks: &[FlatBlock]) -> Vec<MessageRange> {
 /// `token_budget` bounds the chunk except for a first block that exceeds it alone, which is emitted whole so the chunk is never empty.
 /// A caller that must respect a provider context limit still truncates the result.
 pub fn build_historian_chunk(
-    messages: &[IngressMessage],
+    messages: &[Arc<IngressMessage>],
     blocks: &[FlatBlock],
     start_ordinal: u64,
     token_budget: usize,
@@ -558,7 +559,7 @@ pub enum AssembleHistorianFiringOutcome {
 /// Assembles one fenced historian firing or returns the first no-fire reason.
 pub fn assemble_historian_firing(
     store: &MemoryStore,
-    messages: &[IngressMessage],
+    messages: &[Arc<IngressMessage>],
     live: &[FlatBlock],
     block_identities_by_mid: &BTreeMap<String, Vec<BlockIdentity>>,
     config: HistorianAssemblerConfig,
@@ -780,7 +781,7 @@ fn end_placeholder(start: u64) -> u64 {
     start.saturating_sub(1)
 }
 
-pub(crate) fn native_boundary_dates(messages: &[IngressMessage]) -> BTreeMap<String, String> {
+pub(crate) fn native_boundary_dates(messages: &[Arc<IngressMessage>]) -> BTreeMap<String, String> {
     messages
         .iter()
         .filter_map(|message| {
@@ -968,7 +969,7 @@ mod tests {
         offset: u64,
         #[serde(rename = "eligibleEnd")]
         eligible_end: u64,
-        ck: Vec<IngressMessage>,
+        ck: Vec<Arc<IngressMessage>>,
         expected: GoldenExpected,
     }
 
@@ -1005,8 +1006,8 @@ mod tests {
         expected: String,
     }
 
-    fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> IngressMessage {
-        IngressMessage {
+    fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
+        Arc::new(IngressMessage {
             mid: mid.to_string(),
             ordinal,
             ck: WireMessage::from_parts(
@@ -1019,7 +1020,7 @@ mod tests {
                 ProviderExtras::default(),
                 HarnessMeta::default(),
             ),
-        }
+        })
     }
 
     fn text(value: &str) -> BlockKind {
@@ -1062,7 +1063,7 @@ mod tests {
     }
 
     fn project_and_build(
-        messages: &[IngressMessage],
+        messages: &[Arc<IngressMessage>],
         offset: u64,
         budget: usize,
         eligible_end: u64,
@@ -1855,5 +1856,13 @@ mod tests {
                 case.label
             );
         }
+    }
+    #[test]
+    fn fixture_builder_drives_boundary_chunk_assembly() {
+        let fixture = FixtureBuilder::session_with_boundary();
+        let messages: crate::wire::IngressMessages = fixture.messages.clone().into_iter().collect();
+        let built = project_and_build(&messages, 1, 1_000, 3);
+        assert!(built.text.contains("U: before boundary"));
+        assert_eq!(fixture.call_transform()["kind"], "transform");
     }
 }

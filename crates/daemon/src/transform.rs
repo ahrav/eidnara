@@ -695,7 +695,7 @@ pub struct TransformRequest {
     pub native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_array_fingerprint: Option<String>,
-    pub messages: Vec<IngressMessage>,
+    pub messages: wire::IngressMessages,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_delta: Option<Value>,
     #[serde(default)]
@@ -859,7 +859,7 @@ struct TransformRequestWire {
     #[serde(default)]
     full_array_fingerprint: Option<String>,
     #[serde(default)]
-    messages: Vec<IngressMessage>,
+    messages: wire::IngressMessages,
     #[serde(default)]
     tail_delta: Option<Value>,
     #[serde(default)]
@@ -2013,7 +2013,7 @@ fn prefix_projection_differential_enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn assert_prefix_projection_equivalent(
     incremental: &FlatProjection,
-    messages: &[IngressMessage],
+    messages: &[Arc<IngressMessage>],
 ) -> Result<(), WireError> {
     assert_message_projection_equivalent(incremental, &wire::MessageProjection::new(messages))
 }
@@ -2276,7 +2276,8 @@ fn rebase_descent_ordinals(
         .checked_sub(first.ordinal)
         .expect("first.ordinal <= 1 <= expected_first");
     let mut rebased = req.request.clone();
-    for message in &mut rebased.messages {
+    for message in rebased.messages.iter_mut() {
+        let message = Arc::make_mut(message);
         if message.ordinal < first.ordinal {
             return Err(TransformError::LineageProtocol(format!(
                 "descent replacement array contains ordinal {} below its origin {}",
@@ -5124,7 +5125,7 @@ fn trailing_blank_identity_replays_stored(
         req.provider_id.as_deref(),
         false,
         mid,
-        &mut normalized.ck,
+        &mut Arc::make_mut(&mut normalized).ck,
     ) == 0
     {
         return false;
@@ -11481,7 +11482,7 @@ pub(crate) fn clear_served_native_reasoning(
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
     served_messages: &[WireMessage],
-    ingress_messages: &[IngressMessage],
+    ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     mid_turn: bool,
 ) -> usize {
@@ -11504,7 +11505,7 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
     served_messages: &[WireMessage],
-    ingress_messages: &[IngressMessage],
+    ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
@@ -11527,7 +11528,7 @@ pub(crate) fn clear_served_native_reasoning_from_served(
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
     served_messages: &[ServedMessage],
-    ingress_messages: &[IngressMessage],
+    ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
@@ -11550,7 +11551,7 @@ fn clear_served_native_reasoning_from_iter<'a>(
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
     served_messages: impl IntoIterator<Item = &'a WireMessage>,
-    ingress_messages: &[IngressMessage],
+    ingress_messages: &[Arc<IngressMessage>],
     watermark: u64,
     _mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
@@ -12990,7 +12991,7 @@ pub(crate) mod tests {
             serve_native: false,
             native_messages: None,
             full_array_fingerprint: None,
-            messages,
+            messages: messages.into_iter().collect(),
             tail_delta: None,
             usage: None,
             geometry: None,
@@ -13651,7 +13652,7 @@ pub(crate) mod tests {
     #[test]
     fn parked_p2_fingerprint_reuse_and_tag_frontier_match_baseline() {
         let multi = wire_item("user", "multi", 0, &["alpha", "beta"]);
-        let multi_proj = project_messages(std::slice::from_ref(&multi)).unwrap();
+        let multi_proj = project_messages(&[Arc::new(multi.clone())]).unwrap();
         let multi_blocks: Vec<&FlatBlock> = multi_proj.blocks.iter().collect();
         let mut multi_rendered = multi.ck.clone();
         // The test overlays only the second text block so the first remains projection-identical.
@@ -13687,10 +13688,13 @@ pub(crate) mod tests {
 
         let mut memo = TagMintFrontierMemo::default();
         let core = CoreState::empty();
-        let pass1 = project_messages(&[
-            wire_item("user", "t0", 0, &["first"]),
-            wire_item("assistant", "t1", 1, &["second"]),
-        ])
+        let pass1 = project_messages(
+            &[
+                wire_item("user", "t0", 0, &["first"]),
+                wire_item("assistant", "t1", 1, &["second"]),
+            ]
+            .map(Arc::new),
+        )
         .unwrap();
         let empty_tags: HashSet<&str> = HashSet::new();
         let full1 = tag_mint_inputs(&pass1, &core, None, &empty_tags);
@@ -13710,11 +13714,14 @@ pub(crate) mod tests {
         let owned_ids: Vec<String> = full1.inputs.iter().map(|i| i.block_id.clone()).collect();
         let existing: HashSet<&str> = owned_ids.iter().map(String::as_str).collect();
 
-        let pass2 = project_messages(&[
-            wire_item("user", "t0", 0, &["first"]),
-            wire_item("assistant", "t1", 1, &["second"]),
-            wire_item("user", "t2", 2, &["third append"]),
-        ])
+        let pass2 = project_messages(
+            &[
+                wire_item("user", "t0", 0, &["first"]),
+                wire_item("assistant", "t1", 1, &["second"]),
+                wire_item("user", "t2", 2, &["third append"]),
+            ]
+            .map(Arc::new),
+        )
         .unwrap();
         let full2 = tag_mint_inputs(&pass2, &core, None, &existing);
         let memo2 = tag_mint_inputs_from(
@@ -14120,7 +14127,12 @@ pub(crate) mod tests {
     fn wire_golden_projects_to_flat_blocks() {
         let ck: Vec<WireMessage> =
             serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
-        let projection = project_messages(&ingress_from_ck(ck)).unwrap();
+        let projection = project_messages(
+            &ingress_from_ck(ck)
+                .into_iter()
+                .collect::<wire::IngressMessages>(),
+        )
+        .unwrap();
         let actual = serde_json::to_value(&projection.blocks).unwrap();
         if std::env::var_os("EIDNARA_REGEN_PROJECTION_GOLDEN").is_some() {
             std::fs::write(
@@ -14146,7 +14158,8 @@ pub(crate) mod tests {
             assistant_tool_call("turn2_call", 3, "call_0"),
             tool_result("turn2_result", 4, "call_0", "two"),
         ];
-        let projection = project_messages(&messages).unwrap();
+        let projection =
+            project_messages(&messages.into_iter().collect::<wire::IngressMessages>()).unwrap();
         let result_arcs: Vec<_> = projection
             .blocks
             .iter()
@@ -14178,7 +14191,7 @@ pub(crate) mod tests {
                 wire::HarnessMeta::default(),
             ),
         };
-        let projection = project_messages(&[opaque]).unwrap();
+        let projection = project_messages(&[Arc::new(opaque)]).unwrap();
         assert_eq!(projection.blocks.len(), 1);
         let block = &projection.blocks[0];
         assert_eq!(block.kind_tag, "opaque");
@@ -14208,7 +14221,7 @@ pub(crate) mod tests {
             ),
         };
         let media_wire = serde_json::to_value(&media.ck).unwrap();
-        let media_projection = project_messages(std::slice::from_ref(&media)).unwrap();
+        let media_projection = project_messages(&[Arc::new(media.clone())]).unwrap();
         assert_eq!(media_projection.blocks[0].kind_tag, "media");
         assert!(media_projection.blocks[0].bytes.contains("file://x"));
 
@@ -14442,7 +14455,13 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let one_block = vec![item("live", 1, "only block")];
-        let projection = project_messages(&one_block).unwrap();
+        let projection = project_messages(
+            &one_block
+                .clone()
+                .into_iter()
+                .collect::<wire::IngressMessages>(),
+        )
+        .unwrap();
         let core = CoreState {
             frozen_units: vec![
                 synth_region("m0", "BASE".into()),
@@ -14474,7 +14493,13 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let original = vec![item("anchor", 1, "stable"), item("tail", 2, "before")];
-        let projection = project_messages(&original).unwrap();
+        let projection = project_messages(
+            &original
+                .clone()
+                .into_iter()
+                .collect::<wire::IngressMessages>(),
+        )
+        .unwrap();
         let meta = ModuleMeta {
             initialized: true,
             coverage_ordinal: Some(1),
@@ -17398,7 +17423,9 @@ pub(crate) mod tests {
         }];
 
         assert_eq!(
-            latest_assistant_reasoning_mutation_exempt_mid(&wire::MessageProjection::new(&ingress)),
+            latest_assistant_reasoning_mutation_exempt_mid(&wire::MessageProjection::new(
+                &ingress.into_iter().collect::<wire::IngressMessages>()
+            )),
             Some("msg_text_first")
         );
 
@@ -18379,6 +18406,7 @@ pub(crate) mod tests {
                 ck: latest,
             },
         ];
+        let ingress: wire::IngressMessages = ingress.into_iter().collect();
         let mut native = vec![
             json!({
                 "info": { "id": "old", "role": "assistant" },
@@ -18477,6 +18505,7 @@ pub(crate) mod tests {
             ordinal: 1,
             ck: message.clone(),
         }];
+        let ingress: wire::IngressMessages = ingress.into_iter().collect();
         for profile in [
             SerializerProfile::ClaudeCodeAnthropic,
             SerializerProfile::OwnedBroca,
@@ -19277,7 +19306,7 @@ pub(crate) mod tests {
             .messages
             .iter_mut()
             .find(|message| message.mid == "m2414")
-            .expect("ASTRO tail includes m2414") = tool_message;
+            .expect("ASTRO tail includes m2414") = Arc::new(tool_message);
 
         let unchanged = crate::codec::encode_opencode_with_session(
             &[request
@@ -19710,7 +19739,8 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let mut request = astro_request("astro-missing-floor", 2_402);
-        for message in &mut request.messages {
+        for message in request.messages.iter_mut() {
+            let message = Arc::make_mut(message);
             if let Some(wire::BlockKind::Text { text }) = message
                 .ck
                 .content_mut()
@@ -21590,7 +21620,7 @@ pub(crate) mod tests {
                     session,
                     "cfg0",
                     vec![
-                        first.messages[0].clone(),
+                        first.messages[0].as_ref().clone(),
                         wire_item("assistant", "m2", 2, &["answer"]),
                         wire_item("user", "m3", 3, &["question"]),
                         reminder,
@@ -21717,7 +21747,7 @@ pub(crate) mod tests {
                 "cfg0",
                 vec![
                     sparse[0].clone(),
-                    restored.messages[1].clone(),
+                    restored.messages[1].as_ref().clone(),
                     sparse[1].clone(),
                     wire_item("user", "m4", 4, &["nearby"]),
                 ],
@@ -21735,7 +21765,14 @@ pub(crate) mod tests {
 
             let false_window = transform(
                 &s,
-                &cc_req("temporal-sparse", "cfg0", near.messages),
+                &cc_req(
+                    "temporal-sparse",
+                    "cfg0",
+                    near.messages
+                        .iter()
+                        .map(|message| message.as_ref().clone())
+                        .collect(),
+                ),
                 &pctx("git:proj", "/nonexistent-docs", 2_000_000),
             )
             .unwrap();
@@ -21992,7 +22029,8 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>(),
                 vec!["m1#0", "text#0", "error-text#0", "content#0"]
             );
-            let projection = project_messages(&messages).unwrap();
+            let projection =
+                project_messages(&messages.into_iter().collect::<wire::IngressMessages>()).unwrap();
             for row in &rows {
                 let block = projection
                     .blocks
@@ -23986,7 +24024,7 @@ pub(crate) mod tests {
                 input: call["input"].clone(),
                 provider_executed: false,
             };
-            let projection = project_messages(&[message]).unwrap();
+            let projection = project_messages(&[Arc::new(message)]).unwrap();
             let flat = &projection.blocks[0];
             let wire::BlockKind::ToolCall {
                 input: original, ..
@@ -24569,10 +24607,11 @@ pub(crate) mod tests {
         let mut reasoning = req("caveman-reasoning", "cfg", vec![item("m1", 1, &source)]);
         reasoning.caveman_enabled = true;
         reasoning.caveman_min_chars = 1;
-        *reasoning.messages[0].ck.content_mut()[0].kind_mut() = wire::BlockKind::Reasoning {
-            text: source.clone(),
-            signature: None,
-        };
+        *Arc::make_mut(&mut reasoning.messages[0]).ck.content_mut()[0].kind_mut() =
+            wire::BlockKind::Reasoning {
+                text: source.clone(),
+                signature: None,
+            };
         let projection = project_messages(&reasoning.messages).unwrap();
         let live = projection
             .blocks
@@ -24645,7 +24684,7 @@ pub(crate) mod tests {
         assert_eq!(store.load(session).unwrap().meta.caveman_age_basis_tag, 0);
 
         messages.push(item("old-c", 5, &caveman_test_source("old-c")));
-        armed_request.messages = messages.clone();
+        armed_request.messages = messages.clone().into_iter().collect();
         let growing = run(&store, &armed_request, &spine());
         assert_eq!(growing.action, "SOFT+");
         assert!(growing.first_divergence.is_none());
@@ -24662,7 +24701,7 @@ pub(crate) mod tests {
             .unwrap();
         store.arm_soft_refresh(session).unwrap();
         messages.push(item("old-d", 6, &caveman_test_source("old-d")));
-        armed_request.messages = messages.clone();
+        armed_request.messages = messages.clone().into_iter().collect();
         let fold = run(&store, &armed_request, &spine());
         assert_eq!(fold.action, "SOFT");
         assert!(fold.first_divergence.is_some());
@@ -24689,7 +24728,7 @@ pub(crate) mod tests {
                 ordinal,
                 &caveman_test_source(&format!("post-fold-{ordinal}")),
             ));
-            armed_request.messages = messages.clone();
+            armed_request.messages = messages.clone().into_iter().collect();
             let defer = run(&store, &armed_request, &spine());
             assert_eq!(defer.action, "SOFT+");
             assert!(
@@ -24798,7 +24837,7 @@ pub(crate) mod tests {
                 &caveman_test_source(&format!("after-{ordinal}")),
             ));
         }
-        request.messages = messages;
+        request.messages = messages.into_iter().collect();
         let defer = run(&restarted, &request, &spine());
         assert_eq!(defer.action, "SOFT+");
         assert!(defer.first_divergence.is_none());
@@ -24973,7 +25012,7 @@ pub(crate) mod tests {
         let (_dir, store, mut request, ctx) = declared_trim_fixture();
         request
             .messages
-            .insert(0, system_item("sys", 0, "covered system"));
+            .insert(0, Arc::new(system_item("sys", 0, "covered system")));
         let result = transform_with_projection(&store, &request, &ctx).unwrap();
         assert_eq!(result.boundary_state, BoundaryState::DeclaredTrimValidated);
         assert!(result.trim_mismatch.is_none());
@@ -25375,7 +25414,15 @@ pub(crate) mod tests {
             serde_json::to_vec(pass_b.messages()).unwrap()
         );
 
-        let r2_request = active_cc_req("staged-tfe", "pe1/tf2/gfull", request.messages.clone());
+        let r2_request = active_cc_req(
+            "staged-tfe",
+            "pe1/tf2/gfull",
+            request
+                .messages
+                .iter()
+                .map(|message| message.as_ref().clone())
+                .collect(),
+        );
         let pass_c = run(&s, &r2_request, &spine());
         assert_eq!(
             pass_c.action, "HARD",
@@ -26171,7 +26218,7 @@ pub(crate) mod tests {
             tool_result("split-result", 124, "toolu_split", "completed tool output"),
         ];
         let request = cc_req("split-coverage", "cfg0", completed_messages.clone());
-        let projection = project_messages(&completed_messages).unwrap();
+        let projection = project_messages(&request.messages).unwrap();
         let hypothetical_old = build_output(
             &damaged.core,
             &damaged.meta,
@@ -26267,7 +26314,13 @@ pub(crate) mod tests {
         );
 
         let poisoned = store.load("reasoning-transition").unwrap();
-        let projection = project_messages(&messages).unwrap();
+        let projection = project_messages(
+            &messages
+                .clone()
+                .into_iter()
+                .collect::<wire::IngressMessages>(),
+        )
+        .unwrap();
         let hypothetical_defer = build_output(
             &poisoned.core,
             &poisoned.meta,
@@ -26369,7 +26422,13 @@ pub(crate) mod tests {
             transition_consumed_classes(&before.core),
             v1_transition_classes()
         );
-        let projection = project_messages(&messages).unwrap();
+        let projection = project_messages(
+            &messages
+                .clone()
+                .into_iter()
+                .collect::<wire::IngressMessages>(),
+        )
+        .unwrap();
         let golden = build_output(
             &before.core,
             &before.meta,
@@ -26450,7 +26509,7 @@ pub(crate) mod tests {
         let large_projection = project_messages(
             &(0..2_000)
                 .map(|ordinal| item(&format!("perf-{ordinal}"), ordinal, "unaffected"))
-                .collect::<Vec<_>>(),
+                .collect::<wire::IngressMessages>(),
         )
         .unwrap();
         let ordinary_units = vec![
@@ -27111,8 +27170,8 @@ pub(crate) mod tests {
             }
             let before = original.clone();
             let mut flagged = original.clone();
-            flagged.messages[1].ck.meta.synthetic = true;
-            flagged.messages[2].ck.meta.synthetic = true;
+            Arc::make_mut(&mut flagged.messages[1]).ck.meta.synthetic = true;
+            Arc::make_mut(&mut flagged.messages[2]).ck.meta.synthetic = true;
             let mut observations = Vec::new();
             for request in [&original, &flagged] {
                 let dir = tempfile::tempdir().unwrap();
@@ -27475,7 +27534,8 @@ pub(crate) mod tests {
         let changed = changed_messages
             .last_mut()
             .expect("large timing fixture has a tail message");
-        let wire::BlockKind::Text { text } = changed.ck.content_mut()[0].kind_mut() else {
+        let wire::BlockKind::Text { text } = Arc::make_mut(changed).ck.content_mut()[0].kind_mut()
+        else {
             panic!("large timing fixture tail must be text");
         };
         text.push_str(" changed");
@@ -28124,10 +28184,11 @@ pub(crate) mod tests {
 
         let mut edited = request.clone();
         edited.render_config = "anchor-edited".to_string();
-        *edited.messages[0].ck.content_mut()[1].kind_mut() = wire::BlockKind::Text {
-            text: continuation_summary("EDITED"),
-        };
-        edited.messages[0].ck.content_mut()[1].mark_modified();
+        *Arc::make_mut(&mut edited.messages[0]).ck.content_mut()[1].kind_mut() =
+            wire::BlockKind::Text {
+                text: continuation_summary("EDITED"),
+            };
+        Arc::make_mut(&mut edited.messages[0]).ck.content_mut()[1].mark_modified();
         let edited_response = run(&store, &edited, &spine());
         assert_eq!(edited_response.action, "SOFT+");
         assert!(edited_response.reconcile_pending);
@@ -28141,8 +28202,8 @@ pub(crate) mod tests {
         let mut deleted = request.clone();
         deleted.render_config = "anchor-deleted".to_string();
         deleted.messages.remove(0);
-        deleted.messages[0].ordinal = 1;
-        deleted.messages[0].ck.meta.ordinal = Some(1);
+        Arc::make_mut(&mut deleted.messages[0]).ordinal = 1;
+        Arc::make_mut(&mut deleted.messages[0]).ck.meta.ordinal = Some(1);
         let deleted_response = run(&store, &deleted, &spine());
         assert_eq!(deleted_response.action, "SOFT+");
         assert!(deleted_response.reconcile_pending);
@@ -28154,7 +28215,9 @@ pub(crate) mod tests {
 
         let mut rollover = request.clone();
         rollover.render_config = "date-rollover".to_string();
-        rollover.messages = fake_compaction_messages("2026-08-07", &summary);
+        rollover.messages = fake_compaction_messages("2026-08-07", &summary)
+            .into_iter()
+            .collect();
         let rollover_response = run(&store, &rollover, &spine());
         assert_eq!(rollover_response.action, "HARD");
         assert!(!rollover_response.reconcile_pending);
@@ -28317,10 +28380,11 @@ pub(crate) mod tests {
         assert!(!intact.reconcile_pending);
 
         let mut mutated = follow_up.clone();
-        *mutated.messages[0].ck.content_mut()[1].kind_mut() = wire::BlockKind::Text {
-            text: continuation_summary("MUTATED"),
-        };
-        mutated.messages[0].ck.content_mut()[1].mark_modified();
+        *Arc::make_mut(&mut mutated.messages[0]).ck.content_mut()[1].kind_mut() =
+            wire::BlockKind::Text {
+                text: continuation_summary("MUTATED"),
+            };
+        Arc::make_mut(&mut mutated.messages[0]).ck.content_mut()[1].mark_modified();
         let refused = run(&store, &mutated, &spine());
         assert_eq!(refused.action, "SOFT+");
         assert!(refused.reconcile_pending);
@@ -28382,7 +28446,7 @@ pub(crate) mod tests {
                     .unwrap(),
             )
             .unwrap();
-            request.messages[0].ck.meta.synthetic = flagged;
+            Arc::make_mut(&mut request.messages[0]).ck.meta.synthetic = flagged;
             assert!(request.lineage_switched && !request.is_subagent);
             let result = transform_with_projection(&store, &request, &smart_pctx()).unwrap();
             assert_eq!(
