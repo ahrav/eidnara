@@ -170,6 +170,10 @@ impl Job {
 struct Jobs {
     by_key: HashMap<String, u64>,
     by_seq: HashMap<u64, Job>,
+    /// Weak handle to each completed result's lease. The entry outlives the job's removal:
+    /// a served page keeps the lease alive, and the job counts as held until the last page
+    /// drops. Every sweep prunes dead entries, bounding the map by retained jobs plus live pages.
+    leased: HashMap<u64, std::sync::Weak<ResultLease>>,
     next_seq: u64,
     queued_text_bytes: u64,
     retained_result_bytes: u64,
@@ -409,6 +413,7 @@ impl JobTable {
             inner: std::sync::Mutex::new(Jobs {
                 by_key: HashMap::new(),
                 by_seq: HashMap::new(),
+                leased: HashMap::new(),
                 next_seq: 1,
                 queued_text_bytes: 0,
                 retained_result_bytes: 0,
@@ -644,13 +649,15 @@ impl JobTable {
         job.text_bytes = 0;
 
         let boundaries = self.page_boundaries(&job.item_meta, &vectors);
+        let lease = Arc::new(ResultLease::new(
+            result_bytes,
+            Arc::clone(&self.live_result_bytes),
+        ));
+        let holder = Arc::downgrade(&lease);
         job.state = JobState::Ready {
             vectors,
             boundaries,
-            lease: Arc::new(ResultLease::new(
-                result_bytes,
-                Arc::clone(&self.live_result_bytes),
-            )),
+            lease,
         };
         job.result_bytes = result_bytes;
         job.completed_at = Some(Instant::now());
@@ -658,6 +665,7 @@ impl JobTable {
         let retained = job.retained_input_bytes();
         let excess = job.charge.split_excess(retained);
         released.charge(excess);
+        jobs.leased.insert(seq, holder);
         jobs.release_bytes(text_bytes, 0);
         jobs.retained_result_bytes += result_bytes;
         self.enforce_retention(&mut jobs, Some(seq), &mut released);
@@ -857,8 +865,42 @@ impl JobTable {
         self.sweep_expired(&mut jobs, &mut released);
     }
 
+    /// Whether the job is still a physical holder, after expiring what retention no longer keeps: present in the table, or completed with a served result page still alive. Unlike a poll, this neither issues a page nor refreshes the job's retention rank.
+    pub fn retains(&self, job_id: &str) -> bool {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return false;
+        };
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        jobs.by_seq.contains_key(&seq)
+            || jobs
+                .leased
+                .get(&seq)
+                .is_some_and(|lease| lease.strong_count() > 0)
+    }
+
+    /// Whether a result page served for the job is still alive. A ready job's own retained lease does not count; only a page handed to a caller does.
+    pub fn result_in_use(&self, job_id: &str) -> bool {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return false;
+        };
+        let mut released = Released::default();
+        let mut jobs = self.lock_jobs();
+        self.sweep_expired(&mut jobs, &mut released);
+        match jobs.by_seq.get(&seq).map(|job| &job.state) {
+            Some(JobState::Ready { lease, .. }) => Arc::strong_count(lease) > 1,
+            Some(_) => false,
+            None => jobs
+                .leased
+                .get(&seq)
+                .is_some_and(|lease| lease.strong_count() > 0),
+        }
+    }
+
     fn sweep_expired(&self, jobs: &mut Jobs, released: &mut Released) {
         let now = Instant::now();
+        jobs.leased.retain(|_, lease| lease.strong_count() > 0);
         let expired: Vec<u64> = jobs
             .by_seq
             .values()
@@ -969,6 +1011,12 @@ impl JobTable {
         let job = jobs.by_seq.remove(&seq)?;
         jobs.release_bytes(job.text_bytes, job.result_bytes);
         jobs.by_key.remove(&job.key);
+        // `Arc::strong_count(lease) == 1` means only the removed job retains the lease: no served page exists, so the leased entry goes with the job.
+        if let JobState::Ready { lease, .. } = &job.state
+            && Arc::strong_count(lease) == 1
+        {
+            jobs.leased.remove(&seq);
+        }
         Some(job)
     }
 
@@ -1537,6 +1585,41 @@ mod tests {
             PollOutcome::Restarted
         ));
         assert_eq!(jobs.live_result_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_served_page_keeps_the_job_held_past_expiry() {
+        let dimensions = 2;
+        let mut jobs = JobTable::new(SynapseLimits::default());
+
+        let AdmitOutcome::Admitted { job_id, seq } = jobs.admit_uncharged_for_tests(
+            "held".to_owned(),
+            vec![charged_item("a", "alpha")],
+            dimensions,
+        ) else {
+            panic!("the job is admitted");
+        };
+        jobs.start(seq).expect("the job starts");
+        jobs.publish_ready(seq, vec![vec![0.5; dimensions]]);
+        let PollOutcome::Page(page) = jobs.poll(&job_id, "held", None) else {
+            panic!("the result is served");
+        };
+
+        jobs.limits.retention = std::time::Duration::ZERO;
+        assert!(matches!(
+            jobs.poll(&job_id, "held", None),
+            PollOutcome::Restarted
+        ));
+        assert!(
+            jobs.retains(&job_id),
+            "a job whose served page is alive is still held"
+        );
+
+        drop(page);
+        assert!(
+            !jobs.retains(&job_id),
+            "dropping the last page releases the job"
+        );
     }
 
     #[test]

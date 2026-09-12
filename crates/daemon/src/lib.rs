@@ -22,6 +22,7 @@ pub mod historian_chunk;
 pub mod historian_producer;
 pub(crate) mod historian_prompt;
 pub(crate) mod historian_validate;
+pub mod identity_sweep;
 pub mod injection;
 pub mod kernel_routes;
 pub mod m0_compose;
