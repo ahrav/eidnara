@@ -99,5 +99,20 @@ fn parse_charge_covers_dense_native_typed_decode_peak() {
             "{element_count} native elements peaked at {peak} bytes during typed decode but the \
              parse charge reserved only {charge}"
         );
+
+        // The direct decode of an unpaged transform body builds no tree; the same charge covers it.
+        let base = reset_peak();
+        let request: TransformRequest = serde_json::from_slice(&body).expect("direct decode");
+        let direct_peak = peak_since(base);
+        assert_eq!(
+            request.native_messages.as_ref().map(Vec::len),
+            Some(element_count)
+        );
+        drop(request);
+        assert!(
+            direct_peak <= peak,
+            "{element_count} native elements peaked at {direct_peak} bytes during the direct \
+             decode, above the tree decode's {peak}"
+        );
     }
 }

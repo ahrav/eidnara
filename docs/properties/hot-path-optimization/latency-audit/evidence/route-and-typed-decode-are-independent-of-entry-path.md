@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The implementation evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -122,26 +124,154 @@ oracle once the change replaces it.
 - Missing evidence: A differential run over the numeric corpus.
 - Conclusion: unresolved, needs a differential run.
 
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11805-L11827
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15472-L15488
-[probe]: ../../../../../crates/daemon/src/lib.rs#L15311-L15323
-[probestr]: ../../../../../crates/daemon/src/lib.rs#L15330-L15393
-[class]: ../../../../../crates/daemon/src/lib.rs#L15395-L15406
-[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12558-L12652
-[pagefields]: ../../../../../crates/daemon/src/lib.rs#L12654-L12658
-[unrecognized]: ../../../../../crates/daemon/src/lib.rs#L12674-L12698
-[typename]: ../../../../../crates/daemon/src/lib.rs#L12700-L12709
-[pageconst]: ../../../../../crates/daemon/src/lib.rs#L745-L752
-[tdispatch]: ../../../../../crates/daemon/src/lib.rs#L7887-L7903
-[observed]: ../../../../../crates/daemon/src/lib.rs#L7926-L7932
-[fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7933-L7941
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9425-L9433
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12484-L12499
-[wirestruct]: ../../../../../crates/daemon/src/transform.rs#L801-L972
-[typed-decode]: ../../../../../crates/daemon/src/transform.rs#L909-L972
-[wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
-[wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
-[wire63]: ../../../../host-wire-protocol.md#L308
-[wire751]: ../../../../host-wire-protocol.md#L440
+
+## Direct-decode evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/435)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+[`Handler::handle`][handle-live] reads one [entry probe][probe-live] from the
+body before anything else: the `method` and `kind` discriminators and whether
+any [`TRANSFORM_PAGE_FIELDS`][pageconst] key is present. The probe's
+[map visitor][probe-visitor] mirrors the tree dispatch rather than a derived
+struct: a repeated key keeps its last value, a page key counts when present
+whatever its value, `null` included, each key is [classified in place][probe-key]
+so no key text is retained however long it is, and every other value is skipped
+through [`deserialize_any`][skipped] so every check serde_json applies to a
+`Value` parse applies to the probe: the nesting limit, number range, string
+escapes, and UTF-8 (`IgnoredAny` skips without those checks and would let a
+body probe where the tree refuses it). A probe is therefore proof that the tree
+decode parses the body. The probe's only body-proportional cost is serde_json's
+scratch buffer for one escaped string at a time, released with the probe; the
+probe runs before the resident reservation, as the byte-cap probe always did.
+
+The same probe serves the byte cap: [`enforce_request_byte_cap`][cap-live] takes
+it instead of running its own read, so a body over 1 MiB is probed once, and it
+keeps the [class read][class-live] (an overlong `method` reads as absent for the
+widening while [dispatch's read][route-resolve] takes any string `method` as
+the route, so that body is admitted and then refused by shape). A body over
+1 MiB that yields no probe is classed by the [lenient read][class-probe], which
+skips other fields without the tree's checks as the derive does, so a
+transform-class body the tree cannot parse past is still admitted under the
+wider cap and refused by shape, as before; its refusal code does not move to the
+1 MiB cap.
+
+[`dispatch_body`][dispatch-body] is the one branch. When the probe names the
+`transform` route with no page key, the body decodes with
+`serde_json::from_slice::<TransformRequest>` and enters the
+[direct lane][direct-lane]; on any decode error the body falls through to the
+`Value` parse and the tree dispatch, so a refusal is always the tree decode's
+refusal with the tree decode's message. Every other body takes the tree path
+unchanged. The branch reports the lane it took, which the handler discards and
+the tests assert. The [tree-decoded unpaged lane][tree-lane] and the
+[page apply][page-apply-live] both decode their `Value` with `from_value` and
+enter the same [typed handler][typed-entry] the direct lane enters; the
+`request_observed_at_ms` read moved from the raw `Value` to the typed field,
+which decodes to the same value wherever the typed decode succeeds. The
+`handler_total` timing starts before the typed decode on both lanes; on the
+direct lane that decode reads the body bytes, so the direct lane's
+`handler_total` includes the byte parse that the tree lane's `Value` parse
+precedes. The [byte-scan bound][copies-live] is retained; the direct decode
+retains at most what the tree lane retains, and the [peak test][t-peak]
+measures it below the tree decode's peak on the dense native corpus.
+[`handle_transform_for_test`][test-entry] serializes its request and enters at
+the body branch, so the crate's transform tests run the direct lane.
+
+The [corpus][t-corpus] holds 33 bodies: a valid body under `kind` and under
+`method`, an unknown top-level field, `null` on an `Option` and on a defaulted
+field, a wrong type, a float, an exponent, a negative and an above-`u64`
+integer on integer fields, `-0` on a float field, a repeated top-level key, a
+repeated discriminator, a repeated nested key, a missing required field, a
+missing and an unknown serializer profile, a `null` and a lone page field, a
+non-string and an overlong `method` beside `kind`, another route, trailing
+bytes, malformed JSON, array, string and empty bodies, `messages` as an object,
+an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
+field, and nesting at and one past the tree's depth limit. The
+[entry differential][t-entry-diff] runs every body through `dispatch_body` and
+through the tree dispatch on two identical handlers and asserts the same
+response with the timing block removed, or the same code and message; it pins
+the nine bodies that took the direct lane and asserts the valid body was
+served. The [decode differential][t-decode-diff] asserts for every body that a
+probe implies the tree parses it, that where both decodes accept a body they
+produce the same request (pinning the thirteen such bodies, with `-0` compared
+by bit pattern), pins the bodies only the tree accepts to the three
+repeated-key shapes (the derive refuses a repeated field; the handler's
+fallback carries them), pins the bodies only the direct decode accepts to the
+four derive-leniency shapes under an ignored field and asserts the probe
+refuses each first, and decodes a two-page assembly of the valid body to the
+one-slice request. The [probe test][t-probe] checks each page key with `null`,
+the discriminator fallbacks, last-wins, the overlong-`method` split between cap
+and route, and the depth limit found by probing the tree. The
+[cap test][t-cap-live] adds a body of exactly `MAX_TRANSFORM_FRAME_BYTES`
+admitted, one byte more refused, and a 2 MiB transform-class body nested past
+the depth limit still admitted.
+
+The numeric open question is answered by the run: the tree and the direct
+decode share one parser and one set of visitors, so a float or exponent on an
+integer field, an integer above `u64::MAX`, a negative on an unsigned field,
+and `-0` on a float field give the same accept or refusal on both. The
+repeated-key question stays open as a contract question; the behavior is
+unchanged, last-wins through the tree.
+
+### Focused execution, 2026-09-12
+
+`cargo test -p daemon --locked` passed 1016 tests including the four above, the
+two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+branch as well and passing in isolation;
+`cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
+passed; `cargo test -p daemon --locked --features direct-host-fixture --test direct_host`
+passed 6, including the real unary transform through `Handler::handle`;
+`bun scripts/verify-serialized-transform-pages.ts` in `packages/e2e-tests`
+generated the 19-case serialized corpus and passed
+`serialized_transform_corpus_preserves_host_admission_and_completion` through
+the direct-host fixture, which compares the paged final `messages` bytes to the
+one-slice control.
+
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11892-L11913
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12649-L12669
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15442-L15446
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15461-L15495
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15506-L15531
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15540-L15590
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15594-L15599
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15609-L15616
+[class-probe]: ../../../../../crates/daemon/src/lib.rs#L15727-L15732
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15835-L15856
+[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7964-L7976
+[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7980-L8000
+[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8005
+[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9513
+[copies-live]: ../../../../../crates/daemon/src/lib.rs#L15753
+[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8588-L8598
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19344-L19389
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19392-L19524
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19544-L19662
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19685-L19723
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19262-L19341
+[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
+
+[handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
+[bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488
+[probe]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15311-L15323
+[probestr]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15330-L15393
+[class]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15395-L15406
+[dispatch]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L12558-L12652
+[pagefields]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L12654-L12658
+[unrecognized]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L12674-L12698
+[typename]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L12700-L12709
+[pageconst]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L745-L752
+[tdispatch]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7887-L7903
+[observed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7926-L7932
+[fromvalue]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7933-L7941
+[pageapply]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L9425-L9433
+[testentry]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L12484-L12499
+[wirestruct]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L801-L972
+[typed-decode]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L909-L972
+[wiremsg]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L126-L143
+[wireblock]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L250-L264
+[wire63]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L308
+[wire751]: https://github.com/ahrav/eidnara/blob/9132344/docs/host-wire-protocol.md#L440
 [mapinsert]: https://docs.rs/serde_json/1.0.151/src/serde_json/map.rs.html#127-129
 [derivedup]: https://docs.rs/serde_derive/1.0.229/src/serde_derive/de/struct_.rs.html#269

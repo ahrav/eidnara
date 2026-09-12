@@ -205,8 +205,15 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No two-lane decode differential or discriminator corpus
-runs.
+Exercised: partial - the
+[entry differential](evidence/route-and-typed-decode-are-independent-of-entry-path.md#direct-decode-evidence)
+runs a corpus of 33 body shapes through the body entry and the tree dispatch,
+asserts one outcome, and pins which bodies took the direct lane; the decode
+differential pins the acceptance differences to repeated keys and to
+derive-lenient shapes under an ignored field, both kept off the direct lane,
+and decodes a page assembly to the one-slice request; the serialized corpus
+runs paged against one-slice through the direct-host fixture; none drives
+`Handler::handle` with an over-cap or over-footprint body.
 Guarantee: The lane a body reaches, the cap it is admitted under, and the
 typed request it decodes to depend only on raw discriminator and page-field
 reads, and agree across the unpaged lane, the page lane, and any replacement
@@ -265,8 +272,10 @@ Open questions:
 - Must malformed JSON keep reporting `unrecognized_request_shape`, or may it
   become `bad_request`? (needs human input)
 - Integers above `u64::MAX`, exponents, and `-0` pass through `Value`
-  normalization today; equivalence with a direct typed decode for the `u64`,
-  `usize`, and `f64` fields is unresolved, needs a differential run.
+  normalization today; the
+  [differential run](evidence/route-and-typed-decode-are-independent-of-entry-path.md#direct-decode-evidence)
+  shows the direct decode refusing and accepting them as the tree does, since
+  both share one parser and one set of visitors. (answered)
 
 ### scratch-pool-shortfall-reaches-the-parse-reservation
 

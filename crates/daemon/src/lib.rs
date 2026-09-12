@@ -48,6 +48,7 @@ pub mod release_contract;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -7952,24 +7953,30 @@ impl Handler {
             self.handle_transform_page_value(channel, request, TransformLane::Authority, &ticket)
                 .await
         } else {
-            self.handle_transform_value(channel, request, inbound_bytes, &ticket)
+            self.handle_transform_unpaged_value(channel, request, false, inbound_bytes, &ticket)
                 .await
         };
         ticket.finish(matches!(outcome, PreparedOutcome::Error { .. }));
         outcome
     }
 
-    async fn handle_transform_value(
+    /// The unpaged transform lane for a request already decoded from its bytes.
+    async fn handle_transform_direct(
         &self,
         channel: RouteHandle,
-        request: Value,
-        inbound_bytes: Option<usize>,
-        ticket: &TransformDispatchTicket<'_>,
+        parsed: TransformRequest,
+        decode_started_at: Instant,
     ) -> PreparedOutcome {
-        self.handle_transform_unpaged_value(channel, request, false, inbound_bytes, ticket)
-            .await
+        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let outcome = self
+            .handle_transform_typed(channel, parsed, false, decode_started_at, &ticket)
+            .await;
+        ticket.finish(matches!(outcome, PreparedOutcome::Error { .. }));
+        outcome
     }
 
+    /// Decodes a transform request from its `Value` tree; the page lane and the tree-decoded
+    /// unpaged lane both enter the typed handler here.
     async fn handle_transform_unpaged_value(
         &self,
         channel: RouteHandle,
@@ -7978,16 +7985,8 @@ impl Handler {
         _inbound_bytes: Option<usize>,
         ticket: &TransformDispatchTicket<'_>,
     ) -> PreparedOutcome {
-        let handler_started_at = Instant::now();
-        let mut delta_expand_ms = 0.0;
-        const REQUEST_OBSERVED_KEY: &str = "request_observed_at_ms";
-        let request_observed_to_handler = request
-            .get(REQUEST_OBSERVED_KEY)
-            .and_then(Value::as_u64)
-            .and_then(|observed| i64::try_from(observed).ok())
-            .map(|observed| now_ms().saturating_sub(observed) as f64)
-            .unwrap_or(0.0);
-        let mut parsed: TransformRequest = match serde_json::from_value(request) {
+        let decode_started_at = Instant::now();
+        let parsed: TransformRequest = match serde_json::from_value(request) {
             Ok(req) => req,
             Err(e) => {
                 return PreparedOutcome::Error {
@@ -7996,6 +7995,28 @@ impl Handler {
                 };
             }
         };
+        self.handle_transform_typed(channel, parsed, from_page_apply, decode_started_at, ticket)
+            .await
+    }
+
+    /// The transform handler proper. `decode_started_at` is taken before the typed decode
+    /// on both lanes, so `handler_total` covers it; on the direct lane that decode reads
+    /// the body bytes, on the tree lane the bytes were parsed into a `Value` before it.
+    async fn handle_transform_typed(
+        &self,
+        channel: RouteHandle,
+        mut parsed: TransformRequest,
+        from_page_apply: bool,
+        decode_started_at: Instant,
+        ticket: &TransformDispatchTicket<'_>,
+    ) -> PreparedOutcome {
+        let handler_started_at = decode_started_at;
+        let mut delta_expand_ms = 0.0;
+        let request_observed_to_handler = parsed
+            .request_observed_at_ms
+            .and_then(|observed| i64::try_from(observed).ok())
+            .map(|observed| now_ms().saturating_sub(observed) as f64)
+            .unwrap_or(0.0);
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
         if serializer_profile.is_none() {
             return unknown_serializer_profile_error();
@@ -8561,17 +8582,19 @@ impl Handler {
         Instant::now()
     }
 
+    /// Serializes the request and enters at the body branch, so tests run the lane a
+    /// transform body takes in production.
     #[cfg(test)]
     async fn handle_transform_for_test(
         &self,
         route: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let inbound_bytes = serde_json::to_vec(&request)
-            .map(|bytes| bytes.len())
-            .unwrap_or(MAX_TRANSFORM_FRAME_BYTES);
-        self.handle_transform_dispatch(route, request, Some(inbound_bytes))
-            .await
+        let body = serde_json::to_vec(&request).unwrap();
+        let (_, outcome) = self
+            .dispatch_body(route, &body, probe_request(&body).as_ref())
+            .await;
+        outcome
     }
 
     fn handle_state_sync_value(&self, channel: RouteHandle, request: Value) -> PreparedOutcome {
@@ -11867,11 +11890,14 @@ impl CompositeComponent for Handler {
     }
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
-        if let Err(outcome) = enforce_request_byte_cap(ctx.body.as_slice()) {
+        let body = ctx.body.as_slice();
+        // One typed pass over the body reads the discriminator and the page envelope for
+        // both the byte cap and the lane choice below.
+        let probe = probe_request(body);
+        if let Err(outcome) = enforce_request_byte_cap(body, probe.as_ref()) {
             return settle_prepared(&ctx, outcome).await;
         }
-        //
-        let Some(footprint) = value_footprint_bound(ctx.body.as_slice()) else {
+        let Some(footprint) = value_footprint_bound(body) else {
             return settle_prepared(&ctx, request_too_large_error()).await;
         };
         let _parse_charge = match ctx.try_reserve_resident(footprint) {
@@ -11882,11 +11908,7 @@ impl CompositeComponent for Handler {
             }
             None => return settle_prepared(&ctx, resident_capacity_error()).await,
         };
-        let request = serde_json::from_slice::<Value>(ctx.body.as_slice()).unwrap_or(Value::Null);
-        let inbound_bytes = ctx.body.len();
-        let outcome = self
-            .dispatch_value_with_inbound_bytes(ctx.route, request, Some(inbound_bytes))
-            .await;
+        let (_, outcome) = self.dispatch_body(ctx.route, body, probe.as_ref()).await;
         settle_prepared(&ctx, outcome).await
     }
 
@@ -12618,6 +12640,32 @@ impl Handler {
     #[cfg(test)]
     fn install_store_for_test(&self, store: Arc<MemoryStore>) {
         *self.store.lock().expect("store slot mutex") = Some(store);
+    }
+
+    /// Routes one admitted body and reports the lane it took. An unpaged transform body
+    /// decodes typed straight from its bytes. Every other body, and a transform body the
+    /// typed decode refuses, decodes through the `Value` tree, so a refusal is always the
+    /// one the tree decode produces and the two lanes cannot disagree on it.
+    async fn dispatch_body(
+        &self,
+        channel: RouteHandle,
+        body: &[u8],
+        probe: Option<&RequestEntryProbe>,
+    ) -> (BodyLane, PreparedOutcome) {
+        if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
+            let decode_started_at = Instant::now();
+            if let Ok(parsed) = serde_json::from_slice::<TransformRequest>(body) {
+                let outcome = self
+                    .handle_transform_direct(channel, parsed, decode_started_at)
+                    .await;
+                return (BodyLane::Direct, outcome);
+            }
+        }
+        let request = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+        let outcome = self
+            .dispatch_value_with_inbound_bytes(channel, request, Some(body.len()))
+            .await;
+        (BodyLane::Tree, outcome)
     }
 
     async fn dispatch_value_with_inbound_bytes(
@@ -15382,91 +15430,184 @@ const MAX_FACADE_FRAME_BYTES: usize = 1024 * 1024;
 /// The 64 MiB transport frame ceiling permits a 32 MiB body cap while reserving envelope overhead.
 const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
-/// `RequestMethodProbe` deserializes only `method` and `kind`; Serde ignores other fields, avoiding a full `Value` parse.
-/// Serde ignores the remaining fields, avoiding a full `Value` parse of a multi-MiB array.
-#[derive(Deserialize)]
-struct RequestMethodProbe {
-    #[serde(default)]
-    method: ProbeString,
-    #[serde(default)]
-    kind: ProbeString,
-}
-
-/// A discriminator read that keeps only a short string and never materializes anything else.
-///
-/// The probe runs before the host's resident-byte reservation, so an array or object under
-/// `method` must be skipped, not built. Dispatch treats a non-string discriminator as absent,
-/// and this mirrors that; strings longer than any route name are also dropped.
+/// The typed read of the fields the handler branches on before it decodes a body: the
+/// route discriminator and whether the transform page envelope is present. Every other
+/// field is skipped, so no `Value` tree is built for the decision and a multi-MiB array is
+/// never materialized. The read mirrors the tree dispatch: a repeated key keeps its last
+/// value, a page-envelope key counts when present whatever its value, and a body a `Value`
+/// parse refuses (non-object, malformed, nested past the depth limit, a number out of
+/// range, a bad escape or invalid UTF-8 anywhere) yields no probe and takes the tree-decode
+/// path, so a probe is proof that the tree decode parses the body.
 #[derive(Default)]
-struct ProbeString(Option<String>);
-
-impl ProbeString {
-    const MAX_ROUTE_NAME_BYTES: usize = 64;
-
-    fn as_str(&self) -> Option<&str> {
-        self.0.as_deref()
-    }
+struct RequestEntryProbe {
+    method: RouteName,
+    kind: RouteName,
+    page_fields: bool,
 }
 
-impl<'de> Deserialize<'de> for ProbeString {
+fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
+    serde_json::from_slice(body).ok()
+}
+
+/// Which decode a body went through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyLane {
+    /// Decoded typed from its bytes.
+    Direct,
+    /// Decoded through the `Value` tree.
+    Tree,
+}
+
+impl<'de> Deserialize<'de> for RequestEntryProbe {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+        use serde::de::{MapAccess, Visitor};
 
         struct ProbeVisitor;
 
         impl<'de> Visitor<'de> for ProbeVisitor {
-            type Value = ProbeString;
+            type Value = RequestEntryProbe;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a route discriminator")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(ProbeString(
-                    (value.len() <= ProbeString::MAX_ROUTE_NAME_BYTES).then(|| value.to_owned()),
-                ))
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(ProbeString(None))
+                formatter.write_str("a request object")
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(ProbeString(None))
-            }
-
-            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(ProbeString(None))
-            }
-
-            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(ProbeString(None))
-            }
-
-            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(ProbeString(None))
-            }
-
-            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(ProbeString(None))
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(ProbeString(None))
+                let mut probe = RequestEntryProbe::default();
+                while let Some(key) = map.next_key::<ProbeKey>()? {
+                    match key {
+                        ProbeKey::Method => probe.method = map.next_value()?,
+                        ProbeKey::Kind => probe.kind = map.next_value()?,
+                        ProbeKey::PageField => {
+                            map.next_value::<SkippedValue>()?;
+                            probe.page_fields = true;
+                        }
+                        ProbeKey::Other => {
+                            map.next_value::<SkippedValue>()?;
+                        }
+                    }
+                }
+                Ok(probe)
             }
         }
 
-        deserializer.deserialize_any(ProbeVisitor)
+        deserializer.deserialize_map(ProbeVisitor)
     }
 }
 
-impl RequestMethodProbe {
+/// A top-level key classified in place; the probe runs before the resident reservation,
+/// so no key text is retained, whatever its length.
+enum ProbeKey {
+    Method,
+    Kind,
+    PageField,
+    Other,
+}
+
+impl<'de> Deserialize<'de> for ProbeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Visitor;
+
+        struct KeyVisitor;
+
+        impl Visitor<'_> for KeyVisitor {
+            type Value = ProbeKey;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an object key")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(match value {
+                    "method" => ProbeKey::Method,
+                    "kind" => ProbeKey::Kind,
+                    key if TRANSFORM_PAGE_FIELDS.contains(&key) => ProbeKey::PageField,
+                    _ => ProbeKey::Other,
+                })
+            }
+        }
+
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
+/// Skips one value through `deserialize_any`, so every check the deserializer applies to a
+/// `Value` parse applies here: the nesting limit, number range, string escapes, and UTF-8.
+/// `IgnoredAny` is not used because serde_json skips it without those checks, and a body
+/// the tree decode refuses would then probe and reach the direct lane. The cost is the
+/// deserializer's scratch buffer for one escaped string at a time, released with the probe.
+struct SkippedValue;
+
+impl<'de> Deserialize<'de> for SkippedValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{MapAccess, SeqAccess, Visitor};
+
+        struct SkipVisitor;
+
+        impl<'de> Visitor<'de> for SkipVisitor {
+            type Value = SkippedValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("any JSON value")
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<SkippedValue>()?.is_some() {}
+                Ok(SkippedValue)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<SkippedValue, SkippedValue>()?.is_some() {}
+                Ok(SkippedValue)
+            }
+        }
+
+        deserializer.deserialize_any(SkipVisitor)
+    }
+}
+
+impl RequestEntryProbe {
+    /// The discriminator dispatch resolves: `method` when it is a string, else `kind`.
+    fn route(&self) -> &RouteName {
+        match self.method {
+            RouteName::Absent => &self.kind,
+            RouteName::Named(_) | RouteName::Overlong => &self.method,
+        }
+    }
+
+    fn routes_to_unpaged_transform(&self) -> bool {
+        matches!(self.route(), RouteName::Named(name) if name == "transform") && !self.page_fields
+    }
+
+    /// The byte-cap class. Dispatch reads `method` and falls back to `kind`, so the class is
+    /// read the same way; a `kind` beside a `method` names nothing. An overlong `method` reads
+    /// as absent here, so the body is admitted under the wider cap and dispatch then refuses
+    /// it by shape; the cap only ever widens for the class, it never selects a lane.
     fn is_transform_class(&self) -> bool {
-        // Dispatch reads `method` and falls back to `kind`, so the class is
-        // read the same way; a `kind` beside a `method` names nothing.
-        let route = self.method.as_str().or_else(|| self.kind.as_str());
+        let route = self.method.short().or_else(|| self.kind.short());
         route == Some("transform")
             // The state-sync path uses the transform-class ceiling because one row can exceed the facade cap.
             || route == Some("state_sync")
@@ -15475,10 +15616,140 @@ impl RequestMethodProbe {
     }
 }
 
+/// A discriminator read that keeps only a route-length string and never materializes
+/// anything else.
+///
+/// The probe runs before the host's resident-byte reservation, so an array or object under
+/// `method` must be skipped, not built. Dispatch treats a missing or non-string
+/// discriminator as absent and any string, however long, as the route name; the variants
+/// keep that distinction without retaining a long string.
+#[derive(Default)]
+enum RouteName {
+    #[default]
+    Absent,
+    Named(String),
+    Overlong,
+}
+
+impl RouteName {
+    const MAX_ROUTE_NAME_BYTES: usize = 64;
+
+    fn short(&self) -> Option<&str> {
+        match self {
+            RouteName::Named(name) => Some(name),
+            RouteName::Absent | RouteName::Overlong => None,
+        }
+    }
+
+    /// `Skip` is the type nested values under the discriminator are skipped through:
+    /// `SkippedValue` applies the tree decode's checks, `IgnoredAny` applies none.
+    fn deserialize_skipping<'de, D, Skip>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        Skip: Deserialize<'de>,
+    {
+        use serde::de::{MapAccess, SeqAccess, Visitor};
+
+        struct RouteNameVisitor<Skip>(PhantomData<Skip>);
+
+        impl<'de, Skip: Deserialize<'de>> Visitor<'de> for RouteNameVisitor<Skip> {
+            type Value = RouteName;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a route discriminator")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(if value.len() <= RouteName::MAX_ROUTE_NAME_BYTES {
+                    RouteName::Named(value.to_owned())
+                } else {
+                    RouteName::Overlong
+                })
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<Skip>()?.is_some() {}
+                Ok(RouteName::Absent)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<Skip, Skip>()?.is_some() {}
+                Ok(RouteName::Absent)
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(RouteName::Absent)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(RouteName::Absent)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(RouteName::Absent)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(RouteName::Absent)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(RouteName::Absent)
+            }
+        }
+
+        deserializer.deserialize_any(RouteNameVisitor::<Skip>(PhantomData))
+    }
+}
+
+impl<'de> Deserialize<'de> for RouteName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        RouteName::deserialize_skipping::<D, SkippedValue>(deserializer)
+    }
+}
+
+/// The discriminator as the byte cap read it before the entry probe existed: nested values
+/// skipped without the tree decode's checks.
+#[derive(Default)]
+struct LenientRouteName(RouteName);
+
+impl<'de> Deserialize<'de> for LenientRouteName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        RouteName::deserialize_skipping::<D, serde::de::IgnoredAny>(deserializer).map(Self)
+    }
+}
+
+/// The byte-cap class read for a body above the facade cap that yielded no entry probe.
+/// The entry probe refuses whatever a `Value` parse refuses; the cap admits such a body by
+/// its discriminator alone and dispatch then refuses it by shape, so this read skips every
+/// other field without checking it, as the derive does.
+#[derive(Default, Deserialize)]
+struct RequestClassProbe {
+    #[serde(default)]
+    method: LenientRouteName,
+    #[serde(default)]
+    kind: LenientRouteName,
+}
+
+impl RequestClassProbe {
+    fn is_transform_class(body: &[u8]) -> bool {
+        serde_json::from_slice::<RequestClassProbe>(body).is_ok_and(|probe| {
+            RequestEntryProbe {
+                method: probe.method.0,
+                kind: probe.kind.0,
+                page_fields: false,
+            }
+            .is_transform_class()
+        })
+    }
+}
+
 /// The estimate doubles counted node storage for `Vec` and map growth.
 const VALUE_NODE_SLACK: usize = 2;
 
-/// The decoded `Value` tree and the typed request coexist during `serde_json::from_value`.
+/// The decoded `Value` tree and the typed request coexist during `serde_json::from_value` on
+/// the tree-decode lane; the direct decode of an unpaged transform body retains at most as
+/// much, so one bound covers both lanes.
 const RETAINED_NODE_COPIES: usize = 2;
 
 const VALUE_NODE_CHARGE_BYTES: usize = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
@@ -15558,15 +15829,23 @@ fn resident_capacity_error() -> PreparedOutcome {
     }
 }
 
-fn enforce_request_byte_cap(body: &[u8]) -> Result<(), PreparedOutcome> {
-    if body.len() <= MAX_FACADE_FRAME_BYTES {
+/// `probe` is the body's entry probe, `None` when the body yielded none; a body above the
+/// facade cap with no probe is classed by the lenient read, so a discriminator the tree
+/// decode cannot parse past still widens the cap the way it always did.
+fn enforce_request_byte_cap(
+    body: &[u8],
+    probe: Option<&RequestEntryProbe>,
+) -> Result<(), PreparedOutcome> {
+    let body_len = body.len();
+    if body_len <= MAX_FACADE_FRAME_BYTES {
         return Ok(());
     }
-    let transform_class = serde_json::from_slice::<RequestMethodProbe>(body)
-        .map(|probe| probe.is_transform_class())
-        .unwrap_or(false);
+    let transform_class = match probe {
+        Some(probe) => probe.is_transform_class(),
+        None => RequestClassProbe::is_transform_class(body),
+    };
     if transform_class {
-        if body.len() <= MAX_TRANSFORM_FRAME_BYTES {
+        if body_len <= MAX_TRANSFORM_FRAME_BYTES {
             return Ok(());
         }
         return Err(invalid_params_error(
@@ -18981,6 +19260,8 @@ mod tests {
 
     #[test]
     fn request_byte_cap_widens_for_transform_class_only() {
+        let enforce_request_byte_cap =
+            |body: &[u8]| enforce_request_byte_cap(body, probe_request(body).as_ref());
         let pad = |method: &str, key: &str, bytes: usize| {
             format!(
                 "{{\"{key}\":\"{method}\",\"pad\":\"{}\"}}",
@@ -19027,15 +19308,417 @@ mod tests {
         );
         assert!(structured.len() > MAX_FACADE_FRAME_BYTES);
         assert!(enforce_request_byte_cap(structured.as_bytes()).is_ok());
+        // A body the tree cannot parse still widens by its discriminator, as it always did;
+        // dispatch then refuses it by shape.
+        let over_deep = format!(
+            "{{\"kind\":\"transform\",\"x\":{}{},\"pad\":\"{}\"}}",
+            "[".repeat(200),
+            "]".repeat(200),
+            "x".repeat(two_mib)
+        );
+        assert!(probe_request(over_deep.as_bytes()).is_none());
+        assert!(enforce_request_byte_cap(over_deep.as_bytes()).is_ok());
         // A string longer than any route name is dropped, not retained.
         let long_method = format!(
             "{{\"method\":\"{}\",\"kind\":\"transform\"}}",
             "m".repeat(two_mib)
         );
         assert!(enforce_request_byte_cap(long_method.as_bytes()).is_ok());
-        // The transform cap is a hard ceiling.
+        // The transform cap is inclusive: a body of exactly 32 MiB is admitted, one more byte is not.
+        let envelope = pad("transform", "kind", 0).len();
+        let exact = pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES - envelope);
+        assert_eq!(exact.len(), MAX_TRANSFORM_FRAME_BYTES);
+        assert!(enforce_request_byte_cap(&exact).is_ok());
+        let over = pad(
+            "transform",
+            "kind",
+            MAX_TRANSFORM_FRAME_BYTES - envelope + 1,
+        );
+        assert!(enforce_request_byte_cap(&over).is_err());
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
+        );
+    }
+
+    #[test]
+    fn entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does() {
+        let probe = |body: &str| probe_request(body.as_bytes());
+        let unpaged =
+            |body: &str| probe(body).is_some_and(|probe| probe.routes_to_unpaged_transform());
+        assert!(unpaged(r#"{"method":"transform","session_id":"s"}"#));
+        assert!(unpaged(r#"{"kind":"transform"}"#));
+        // A non-string `method` is absent to dispatch, which then reads `kind`.
+        assert!(unpaged(r#"{"method":0,"kind":"transform"}"#));
+        assert!(unpaged(r#"{"method":null,"kind":"transform"}"#));
+        assert!(unpaged(r#"{"method":{"a":[1]},"kind":"transform"}"#));
+        // A `kind` beside a string `method` names nothing.
+        assert!(!unpaged(r#"{"method":"status","kind":"transform"}"#));
+        // Dispatch takes any string `method` as the route, so an overlong one is not the
+        // transform route even though the cap still widens for it.
+        let overlong = format!(r#"{{"method":"{}","kind":"transform"}}"#, "m".repeat(65));
+        assert!(!unpaged(&overlong));
+        assert!(probe(&overlong).unwrap().is_transform_class());
+        assert!(!unpaged(r#"{"method":"state_sync"}"#));
+        // Every page-envelope key, `null` included, selects the page lane.
+        for field in TRANSFORM_PAGE_FIELDS {
+            let paged = format!(r#"{{"method":"transform","{field}":null}}"#);
+            assert!(!unpaged(&paged), "{field}");
+            assert!(probe(&paged).unwrap().page_fields, "{field}");
+        }
+        // A repeated key keeps its last value, as the tree does.
+        assert!(unpaged(r#"{"method":"status","method":"transform"}"#));
+        assert!(!unpaged(r#"{"method":"transform","method":"status"}"#));
+        // Non-object, malformed, and over-deep bodies yield no probe: the tree path decides them.
+        assert!(probe(r#"{"method":"transform""#).is_none());
+        assert!(probe(r#"["transform"]"#).is_none());
+        assert!(probe(r#""transform""#).is_none());
+        assert!(probe("").is_none());
+        let nested = |depth: usize| {
+            format!(
+                r#"{{"method":"transform","x":{}{}}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        let deepest_tree = (1..)
+            .take_while(|depth| serde_json::from_str::<Value>(&nested(*depth)).is_ok())
+            .last()
+            .unwrap();
+        assert!(unpaged(&nested(deepest_tree)));
+        assert!(probe(&nested(deepest_tree + 1)).is_none());
+    }
+
+    /// Bodies that exercise every decode branch the two lanes must agree on.
+    fn transform_decode_corpus() -> Vec<(&'static str, Vec<u8>)> {
+        let message = serde_json::to_string(&ck("m1", 1, "seed block + new_messages")).unwrap();
+        let valid = |extra: &str| {
+            format!(
+                r#"{{"kind":"transform","v":2,"serializer_profile":"owned-llmrunner","session_id":"ses","render_config":"cfg0","messages":[{message}]{extra}}}"#
+            )
+            .into_bytes()
+        };
+        let mut corpus = vec![
+            ("valid", valid("")),
+            ("method discriminator", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(r#""kind":"transform""#, r#""method":"transform""#, 1)
+                    .into_bytes()
+            }),
+            (
+                "unknown top-level field",
+                valid(r#","not_a_field":{"deep":[1,2,3]}"#),
+            ),
+            (
+                "null on an optional field",
+                valid(r#","request_observed_at_ms":null"#),
+            ),
+            ("null on a defaulted field", valid(r#","is_subagent":null"#)),
+            (
+                "wrong type on a defaulted field",
+                valid(r#","protected_tags":"twenty""#),
+            ),
+            (
+                "float on an integer field",
+                valid(r#","protected_tags":1.0"#),
+            ),
+            (
+                "negative on an unsigned field",
+                valid(r#","request_observed_at_ms":-1"#),
+            ),
+            (
+                "integer above u64",
+                valid(r#","request_observed_at_ms":18446744073709551616"#),
+            ),
+            (
+                "exponent on an integer field",
+                valid(r#","protected_tags":1e2"#),
+            ),
+            ("negative zero", valid(r#","history_budget_tokens":-0"#)),
+            ("duplicate top-level key", valid(r#","session_id":"other""#)),
+            ("duplicate discriminator", valid(r#","kind":"transform""#)),
+            ("duplicate nested key", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(r#""mid":"m1""#, r#""mid":"m0","mid":"m1""#, 1)
+                    .into_bytes()
+            }),
+            ("missing required field", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(r#""render_config":"cfg0","#, "", 1)
+                    .into_bytes()
+            }),
+            ("missing serializer profile", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(r#""serializer_profile":"owned-llmrunner","#, "", 1)
+                    .into_bytes()
+            }),
+            ("unknown serializer profile", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen("owned-llmrunner", "no-such-profile", 1)
+                    .into_bytes()
+            }),
+            ("null page field", valid(r#","transform_page_id":null"#)),
+            ("one page field", valid(r#","transform_page_id":"page""#)),
+            ("non-string discriminator with kind", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(
+                    r#""kind":"transform""#,
+                    r#""method":7,"kind":"transform""#,
+                    1,
+                )
+                .into_bytes()
+            }),
+            ("overlong method beside kind", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(
+                    r#""kind":"transform""#,
+                    &format!(r#""method":"{}","kind":"transform""#, "m".repeat(65)),
+                    1,
+                )
+                .into_bytes()
+            }),
+            ("other route", valid(r#","method":"status""#)),
+            ("trailing bytes", {
+                let mut body = valid("");
+                body.extend_from_slice(b" {}");
+                body
+            }),
+            (
+                "malformed",
+                b"{\"kind\":\"transform\",\"session_id\":".to_vec(),
+            ),
+            ("array body", b"[\"transform\"]".to_vec()),
+            ("string body", b"\"transform\"".to_vec()),
+            ("empty body", Vec::new()),
+            ("messages as an object", valid(r#","messages":{}"#)),
+            // Shapes the derive skips without checking under an ignored field; the tree refuses each.
+            (
+                "number out of range under an ignored field",
+                valid(r#","x":1e400"#),
+            ),
+            (
+                "lone surrogate under an ignored field",
+                valid(r#","x":"\ud83d""#),
+            ),
+            ("invalid UTF-8 under an ignored field", {
+                let mut body = valid(r#","x":"a""#);
+                body.truncate(body.len() - 2);
+                body.extend_from_slice(b"\xff\"}");
+                body
+            }),
+        ];
+        let nested = |depth: usize| {
+            valid(&format!(
+                r#","x":{}{}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            ))
+        };
+        // The deepest nesting a `Value` parse accepts, then one level past it.
+        let deepest_tree = (1..)
+            .take_while(|depth| serde_json::from_slice::<Value>(&nested(*depth)).is_ok())
+            .last()
+            .unwrap();
+        corpus.push(("nesting at the tree limit", nested(deepest_tree)));
+        corpus.push(("nesting past the tree limit", nested(deepest_tree + 1)));
+        corpus
+    }
+
+    fn tree_decode(body: &[u8]) -> Result<TransformRequest, String> {
+        let tree = serde_json::from_slice::<Value>(body).map_err(|error| error.to_string())?;
+        serde_json::from_value(tree).map_err(|error| error.to_string())
+    }
+
+    fn direct_decode(body: &[u8]) -> Result<TransformRequest, String> {
+        serde_json::from_slice::<TransformRequest>(body).map_err(|error| error.to_string())
+    }
+
+    /// Where both decodes accept a body they decode it to the same request. The two
+    /// decodes differ in acceptance on exactly two shapes, and the handler keeps both off
+    /// the direct lane: a repeated key in a derived struct, top-level or nested, which the
+    /// derive refuses and the tree keeps last-wins (the direct lane falls back to the tree
+    /// decode), and nesting past
+    /// the tree's depth limit under an ignored field, which the derive skips without a
+    /// limit (the probe refuses it first). A body assembled from pages decodes to the same
+    /// request as the same body in one slice.
+    #[test]
+    fn direct_and_tree_transform_decodes_agree_on_the_corpus() {
+        let corpus = transform_decode_corpus();
+        let mut accepted = Vec::new();
+        let mut tree_only = Vec::new();
+        let mut direct_only = Vec::new();
+        for (name, body) in &corpus {
+            // A probe is proof that the tree parses the body.
+            if probe_request(body).is_some() {
+                assert!(
+                    serde_json::from_slice::<Value>(body).is_ok(),
+                    "{name}: probed, so the tree must parse it"
+                );
+            }
+            match (direct_decode(body), tree_decode(body)) {
+                (Ok(direct), Ok(tree)) => {
+                    accepted.push(*name);
+                    if *name == "negative zero" {
+                        let sign = |request: &TransformRequest| {
+                            request.history_budget_tokens.unwrap().to_bits()
+                        };
+                        assert_eq!(sign(&direct), sign(&tree));
+                        assert!(direct.history_budget_tokens.unwrap().is_sign_negative());
+                    }
+                    assert_eq!(
+                        serde_json::to_value(&direct).unwrap(),
+                        serde_json::to_value(&tree).unwrap(),
+                        "{name}: both decodes accept, so they must agree"
+                    );
+                }
+                (Err(_), Err(_)) => {}
+                (Err(_), Ok(_)) => tree_only.push(*name),
+                (Ok(_), Err(_)) => direct_only.push(*name),
+            }
+        }
+        assert_eq!(
+            accepted,
+            [
+                "valid",
+                "method discriminator",
+                "unknown top-level field",
+                "null on an optional field",
+                "negative zero",
+                "missing serializer profile",
+                "unknown serializer profile",
+                "null page field",
+                "one page field",
+                "non-string discriminator with kind",
+                "overlong method beside kind",
+                "other route",
+                "nesting at the tree limit",
+            ],
+            "the bodies both decodes accept"
+        );
+        assert_eq!(
+            tree_only,
+            [
+                "duplicate top-level key",
+                "duplicate discriminator",
+                "duplicate nested key"
+            ],
+            "the derive refuses a repeated key where the tree keeps the last value"
+        );
+        assert_eq!(
+            direct_only,
+            [
+                "number out of range under an ignored field",
+                "lone surrogate under an ignored field",
+                "invalid UTF-8 under an ignored field",
+                "nesting past the tree limit",
+            ],
+            "the derive skips an ignored field without the tree's checks"
+        );
+        for name in direct_only {
+            let (_, body) = corpus
+                .iter()
+                .find(|(candidate, _)| candidate == &name)
+                .unwrap();
+            assert!(
+                probe_request(body).is_none(),
+                "{name}: the probe refuses the body before the direct decode can see it"
+            );
+        }
+
+        // The page lane strips the envelope, concatenates the array fields, and decodes the
+        // assembled tree; the result is the one-slice direct decode.
+        let (_, one_slice) = corpus.iter().find(|(name, _)| *name == "valid").unwrap();
+        let mut whole: Value = serde_json::from_slice(one_slice).unwrap();
+        let messages = whole["messages"].take();
+        let first = json!({
+            "kind": "transform",
+            "session_id": "ses",
+            "messages": [messages[0].clone()],
+            "transform_page_id": "page-1",
+            "transform_generation": 1,
+            "transform_page_index": 0,
+            "transform_page_total": 2,
+            "transform_page_complete": false,
+            "transform_page_digest": "d0",
+        });
+        let mut last = whole.clone();
+        last["messages"] = json!([]);
+        for (field, value) in [
+            ("transform_page_id", json!("page-1")),
+            ("transform_generation", json!(1)),
+            ("transform_page_index", json!(1)),
+            ("transform_page_total", json!(2)),
+            ("transform_page_complete", json!(true)),
+            ("transform_page_digest", json!("d1")),
+        ] {
+            last[field] = value;
+        }
+        let assembled = assemble_transform_pages(vec![first, last]).unwrap();
+        let paged: TransformRequest = serde_json::from_value(assembled).unwrap();
+        assert_eq!(
+            serde_json::to_value(&paged).unwrap(),
+            serde_json::to_value(direct_decode(one_slice).unwrap()).unwrap(),
+            "the page-assembled body decodes to the one-slice request"
+        );
+    }
+
+    /// One outcome per body, with the timing block removed: it differs between two runs of
+    /// the same body and says nothing about the lane.
+    fn comparable_outcome(outcome: PreparedOutcome) -> (String, String, Option<Value>) {
+        match outcome {
+            PreparedOutcome::Response(bytes) => {
+                let mut response: Value = serde_json::from_slice(&bytes).unwrap();
+                if let Some(object) = response.as_object_mut() {
+                    object.remove("timings");
+                }
+                ("response".to_string(), String::new(), Some(response))
+            }
+            PreparedOutcome::Error { code, message } => (code, message, None),
+            PreparedOutcome::Streamed => ("streamed".to_string(), String::new(), None),
+        }
+    }
+
+    /// Every corpus body reaches the same outcome through the body entry as through the
+    /// tree decode: the same response, or the same code and message. The bodies the direct
+    /// decode accepts under the unpaged transform route take the direct lane, whatever the
+    /// handler then decides; every other body takes the tree lane.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths() {
+        let mut direct_lane = Vec::new();
+        for (name, body) in transform_decode_corpus() {
+            let (direct, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let (tree, _store, _dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let (lane, through_body) = direct
+                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref())
+                .await;
+            let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let through_tree = tree
+                .dispatch_value_with_inbound_bytes(test_route(7), request, Some(body.len()))
+                .await;
+            let through_body = comparable_outcome(through_body);
+            assert_eq!(through_body, comparable_outcome(through_tree), "{name}");
+            if name == "valid" {
+                assert_eq!(through_body.0, "response", "{name}: {through_body:?}");
+            }
+            if lane == BodyLane::Direct {
+                direct_lane.push(name);
+            }
+        }
+        assert_eq!(
+            direct_lane,
+            [
+                "valid",
+                "method discriminator",
+                "unknown top-level field",
+                "null on an optional field",
+                "negative zero",
+                "missing serializer profile",
+                "unknown serializer profile",
+                "non-string discriminator with kind",
+                "nesting at the tree limit",
+            ],
+            "the bodies that decode typed from their bytes; the rest take the tree lane"
         );
     }
 

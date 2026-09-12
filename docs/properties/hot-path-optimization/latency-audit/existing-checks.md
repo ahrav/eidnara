@@ -20,7 +20,11 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [`request_byte_cap_widens_for_transform_class_only`][t-cap] | `enforce_request_byte_cap` class set, `kind` beside `method`, non-string fallback, unparseable refusal, structured and 2 MiB `method`, body above the 32 MiB ceiling. | unaudited |
+| [`request_byte_cap_widens_for_transform_class_only`][t-cap] | `enforce_request_byte_cap` class set, `kind` beside `method`, non-string fallback, unparseable refusal, structured and 2 MiB `method`, a 2 MiB over-deep transform-class body admitted, a body of exactly 32 MiB admitted and one byte more refused. | unaudited |
+| [`entry_probe_reads_the_route_and_the_page_envelope_as_dispatch_does`][t-probe] | The probe resolves `method` then `kind` as dispatch does, counts every page key with `null`, keeps the last repeated key, splits an overlong `method` between cap widening and route, and refuses non-object, malformed, and over-deep bodies. | unaudited |
+| [`direct_and_tree_transform_decodes_agree_on_the_corpus`][t-decode-diff] | A probe implies the tree parses the body; both decodes give one request where both accept (thirteen bodies pinned); only repeated keys are tree-only; only derive-lenient shapes under an ignored field are direct-only, each refused by the probe; a two-page assembly decodes to the one-slice request. | unaudited |
+| [`unpaged_transform_bodies_reach_the_same_outcome_through_both_entry_paths`][t-entry-diff] | Every corpus body gives the same response or the same code and message through `dispatch_body` and through the tree dispatch; the nine direct-lane bodies are pinned and the valid body is served. | unaudited |
+| [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The footprint bound covers the tree decode's peak, and the direct decode peaks at or below it. | unaudited |
 | [`value_footprint_counts_nodes_outside_strings_only`][t-fp] | Separators inside strings and escaped quotes do not count as nodes. | unaudited |
 | [`value_footprint_charges_every_retained_copy_of_string_bytes`][t-fp] | The bound is at least three copies of a 1 MiB text block. | unaudited |
 | [`scalar_dense_bodies_bound_far_above_their_wire_size`][t-fp] | Node cost dominates for `[1,1,...]`; string bytes are not charged as nodes. | unaudited |
@@ -38,11 +42,8 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 None found: a handler-level test that drives `Handler::handle` with an
 over-cap or over-footprint body and asserts `invalid_params`, or drains the
 scratch pool and asserts `queue_full` (`RequestCtx` is transport-private, so
-tests enter at [`dispatch_value`][testentry]); a differential of duplicate
-keys, `null` fields, or malformed JSON across the unpaged and paged lanes; a
-test that a `null` page field selects the page lane; a test at exactly
-`MAX_TRANSFORM_FRAME_BYTES`; a test that counts string copies retained by the
-typed decode. The `request_too_large` assertion in
+tests enter at [`dispatch_value`][testentry] or [`dispatch_body`][bodyentry]);
+a test that counts string copies retained by the typed decode. The `request_too_large` assertion in
 [direct_host.rs][fixture] tests the fixture's line-based control channel,
 not the handler.
 
@@ -443,7 +444,12 @@ not a claim that no related check exists anywhere in the repository.
 
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12484-L12499
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L18576-L18631
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L19262-L19341
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L19344-L19389
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19544-L19662
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19685-L19723
+[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L81-L118
+[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12649-L12669
 [t-fp]: ../../../../crates/daemon/src/lib.rs#L18636-L18697
 [t-dispatch]: ../../../../crates/daemon/src/lib.rs#L26853-L26908
 [t-shape]: ../../../../crates/daemon/src/lib.rs#L32704-L32721
