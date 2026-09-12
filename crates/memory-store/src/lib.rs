@@ -8800,10 +8800,15 @@ impl MemoryStore {
                 Ok::<_, MemoryStoreError>(write.scans.len() - 1)
             })
             .transpose()?;
+        // The fingerprint is stored only inside a `scheduler_interesting` entry, so its scan
+        // joins the retained owner only when that entry is written.
+        let fingerprint_scan = scheduler_full_array_fingerprint
+            .map(|fingerprint| {
+                write.identity("scheduler_full_array_fingerprint", fingerprint)?;
+                Ok::<_, MemoryStoreError>(write.scans.len() - 1)
+            })
+            .transpose()?;
         let retained_scans_start = write.scans.len();
-        if let Some(fingerprint) = scheduler_full_array_fingerprint {
-            write.identity("scheduler_full_array_fingerprint", fingerprint)?;
-        }
         let first_divergence = first_divergence
             .map(|value| {
                 write.json_content(
@@ -8936,6 +8941,14 @@ impl MemoryStore {
             })
             .transpose()?;
         let history_scans = history_scans_start..write.scans.len();
+        if let (Some(_), Some(fingerprint_scan)) = (&scheduler_interesting_json, fingerprint_scan) {
+            write.reassign_scans_in(
+                fingerprint_scan..fingerprint_scan + 1,
+                "session",
+                session_id,
+                CACHE_STATE_RETAINED_OWNER_KEY,
+            );
+        }
         // The accepted cache row version is a stable identity for the pass that produced the
         // divergence. Overlay timestamps are the request clock when available; direct callers
         // that omit one still receive a real commit timestamp.
@@ -9096,6 +9109,11 @@ impl MemoryStore {
                 (
                     "scheduler_interesting",
                     scheduler_interesting_json.is_some(),
+                    PASS_TRACE_HISTORY_RING_LEN - 1,
+                ),
+                (
+                    "scheduler_full_array_fingerprint",
+                    scheduler_interesting_json.is_some() && fingerprint_scan.is_some(),
                     PASS_TRACE_HISTORY_RING_LEN - 1,
                 ),
                 ("first_divergence", first_divergence.is_some(), 0),
@@ -14398,7 +14416,8 @@ const SIDE_CHANNEL_ROW_ALREADY_RETIRED: &str = "historian side-channel row alrea
 /// Retires one pending outbox row inside the delivery transaction. The `delivered_at_ms IS
 /// NULL` predicate is the row-still-pending guard: a concurrent drainer that retired the row
 /// first leaves nothing to delete, the error rolls this transaction's target insert back,
-/// and the row is delivered once.
+/// and the row is delivered once. The payload predicate keeps a handle read before a
+/// session reset from consuming a row re-issued under the same key with other bytes.
 fn retire_historian_side_channel_tx(
     tx: &GuardedConn<'_>,
     row: &HistorianSideChannelOutboxRow,
@@ -14407,7 +14426,7 @@ fn retire_historian_side_channel_tx(
         "DELETE FROM historian_side_channel_outbox
           WHERE session_id = ?1 AND firing_seq = ?2 AND kind = ?3
             AND source_start = ?4 AND source_end = ?5 AND item_index = ?6
-            AND delivered_at_ms IS NULL",
+            AND delivered_at_ms IS NULL AND payload_json = ?7",
         params![
             row.session_id,
             row.id.firing_seq as i64,
@@ -14415,6 +14434,7 @@ fn retire_historian_side_channel_tx(
             row.id.source_start as i64,
             row.id.source_end as i64,
             row.id.item_index as i64,
+            row.payload_json,
         ],
     )?;
     if changed != 1 {
@@ -16966,6 +16986,130 @@ mod tests {
             (counts["project_root"], counts["first_divergence"]),
             (2, 1),
             "a second stored root adds its receipt; the divergence keeps its one, got {counts:?}"
+        );
+    }
+
+    /// A fingerprint is stored only inside a `scheduler_interesting` entry, so a pass that
+    /// writes none leaves its fingerprint scan under the pass owner.
+    #[test]
+    fn a_fingerprint_without_an_interesting_entry_keeps_no_retained_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let core = CoreState::empty();
+        let meta = ModuleMeta::default();
+        let observation = PassSchedulerObservation {
+            timestamp_ms: 1,
+            scheduler_decision: "Defer".to_string(),
+            drain_latch_active: false,
+        };
+        let field = ["scheduler_full_array_fingerprint"];
+        let mut version = None;
+        for pass in 0..5 {
+            version = Some(
+                store
+                    .commit_transform(
+                        "ses",
+                        TransformCommit {
+                            scheduler_observation: Some(&observation),
+                            scheduler_full_array_fingerprint: Some("fp-1"),
+                            ..base_commit(version, &core, &meta)
+                        },
+                    )
+                    .unwrap(),
+            );
+            let counts = field_copy_counts(&store, "ses", &field);
+            assert_eq!(
+                counts["scheduler_full_array_fingerprint"], 1,
+                "pass {pass}: only the live pass's scan of an unstored fingerprint, got {counts:?}"
+            );
+        }
+        store
+            .commit_transform(
+                "ses",
+                TransformCommit {
+                    scheduler_observation: Some(&observation),
+                    scheduler_full_array_fingerprint: Some("fp-1"),
+                    scheduler_applied_reductions: true,
+                    ..base_commit(version, &core, &meta)
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            field_copy_counts(&store, "ses", &field)["scheduler_full_array_fingerprint"],
+            1,
+            "a fingerprint stored inside an interesting entry keeps one retained receipt"
+        );
+    }
+
+    /// A drainer that read a row before it was retired, the session reset, and the key
+    /// re-issued for a new payload must not deliver its stale payload or consume the new row.
+    #[test]
+    fn a_stale_delivery_does_not_retire_a_re_created_outbox_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let old_payload = serde_json::to_string(&HistorianEventCandidate {
+            kind: "old".into(),
+            at_compartment: Some(1),
+            compartment_id: Some(0),
+            fields_json: "{}".into(),
+            created_at: 1,
+            harness: "module".into(),
+        })
+        .unwrap();
+        let new_payload = old_payload.replace("\"old\"", "\"new\"");
+        let insert = |payload: &str| {
+            store
+                .inner
+                .with_conn_fenced(|tx| {
+                    tx.execute(
+                        "INSERT INTO historian_side_channel_outbox(session_id, firing_seq, kind, \
+                         source_start, source_end, item_index, payload_json, created_at_ms) \
+                         VALUES ('ses', 1, 'event', 1, 2, 0, ?1, 1)",
+                        params![payload],
+                    )
+                    .map(|_| ())
+                })
+                .unwrap();
+        };
+        insert(&old_payload);
+        let stale = store
+            .load_due_historian_side_channels("ses", "event", i64::MAX, 32)
+            .unwrap()
+            .remove(0);
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "DELETE FROM historian_side_channel_outbox WHERE session_id = 'ses'",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        insert(&new_payload);
+        let delivered = store.deliver_historian_side_channel(&stale).unwrap();
+        assert!(
+            !delivered,
+            "the stale handle reports the row as already retired"
+        );
+        assert_eq!(
+            store.load_compartment_events("ses").unwrap().len(),
+            0,
+            "the stale payload is not delivered"
+        );
+        let pending = store
+            .load_due_historian_side_channels("ses", "event", i64::MAX, 32)
+            .unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|row| row.payload_json.as_str())
+                .collect::<Vec<_>>(),
+            vec![new_payload.as_str()],
+            "the re-created row stays pending with its own payload"
         );
     }
 

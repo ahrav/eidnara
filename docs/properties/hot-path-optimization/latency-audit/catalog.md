@@ -804,9 +804,10 @@ violation); a stable pass; an Emergency95 pass that reruns and commits twice;
 a CAS conflict on the first commit attempt so the [retry loop][cas-retry]
 reruns `apply_once` and commits once (one breadcrumb, not zero or two); a
 fresh session whose first pass commits; an injected failure in the
-`pass_trace` upsert during a committing pass (no store seam exists at HEAD;
-the four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928`
-cover the side channel, the authority route read, and dreamer tasks only).
+`pass_trace` upsert during a committing pass, injected through
+[`fail_next_pass_trace_receive_for_test`][receive-seam], which fires inside
+the receive transaction at its UPSERT; the older `fail_next_*_for_test` seams
+cover the side channel, the authority route read, and dreamer tasks.
 Confidence: high - [Evidence](evidence/pass-trace-writes-count-every-pass-outside-the-cache-cas.md).
 [`trace_pass_received`][received] (its [doc][received-doc] says the write
 never contends with or extends the pass commit),
@@ -2658,6 +2659,7 @@ evaluation of this area and its disposition are recorded in
 [truncate]: ../../../../crates/daemon/src/transform.rs#L4136-L4142
 [sched-test]: ../../../../crates/daemon/src/transform.rs#L13686
 [received]: ../../../../crates/memory-store/src/lib.rs#L6565-L6615
+[receive-seam]: ../../../../crates/memory-store/src/lib.rs#L6311
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6562-L6564
 [flagged]: ../../../../crates/memory-store/src/lib.rs#L6576-L6594
 [stable]: ../../../../crates/memory-store/src/lib.rs#L6620-L6712
@@ -2679,25 +2681,25 @@ evaluation of this area and its disposition are recorded in
 [clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3482-L3487
 [unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3490-L3491
 [unique]: ../../../../crates/memory-store/src/lib.rs#L3492-L3573
-[recomp]: ../../../../crates/memory-store/src/lib.rs#L10187-L10280
+[recomp]: ../../../../crates/memory-store/src/lib.rs#L10205-L10298
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1387-L1388
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1503-L1504
 [phase]: ../../../../crates/memory-store/src/lib.rs#L537-L546
-[drain]: ../../../../crates/memory-store/src/lib.rs#L10936-L10981
-[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L10933-L10935
-[status-sc]: ../../../../crates/memory-store/src/lib.rs#L10983-L11009
-[load-due]: ../../../../crates/memory-store/src/lib.rs#L11011-L11045
-[deliver]: ../../../../crates/memory-store/src/lib.rs#L11560-L11638
-[failure]: ../../../../crates/memory-store/src/lib.rs#L11105-L11144
-[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11146-L11159
-[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11161-L11183
-[publish]: ../../../../crates/memory-store/src/lib.rs#L10689
-[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L10892-L10901
+[drain]: ../../../../crates/memory-store/src/lib.rs#L10954-L10999
+[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L10951-L10953
+[status-sc]: ../../../../crates/memory-store/src/lib.rs#L11001-L11027
+[load-due]: ../../../../crates/memory-store/src/lib.rs#L11029-L11063
+[deliver]: ../../../../crates/memory-store/src/lib.rs#L11578-L11656
+[failure]: ../../../../crates/memory-store/src/lib.rs#L11123-L11162
+[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11164-L11177
+[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11179-L11201
+[publish]: ../../../../crates/memory-store/src/lib.rs#L10707
+[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L10910-L10919
 [kinds]: ../../../../crates/memory-store/src/lib.rs#L4586-L4589
-[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13701-L13722
-[mark]: ../../../../crates/memory-store/src/lib.rs#L13860-L13885
-[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L13887-L13929
-[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L13931-L13952
+[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13719-L13740
+[mark]: ../../../../crates/memory-store/src/lib.rs#L13878-L13903
+[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L13905-L13947
+[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L13949-L13970
 [idx-order]: ../../../../crates/memory-store/baseline.sql#L531-L535
 
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
@@ -2927,13 +2929,13 @@ evaluation of this area and its disposition are recorded in
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 
 [pass-drain]: ../../../../crates/daemon/src/lib.rs#L8141-L8145
-[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11023-L11024
-[backoff]: ../../../../crates/memory-store/src/lib.rs#L11111-L11115
+[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11041-L11042
+[backoff]: ../../../../crates/memory-store/src/lib.rs#L11129-L11133
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5980-L5989
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
 [t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36463
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18876
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19081
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19020
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19225
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261
 [sched-due-projects]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L265-L296
 [sched-idle]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L36

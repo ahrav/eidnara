@@ -153,7 +153,11 @@ in one fenced transaction. The retirement is a `DELETE` whose
 drainer that read the row before another drainer retired it finds nothing to
 delete, the delivery rolls its target insert back and reports the row as
 already retired, and the drain counts it as neither delivered nor failed, so no
-failure record or backoff is written for a row that no longer exists. Drainers
+failure record or backoff is written for a row that no longer exists. The
+predicate also names the payload: a handle read before a session reset cannot
+consume a row re-issued under the same composite key with other bytes, as the
+[key-reuse test][reuse-test] shows (the stale delivery reports already
+retired, delivers nothing, and the re-created row stays pending). Drainers
 on one store serialize on the connection, so the guard closes a stale read,
 not two simultaneous statements. The per-row delete transaction is gone
 because nothing remains for a restart or a concurrent drainer to redeliver: a
@@ -180,7 +184,8 @@ and the outbox holds none.
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11560-L11638
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14357-L14381
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11639-L11663
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20327-L20466
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11578-L11656
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14421-L14446
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11702-L11726
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20565-L20704
+[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17047-L17114
