@@ -312,8 +312,13 @@ prepared under the unrestricted mode is refused in a guarded callback once the
 cache is flushed; a panicking read or fenced callback returns the connection to
 the unrestricted mode and rolls its partial write back; and baseline text with
 a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
-format-marker delete is refused by the store connection's gate. No
-baseline-versus-candidate trace over interleaved facade callers runs.
+format-marker delete is refused by the store connection's gate. With the
+snapshot keyed on the schema and data versions, a rename through a second
+connection is observed by the next callback even when the schema version is
+written back, a maintenance-left temp shadow is still refused, a panicking
+maintenance callback still discards the snapshot and re-arms the pin, and the
+durability pin runs once per connection until the maintenance path re-arms it. No baseline-versus-candidate trace over interleaved facade
+callers runs.
 Guarantee: Cached statements and reduced callback setup preserve each call's
 current read/write, schema, fencing, and applicable facade authority.
 Check: `always` - Across identical authority-transition traces, baseline and

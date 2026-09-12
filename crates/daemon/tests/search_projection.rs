@@ -242,6 +242,36 @@ fn the_connection_is_verified_owner_only_and_rows_survive_close_and_reopen() {
         .unwrap();
 }
 
+/// Every `storage::open_sqlite` call site in the daemon process retains one schema snapshot
+/// within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the declared retained-resident
+/// total multiplies that bound by `daemon::STORAGE_CONNECTIONS`, so the two must agree.
+#[test]
+fn the_declared_storage_connection_count_matches_the_open_sqlite_call_sites() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sources = [
+        "crates/daemon/src/search_projection.rs",
+        "crates/memory-store/src/lib.rs",
+    ];
+    let call_sites: usize = sources
+        .iter()
+        .map(|source| {
+            std::fs::read_to_string(root.join(source))
+                .unwrap()
+                .matches("open_sqlite(")
+                .count()
+        })
+        .sum();
+    assert_eq!(call_sites as u64, daemon::STORAGE_CONNECTIONS);
+    let elsewhere = ["crates/daemon/src/lib.rs", "crates/retrieval/src/lib.rs"];
+    for source in elsewhere {
+        let text = std::fs::read_to_string(root.join(source)).unwrap();
+        assert!(
+            !text.contains("open_sqlite("),
+            "{source} opens a storage connection the declaration does not count"
+        );
+    }
+}
+
 #[test]
 fn retrieval_depends_on_no_product_crate_but_the_kernel() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

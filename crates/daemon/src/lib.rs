@@ -2241,6 +2241,12 @@ const _: () = assert!(
         <= TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
 );
 
+/// Connections the daemon opens through `storage::open_sqlite`: the memory store
+/// (`crates/memory-store/src/lib.rs`) and the search projection
+/// (`crates/daemon/src/search_projection.rs`). `tests/search_projection.rs` counts the
+/// call sites against this constant.
+pub const STORAGE_CONNECTIONS: u64 = 2;
+
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
@@ -2248,6 +2254,7 @@ const _: () = assert!(
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
+/// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2260,6 +2267,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
     + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
+    + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64 * STORAGE_CONNECTIONS
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX

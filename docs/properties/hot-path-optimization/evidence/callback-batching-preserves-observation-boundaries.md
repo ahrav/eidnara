@@ -63,7 +63,7 @@ Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969`.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/428)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
-The mode-gated authorizer batches nothing. Each [read callback][live-read]
+The mode-gated authorizer and the schema-version keyed snapshot batch nothing. Each [read callback][live-read]
 still opens its own deferred transaction and finishes it when the callback
 ends; each [fenced callback][live-write] still runs inside its own immediate
 transaction with its own claim and commit decision. The gate changes what
@@ -71,12 +71,15 @@ happens between those boundaries, not the boundaries: the callback switches
 the connection mode instead of installing an authorizer, so a prepared
 statement survives from one callback to the next. Statement survival does not
 share a snapshot; a re-run cached statement reads the transaction it runs in.
-The [snapshot and freshness test][live-test] and the [rollback test][live-rollback]
-pass unchanged against the gate.
+The snapshot a callback takes of the main schema is metadata for the
+authorizer, not a read snapshot: each callback still reads the database
+through its own transaction. The [snapshot and freshness test][live-test] and
+the [rollback test][live-rollback] pass unchanged against the gate and the
+keyed snapshot.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p storage --locked` passed 68 tests after the change. The
+`cargo test -p storage --locked` passed 76 tests after the changes. The
 snapshot, freshness, and rollback checks named here are among them; they are
 existing checks and remain unaudited.
 
@@ -86,6 +89,6 @@ existing checks and remain unaudited.
 [rollback]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L4116
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
 [live-read]: ../../../../crates/storage/src/lib.rs#L248-L264
-[live-write]: ../../../../crates/storage/src/lib.rs#L314-L340
-[live-test]: ../../../../crates/storage/src/lib.rs#L4303-L4340
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L4473-L4499
+[live-write]: ../../../../crates/storage/src/lib.rs#L313-L339
+[live-test]: ../../../../crates/storage/src/lib.rs#L4750-L4787
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L4920-L4946
