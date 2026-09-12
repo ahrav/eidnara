@@ -1,12 +1,15 @@
 //! One coherent coverage observation over the projection: for every source class, the live occurrences the lexical index holds, the subset that requires dense coverage, the durable vectors valid for the observed generation, the missing set `M = R − V`, its pending subset `P`, and `M − P`. Every count comes from one read transaction keyed by the projection identity, its checkpoint, and one vector generation, so no cell mixes denominators; when any of those is absent the observation is unavailable rather than partial. Counts describe coverage; they grant nothing and satisfy no required witness.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use kernel::source_identity::OccurrenceClass;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use storage::GuardedConn;
 
-use crate::batch::{ProjectionCheckpoint, VectorGeneration, dense_eligible, read_checkpoint};
+use crate::batch::{
+    ProjectionCheckpoint, VectorGeneration, dense_eligible, read_checkpoint, registered_generation,
+};
 use crate::{ProjectionError, ProjectionIdentity, read_identity};
 
 /// Why no coherent observation exists. Nothing partial is reported in its place.
@@ -20,8 +23,12 @@ pub enum CoverageUnavailable {
     NoCheckpoint,
     /// The generation the report was asked for is not registered, or its identity disagrees with the projection's.
     GenerationMismatch,
+    /// The generation is retired: completion refuses its vectors and no new work queues for it, so its open jobs stand for nothing.
+    RetiredGeneration,
     /// A class holds more live occurrences than the observation may count.
     OverBound { class: OccurrenceClass, max: usize },
+    /// Tombstones are never reclaimed for most classes, so a long-lived projection can exceed this bound with few live rows.
+    TombstonedOverBound { class: OccurrenceClass, max: usize },
 }
 
 /// What the dense columns of one class mean.
@@ -80,10 +87,11 @@ impl CoverageReport {
     }
 }
 
-/// Live occurrences one class may hold before the observation refuses it; the caller sizes the per-occurrence reads it runs beside the counts from the same bound.
+/// Rows one class may hold before the observation refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverageBounds {
     pub max_live_per_class: NonZeroUsize,
+    pub max_tombstoned_per_class: NonZeroUsize,
 }
 
 impl CoverageBounds {
@@ -117,23 +125,15 @@ pub fn observe(
     let Some(checkpoint) = read_checkpoint(conn, kernel_incarnation_id)? else {
         return Ok(Err(CoverageUnavailable::NoCheckpoint));
     };
-    let registered: Option<(String, String, i64, i64)> = conn
-        .query_row(
-            "SELECT embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch
-             FROM vector_generations WHERE generation_id=?1",
-            [&generation.generation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let matches = registered.is_some_and(|(model, fingerprint, dimension, epoch)| {
-        model == generation.embedding_model
-            && fingerprint == generation.tokenizer_fingerprint
-            && u32::try_from(dimension)
-                .is_ok_and(|dimension| dimension == generation.vector_dimension)
-            && u64::try_from(epoch).is_ok_and(|epoch| epoch == generation.generation_epoch)
-    });
-    if !matches {
-        return Ok(Err(CoverageUnavailable::GenerationMismatch));
+    match registered_generation(conn, generation)? {
+        Some(registered) if !registered.identity_matches => {
+            return Ok(Err(CoverageUnavailable::GenerationMismatch));
+        }
+        Some(registered) if registered.is_retired() => {
+            return Ok(Err(CoverageUnavailable::RetiredGeneration));
+        }
+        Some(_) => {}
+        None => return Ok(Err(CoverageUnavailable::GenerationMismatch)),
     }
     let mut classes = Vec::with_capacity(OccurrenceClass::ALL.len());
     for class in OccurrenceClass::ALL {
@@ -169,24 +169,43 @@ fn class_coverage(
     } else {
         DenseDisposition::LexicalOnly
     };
-    let (lexical, tombstoned): (i64, i64) = conn.query_row(
-        "SELECT SUM(t.occurrence_id IS NULL),SUM(t.occurrence_id IS NOT NULL)
-         FROM occurrences o LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-         WHERE o.class=?1",
-        [class.code()],
+    let max_live = bounds.max_live_per_class.get();
+    let max_tombstoned = bounds.max_tombstoned_per_class.get();
+    // The query reads at most `max_live + max_tombstoned + 1` rows. Reaching
+    // that limit proves one bound is exceeded, and the exceeded bound within
+    // the prefix names the refusal; a shorter walk covers the whole class.
+    let walk_limit = max_live.saturating_add(max_tombstoned).saturating_add(1);
+    let (walked, tombstoned): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*),SUM(walked.tombstoned) FROM (
+             SELECT (t.occurrence_id IS NOT NULL) AS tombstoned
+             FROM occurrences o LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+             WHERE o.class=?1 LIMIT ?2) walked",
+        params![
+            class.code(),
+            i64::try_from(walk_limit).map_err(|_| ProjectionError::CorruptRow)?
+        ],
         |row| {
             Ok((
-                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, i64>(0)?,
                 row.get::<_, Option<i64>>(1)?.unwrap_or(0),
             ))
         },
     )?;
-    let lexical = usize::try_from(lexical).map_err(|_| ProjectionError::CorruptRow)?;
+    let walked = usize::try_from(walked).map_err(|_| ProjectionError::CorruptRow)?;
     let tombstoned = usize::try_from(tombstoned).map_err(|_| ProjectionError::CorruptRow)?;
-    if lexical > bounds.max_live_per_class.get() {
+    let lexical = walked
+        .checked_sub(tombstoned)
+        .ok_or(ProjectionError::CorruptRow)?;
+    if lexical > max_live {
         return Ok(Err(CoverageUnavailable::OverBound {
             class,
-            max: bounds.max_live_per_class.get(),
+            max: max_live,
+        }));
+    }
+    if tombstoned > max_tombstoned {
+        return Ok(Err(CoverageUnavailable::TombstonedOverBound {
+            class,
+            max: max_tombstoned,
         }));
     }
     let mut coverage = ClassCoverage {
@@ -229,35 +248,33 @@ fn class_coverage(
     Ok(Ok(coverage))
 }
 
-/// The live occurrences that hold a valid vector of `generation`, so a caller judging the same live set elsewhere can split its verdicts into covered and missing without a second observation.
+/// Returns the ids in `occurrence_ids` with a valid vector for `generation`. One point read per id, so a caller can split an observed live set without a class-wide scan.
 ///
 /// # Errors
 ///
-/// Returns [`ProjectionError::TooManyRecords`] when more than `max` such occurrences exist, and the SQLite error otherwise.
-pub fn covered_occurrences(
+/// Returns the SQLite error when a probe fails.
+pub fn covered_among<'a>(
     conn: &GuardedConn<'_>,
     generation: &VectorGeneration,
-    max: NonZeroUsize,
-) -> Result<std::collections::HashSet<String>, ProjectionError> {
-    let limit = i64::try_from(max.get()).unwrap_or(i64::MAX);
-    let mut statement = conn.prepare_cached(&format!(
-        "SELECT o.occurrence_id FROM occurrences o
-         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-         WHERE t.occurrence_id IS NULL AND {VALID_VECTOR}
-         LIMIT ?3"
+    occurrence_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<HashSet<String>, ProjectionError> {
+    // A one-row `o` carrying the probed id lets `VALID_VECTOR` evaluate it unchanged.
+    let mut probe = conn.prepare_cached(&format!(
+        "SELECT {VALID_VECTOR} FROM (SELECT ?3 AS occurrence_id) o"
     ))?;
-    let rows: Vec<String> = statement
-        .query_map(
+    let mut covered = HashSet::new();
+    for occurrence_id in occurrence_ids {
+        let has_vector: bool = probe.query_row(
             params![
                 generation.generation_id,
                 i64::from(generation.vector_dimension),
-                limit.saturating_add(1)
+                occurrence_id
             ],
             |row| row.get(0),
-        )?
-        .collect::<rusqlite::Result<_>>()?;
-    if rows.len() > max.get() {
-        return Err(ProjectionError::TooManyRecords { count: rows.len() });
+        )?;
+        if has_vector {
+            covered.insert(occurrence_id.to_string());
+        }
     }
-    Ok(rows.into_iter().collect())
+    Ok(covered)
 }

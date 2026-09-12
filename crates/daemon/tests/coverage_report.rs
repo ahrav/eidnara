@@ -88,6 +88,7 @@ fn batch_bounds() -> BatchBounds {
 fn bounds() -> CoverageBounds {
     CoverageBounds {
         max_live_per_class: NonZeroUsize::new(64).unwrap(),
+        max_tombstoned_per_class: NonZeroUsize::new(64).unwrap(),
     }
 }
 
@@ -502,7 +503,7 @@ fn per_class_sets_match_independent_oracles() {
     let (m_other_generation, _) =
         corpus.publish(&message("m-other", 1, "vector of another generation"));
     let (m_revised, _) = corpus.publish(&message("m-revised", 1, "before"));
-    let (t_one, _) = corpus.publish(&tool("call_1", "tool output"));
+    let (t_one, t_one_object) = corpus.publish(&tool("call_1", "tool output"));
     let (_, t_two_object) = corpus.publish(&tool("call_2", "tool error"));
     let (g_one, _) = corpus.publish(&commit("0123456789abcdef0123456789abcdef01234567", "Fix\n"));
     corpus.decide("rule", "Keep the contract.", "Relied on.");
@@ -654,27 +655,59 @@ fn per_class_sets_match_independent_oracles() {
     );
     assert!(coverage.exclusions.is_empty(), "{:?}", coverage.exclusions);
 
-    // A retirement in the kernel the projection has not caught up to is an exclusion beside the class's counts, not a change to them; the excluded row is one of the covered ones.
+    // A retirement in the kernel the projection has not caught up to is an exclusion beside the class's counts, not a change to them; the excluded message is one of the covered ones, and the excluded tool span belongs to a class that holds no vector, so it sits in neither the covered nor the missing cell.
     let (_, m_valid_object) = corpus.publish(&message("m-valid", 1, "valid vector"));
     corpus.retire(&m_valid_object);
+    corpus.retire(&t_one_object);
     let excluded = corpus.observe(&projection).unwrap();
     assert_eq!(
         excluded.class(OccurrenceClass::Messages),
         &expected_messages
     );
+    assert_eq!(
+        excluded.class(OccurrenceClass::RawToolSpans),
+        &lexical_only_oracle(1, 1)
+    );
+    for exclusion in &excluded.exclusions {
+        let class = excluded.class(exclusion.class);
+        assert!(
+            exclusion.covered <= class.valid_vectors
+                && exclusion.missing <= class.missing
+                && exclusion.lexical_only <= class.lexical,
+            "an exclusion splits members of the class's own cells: {exclusion:?} against {class:?}"
+        );
+        assert!(
+            match class.dense {
+                DenseDisposition::Required => exclusion.lexical_only == 0,
+                DenseDisposition::LexicalOnly => exclusion.covered == 0 && exclusion.missing == 0,
+            },
+            "a class's exclusions use only its own cells: {exclusion:?} against {class:?}"
+        );
+    }
     assert_eq!(excluded.excluded(OccurrenceClass::Messages), 1);
+    assert_eq!(excluded.excluded(OccurrenceClass::RawToolSpans), 1);
     assert_eq!(
         excluded
             .exclusions
             .iter()
-            .map(|e| (e.class, e.verdict, e.covered, e.missing))
+            .map(|e| (e.class, e.verdict, e.covered, e.missing, e.lexical_only))
             .collect::<Vec<_>>(),
-        vec![(
-            OccurrenceClass::Messages,
-            EligibilityVerdict::Retracted,
-            1,
-            0
-        )]
+        vec![
+            (
+                OccurrenceClass::Messages,
+                EligibilityVerdict::Retracted,
+                1,
+                0,
+                0
+            ),
+            (
+                OccurrenceClass::RawToolSpans,
+                EligibilityVerdict::Retracted,
+                0,
+                0,
+                1
+            )
+        ]
     );
     assert!(excluded.kernel_snapshot.tip > coverage.kernel_snapshot.tip);
 
@@ -686,7 +719,7 @@ fn per_class_sets_match_independent_oracles() {
     assert_eq!(again.exclusions, excluded.exclusions);
 }
 
-/// AC4, AC5: an absent identity, a missing checkpoint, a foreign kernel, a generation whose identity disagrees, and a class beyond the bound each make the whole report unavailable; a projection with no rows reports every class known-empty rather than unavailable.
+/// An absent identity, a missing checkpoint, a foreign kernel, a generation whose identity disagrees, a retired generation, and a class beyond either the live or the tombstone bound each make the whole report unavailable; a projection with no rows reports every class known-empty rather than unavailable.
 #[test]
 fn incoherent_observations_are_unavailable_and_empty_classes_are_known_empty() {
     let dir = tempfile::tempdir().unwrap();
@@ -761,27 +794,85 @@ fn incoherent_observations_are_unavailable_and_empty_classes_are_known_empty() {
     corpus.publish(&message("m-2", 1, "two"));
     let hold = corpus.capture();
     let projection = corpus.bootstrap(dir.path(), &hold);
-    let over = observe_coverage(
-        &projection,
-        &corpus.kernel,
-        &corpus.kernel_incarnation_id(),
-        &ProjectScope::new(PROJECT).unwrap(),
-        ArtifactDestination::Local,
-        &generation(),
-        CoverageBounds {
-            max_live_per_class: NonZeroUsize::new(1).unwrap(),
-        },
-    )
-    .unwrap()
-    .unwrap_err();
+    // Revising both messages leaves the class with two live rows and two tombstoned rows, so each bound can be exceeded on its own.
+    corpus.publish(&message("m-1", 2, "one, revised"));
+    corpus.publish(&message("m-2", 2, "two, revised"));
+    corpus.catch_up(&projection, &hold);
+    let observe_with = |bounds: CoverageBounds| {
+        observe_coverage(
+            &projection,
+            &corpus.kernel,
+            &corpus.kernel_incarnation_id(),
+            &ProjectScope::new(PROJECT).unwrap(),
+            ArtifactDestination::Local,
+            &generation(),
+            bounds,
+        )
+        .unwrap()
+    };
     assert_eq!(
-        over,
+        observe_with(CoverageBounds {
+            max_live_per_class: NonZeroUsize::new(1).unwrap(),
+            max_tombstoned_per_class: NonZeroUsize::new(64).unwrap(),
+        })
+        .unwrap_err(),
         ReportUnavailable::Projection(CoverageUnavailable::OverBound {
             class: OccurrenceClass::Messages,
             max: 1
         })
     );
-    let fine = corpus.observe(&projection).unwrap();
+    assert_eq!(
+        observe_with(CoverageBounds {
+            max_live_per_class: NonZeroUsize::new(64).unwrap(),
+            max_tombstoned_per_class: NonZeroUsize::new(1).unwrap(),
+        })
+        .unwrap_err(),
+        ReportUnavailable::Projection(CoverageUnavailable::TombstonedOverBound {
+            class: OccurrenceClass::Messages,
+            max: 1
+        })
+    );
+    // Both bounds exceeded: the walk stops after three of the four rows, and whichever bound the walked prefix already exceeds names the refusal.
+    assert!(matches!(
+        observe_with(CoverageBounds {
+            max_live_per_class: NonZeroUsize::new(1).unwrap(),
+            max_tombstoned_per_class: NonZeroUsize::new(1).unwrap(),
+        })
+        .unwrap_err(),
+        ReportUnavailable::Projection(
+            CoverageUnavailable::OverBound {
+                class: OccurrenceClass::Messages,
+                max: 1
+            } | CoverageUnavailable::TombstonedOverBound {
+                class: OccurrenceClass::Messages,
+                max: 1
+            }
+        )
+    ));
+    // Bounds met exactly: the walk covers every row, so the counts are exact.
+    let fine = observe_with(CoverageBounds {
+        max_live_per_class: NonZeroUsize::new(2).unwrap(),
+        max_tombstoned_per_class: NonZeroUsize::new(2).unwrap(),
+    })
+    .unwrap();
     assert_eq!(fine.class(OccurrenceClass::Messages).lexical, 2);
+    assert_eq!(fine.class(OccurrenceClass::Messages).tombstoned, 2);
+    assert_eq!(fine.class(OccurrenceClass::Messages).pending, 2);
     assert!(fine.class(OccurrenceClass::GitCommits).is_known_empty());
+    assert_eq!(corpus.observe(&projection).unwrap().report, fine.report);
+
+    // A retired generation accepts no completion and queues no work, so its open jobs stand for nothing; the observation is unavailable rather than one that reports them as pending.
+    projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE vector_generations SET state='retired' WHERE generation_id=?1",
+                [GENERATION],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        corpus.observe(&projection).unwrap_err(),
+        ReportUnavailable::Projection(CoverageUnavailable::RetiredGeneration)
+    );
 }
