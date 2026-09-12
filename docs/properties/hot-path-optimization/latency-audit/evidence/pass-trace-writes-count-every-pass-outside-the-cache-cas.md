@@ -140,7 +140,7 @@ channel, the authority route read, and dreamer tasks only.
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L852-L869
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6794-L6796
 [received]: ../../../../../crates/memory-store/src/lib.rs#L6797-L6847
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6798-L6816
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6808-L6826
 [stable]: ../../../../../crates/memory-store/src/lib.rs#L6852-L6944
 [stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6906-L6913
 [completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6946-L6948
@@ -152,5 +152,5 @@ channel, the authority route read, and dreamer tasks only.
 [commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8739-L8806
 [commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8753
 [t-secret]: ../../../../../crates/memory-store/src/lib.rs#L16109
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18278
+[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18200
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268

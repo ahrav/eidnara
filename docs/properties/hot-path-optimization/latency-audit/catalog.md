@@ -2655,7 +2655,7 @@ evaluation of this area and its disposition are recorded in
 [sched-test]: ../../../../crates/daemon/src/transform.rs#L13689
 [received]: ../../../../crates/memory-store/src/lib.rs#L6797-L6847
 [received-doc]: ../../../../crates/memory-store/src/lib.rs#L6794-L6796
-[flagged]: ../../../../crates/memory-store/src/lib.rs#L6798-L6816
+[flagged]: ../../../../crates/memory-store/src/lib.rs#L6808-L6826
 [stable]: ../../../../crates/memory-store/src/lib.rs#L6852-L6944
 [completed]: ../../../../crates/memory-store/src/lib.rs#L6949-L6997
 [completed-doc]: ../../../../crates/memory-store/src/lib.rs#L6946-L6948
@@ -2927,7 +2927,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L11293-L11297
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6092-L6101
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36707
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36714
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19314
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L19519
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261

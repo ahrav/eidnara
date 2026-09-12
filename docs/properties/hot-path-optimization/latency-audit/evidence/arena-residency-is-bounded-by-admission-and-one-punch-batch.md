@@ -151,11 +151,11 @@ piece once; none asserts the inequality over a run or measures an idle ring.
 [trim]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2244-L2266
 [abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2268-L2304
 [t-syscall]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3086-L3087
-[t-abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3677-L3693
-[t-batch]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4016-L4044
-[t-reuse]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4073-L4088
-[t-subpage]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4091-L4115
-[t-punchfail]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4243-L4258
+[t-abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3667-L3685
+[t-batch]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4018-L4046
+[t-reuse]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4075-L4091
+[t-subpage]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4093-L4118
+[t-punchfail]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4245-L4261
 [madv]: ../../../../../crates/shm-transport/src/backend/sys.rs#L135-L149
 [native-reserve]: ../../../../../packages/shm-native/src/lib.rs#L1024
 [bench]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L296-L306

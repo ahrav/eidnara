@@ -132,5 +132,5 @@ sources because only one exists.
 [t-recover-twice]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L384-L389
 [t-faults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
-[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
-[t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L602-L642
+[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
+[t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634

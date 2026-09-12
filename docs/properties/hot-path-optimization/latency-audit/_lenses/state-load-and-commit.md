@@ -561,7 +561,7 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 
 [received]: ../../../../../crates/memory-store/src/lib.rs#L6797-L6847
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6794-L6796
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6798-L6816
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6808-L6826
 [stable]: ../../../../../crates/memory-store/src/lib.rs#L6852-L6944
 [completed]: ../../../../../crates/memory-store/src/lib.rs#L6949-L6997
 [completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6946-L6948
@@ -614,21 +614,21 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36288
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L35498
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23008
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36850
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36057
+[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23425
 [t-reject]: ../../../../../crates/daemon/src/lib.rs#L23857
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23887
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23903
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23935
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23967
-[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32216
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13535
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24606
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L24809
+[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32860
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
 [t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L17186
 [t-snap-keeps]: ../../../../../crates/memory-store/src/lib.rs#L17240
 [t-cas-empty]: ../../../../../crates/memory-store/src/lib.rs#L17309
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18278
+[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L18200
 [t-secret]: ../../../../../crates/memory-store/src/lib.rs#L16109
 [t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19519
 [t-faults]: ../../../../../crates/memory-store/src/lib.rs#L19314

@@ -149,8 +149,7 @@ The default-production reachability class and medium confidence remain.
 Test adequacy remains unaudited. No benchmark or measurement campaign ran;
 parent measurement and whole-repository landing gates remain separate.
 
-[witness]: ../../../../../crates/daemon/src/lib.rs#L23252
-
+[witness]: ../../../../../crates/daemon/src/lib.rs#L23669
 ## Third-turn prefix and production-prompt checks
 
 The [witness][witness] also sends a third delta after the second turn's

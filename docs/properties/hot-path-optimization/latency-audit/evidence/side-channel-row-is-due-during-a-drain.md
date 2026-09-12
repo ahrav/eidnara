@@ -95,7 +95,7 @@ test records the marker, and none has all three kinds due in one pass drain.
 - Conclusion: resolved with answer - constructible; the witness is recorded.
 
 [pass-drain]: ../../../../../crates/daemon/src/lib.rs#L8180-L8184
-[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L36152
+[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L36714
 [daemon-cargo]: ../../../../../crates/daemon/Cargo.toml#L92
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126

@@ -129,4 +129,4 @@ enumerating the paths.
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
 [t-crash-point]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L34
 [t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
-[t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L543-L562
+[t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554

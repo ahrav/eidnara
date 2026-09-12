@@ -112,5 +112,5 @@ tracing the window.
 [idle-select]: ../../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
 [publish-one]: ../../../../../crates/host-runtime/src/ring_transport.rs#L749-L786
 [publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
-[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1857-L1887
+[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
 [fixture-arm]: ../../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
