@@ -498,7 +498,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1846
 [t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1896
 [t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1961
-[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L19962
+[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L19969
 [t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22316
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L137-L175

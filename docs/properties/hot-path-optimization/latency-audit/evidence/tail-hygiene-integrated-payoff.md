@@ -177,6 +177,12 @@ accounting, full measurement construction, and its drop remain inside the
 timed call. A uses the original non-memo wrapper with its warm token cache.
 Tokenizer initialization is outside timing.
 
+B is the fixed-slot memo revision. The later session-table revision, which
+refuses over-budget blocks instead of resetting the memo, fingerprints caveman
+units instead of cloning them, and replaces the sixteen hashed slots with a
+least-recently-used table behind per-session locks, is not measured here; no
+timing is claimed for it.
+
 Core, tag rows, and protected IDs are empty; coverage is `None` and
 `protected_tags` is 20. U is zero. Populated attribution and caveman
 invalidation are not exercised. This is repeated warm in-process service
