@@ -15470,10 +15470,10 @@ fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
     serde_json::from_slice(body).ok()
 }
 
-/// The probe that selects the lane for an admitted body. A body whose bytes never spell
-/// `transform` cannot name that route through the tree's unescaped read except by an escaped
-/// discriminator, which then takes the tree lane like any body without a probe, so the walk
-/// is skipped for it and a facade body pays only its `Value` parse, as before the direct lane.
+/// The probe that selects the lane for an admitted body. Only a discriminator the body
+/// spells literally selects the direct lane, so a body whose bytes never spell `transform`
+/// cannot reach it; the walk is skipped for such a body and a facade body pays only its
+/// `Value` parse, as before the direct lane.
 fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
     memchr::memmem::find(body, b"transform")
         .is_some()
@@ -15660,7 +15660,7 @@ impl RequestEntryProbe {
     fn route(&self) -> &RouteName {
         match self.method {
             RouteName::Absent => &self.kind,
-            RouteName::Named(_) | RouteName::Overlong => &self.method,
+            RouteName::Named(_) | RouteName::Escaped(_) | RouteName::Overlong => &self.method,
         }
     }
 
@@ -15688,12 +15688,16 @@ impl RequestEntryProbe {
 /// The probe runs before the host's resident-byte reservation, so an array or object under
 /// `method` must be skipped, not built. Dispatch treats a missing or non-string
 /// discriminator as absent and any string, however long, as the route name; the variants
-/// keep that distinction without retaining a long string.
+/// keep that distinction without retaining a long string. A name spelled with an escape
+/// is kept apart: it widens the byte cap like any name, but only a name the body spells
+/// literally selects the direct lane, so the lane never depends on which bytes elsewhere
+/// in the body happen to spell it.
 #[derive(Default)]
 enum RouteName {
     #[default]
     Absent,
     Named(String),
+    Escaped(String),
     Overlong,
 }
 
@@ -15702,7 +15706,7 @@ impl RouteName {
 
     fn short(&self) -> Option<&str> {
         match self {
-            RouteName::Named(name) => Some(name),
+            RouteName::Named(name) | RouteName::Escaped(name) => Some(name),
             RouteName::Absent | RouteName::Overlong => None,
         }
     }
@@ -15721,7 +15725,20 @@ impl<'de> Deserialize<'de> for RouteName {
                 formatter.write_str("a route discriminator")
             }
 
+            /// serde_json hands a string it had to unescape through this path and a string
+            /// borrowed from the body through `visit_borrowed_str`.
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(if value.len() <= RouteName::MAX_ROUTE_NAME_BYTES {
+                    RouteName::Escaped(value.to_owned())
+                } else {
+                    RouteName::Overlong
+                })
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                value: &'de str,
+            ) -> Result<Self::Value, E> {
                 Ok(if value.len() <= RouteName::MAX_ROUTE_NAME_BYTES {
                     RouteName::Named(value.to_owned())
                 } else {
@@ -19431,6 +19448,16 @@ mod tests {
         assert!(unpaged(&nested(deepest_tree + 1)));
         assert!(tree_decode_parses(nested(deepest_tree).as_bytes()));
         assert!(!tree_decode_parses(nested(deepest_tree + 1).as_bytes()));
+        // A discriminator spelled with an escape widens the cap as dispatch reads it, but
+        // never selects the direct lane, so the lane cannot turn on other payload text.
+        let escaped = r#"{"kind":"tr\u0061nsform","x":"transform"}"#;
+        assert!(probe(escaped).unwrap().is_transform_class());
+        assert!(!unpaged(escaped));
+        assert!(lane_probe(escaped.as_bytes()).is_some());
+        assert!(
+            lane_probe(br#"{"kind":"tr\u0061nsform"}"#).is_none(),
+            "no literal `transform`, no walk"
+        );
     }
 
     /// The witness refuses exactly what a `Value` parse refuses, plus an object holding the
@@ -19646,6 +19673,11 @@ mod tests {
                 body.replacen(r#""kind":"transform""#, r#""kind":"tr\u0061nsform""#, 1)
                     .into_bytes()
             }),
+            ("escaped discriminator beside transform text", {
+                let body = String::from_utf8(valid(r#","x":"transform""#)).unwrap();
+                body.replacen(r#""kind":"transform""#, r#""kind":"tr\u0061nsform""#, 1)
+                    .into_bytes()
+            }),
             ("raw-value token after a key inside a message", {
                 let body = String::from_utf8(valid("")).unwrap();
                 body.replacen(
@@ -19746,6 +19778,7 @@ mod tests {
                 "raw-value token holding a document",
                 "raw-value token not in first position",
                 "escaped discriminator",
+                "escaped discriminator beside transform text",
                 "raw-value token after a key inside a message",
                 "nesting at the tree limit",
             ],
