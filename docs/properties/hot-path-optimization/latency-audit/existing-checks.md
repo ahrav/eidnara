@@ -548,7 +548,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15166
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L606
 [t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15309
-[t-sync]: ../../../../crates/storage/src/lib.rs#L3445
+[t-sync]: ../../../../crates/storage/src/lib.rs#L3682
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
