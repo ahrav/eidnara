@@ -34,7 +34,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
   [`mark_historian_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
   call per kind; the mark updates under `delivered_at_ms IS NULL` and returns
   `QueryReturnedNoRows` when `changed != 1`, which rolls the transaction back.
-  A test-only `fail_once` seam at [`:10922-10933`][fail-once] injects a
+  A test-only `fail_once` seam at [`:11197-11208`][fail-once] injects a
   failure per kind.
 - [`record_historian_side_channel_failure`][failure] computes
   `delay = 1000 * 2^min(attempt_count, 6)` capped at
@@ -52,7 +52,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
 - Rows are enqueued by [`publish_historian_chunk`][publish]; the outbox
   [primary key][outbox-sql] is `(session_id, firing_seq, kind, source_start,
   source_end, item_index)`. The publish task also drains after a committed
-  publish ([`:10762-10771`][publish-drain]), so two drainers can overlap on one
+  publish ([`:11037-11046`][publish-drain]), so two drainers can overlap on one
   session.
 - Firing needs a configured [`model_chain`][cfg-models] (the
   [`no_models` gate][no-models]); `user_observation` rows also need
@@ -111,7 +111,7 @@ window, two drainers, ordering across firings, the limit, or the backoff.
 - Conclusion: resolved with answer - the code and doc agree at HEAD; a fold
   must rewrite the doc and prove the one-row delete-or-rollback guard.
 
-[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8180-L8184
+[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8199-L8203
 [no-models]: ../../../../../crates/daemon/src/lib.rs#L5238-L5245
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126

@@ -108,7 +108,7 @@ because the decoded type exposes no copy count.
 
 - Sources examined: the [page apply][pageapply] call into
   `handle_transform_unpaged_value`, the [512 KiB page cap][hostpagecheck], and
-  the staging constants at [`:735-736`][hostpage] (128 MiB staged maximum).
+  the staging constants at [`:742-743`][hostpage] (128 MiB staged maximum).
 - Findings: The assembled `Value` reaches the typed decode with the per-page
   reservation history only; no `value_footprint_bound` runs on the whole.
 - Missing evidence: A statement of which budget covers the assembled tree.
@@ -131,8 +131,8 @@ because the decoded type exposes no copy count.
 [toolarge]: ../../../../../crates/daemon/src/lib.rs#L15516-L15521
 [queuefull]: ../../../../../crates/daemon/src/lib.rs#L15523-L15528
 [freeze]: ../../../../../crates/daemon/src/lib.rs#L8085-L8086
-[routechan]: ../../../../../crates/daemon/src/lib.rs#L8094-L8097
-[accept]: ../../../../../crates/daemon/src/lib.rs#L8115
+[routechan]: ../../../../../crates/daemon/src/lib.rs#L8113-L8116
+[accept]: ../../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../../crates/daemon/src/lib.rs#L581-L638
 [pageapply]: ../../../../../crates/daemon/src/lib.rs#L9483-L9491
 [hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743

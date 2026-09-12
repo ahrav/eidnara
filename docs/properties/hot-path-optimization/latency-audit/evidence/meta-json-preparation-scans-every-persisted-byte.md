@@ -36,12 +36,12 @@ column specifically.
   secret-bearing value bypass `prepare_value` and persist when the unchanged
   input is returned.
 - [`prepare_value`][prepare-value]: a detected value under an identity or
-  integrity key refuses ([`:3213-3217`][refuse-identity]); a protected key
-  holding a container with text refuses ([`:3226-3233`][refuse-container]); a
+  integrity key refuses ([`:3298-3302`][refuse-identity]); a protected key
+  holding a container with text refuses ([`:3311-3318`][refuse-container]); a
   protected scalar substitutes `<REDACTED:label>` and records a synthetic
-  detection when the scanner found none ([`:3243-3259`][substitute]); object
+  detection when the scanner found none ([`:3328-3344`][substitute]); object
   keys are bound-checked and scanned again during the walk
-  ([`:3266-3272`][walk-keys]).
+  ([`:3351-3357`][walk-keys]).
 - The [policy enum][policy] distinguishes durable from transaction and
   reject-protected from preserve-identities; the `meta` column uses durable
   preserve-identities.

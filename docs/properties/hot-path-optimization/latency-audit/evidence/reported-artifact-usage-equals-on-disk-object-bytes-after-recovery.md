@@ -19,7 +19,7 @@ reports equals the disk.
   walk backs [`check_budget`][check-budget]. Only one usage source exists.
 - `KernelStore::open` runs [`recover_interrupted_work`][recover] at
   [open.rs:406][open-recover], which calls [`run_artifact_recovery`][recovery].
-- Publish: the reservation row commits at [`:469-471`][ingest-reservation],
+- Publish: the reservation row commits at [`:424-471`][ingest-reservation],
   the rename lands at [`:476-526`][ingest-publish], and the reference commits
   at [`:580-595`][ingest-commit]. Between the rename and the reference commit
   the bytes are on disk with a `Live` row and no reference.
@@ -27,8 +27,8 @@ reports equals the disk.
   [`cleanup_failed_reference`][cleanup] unlinks a newly published object when no
   reference or reservation protects it; [`reclaim_candidate`][reclaim-cand]
   reads the size in [`unlink_artifact`][unlink-artifact] and unlinks at
-  [`:260`][reclaim-cand] before its row deletes commit at
-  [`:287`][reclaim-cand]; [`complete_pending_purge_locked`][purge-unlink]
+  [`:212-289`][reclaim-cand] before its row deletes commit at
+  [`:212-289`][reclaim-cand]; [`complete_pending_purge_locked`][purge-unlink]
   unlinks the object and its temps before deleting the pending row. A dedup hit
   or a failed publish only [releases the row][release-res].
 - Recovery: [`prepare_startup_cas_recovery`][startup] promotes `Live` rows

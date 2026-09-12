@@ -32,7 +32,7 @@ not the charge accounting.
   [`select!`][idle-select] and runs [`publish_one`][publish-one]; the direct
   arm reserves, serializes, and commits in [`publish_direct`][publish-direct].
   Commit is the point at which the closure's captures stop being needed and
-  the egress charge is dropped ([`:784`][publish-one]).
+  the egress charge is dropped ([`:749-786`][publish-one]).
 - A stream item is different: [`StreamSink::send`][stream-send] runs
   `emit_reserved_frame` while the handler future is still executing, so a
   direct stream item's closure can be serialized before the handler returns.

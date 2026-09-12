@@ -522,7 +522,7 @@ not a claim that no related check exists anywhere in the repository.
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
-[hook]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
+[hook]: ../../../../crates/daemon/src/lib.rs#L8308-L8316
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5510
 [t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36850
 [t-emergency]: ../../../../crates/daemon/src/lib.rs#L36057

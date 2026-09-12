@@ -63,7 +63,7 @@ tokenizer obligations remain in their canonical catalogs, named under
 | G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the historian, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The dreamer schedule [defaults to `None`][sched-default]; smart notes need a cron on the note. |
-| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14027`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
+| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14098`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the only abort seam after commit is the `#[cfg(test)]` [hook][hook]. |
 | W12 | default-production | Every `kernel.*` route that reaches the store runs its work through [`kernel_routes::blocking`][blocking] on a `spawn_blocking` worker with the redaction guard at depth `0`; the panic itself is the injected fault. |
 
@@ -790,8 +790,8 @@ never both; a `pass_trace` write never changes `cache_state`; and a
 `pass_trace` failure never aborts an otherwise valid cache commit unless the
 specification states the new coupling. `always` because status, health, and
 the plugin display read these counters on every request, and every call site
-discards the trace result with `let _ =` ([`:8129`][received-call],
-[`:8192-8199`][rejected-call], [`:8434`][completed-call],
+discards the trace result with `let _ =` ([`:8206`][received-call],
+[`:8280-8287`][rejected-call], [`:8512`][completed-call],
 [`record_stable_pass_trace`][stable-call]).
 Fault/timing angle: A fold moves the bump after `run_transform`, so a rejected
 or stable pass under-counts, or attaches it to every commit so a rerun
@@ -865,7 +865,7 @@ returned after the loop completes. `always` because
 which rows a pass touches.
 Fault/timing angle: Process crash between the mark commit and the
 [per-row delete][delete-one]; the publish task's own drain
-([`:10762-10771`][publish-drain]) overlapping the pass drain on one session;
+([`:11037-11046`][publish-drain]) overlapping the pass drain on one session;
 a target insert failing after the outbox state change in a reordered
 transaction; an empty-drain shortcut that skips the [leftover delete][delete-all];
 a delete-in-place that changes which rows [count as pending][status-sc].
@@ -992,10 +992,10 @@ on an empty drain.
 Check: `sometimes` - Under three constant markers
 `side-channel-row-is-due-during-a-drain-event`, `-primer`, and
 `-user-observation`, for some call to [`drain_historian_side_channels`][drain]
-from the handler's pass drain ([`:8122-8126`][pass-drain]), the outbox holds
+from the handler's pass drain ([`:8199-8203`][pass-drain]), the outbox holds
 at entry, for that kind, at least one row with `delivered_at_ms IS NULL` and
 `next_attempt_at_ms <= now_ms` for the `now_ms` the call passes (the due
-predicate at [`:10893-10894`][due-predicate]). Each marker records the
+predicate at [`:11168-11169`][due-predicate]). Each marker records the
 pending rows read from the outbox and the drain's `now_ms` before delivery
 runs, never the delivery result. `sometimes` because the drain lines execute
 on every pass while a due row may never exist, so `reachable` would be
@@ -1004,9 +1004,9 @@ Fault/timing angle: Under default configuration no [`model_chain`][cfg-models]
 is set, so nothing publishes, the outbox is empty on every pass, and C3's
 per-row clauses are never evaluated. With publishing,
 [`publish_historian_chunk`][publish] drains inline right after its commit
-([`:10762-10771`][publish-drain]), so the pass drain finds a due row only when
+([`:11037-11046`][publish-drain]), so the pass drain finds a due row only when
 that inline delivery failed (the next attempt is
-`now + 1000 * 2^min(attempt, 6)` ms, [`:10981-10985`][backoff]) or when the
+`now + 1000 * 2^min(attempt, 6)` ms, [`:11256-11260`][backoff]) or when the
 process ended between the enqueue commit and the inline drain.
 Required faults and enabling state: A published firing with events, primers,
 and user observations (a direct `publish_historian_chunk` call in a unit
@@ -1710,7 +1710,7 @@ test mode and compares nothing; [`.config/nextest.toml`][nextest] excludes
 bench targets. The daemon bench's [header][hp-header] disclaims its own
 numbers as a baseline; its end-to-end arms call [`transform_cached`][hp-e2e]
 on an already-typed request against a fresh store, skipping the handler work
-at [`:8113-8130`][h-pre] and the response encoding in
+at [`:8181-8198`][h-pre] and the response encoding in
 [`respond_transform`][respond]. The two production-sized fixtures
 ([1_400][fx-1400], [2_500][fx-2500]) are `#[ignore]` and print to stderr. The
 transport bench measures a fixed [256- or 4096-byte payload][he-payload],
@@ -1760,7 +1760,7 @@ the token-cache delta ([`record_token_cache_delta`][rtcd]) run on one thread.
 `always` because the handler populates `timings` on every ordinary pass and
 [`respond_transform`][respond] emits the line for every response.
 Fault/timing angle: The transform moves to a blocking thread while the
-handler-level `Instant` pairs at [`:8538-8562`][h-timings] stay on the
+handler-level `Instant` pairs at [`:8540-8564`][h-timings] stay on the
 handler task; a stage split across an `.await` splits its
 [thread-local counter][tc-local] delta. Both reads sit inside the synchronous
 [`apply_additive_only`][snap-add] and [`apply_once`][snap-once] bodies today.
@@ -2028,8 +2028,8 @@ edited; two project roots bound at once.
 Confidence: high - [Evidence](evidence/effective-config-reads-observe-a-tier-change-by-the-next-pass.md).
 [`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn]
 with its deep clone at [`:288`][eff-clone], the per-pass callers
-([`:4788`][call-reattach], [`:5049`][call-fire], [`:5366`][call-wrapup]), and
-the bind freeze ([`:11786`][call-bind], [binding doc][binding-doc]) are
+([`:4842`][call-reattach], [`:5100`][call-fire], [`:5419`][call-wrapup]), and
+the bind freeze ([`:11856`][call-bind], [binding doc][binding-doc]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the mtime test and the three privilege tests; all unaudited. Unit tests
@@ -2061,15 +2061,15 @@ next pass's `ProducerContext` construction for the same session:
 table; the projection cache holds the entry [`store_projection_cache`][store-pc]
 would have stored, or the next pass takes the full projection path;
 `guidance_dates` holds no entry for the session, or the next pass's
-`ProducerContext.guidance_date` ([`:8173`][guidance-use]) equals a fresh
+`ProducerContext.guidance_date` ([`:8261`][guidance-use]) equals a fresh
 computation; and the serialized-output cache holds no entry from a pass the
 store rejected, which the transform catalog's
 [output-cache record][tc-output] already constrains. `always` because the
 four updates run on every committing pass whatever the execution topology.
 Fault/timing angle: On the ordinary path there is no `.await` between the
-commit at [`:8200`][commit-call] and the bookkeeping at
-[`:8207-8212`][roots-insert], [`:8385-8392`][pc-store], and
-[`:8396-8401`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
+commit at [`:8288-8291`][commit-call] and the bookkeeping at
+[`:8297-8302`][roots-insert], [`:8444-8451`][pc-store], and
+[`:8474-8479`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
 sit inside the Emergency95 branch. Moving `run_transform` to
 `spawn_blocking` introduces an await after the commit, and a blocking task
 cannot be cancelled once started, so an abort landing there leaves the
@@ -2194,7 +2194,7 @@ Guarantee: A relocation campaign reaches the window in which a transform is
 committed and its in-memory bookkeeping has not run.
 Check: `sometimes` - For some pass, `commit_transform` has returned success
 and the handler's abort (cancellation, route close, or generation
-retirement) is observed before [`:8207`][roots-insert] executes. The marker
+retirement) is observed before [`:8297-8302`][roots-insert] executes. The marker
 asserts the commit and the abort ordering, not the next pass's state.
 Fault/timing angle: At HEAD the window exists only in the Emergency95 branch
 at the awaits `:8263`, `:8289`, and `:8315`; it exists on every pass once a
@@ -2232,7 +2232,7 @@ code as an in-handler panic on the runtime worker, which at HEAD is
 `internal_error` with `handler request task failed`
 ([`dispatch.rs:985-989`][panic-terminal]). `always` because the hook decides
 per panic from the panicking thread's [`CALLBACK_POLL_DEPTH`][pb-tls]
-([`callback_is_polling`][pb-polling], the branch at [`:40-47`][pb-hook]), so
+([`callback_is_polling`][pb-polling], the branch at [`:36-50`][pb-hook]), so
 every worker-thread panic is either redacted or forwarded; the check is on
 the thread the panic runs on, not on a defect.
 Fault/timing angle: The guard is a thread-local depth counter
@@ -2241,7 +2241,7 @@ Fault/timing angle: The guard is a thread-local depth counter
 handler future ([`dispatch.rs:928-934`][wrap-callback]). A
 `tokio::task::spawn_blocking` worker never runs either, so its depth is the
 initial `0` and the hook forwards the full panic info to the previously
-installed hook ([`:46`][pb-hook]), the Rust default because the only other
+installed hook ([`:36-50`][pb-hook]), the Rust default because the only other
 `std::panic::set_hook` in the tree is in a test
 ([`tests/dispatch.rs:635`][t-panic-child]). Tokio catches the unwinding panic
 as a `JoinError` after the hook has printed. At HEAD the daemon runs kernel
@@ -2328,8 +2328,8 @@ lines execute every [`IDLE_POLL`][sched-idle] on a default campaign while the
 list is empty, so `reachable` would be trivially satisfied.
 Fault/timing angle: The schedule [defaults to `None`][sched-default], and
 [`scheduled_projects`][sched-projects] drops any project whose schedule is
-`None` (`schedule: schedule?` at [`:14027`][sched-filter]) or whose memories
-authority is not `MODULE` ([`:14002-14007`][sched-authority]), so a default
+`None` (`schedule: schedule?` at [`:14098`][sched-filter]) or whose memories
+authority is not `MODULE` ([`:14073-14078`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
@@ -2545,8 +2545,8 @@ evaluation of this area and its disposition are recorded in
 [unrecognized]: ../../../../crates/daemon/src/lib.rs#L12743-L12767
 [pageconst]: ../../../../crates/daemon/src/lib.rs#L758-L765
 [freeze]: ../../../../crates/daemon/src/lib.rs#L8095-L8096
-[routechan]: ../../../../crates/daemon/src/lib.rs#L8104-L8107
-[accept]: ../../../../crates/daemon/src/lib.rs#L8132
+[routechan]: ../../../../crates/daemon/src/lib.rs#L8113-L8116
+[accept]: ../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../crates/daemon/src/lib.rs#L587-L644
 [pageapply]: ../../../../crates/daemon/src/lib.rs#L9493-L9501
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12553-L12568
@@ -2568,7 +2568,7 @@ evaluation of this area and its disposition are recorded in
 [assemble]: ../../../../crates/daemon/src/lib.rs#L5287-L5291
 [ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13099
 [gate-native]: ../../../../crates/daemon/src/lib.rs#L13155-L13160
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13163-L13183
+[native-attach]: ../../../../crates/daemon/src/lib.rs#L8481-L8510
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13396-L13413
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14502-L14517
 [segments]: ../../../../crates/daemon/src/lib.rs#L14522-L14529
@@ -2637,20 +2637,20 @@ evaluation of this area and its disposition are recorded in
 [prepare]: ../../../../crates/daemon/src/lib.rs#L5046-L5119
 [no-fire]: ../../../../crates/daemon/src/lib.rs#L5502-L5515
 [handler]: ../../../../crates/daemon/src/lib.rs#L8181-L8444
-[received-call]: ../../../../crates/daemon/src/lib.rs#L8197
-[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8271-L8278
-[commit-call]: ../../../../crates/daemon/src/lib.rs#L8271
-[roots-insert]: ../../../../crates/daemon/src/lib.rs#L8286-L8291
-[floor-a]: ../../../../crates/daemon/src/lib.rs#L8294-L8302
-[hook]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
+[received-call]: ../../../../crates/daemon/src/lib.rs#L8206
+[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8280-L8287
+[commit-call]: ../../../../crates/daemon/src/lib.rs#L8288-L8291
+[roots-insert]: ../../../../crates/daemon/src/lib.rs#L8297-L8302
+[floor-a]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
+[hook]: ../../../../crates/daemon/src/lib.rs#L8308-L8316
 [floor-b]: ../../../../crates/daemon/src/lib.rs#L8425-L8444
-[pc-store]: ../../../../crates/daemon/src/lib.rs#L8454-L8461
-[guidance-remove]: ../../../../crates/daemon/src/lib.rs#L8465-L8470
-[completed-call]: ../../../../crates/daemon/src/lib.rs#L8503
+[pc-store]: ../../../../crates/daemon/src/lib.rs#L8444-L8451
+[guidance-remove]: ../../../../crates/daemon/src/lib.rs#L8474-L8479
+[completed-call]: ../../../../crates/daemon/src/lib.rs#L8512
 [cfg-models]: ../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L126
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1942-L1981
-[stable-call]: ../../../../crates/daemon/src/transform.rs#L1824-L1848
+[stable-call]: ../../../../crates/daemon/src/transform.rs#L1823-L1847
 [descend]: ../../../../crates/daemon/src/transform.rs#L2963-L2974
 [value-compare]: ../../../../crates/daemon/src/transform.rs#L3227
 [truncate]: ../../../../crates/daemon/src/transform.rs#L4139-L4145
@@ -2813,7 +2813,7 @@ evaluation of this area and its disposition are recorded in
 [fx-1400]: ../../../../crates/daemon/src/transform.rs#L12436-L12441
 [fx-2500]: ../../../../crates/daemon/src/transform.rs#L28085-L28090
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8181-L8198
-[h-timings]: ../../../../crates/daemon/src/lib.rs#L8530-L8556
+[h-timings]: ../../../../crates/daemon/src/lib.rs#L8540-L8564
 [respond]: ../../../../crates/daemon/src/lib.rs#L14479
 [tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1209-L1220
@@ -2903,7 +2903,7 @@ evaluation of this area and its disposition are recorded in
 [knows]: ../../../../crates/daemon/src/lib.rs#L4522-L4569
 [roots-doc]: ../../../../crates/daemon/src/lib.rs#L2959-L2962
 [guidance-fn]: ../../../../crates/daemon/src/lib.rs#L4700-L4707
-[guidance-use]: ../../../../crates/daemon/src/lib.rs#L8249
+[guidance-use]: ../../../../crates/daemon/src/lib.rs#L8261
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
@@ -2931,7 +2931,7 @@ evaluation of this area and its disposition are recorded in
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 
-[pass-drain]: ../../../../crates/daemon/src/lib.rs#L8190-L8194
+[pass-drain]: ../../../../crates/daemon/src/lib.rs#L8199-L8203
 [due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11168-L11169
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L11256-L11260
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6055-L6064

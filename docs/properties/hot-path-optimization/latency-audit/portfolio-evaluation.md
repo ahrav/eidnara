@@ -546,7 +546,7 @@ Current:
 
 ```
 Check: `always` - For every SOFT pass, `pressure_refold` equals the reference
-predicate at [`:4306-4324`][soft-predicate] evaluated with the uncached
+predicate at [`:4309-4327`][soft-predicate] evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
 ```
 
@@ -554,7 +554,7 @@ Replacement:
 
 ```
 Check: `always` - For every SOFT pass, `pressure_refold` equals a frozen copy
-of the predicate at [`:4306-4324`][soft-predicate], kept as a test-only
+of the predicate at [`:4309-4327`][soft-predicate], kept as a test-only
 reference function, evaluated with the uncached
 `tokenizer::estimate_tokens` on the frozen m0 payload and on the composed
 ```

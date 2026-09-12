@@ -17,7 +17,7 @@ request validation, and replay. These have different implemented boundaries.
   reach all-tier-5 output for `H` compartments, without requiring monotonic cost.
 - [m0_compose.rs:178-215][outer] counts the wrapped history slice, retries above
   105% at most three times, and can return a still-over-budget render.
-- [daemon/lib.rs:8155-8159][validation] resolves request budgets separately.
+- [daemon/lib.rs:8239-8242][validation] resolves request budgets separately.
 - [transform.rs:4031-4058][hard] composes on HARD; [4310-4344][refold] also
   composes on pressure refold. Frozen replay is not all SOFT work indiscriminately.
 - [cache-stability:221-287][core] separates pure Defer/SoftPlus replay from SOFT
@@ -64,7 +64,7 @@ outer retry matrix. Existing checks are
 [tiers]: ../../../../crates/daemon/src/decay_render.rs#L203-L240
 [tokenizer]: ../../../../crates/tokenizer/src/lib.rs#L123-L149
 [outer]: ../../../../crates/daemon/src/m0_compose.rs#L178-L215
-[validation]: ../../../../crates/daemon/src/lib.rs#L8204-L8208
+[validation]: ../../../../crates/daemon/src/lib.rs#L8239-L8242
 [hard]: ../../../../crates/daemon/src/transform.rs#L4034-L4061
 [refold]: ../../../../crates/daemon/src/transform.rs#L4313-L4347
 [core]: ../../../../crates/cache-stability/src/lib.rs#L221-L287

@@ -32,15 +32,15 @@ must reach before any "faster" claim is checkable.
   mixed content; the end-to-end arms use [`E2E_MESSAGE_COUNTS`][hp-e2e-counts]
   (100, 1_000) because a 1_400-message first HARD pass is rejected by the
   store's 512 KiB durable-text bound, as the comment at
-  [`:30-33`][hp-e2e-counts] and the note at [`:341-343`][hp-cliff] say.
+  [`:30-33`][hp-e2e-counts] and the note at [`:352-354`][hp-cliff] say.
 - The end-to-end arms ([`bench_e2e_first_hard`][hp-e2e], steady, output
   cache, caveman) call [`transform_cached`][hp-e2e] on a request built by
   [`serde_json::from_value`][hp-req] against a [fresh tempfile store][hp-store]
   with a fixed [`ProducerContext`][hp-ctx]. The production handler wraps that
   call with the projection-cache lookup, side-channel drain, and receive
-  trace at [`:8113-8130`][h-pre], the `run_transform` closure's
+  trace at [`:8181-8198`][h-pre], the `run_transform` closure's
   `project_memory`, `historian_active`, and guidance reads at
-  [`:8136-8191`][h-run], and the response encoding in
+  [`:8195-8261`][h-run], and the response encoding in
   [`respond_transform`][respond]; none of that is in the bench.
 - The 1_400 and 1_000 points are pinned by
   [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound]
@@ -53,7 +53,7 @@ must reach before any "faster" claim is checkable.
   frozen units, 4_096-byte payloads).
 - The transport bench uses a fixed payload, [256 bytes in smoke and 4_096 in
   a campaign][he-payload], where a campaign needs `--bench` or `--campaign`
-  ([`:217-221`][he-payload]); it [exits with status 2 on
+  ([`:217-223`][he-payload]); it [exits with status 2 on
   `--designated-host`][he-designated] and writes
   [`designated_host_verdict: BLOCKED`][he-blocked] into its record. Its
   [manifest][he-manifest] declares 24 `byte_size_boundary_probes`, three
@@ -143,7 +143,7 @@ specification enumerates the stages, and no name is built at run time.
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
 [h-pre]: ../../../../../crates/daemon/src/lib.rs#L8181-L8198
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8204-L8270
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
 [respond]: ../../../../../crates/daemon/src/lib.rs#L14479
 [emit]: ../../../../../crates/daemon/src/lib.rs#L14554-L14576
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
