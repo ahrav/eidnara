@@ -380,7 +380,7 @@ the historical evidence and bound golden remain intact.
 [shared-ingress]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
 [shared-replay-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20654
 [shared-ingress-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20873
-[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L70
+[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L71
 [raw-allocation-check]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20984
 
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md

@@ -382,7 +382,7 @@ not a claim that no related check exists anywhere in the repository.
 [testentry]: ../../../../crates/daemon/src/lib.rs#L12476-L12491
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 [t-cap]: ../../../../crates/daemon/src/lib.rs#L18582-L18639
-[t-fp]: ../../../../crates/daemon/src/lib.rs#L18642-L18658
+[t-fp]: ../../../../crates/daemon/src/lib.rs#L18642-L18705
 [t-dispatch]: ../../../../crates/daemon/src/lib.rs#L27186-L27241
 [t-shape]: ../../../../crates/daemon/src/lib.rs#L33008-L33025
 [t-shape2]: ../../../../crates/daemon/src/lib.rs#L33028-L33068
@@ -394,7 +394,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503
 
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2004-L2011
-[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2013-L2036
+[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2021-L2036
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1503
 [t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1800
 [t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L36653
@@ -413,7 +413,7 @@ not a claim that no related check exists anywhere in the repository.
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23242
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13653
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13523
-[t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L34-L54
+[t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L32-L52
 [t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20654
 [t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L20970
 [t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21090
@@ -528,8 +528,8 @@ not a claim that no related check exists anywhere in the repository.
 [t-timings]: ../../../../crates/daemon/src/transform.rs#L12241
 [t-tc-match]: ../../../../crates/daemon/src/token_cache.rs#L188
 [t-tc-hits]: ../../../../crates/daemon/src/token_cache.rs#L209
-[t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L233
-[t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L249
+[t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L209
+[t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L225
 [t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L242
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L23759
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24011

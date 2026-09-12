@@ -58,7 +58,7 @@ tokenizer obligations remain in their canonical catalogs, named under
 | G3 | test-only | Four of five decrement paths run only in kernel tests and benches. |
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the historian, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The dreamer schedule [defaults to `None`][sched-default]; smart notes need a cron on the note. |
-| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14023`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
+| W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14021`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
 | W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the only abort seam after commit is the `#[cfg(test)]` [hook][hook]. |
 | W12 | default-production | Every `kernel.*` route that reaches the store runs its work through [`kernel_routes::blocking`][blocking] on a `spawn_blocking` worker with the redaction guard at depth `0`; the panic itself is the injected fault. |
 
@@ -491,10 +491,10 @@ for the session equals `store.load_tags_for_session(session)` for the
 [`append_tag_mint_rows`][append-mint] is the baseline followed by the mint
 rows with `tag_number = max + offset + 1` in projection block order; and
 every committed `TagRow.source_bytes` equals the block's
-[`taggable_source`][taggable] text bytes exactly ([`:7196-7201`][mint-input]).
+[`taggable_source`][taggable] text bytes exactly ([`:7197-7202`][mint-input]).
 `always` because the entry is read on the next pass of the same session and
 a stale or speculative row changes the active-tag match at
-[`:7392`][active-match].
+[`:7393`][active-match].
 Fault/timing angle: [`Arc::make_mut`][make-mut] copies on every pass because
 [`snapshot`][tag-snapshot] holds a second reference. A design that appends
 in place, or stores the pass's `Arc` back before commit, exposes rows the
@@ -626,8 +626,8 @@ executes after `commit_transform`, [`descend_lineage`][descend],
 firing observes a `row_version` at least as new as the one that work
 returned, any CAS write derived from that read ([`record_no_fire`][no-fire]
 under `loaded.row_version`) uses that value, and the two Emergency95
-`publication_floor_ordinal` reads ([`:8215-8223`][floor-a],
-[`:8358-8377`][floor-b]) stay distinct because their comparison is the rerun
+`publication_floor_ordinal` reads ([`:8207-8215`][floor-a],
+[`:8350-8369`][floor-b]) stay distinct because their comparison is the rerun
 trigger. Decode: for every stored `meta` text, a scalar projection of
 `revert_epoch` and `historian.state` returns the same value as
 `serde_json::from_str::<ModuleMeta>(meta)` when that succeeds, and when it
@@ -698,8 +698,8 @@ never both; a `pass_trace` write never changes `cache_state`; and a
 `pass_trace` failure never aborts an otherwise valid cache commit unless the
 specification states the new coupling. `always` because status, health, and
 the plugin display read these counters on every request, and every call site
-discards the trace result with `let _ =` ([`:8131`][received-call],
-[`:8194-8201`][rejected-call], [`:8436`][completed-call],
+discards the trace result with `let _ =` ([`:8123`][received-call],
+[`:8186-8193`][rejected-call], [`:8428`][completed-call],
 [`record_stable_pass_trace`][stable-call]).
 Fault/timing angle: A fold moves the bump after `run_transform`, so a rejected
 or stable pass under-counts, or attaches it to every commit so a rerun
@@ -862,7 +862,7 @@ committed, and that commit returns before the pass's first post-commit
 `cache_state` read begins; both versions and the ordering are recorded from
 the store and the actor, never from the pass's own read, which is what C1
 tests. `sometimes` rather than `reachable` because the rerun
-lines at [`:8358-8377`][floor-b] execute on every Emergency95 pass while the
+lines at [`:8350-8369`][floor-b] execute on every Emergency95 pass while the
 interleaving that makes C1 meaningful may never occur.
 Fault/timing angle: The window between `commit_transform` and
 [`prepare_historian_fire`][prepare] or the floor check.
@@ -894,7 +894,7 @@ on an empty drain.
 Check: `sometimes` - Under three constant markers
 `side-channel-row-is-due-during-a-drain-event`, `-primer`, and
 `-user-observation`, for some call to [`drain_historian_side_channels`][drain]
-from the handler's pass drain ([`:8124-8128`][pass-drain]), the outbox holds
+from the handler's pass drain ([`:8116-8120`][pass-drain]), the outbox holds
 at entry, for that kind, at least one row with `delivered_at_ms IS NULL` and
 `next_attempt_at_ms <= now_ms` for the `now_ms` the call passes (the due
 predicate at [`:10893-10894`][due-predicate]). Each marker records the
@@ -1612,7 +1612,7 @@ test mode and compares nothing; [`.config/nextest.toml`][nextest] excludes
 bench targets. The daemon bench's [header][hp-header] disclaims its own
 numbers as a baseline; its end-to-end arms call [`transform_cached`][hp-e2e]
 on an already-typed request against a fresh store, skipping the handler work
-at [`:8115-8132`][h-pre] and the response encoding in
+at [`:8107-8124`][h-pre] and the response encoding in
 [`respond_transform`][respond]. The two production-sized fixtures
 ([1_400][fx-1400], [2_500][fx-2500]) are `#[ignore]` and print to stderr. The
 transport bench measures a fixed [256- or 4096-byte payload][he-payload],
@@ -1660,7 +1660,7 @@ the token-cache delta ([`record_token_cache_delta`][rtcd]) run on one thread.
 `always` because the handler populates `timings` on every ordinary pass and
 [`respond_transform`][respond] emits the line for every response.
 Fault/timing angle: The transform moves to a blocking thread while the
-handler-level `Instant` pairs at [`:8463-8488`][h-timings] stay on the
+handler-level `Instant` pairs at [`:8455-8480`][h-timings] stay on the
 handler task; a stage split across an `.await` splits its
 [thread-local counter][tc-local] delta. Both reads sit inside the synchronous
 [`apply_additive_only`][snap-add] and [`apply_once`][snap-once] bodies today.
@@ -1816,7 +1816,7 @@ state.
 Fault/timing angle: A fingerprint format change lands while a firing is in
 flight across a restart, so the stored string no longer equals the recomputed
 one and publication fails with `FingerprintMismatch`. The snapshot is built at
-[`:417-429`][snap-build] with `bytes: block.bytes.to_string()`; its only
+[`:418-430`][snap-build] with `bytes: block.bytes.to_string()`; its only
 reader is [`as_item`][as-item] feeding the fingerprint, which reads
 `item.bytes.len()` into the literal `id:kind:len|...`, stored in
 [`HistorianDurableState.chunk_fingerprint`][fp-field] and compared by
@@ -1830,7 +1830,7 @@ firing; a chunk whose text exceeds `token_budget`, which needs a large
 session.
 Confidence: high - [Evidence](evidence/historian-firing-input-is-preserved-by-cheaper-construction.md).
 The snapshot, the fingerprint, its two comparisons, and the truncation call
-at [`:692`][trunc-call] are source-verified.
+at [`:693`][trunc-call] are source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the fingerprint test, the production-window, exact-budget, and
 small-window differentials, the golden, and the marker test; all unaudited.
@@ -1919,8 +1919,8 @@ edited; two project roots bound at once.
 Confidence: high - [Evidence](evidence/effective-config-reads-observe-a-tier-change-by-the-next-pass.md).
 [`effective_for_project`][eff-proj], [`effective_with_warnings`][eff-warn]
 with its deep clone at [`:288`][eff-clone], the per-pass callers
-([`:4790`][call-reattach], [`:5051`][call-fire], [`:5368`][call-wrapup]), and
-the bind freeze ([`:11788`][call-bind], [binding doc][binding-doc]) are
+([`:4782`][call-reattach], [`:5043`][call-fire], [`:5360`][call-wrapup]), and
+the bind freeze ([`:11780`][call-bind], [binding doc][binding-doc]) are
 source-verified.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 list the mtime test and the three privilege tests; all unaudited. Unit tests
@@ -1952,15 +1952,15 @@ next pass's `ProducerContext` construction for the same session:
 table; the projection cache holds the entry [`store_projection_cache`][store-pc]
 would have stored, or the next pass takes the full projection path;
 `guidance_dates` holds no entry for the session, or the next pass's
-`ProducerContext.guidance_date` ([`:8175`][guidance-use]) equals a fresh
+`ProducerContext.guidance_date` ([`:8167`][guidance-use]) equals a fresh
 computation; and the serialized-output cache holds no entry from a pass the
 store rejected, which the transform catalog's
 [output-cache record][tc-output] already constrains. `always` because the
 four updates run on every committing pass whatever the execution topology.
 Fault/timing angle: On the ordinary path there is no `.await` between the
-commit at [`:8202`][commit-call] and the bookkeeping at
-[`:8209-8214`][roots-insert], [`:8387-8394`][pc-store], and
-[`:8398-8403`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
+commit at [`:8194`][commit-call] and the bookkeeping at
+[`:8201-8206`][roots-insert], [`:8379-8386`][pc-store], and
+[`:8390-8395`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
 sit inside the Emergency95 branch. Moving `run_transform` to
 `spawn_blocking` introduces an await after the commit, and a blocking task
 cannot be cancelled once started, so an abort landing there leaves the
@@ -2085,7 +2085,7 @@ Guarantee: A relocation campaign reaches the window in which a transform is
 committed and its in-memory bookkeeping has not run.
 Check: `sometimes` - For some pass, `commit_transform` has returned success
 and the handler's abort (cancellation, route close, or generation
-retirement) is observed before [`:8209`][roots-insert] executes. The marker
+retirement) is observed before [`:8201`][roots-insert] executes. The marker
 asserts the commit and the abort ordering, not the next pass's state.
 Fault/timing angle: At HEAD the window exists only in the Emergency95 branch
 at the awaits `:8263`, `:8289`, and `:8315`; it exists on every pass once a
@@ -2219,8 +2219,8 @@ lines execute every [`IDLE_POLL`][sched-idle] on a default campaign while the
 list is empty, so `reachable` would be trivially satisfied.
 Fault/timing angle: The schedule [defaults to `None`][sched-default], and
 [`scheduled_projects`][sched-projects] drops any project whose schedule is
-`None` (`schedule: schedule?` at [`:14023`][sched-filter]) or whose memories
-authority is not `MODULE` ([`:13998-14003`][sched-authority]), so a default
+`None` (`schedule: schedule?` at [`:14021`][sched-filter]) or whose memories
+authority is not `MODULE` ([`:13996-14001`][sched-authority]), so a default
 campaign hands the scheduler an empty list and `next_due` is never called;
 W6's clauses then hold on no instant.
 Required faults and enabling state: A user tier with
@@ -2429,8 +2429,8 @@ evaluation of this area and its disposition are recorded in
 [copies]: ../../../../crates/daemon/src/lib.rs#L15400-L15409
 [toolarge]: ../../../../crates/daemon/src/lib.rs#L15450-L15455
 [queuefull]: ../../../../crates/daemon/src/lib.rs#L15457-L15462
-[probe]: ../../../../crates/daemon/src/lib.rs#L15303-L15315
-[class]: ../../../../crates/daemon/src/lib.rs#L15387-L15398
+[probe]: ../../../../crates/daemon/src/lib.rs#L15313-L15321
+[class]: ../../../../crates/daemon/src/lib.rs#L15393-L15404
 [dispatch]: ../../../../crates/daemon/src/lib.rs#L12550-L12644
 [pagefields]: ../../../../crates/daemon/src/lib.rs#L12646-L12650
 [unrecognized]: ../../../../crates/daemon/src/lib.rs#L12666-L12690
@@ -2457,14 +2457,14 @@ evaluation of this area and its disposition are recorded in
 [store-pc]: ../../../../crates/daemon/src/lib.rs#L4296-L4338
 [historian-fire]: ../../../../crates/daemon/src/lib.rs#L4987
 [assemble]: ../../../../crates/daemon/src/lib.rs#L5227-L5231
-[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13020-L13072
-[gate-native]: ../../../../crates/daemon/src/lib.rs#L13076-L13081
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13084-L13099
-[native-diff]: ../../../../crates/daemon/src/lib.rs#L13317-L13334
-[segments-take]: ../../../../crates/daemon/src/lib.rs#L14423-L14438
-[segments]: ../../../../crates/daemon/src/lib.rs#L14444-L14450
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16565
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16646
+[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13022
+[gate-native]: ../../../../crates/daemon/src/lib.rs#L13078-L13083
+[native-attach]: ../../../../crates/daemon/src/lib.rs#L13092-L13106
+[native-diff]: ../../../../crates/daemon/src/lib.rs#L13319-L13336
+[segments-take]: ../../../../crates/daemon/src/lib.rs#L14425-L14440
+[segments]: ../../../../crates/daemon/src/lib.rs#L14445-L14452
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16586
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16648
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2021-L2043
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L293-L300
@@ -2685,7 +2685,7 @@ evaluation of this area and its disposition are recorded in
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../crates/daemon/benches/hot_path.rs#L1-L10
-[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L271-L304
+[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L267-L300
 [meta-bound]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [he-payload]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
@@ -2696,7 +2696,7 @@ evaluation of this area and its disposition are recorded in
 [fx-2500]: ../../../../crates/daemon/src/transform.rs#L28092-L28097
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8107-L8124
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8455-L8480
-[respond]: ../../../../crates/daemon/src/lib.rs#L14396
+[respond]: ../../../../crates/daemon/src/lib.rs#L14402
 [tt]: ../../../../crates/daemon/src/transform.rs#L1018-L1197
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1199-L1210
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1216-L1349
@@ -2713,8 +2713,8 @@ evaluation of this area and its disposition are recorded in
 [tc-u32]: ../../../../crates/daemon/src/token_cache.rs#L135-L137
 [tc-cet]: ../../../../crates/daemon/src/token_cache.rs#L165-L181
 [tc-inject]: ../../../../crates/daemon/src/transform.rs#L1793-L1809
-[declared-doc]: ../../../../crates/daemon/src/lib.rs#L2229-L2234
-[declared]: ../../../../crates/daemon/src/lib.rs#L2236-L2250
+[declared-doc]: ../../../../crates/daemon/src/lib.rs#L2235-L2241
+[declared]: ../../../../crates/daemon/src/lib.rs#L2242-L2256
 [ao-sig]: ../../../../crates/daemon/src/transform.rs#L2866
 [soft-predicate]: ../../../../crates/daemon/src/transform.rs#L6316
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L23759
@@ -2780,7 +2780,7 @@ evaluation of this area and its disposition are recorded in
 [merge]: ../../../../crates/daemon/src/config.rs#L716
 [raise-only]: ../../../../crates/daemon/src/config.rs#L740
 [knows]: ../../../../crates/daemon/src/lib.rs#L4481-L4528
-[roots-doc]: ../../../../crates/daemon/src/lib.rs#L2929-L2932
+[roots-doc]: ../../../../crates/daemon/src/lib.rs#L2937-L2940
 [guidance-fn]: ../../../../crates/daemon/src/lib.rs#L4640-L4647
 [guidance-use]: ../../../../crates/daemon/src/lib.rs#L8167
 
@@ -2804,7 +2804,7 @@ evaluation of this area and its disposition are recorded in
 [blk-read-rows]: ../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3801-L3803
+[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3809-L3811
 [tl-test]: ../../../../crates/daemon/src/transform.rs#L487-L490
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
@@ -2825,6 +2825,6 @@ evaluation of this area and its disposition are recorded in
 [sched-fixture]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L586-L593
 [sched-clock]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L418-L427
 [t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L680
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L13971-L14020
-[sched-authority]: ../../../../crates/daemon/src/lib.rs#L13990-L13995
-[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14015
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L13974-L14026
+[sched-authority]: ../../../../crates/daemon/src/lib.rs#L13996-L14001
+[sched-filter]: ../../../../crates/daemon/src/lib.rs#L14021
