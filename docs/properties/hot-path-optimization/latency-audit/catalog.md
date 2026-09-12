@@ -2496,9 +2496,9 @@ evaluation of this area and its disposition are recorded in
 [commit-mints]: ../../../../crates/daemon/src/transform.rs#L4951-L4960
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27615
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27366
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L22857
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23124
-[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28345
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23242
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23515
+[synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28633
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L186-L198
 [reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
 [diff-bytes]: ../../../../crates/daemon/src/wire.rs#L367-L375

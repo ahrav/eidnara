@@ -33,7 +33,7 @@ never of the allocation or the lane that produced them.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
   blocks with `WireMessage::from_parts`, so a rebuilt shell has no `original`;
   its [doc][reattach-doc] says unknown top-level fields are dropped.
-- The native differential at [`:13316-13333`][native-diff] compares
+- The native differential at [`:13325-13342`][native-diff] compares
   `to_vec(incremental)` with `to_vec(encode_full_native_messages(..))` under
   [`native_attachment_differential_enabled`][gate-native], the same gate shape.
 - [`native_ingress_chunks`][ingress-chunks] shares an output chunk for index
@@ -52,8 +52,8 @@ never of the allocation or the lane that produced them.
 - [`Serialize for ServedMessage`][ser-served] re-serializes the inner
   `WireMessage`, not `canonical_bytes`. The handler avoids that path by taking
   `messages` out of the response before `to_value(response)`
-  ([`:14428-14443`][segments-take]) and writing each through
-  [`PreparedSegment::served`][segment-served] ([`:14448-14454`][segments]),
+  ([`:14431-14446`][segments-take]) and writing each through
+  [`PreparedSegment::served`][segment-served] ([`:14452-14458`][segments]),
   whose `bytes()` returns `canonical_bytes`.
 
 ## Failure scenario
@@ -61,7 +61,7 @@ never of the allocation or the lane that produced them.
 A projector that reuses an ingress `Arc<WireBlock>` but computes `bytes` from
 a different serialization breaks `bytes == to_string(wire)` and every digest
 keyed on it. A chunk-sharing decision by pointer identity diverges from the
-value test at [`:13058`][chunk-eq] for a message equal by value but not by
+value test at [`:13065`][chunk-eq] for a message equal by value but not by
 pointer. A sidecar merge that reorders a repeated mid changes `order`. A
 direct `to_vec(&message)` on a typed shell emits struct field order where the
 `to_value` round trip emits sorted keys, so bytes and `canonical_hash` change
@@ -314,10 +314,17 @@ branch on every message, a path a decoded request never takes because
 [bench corpus helper][bench-ingress] first failed on that shape, then passed
 once the helper round-trips the corpus through `serde_json`. `projection/full`
 measures the canonical-shell rebuild that a cold request pays. A separate
-[`projection/reattached_prefix`][bench-reattached] cell keeps the typed corpus
-and asserts every projected block points into a corpus shell, so it measures the
-share path a reattached prefix takes. `cargo test --bench hot_path` passes with
-both cells. These are shape corrections to the bench input, not measurements.
+[`projection/reattached_prefix`][bench-reattached] cell takes the decoded corpus
+and clears only each message's retained JSON through `mark_modified`, the shell
+shape the projection builder produces on replay. It asserts that every block
+keeps its retained JSON and that every projected block points into a corpus
+shell, so it measures the share path a reattached prefix takes. A typed corpus
+fails the block-retention assertion: `flatten_block` would then clone each typed
+payload instead of replaying its `Value`, a cost no reattached block pays. The
+`hot_path` target declares `required-features = ["bench-internals"]`, so
+`cargo test -p daemon --features bench-internals --locked --bench hot_path`
+exercises both cells and passes. These are shape corrections to the bench input,
+not measurements.
 
 ### Shell metadata preservation and review disposition
 
@@ -358,7 +365,7 @@ also pass. The extension changes tests and documentation, not served behavior;
 the historical evidence and bound golden remain intact.
 
 [bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
-[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L102-L135
+[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L118-L155
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
 [shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
@@ -390,14 +397,14 @@ the historical evidence and bound golden remain intact.
 [assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
 [prefix-call]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L2910-L2912
 [sel-item]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/transform.rs#L6352
-[sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16629
-[ingress-chunks]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13027-L13071
-[chunk-eq]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13058
-[gate-native]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13073-L13080
-[native-diff]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13316-L13333
-[segments-take]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14428-L14443
-[segments]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14448-L14454
-[t-astro]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L20954
+[sel-kind]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L16632
+[ingress-chunks]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13028-L13080
+[chunk-eq]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13065
+[gate-native]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13084-L13089
+[native-diff]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L13325-L13342
+[segments-take]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14431-L14446
+[segments]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L14452-L14458
+[t-astro]: https://github.com/ahrav/eidnara/blob/6b2c0c5f/crates/daemon/src/lib.rs#L21222
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L302
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L278-L300
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
