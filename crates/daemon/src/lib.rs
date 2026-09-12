@@ -19401,6 +19401,11 @@ mod tests {
                 "dense unknown field",
                 valid(&format!(r#","junk":[{}]"#, "0,".repeat(20_000) + "0")),
             ),
+            // serde accepts a unit variant as `{"light":null}` beside the string form.
+            (
+                "object-form preset",
+                valid(r#","prompt_surface_preset":{"light":null}"#),
+            ),
             // Shapes the derive skips without checking under an ignored field; the tree refuses each.
             (
                 "number out of range under an ignored field",
@@ -19502,6 +19507,7 @@ mod tests {
                 "overlong method beside kind",
                 "other route",
                 "dense unknown field",
+                "object-form preset",
                 "nesting at the tree limit",
             ],
             "the bodies both decodes accept"
@@ -19631,6 +19637,7 @@ mod tests {
                 "unknown serializer profile",
                 "non-string discriminator with kind",
                 "dense unknown field",
+                "object-form preset",
                 "nesting at the tree limit",
             ],
             "the bodies that decode typed from their bytes; the rest take the tree lane"
@@ -19982,10 +19989,16 @@ mod tests {
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let body = serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap();
         let footprint = footprint_of(&body);
-        let in_flight_before = DISPATCH_HEALTH.in_flight_count.load(Ordering::Relaxed);
-        let started_before = DISPATCH_HEALTH
-            .last_dispatch_started_at_ms
-            .load(Ordering::Relaxed);
+        let route = test_route(7);
+        // `DISPATCH_HEALTH` is process-wide and moves under other tests, so the witnesses are
+        // the handler's own route table and the store, which a ticket's accept would touch.
+        let route_channel_bound = |handler: &Handler| {
+            handler
+                .transform_route_channels
+                .lock()
+                .expect("route channels mutex")
+                .contains_key(&route)
+        };
 
         for (pool, expected) in [
             (
@@ -20000,34 +20013,25 @@ mod tests {
             let holder = pool.hold(pool.capacity() / 2);
             let meter = ResidentMeter::new(&pool);
             let (_, outcome) = handler
-                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+                .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
                 .await;
             assert_eq!(comparable_outcome(outcome), comparable_outcome(expected));
             drop(meter);
             drop(holder);
+            assert!(!route_channel_bound(&handler), "a refusal bound the route");
         }
-        assert_eq!(
-            DISPATCH_HEALTH.in_flight_count.load(Ordering::Relaxed),
-            in_flight_before
-        );
-        assert_eq!(
-            DISPATCH_HEALTH
-                .last_dispatch_started_at_ms
-                .load(Ordering::Relaxed),
-            started_before,
-            "no transform ticket was opened"
-        );
         assert!(!handler.module_knows_transform_session("ses", &project));
         assert!(store.load("ses").unwrap().row_version.is_none());
 
-        // The same body with room is served.
+        // The same body with room is served, and only then is the route bound.
         let pool = TestPool::unbounded();
         let meter = ResidentMeter::new(&pool);
         let (lane, outcome) = handler
-            .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+            .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
             .await;
         assert_eq!(lane, BodyLane::Direct);
         assert_eq!(comparable_outcome(outcome).0, "response");
+        assert!(route_channel_bound(&handler));
     }
 
     #[test]

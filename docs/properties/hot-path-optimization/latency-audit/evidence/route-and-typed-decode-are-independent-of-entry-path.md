@@ -180,7 +180,7 @@ native corpus.
 [`handle_transform_for_test`][test-entry] serializes its request and enters at
 the body branch, so the crate's transform tests run the direct lane.
 
-The [corpus][t-corpus] holds 34 bodies: a valid body under `kind` and under
+The [corpus][t-corpus] holds 35 bodies: a valid body under `kind` and under
 `method`, an unknown top-level field, `null` on an `Option` and on a defaulted
 field, a wrong type, a float, an exponent, a negative and an above-`u64`
 integer on integer fields, `-0` on a float field, a repeated top-level key, a
@@ -188,15 +188,15 @@ repeated discriminator, a repeated nested key, a missing required field, a
 missing and an unknown serializer profile, a `null` and a lone page field, a
 non-string and an overlong `method` beside `kind`, another route, trailing
 bytes, malformed JSON, array, string and empty bodies, `messages` as an object,
-twenty thousand values under an ignored field, an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
+twenty thousand values under an ignored field, a preset spelled as an object, an out-of-range number, a lone surrogate and invalid UTF-8 under an ignored
 field, and nesting at and one past the tree's depth limit. The
 [entry differential][t-entry-diff] runs every body through `dispatch_body` and
 through the tree dispatch on two identical handlers and asserts the same
 response with the timing block removed, or the same code and message; it pins
-the ten bodies that took the direct lane and asserts the valid body was
+the eleven bodies that took the direct lane and asserts the valid body was
 served. The [decode differential][t-decode-diff] asserts for every body that a
 probe implies the tree parses it, that where both decodes accept a body they
-produce the same request (pinning the fourteen such bodies, with `-0` compared
+produce the same request (pinning the fifteen such bodies, with `-0` compared
 by bit pattern), pins the bodies only the tree accepts to the three
 repeated-key shapes (the derive refuses a repeated field; the handler's
 fallback carries them), pins the bodies only the direct decode accepts to the
@@ -247,9 +247,9 @@ one-slice control.
 [copies-live]: ../../../../../crates/daemon/src/metered_decode.rs#L38
 [test-entry]: ../../../../../crates/daemon/src/lib.rs#L8593-L8605
 [t-probe]: ../../../../../crates/daemon/src/lib.rs#L19250-L19295
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19298-L19435
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19455-L19574
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19597-L19638
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19298-L19440
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19460-L19580
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19603-L19645
 [t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19168-L19247
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
 

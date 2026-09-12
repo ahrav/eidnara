@@ -258,4 +258,4 @@ steady-pass eviction test.
 [capacity]: ../../../../crates/memory-store/src/lib.rs#L478
 [resource-pragmas]: ../../../../crates/storage/src/lib.rs#L4685-L4723
 [eviction-probe]: ../../../../crates/storage/src/lib.rs#L4729-L4788
-[pass-probe]: ../../../../crates/daemon/src/lib.rs#L24573-L24603
+[pass-probe]: ../../../../crates/daemon/src/lib.rs#L24577-L24607

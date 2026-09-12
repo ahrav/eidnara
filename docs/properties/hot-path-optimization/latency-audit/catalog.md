@@ -142,10 +142,13 @@ Status: active
 Exercised: partial - the
 [ring test](evidence/admission-chain-charges-before-decode-and-refuses-effect-free.md#metered-decode-evidence)
 drives `Handler::handle` through the direct-host fixture with a body over
-each cap and two whose footprint exceeds the scratch pool, asserts one
-`invalid_params` terminal each and no pass trace or store row for the session;
-the effect test drives a permanent and a transient refusal through
-`dispatch_body` and asserts no ticket, route channel, or store row; the doomed
+each cap and two whose byte-derived floor exceeds the scratch pool, observes
+an `invalid_params` error at the managed client for each (the client settles a
+request on its first terminal and drops a later one, so one terminal is a
+claim the fixture cannot count) and no pass trace or store row for the
+session; no ring-level body reaches either metered decode's refusal; the
+effect test drives a permanent and a transient refusal through
+`dispatch_body` and asserts no route channel or store row; the doomed
 body test shows a body refused from its bytes with the pool never asked; the
 lane test shows both lanes counting one footprint and refusing the same bodies;
 the meter, floor, small-body, and drained-pool tests cover the charge
@@ -227,7 +230,7 @@ Reachability: default-production
 Status: active
 Exercised: partial - the
 [entry differential](evidence/route-and-typed-decode-are-independent-of-entry-path.md#direct-decode-evidence)
-runs a corpus of 34 body shapes through the body entry and the tree dispatch,
+runs a corpus of 35 body shapes through the body entry and the tree dispatch,
 asserts one outcome, and pins which bodies took the direct lane; the decode
 differential pins the acceptance differences to repeated keys and to
 derive-lenient shapes under an ignored field, both kept off the direct lane,
@@ -2643,8 +2646,8 @@ evaluation of this area and its disposition are recorded in
 [commit-mints]: ../../../../crates/daemon/src/transform.rs#L4969-L4978
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27935
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27686
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23576
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23857
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23577
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L23861
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28953
 [flatproj]: ../../../../crates/daemon/src/wire.rs#L187-L198
 [reattach]: ../../../../crates/daemon/src/wire.rs#L214-L241
@@ -2875,9 +2878,9 @@ evaluation of this area and its disposition are recorded in
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L23721
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24561
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20668
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20975
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21095
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L20672
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L20979
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L21091
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L23750
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L23775
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L23910
@@ -2905,7 +2908,7 @@ evaluation of this area and its disposition are recorded in
 [trunc]: ../../../../crates/daemon/src/historian_chunk.rs#L744-L777
 [boundary-view]: ../../../../crates/daemon/src/lib.rs#L16600-L16660
 [construction-corpus]: ../../../../crates/daemon/src/lib.rs#L17538
-[firing-capture]: ../../../../crates/daemon/src/lib.rs#L23576
+[firing-capture]: ../../../../crates/daemon/src/lib.rs#L23577
 [fp]: ../../../../crates/daemon/src/historian.rs#L140-L158
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L588
 [fp-verify]: ../../../../crates/daemon/src/historian.rs#L326-L334
@@ -2972,7 +2975,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L10981-L10985
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L5900-L5909
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35840
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L35844
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L18704
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L18920
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261

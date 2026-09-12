@@ -421,4 +421,4 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L4685-L4723
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L4729-L4788
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L15120-L15149
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L24573-L24603
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L24577-L24607

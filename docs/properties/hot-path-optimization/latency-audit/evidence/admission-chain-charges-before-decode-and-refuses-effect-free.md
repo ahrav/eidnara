@@ -195,13 +195,22 @@ decode falls to the tree decode with the meter restarted, so the bytes the
 failed decode held cover the tree decode before it charges more; a refusal
 does not fall through.
 
-The one behavior that moves: the pre-scan bounded a body before it was parsed,
-so a malformed body with enough separators was refused as too large. The floor
-keeps that outcome for a malformed body whose value count alone exceeds the
-capacity; a malformed body under the floor is refused by the tree decode as
-`unrecognized_request_shape` unless the footprint of its well-formed prefix
-crosses the capacity first. Every body over 1 MiB is still gated by the byte
-cap before either applies.
+Two behaviors move; the error literals stay. The pre-scan bounded a body
+before it was parsed, so a malformed body with enough separators was refused
+as too large. The floor keeps that outcome for a malformed body whose value
+count alone exceeds the capacity; a malformed body under the floor is refused
+by the tree decode as `unrecognized_request_shape` unless the footprint of its
+well-formed prefix crosses the capacity first. And the admitted set of
+well-formed bodies changes at the capacity boundary: the pre-scan counted
+`1 + commas + colons` nodes, while the meter and the floor count every value,
+container openings included, so a body dense in nested containers is charged
+more than the scan estimated. A 4 MB body holding 800,000 `[[]]` elements
+under an ignored field estimated about 102 MB of nodes under the scan and
+counts about 205 MB under the meter, so against a free default scratch pool
+of about 185 MB the scan admitted it and the meter refuses it as too large.
+The scan under-counted such a body's `Value` tree; the meter's count is the
+one the [peak test][t-peak] holds against the allocator. Every body over
+1 MiB is still gated by the byte cap before either applies.
 
 The [footprint test][t-footprint] shows separators inside strings not counted
 as values, a large text block charged for three copies, a scalar-dense body
@@ -229,15 +238,25 @@ them, through both lanes with a pool one byte short of its footprint and with
 a pool that just fits, and shows one outcome, one counted footprint, and the
 too-large refusal on the short pool. The [drained-pool test][t-drain] is the
 A3 witness. The [effect test][t-effect] runs a permanent and a transient
-refusal through `dispatch_body` and shows the dispatch health counters, the
-route channel, and the store row untouched, then the same body served with
-room. The [ring test][t-ring] sends, through the direct-host fixture to
+refusal through `dispatch_body` and shows the handler's route table without the
+tested route and the store row absent, checked directly rather than through
+the process-wide dispatch counters other tests move or a session helper that
+returns before it reads the route table, then the same body served with room
+and only then the route bound. The direct lane's [object-form preset][t-lanes]
+corpus body, `{"light":null}` for a unit variant, is decoded through a
+[hand-written visitor][preset] so the meter sees the object and its `null`;
+the derive's `deserialize_enum` path handed serde_json the `null` unmetered and
+the direct lane counted two nodes fewer than the tree for it. The [ring test][t-ring] sends, through the direct-host fixture to
 `Handler::handle`, a body over the facade cap, one over the transform cap, and
 two under both caps whose two million values exceed the scratch pool, one
 carrying a page key and one a complete unpaged request, both refused from
-their bytes before either decode; each ends in one `host.invalid_params`
-terminal, the session's `status` then shows no `pass_trace` and no
-`row_version`, and a transform on the same route is served and counted once.
+their bytes before either decode, so neither metered decode's refusal or
+charge release runs at ring level; each request ends in a
+`host.invalid_params` error at the managed client, which settles on the first
+terminal it correlates and drops a later one, so the test observes one error,
+not that exactly one terminal was published; the session's `status` then shows
+no `pass_trace` and no `row_version`, and a transform on the same route is
+served and counted once.
 The [peak test][t-peak] shows the footprint covering the tree decode's heap
 peak on the dense native corpus, the direct decode's peak at or below it, and
 the direct lane's own metered count covering its peak with the values under an
@@ -268,19 +287,20 @@ passed.
 [ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L522-L528
 [constants]: ../../../../../crates/daemon/src/metered_decode.rs#L57
 [step]: ../../../../../crates/daemon/src/metered_decode.rs#L62
-[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19737-L19771
-[t-meter]: ../../../../../crates/daemon/src/lib.rs#L19777-L19810
-[t-small]: ../../../../../crates/daemon/src/lib.rs#L19814-L19831
-[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L19836-L19864
+[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19744-L19778
+[t-meter]: ../../../../../crates/daemon/src/lib.rs#L19784-L19817
+[t-small]: ../../../../../crates/daemon/src/lib.rs#L19821-L19838
+[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L19843-L19871
 [t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L911-L939
 [t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L941-L976
-[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L19963-L19975
-[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L19923-L19958
-[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19644-L19690
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19870-L19918
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19980-L20031
+[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L19970-L19982
+[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L19930-L19965
+[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19651-L19697
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19877-L19925
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19987-L20035
 [t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
+[preset]: ../../../../../crates/daemon/src/prompt_surface.rs#L108-L163
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488

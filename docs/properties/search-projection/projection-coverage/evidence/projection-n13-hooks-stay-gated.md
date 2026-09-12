@@ -100,7 +100,7 @@ scheduler record rather than duplicating lease/receipt rules.
 [config]: ../../../../../crates/daemon/src/config.rs#L1881-L1929
 [keys]: ../../../../../crates/daemon/src/config.rs#L532-L624
 [facade]: ../../../../../crates/daemon/src/lib.rs#L10222-L10234
-[routes]: ../../../../../crates/daemon/src/lib.rs#L32439-L32479
+[routes]: ../../../../../crates/daemon/src/lib.rs#L32443-L32483
 [scheduler]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L25-L36
 [bridge]: ../../../../../crates/daemon/src/lib.rs#L13979-L14044
 [acceptance]: ../catalog.md#projection-acceptance-situations-witnessed

@@ -226,5 +226,5 @@ branch as well and passing in isolation.
 [retire]: ../../../../../crates/memory-store/src/lib.rs#L8832
 [overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L8786
 [retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16263-L16401
-[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24736-L24780
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24740-L24784
 [receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L6897

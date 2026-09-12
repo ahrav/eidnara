@@ -241,5 +241,5 @@ branch as well and passing in isolation.
 [epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6396-L6408
 [phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6414-L6428
 [scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15238-L15441
-[load-count]: ../../../../../crates/daemon/src/lib.rs#L24667-L24710
-[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24716-L24729
+[load-count]: ../../../../../crates/daemon/src/lib.rs#L24671-L24714
+[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24720-L24733

@@ -228,7 +228,7 @@ only the five values asserted by the retained tests.
 [t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1744-L1757
 [boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16600-L16660
 [construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17538
-[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23576
+[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23577
 [frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16707-L16765
 [normalize]: ../../../../../crates/daemon/src/transform.rs#L2126-L2142
 [apply-normalized]: ../../../../../crates/daemon/src/transform.rs#L2895-L2908

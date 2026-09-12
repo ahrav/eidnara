@@ -459,12 +459,12 @@ both sides and neither resolved here:
 [boundary-filter]: ../../../../../crates/daemon/src/lib.rs#L16597
 [sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16628-L16643
 [token-count]: ../../../../../crates/daemon/src/lib.rs#L2028-L2050
-[t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L20644
+[t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L20648
 [t-astro]: ../../../../../crates/daemon/src/lib.rs#L20948
-[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L21678
-[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L21748
-[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L22220
-[t-dup]: ../../../../../crates/daemon/src/lib.rs#L22264
+[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L21682
+[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L21752
+[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L22224
+[t-dup]: ../../../../../crates/daemon/src/lib.rs#L22268
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [with-identity]: ../../../../../crates/daemon/src/transform.rs#L218-L225
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
