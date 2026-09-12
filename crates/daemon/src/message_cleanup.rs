@@ -6,6 +6,7 @@ use kernel::applicability::EvalBudget;
 use retrieval::message_cleanup::{Candidate, Reclaimed, candidates, reclaim};
 use storage::{GuardedConn, StoreError};
 
+use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 use crate::search_projection::{SearchProjection, SearchProjectionError};
 
 /// Bounds one slice: how many tombstoned rows one page inspects, how many pages one slice may write, and how many rows one slice may reclaim in total.
@@ -25,6 +26,8 @@ pub enum CleanupStop {
     BoundReached,
     /// The store returned before the page's COMMIT, so the page's rows are unchanged and the same page is reclaimed again next slice.
     Write(String),
+    /// The gate denied the hook before any page was read; nothing was inspected or reclaimed.
+    Denied(Denial),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +73,7 @@ impl<'a> MessageCleanup<'a> {
     /// Returns the projection's error when a read fails, a statement fails, or the store is quarantined, so the caller can quarantine as every other projection writer does; a write the store refused before COMMIT ends the slice in the report instead, since the page is unchanged.
     pub fn run_slice(
         &mut self,
+        gate: &HookGate,
         bounds: CleanupBounds,
         budget: &EvalBudget,
     ) -> Result<CleanupReport, SearchProjectionError> {
@@ -79,6 +83,10 @@ impl<'a> MessageCleanup<'a> {
             cursor: self.cursor.clone(),
             stop: None,
         };
+        if let Err(denial) = gate.admit(ProjectionHook::MessageCleanup, EntryPoint::Dispatch) {
+            report.stop = Some(CleanupStop::Denied(denial));
+            return Ok(report);
+        }
         for _ in 0..bounds.max_pages.get() {
             if budget.check().is_err() {
                 report.stop = Some(CleanupStop::Cancelled);

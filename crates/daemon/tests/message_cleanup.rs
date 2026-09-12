@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+mod support;
+
 use daemon::harness_sources::{Representation, SourcePublisher, SourceUnit};
 use daemon::message_cleanup::{CleanupBounds, CleanupStop, MessageCleanup};
 use daemon::search_projection::SearchProjection;
@@ -532,7 +534,13 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     let payloads_before = payloads(fixture.data_home());
 
     let mut cleanup = MessageCleanup::new(fixture.projection(), fixture.acknowledged);
-    let report = cleanup.run_slice(bounds(), &unbounded()).unwrap();
+    let report = cleanup
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
+        .unwrap();
     assert_eq!(report.stop, None, "{report:?}");
     assert_eq!(report.cursor, None, "the scan was exhausted");
     assert_eq!(
@@ -573,7 +581,11 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     }
 
     let again = MessageCleanup::new(fixture.projection(), fixture.acknowledged)
-        .run_slice(bounds(), &unbounded())
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(
         (again.reclaimed.occurrences, again.reclaimed.payloads),
@@ -599,7 +611,13 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     fixture.reopen();
     let reopened = fixture.projection();
     let mut cleanup = MessageCleanup::new(reopened, fixture.acknowledged);
-    let report = cleanup.run_slice(bounds(), &unbounded()).unwrap();
+    let report = cleanup
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
+        .unwrap();
     assert_eq!(report.reclaimed.occurrences, 0);
     assert_eq!(
         rows(fixture.data_home())
@@ -612,7 +630,11 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     // The late tombstone becomes eligible once the acknowledged prefix covers it; the held ones never do while their job rows exist, and the other class never does. A prefix claimed above the projection's own checkpoint is capped by the store.
     let tip = fixture.corpus.kernel.tip().unwrap();
     let report = MessageCleanup::new(reopened, tip + 1_000)
-        .run_slice(bounds(), &unbounded())
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(report.reclaimed.occurrences, 1, "{report:?}");
     assert_eq!(
@@ -646,18 +668,26 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     let cancelled = unbounded();
     cancelled.cancel();
     let mut cleanup = MessageCleanup::new(fixture.projection(), fixture.acknowledged);
-    let report = cleanup.run_slice(bounds(), &cancelled).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &cancelled)
+        .unwrap();
     assert_eq!(report.stop, Some(CleanupStop::Cancelled));
     assert_eq!((report.inspected, report.reclaimed.occurrences), (0, 0));
     assert_eq!(fixture.present().len(), 10);
     // Sticky cancellation: the same budget refuses again; a deadline that passed refuses too and is never renewed.
-    let report = cleanup.run_slice(bounds(), &cancelled).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &cancelled)
+        .unwrap();
     assert_eq!(report.stop, Some(CleanupStop::Cancelled));
     let expired = EvalBudget::new(Some(Instant::now()), Arc::new(AtomicBool::new(false)));
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let report = cleanup.run_slice(bounds(), &expired).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &expired)
+        .unwrap();
     assert_eq!(report.stop, Some(CleanupStop::Cancelled));
-    let report = cleanup.run_slice(bounds(), &expired).unwrap();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), bounds(), &expired)
+        .unwrap();
     assert_eq!(
         report.stop,
         Some(CleanupStop::Cancelled),
@@ -675,7 +705,9 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     for _ in 0..fixture.eligible.len() {
         let mut slice = MessageCleanup::new(fixture.projection(), fixture.acknowledged)
             .resuming(cursor.clone());
-        let report = slice.run_slice(one, &unbounded()).unwrap();
+        let report = slice
+            .run_slice(&support::projection_gate::open_gate(), one, &unbounded())
+            .unwrap();
         assert_eq!(report.reclaimed.occurrences, 1, "{report:?}");
         assert_eq!(report.stop, Some(CleanupStop::BoundReached));
         assert!(report.cursor.is_some());
@@ -686,7 +718,9 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
         removed = gone;
     }
     let mut last = MessageCleanup::new(fixture.projection(), fixture.acknowledged).resuming(cursor);
-    let report = last.run_slice(one, &unbounded()).unwrap();
+    let report = last
+        .run_slice(&support::projection_gate::open_gate(), one, &unbounded())
+        .unwrap();
     assert_eq!(report.reclaimed.occurrences, 0);
     assert_eq!(report.cursor, None, "the scan is exhausted");
     assert_eq!(fixture.present(), expected_final);
@@ -698,7 +732,9 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
         ..bounds()
     };
     let mut slice = MessageCleanup::new(fixture.projection(), fixture.acknowledged);
-    let report = slice.run_slice(page, &unbounded()).unwrap();
+    let report = slice
+        .run_slice(&support::projection_gate::open_gate(), page, &unbounded())
+        .unwrap();
     assert_eq!(report.inspected, 2);
     assert_eq!(report.stop, Some(CleanupStop::BoundReached));
     assert!(report.cursor.is_some());

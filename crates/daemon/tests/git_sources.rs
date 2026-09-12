@@ -5,6 +5,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod support;
+
 use daemon::git_sources::{
     COMMIT_ROLE, GIT_COMMIT_REVISION, GitDisposition, GitReadBounds, GitRefusal, RepositoryBinding,
     read_selection,
@@ -456,12 +458,14 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
     );
 
     let alpha_selection = read_selection(
+        &support::projection_gate::open_gate(),
         &alpha.binding("repo-alpha"),
         &[a1.clone(), a2.clone(), a3.clone()],
         bounds(),
     )
     .unwrap();
     let beta_selection = read_selection(
+        &support::projection_gate::open_gate(),
         &beta.binding("repo-beta"),
         std::slice::from_ref(&b1),
         bounds(),
@@ -480,6 +484,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
     }
     // Binding the same directory under another id names another repository; the path is not an identity.
     let renamed = read_selection(
+        &support::projection_gate::open_gate(),
         &alpha.binding("repo-gamma"),
         std::slice::from_ref(&a1),
         bounds(),
@@ -550,7 +555,13 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
         repository_id: "repo-alpha".to_string(),
         path: dir.path().join("alpha-moved"),
     };
-    let reread = read_selection(&moved, &[a1.clone(), a2.clone(), a3.clone()], bounds()).unwrap();
+    let reread = read_selection(
+        &support::projection_gate::open_gate(),
+        &moved,
+        &[a1.clone(), a2.clone(), a3.clone()],
+        bounds(),
+    )
+    .unwrap();
     assert_eq!(reread.units, alpha_selection.units);
     for unit in &reread.units {
         assert!(publisher.publish(unit, NOW).unwrap().replayed);
@@ -583,6 +594,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
     std::fs::remove_dir_all(dir.path().join("first")).unwrap();
     assert!(
         read_selection(
+            &support::projection_gate::open_gate(),
             &RepositoryBinding {
                 repository_id: "repo-alpha".into(),
                 path: dir.path().join("alpha")
@@ -665,7 +677,13 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         ),
     ];
     for (oids, bounds, expected) in cases {
-        let refusal = read_selection(&binding, &oids, bounds).unwrap_err();
+        let refusal = read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            &oids,
+            bounds,
+        )
+        .unwrap_err();
         match (&refusal, &expected) {
             (
                 GitRefusal::ObjectTooLarge { oid, bytes, max },
@@ -693,7 +711,12 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         path: dir.path().join("nowhere"),
     };
     assert_eq!(
-        read_selection(&unopenable, std::slice::from_ref(&good), bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &unopenable,
+            std::slice::from_ref(&good),
+            bounds()
+        ),
         Err(GitRefusal::Open)
     );
     // A garbled loose object is unreadable, not missing, and refuses the selection whole.
@@ -706,7 +729,12 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     std::fs::set_permissions(&loose, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
     std::fs::write(&loose, b"not zlib").unwrap();
     assert_eq!(
-        read_selection(&binding, &[good.clone(), garbled.clone()], bounds()),
+        read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            &[good.clone(), garbled.clone()],
+            bounds()
+        ),
         Err(GitRefusal::Unreadable(garbled))
     );
 
@@ -714,6 +742,7 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     let undeclared = repo.raw_commit(b"broken \xff byte\n", None);
     let declared_utf8 = repo.raw_commit("Declared UTF-8\n".as_bytes(), Some("UTF-8"));
     let selection = read_selection(
+        &support::projection_gate::open_gate(),
         &binding,
         &[
             good.clone(),
@@ -747,7 +776,13 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
     );
 
     let secret = repo.commit(&format!("Leak\n\ntoken {SECRET}\n"), 5);
-    let leaking = read_selection(&binding, std::slice::from_ref(&secret), bounds()).unwrap();
+    let leaking = read_selection(
+        &support::projection_gate::open_gate(),
+        &binding,
+        std::slice::from_ref(&secret),
+        bounds(),
+    )
+    .unwrap();
     let publisher = corpus.publisher();
     let tip = corpus.kernel.tip().unwrap();
     let error = publisher.publish(&leaking.units[0], NOW).unwrap_err();

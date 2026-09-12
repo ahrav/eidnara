@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+mod support;
+
 use daemon::git_reconcile::{
     GitReconciler, InventoryBounds, ReconcileBlocked, ReconcileEnd, ReconcilePhase,
     ReconcileReport, ReconcileScope,
@@ -266,7 +268,13 @@ impl Corpus {
             repository_id: repository_id.to_string(),
             path: repo.root.clone(),
         };
-        let selection = read_selection(&binding, oids, read_bounds()).unwrap();
+        let selection = read_selection(
+            &support::projection_gate::open_gate(),
+            &binding,
+            oids,
+            read_bounds(),
+        )
+        .unwrap();
         assert_eq!(selection.units.len(), oids.len());
         for unit in &selection.units {
             self.publisher().publish(unit, NOW).unwrap();
@@ -298,7 +306,12 @@ impl Corpus {
 
     fn reconcile(&self, scope: &ReconcileScope) -> ReconcileReport {
         GitReconciler::new(&self.kernel)
-            .run_episode(scope, bounds(), &unbounded())
+            .run_episode(
+                &support::projection_gate::open_gate(),
+                scope,
+                bounds(),
+                &unbounded(),
+            )
             .unwrap()
     }
 
@@ -703,7 +716,12 @@ fn incomplete_scans_retire_nothing() {
     assert_eq!(opened.retired, 0);
 
     let cancelled = GitReconciler::new(&corpus.kernel)
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &exhausted())
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &exhausted(),
+        )
         .unwrap();
     assert_eq!(
         cancelled.end,
@@ -713,6 +731,7 @@ fn incomplete_scans_retire_nothing() {
 
     let too_much_work = GitReconciler::new(&corpus.kernel)
         .run_episode(
+            &support::projection_gate::open_gate(),
             &repo.scope(&[MAIN]),
             InventoryBounds {
                 max_commits: NonZeroUsize::new(1).unwrap(),
@@ -729,6 +748,7 @@ fn incomplete_scans_retire_nothing() {
 
     let too_many_retained = GitReconciler::new(&corpus.kernel)
         .run_episode(
+            &support::projection_gate::open_gate(),
             &repo.scope(&[MAIN]),
             InventoryBounds {
                 max_retained: NonZeroUsize::new(2).unwrap(),
@@ -746,7 +766,12 @@ fn incomplete_scans_retire_nothing() {
     // A ref that moves after the walk, and a budget cancelled after the walk, both leave the excluded commit alone.
     let moved = GitReconciler::new(&corpus.kernel)
         .with_after_traversal_for_test(|| repo.point_ref(MAIN, &c1))
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &unbounded())
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &unbounded(),
+        )
         .unwrap();
     assert_eq!(
         moved.end,
@@ -757,7 +782,12 @@ fn incomplete_scans_retire_nothing() {
     let budget = unbounded();
     let cancelled_late = GitReconciler::new(&corpus.kernel)
         .with_after_traversal_for_test(|| budget.cancel())
-        .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+        .run_episode(
+            &support::projection_gate::open_gate(),
+            &repo.scope(&[MAIN]),
+            bounds(),
+            &budget,
+        )
         .unwrap();
     assert_eq!(
         cancelled_late.end,

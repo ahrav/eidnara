@@ -10,6 +10,7 @@ use kernel::source_identity::{OccurrenceClass, identity_digest};
 use kernel::{CommitIntent, KernelError, KernelStore, LiveDescriptor, SourceDescriptorPolicy};
 
 use crate::git_sources::{GitRefusal, RepositoryBinding};
+use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 
 const PRODUCER: &str = "eidnara-daemon/git-reconcile";
 
@@ -37,6 +38,8 @@ pub struct InventoryBounds {
 pub enum ReconcileBlocked {
     /// The budget was cancelled or its deadline passed before the phase named ran.
     Cancelled(ReconcilePhase),
+    /// The gate denied the sweep or its lease before the inventory was read; nothing was retired.
+    Denied(Denial),
     Repository(GitRefusal),
     /// A permitted ref does not exist or does not resolve to a commit.
     RefUnresolved(String),
@@ -147,6 +150,7 @@ impl<'a> GitReconciler<'a> {
     /// Returns the kernel's error when a read fails without a durable fact to reconcile against, or when a retained row's identity cannot be read. Every refusal ends the episode in the report.
     pub fn run_episode(
         &mut self,
+        gate: &HookGate,
         scope: &ReconcileScope,
         bounds: InventoryBounds,
         budget: &EvalBudget,
@@ -160,6 +164,13 @@ impl<'a> GitReconciler<'a> {
             retired: 0,
             end: ReconcileEnd::Complete,
         };
+        if let Err(denial) = gate.admit_all(
+            &[ProjectionHook::GitSweeps, ProjectionHook::GitLeases],
+            EntryPoint::Dispatch,
+        ) {
+            report.end = ReconcileEnd::Blocked(ReconcileBlocked::Denied(denial));
+            return Ok(report);
+        }
         match self.drive(scope, bounds, budget, &mut report) {
             Ok(()) => Ok(report),
             Err(Stop::Blocked(blocked)) => {

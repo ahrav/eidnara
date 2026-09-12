@@ -54,6 +54,7 @@ pub mod wire;
 pub mod transform;
 
 pub mod production_inputs;
+pub mod projection_gates;
 pub mod release_contract;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};

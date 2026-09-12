@@ -19,11 +19,14 @@ use crate::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
 };
 use crate::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
+use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
 use crate::search_projection::SearchProjection;
 use crate::search_writer::Quarantine;
 
 /// The stores and lane one supervisor works against.
 pub struct Maintained {
+    /// The gate every slice asks before it runs; a denied slice does no work and the loop treats it as idle.
+    pub gate: Arc<HookGate>,
     pub kernel: Arc<KernelStore>,
     pub projection: Arc<SearchProjection>,
     pub synapse: Arc<SynapseComponent>,
@@ -46,6 +49,15 @@ pub enum SliceKind {
     Sweep,
 }
 
+impl SliceKind {
+    fn other(self) -> Self {
+        match self {
+            Self::Backfill => Self::Sweep,
+            Self::Sweep => Self::Backfill,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceOutcome {
     /// The pass ended, drained or blocked. `admitted` and `published` count rows that moved toward a vector; `dispositions` counts rows the pass retried or stopped.
@@ -58,6 +70,8 @@ pub enum SliceOutcome {
     Sweep(SweepReport),
     /// The slice's first read failed before anything was decided; the message is the error's display. The next slice of the same kind runs the work again.
     ReadFailed(String),
+    /// The gate denied the slice's hooks; nothing ran and no durable work was created. The next slice of the same kind asks again.
+    Denied(Denial),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -213,19 +227,46 @@ impl EmbeddingSupervisor {
                 kind,
                 deadline: budget.deadline().expect("slice budgets carry a deadline"),
             });
-            let mut slice = {
-                let this = Arc::clone(&self);
-                let budget = budget.clone();
-                self.tracker
-                    .spawn_blocking(move || this.slice(kind, &budget))
+            // The first slice of the run is the startup path; every later one is a dispatch. A backfill pass may embed any dense class, so it asks for the per-class hooks too rather than embed a class whose hook is off.
+            let entry = if self.slices.load(Ordering::SeqCst) == 0 {
+                EntryPoint::Startup
+            } else {
+                EntryPoint::Dispatch
             };
-            // Shutdown cancels the budget and then waits for the slice: the thread is never abandoned, and the slice sees the cancellation at its next job or poll.
-            let joined = tokio::select! {
-                biased;
-                joined = &mut slice => joined,
-                () = self.shutdown.cancelled() => {
-                    budget.cancel();
-                    slice.await
+            let hooks: &[ProjectionHook] = match kind {
+                SliceKind::Backfill => &[
+                    ProjectionHook::EmbeddingBootstrap,
+                    ProjectionHook::EmbeddingRouting,
+                    ProjectionHook::EmbeddingRegistry,
+                    ProjectionHook::EmbeddingBackfill,
+                    ProjectionHook::PromotedMemoryEmbeddings,
+                    ProjectionHook::GitJobs,
+                ],
+                SliceKind::Sweep => &[ProjectionHook::EmbeddingIdentityGc],
+            };
+            // A denied slice never spawns: it ends at once with no work and counts as idle. An admitted slice runs under its grant's token as well as shutdown; either cancels the budget and then waits for the slice, so the thread is never abandoned, admitted native work keeps its owner, and the slice sees the cancellation at its next job or poll.
+            let joined = match self.maintained.gate.admit_all(hooks, entry) {
+                Err(denial) => Ok(Ok(SliceOutcome::Denied(denial))),
+                Ok(admissions) => {
+                    let invalidated = admissions[0].invalidated.clone();
+                    let mut slice = {
+                        let this = Arc::clone(&self);
+                        let budget = budget.clone();
+                        self.tracker
+                            .spawn_blocking(move || this.slice(kind, &budget))
+                    };
+                    tokio::select! {
+                        biased;
+                        joined = &mut slice => joined,
+                        () = self.shutdown.cancelled() => {
+                            budget.cancel();
+                            slice.await
+                        }
+                        () = invalidated.cancelled() => {
+                            budget.cancel();
+                            slice.await
+                        }
+                    }
                 }
             };
             self.slices.fetch_add(1, Ordering::SeqCst);
@@ -255,10 +296,7 @@ impl EmbeddingSupervisor {
                     return;
                 }
             };
-            kind = match kind {
-                SliceKind::Backfill => SliceKind::Sweep,
-                SliceKind::Sweep => SliceKind::Backfill,
-            };
+            kind = kind.other();
             if idle.both() {
                 tokio::select! {
                     biased;
@@ -547,6 +585,6 @@ fn idle_after(outcome: &SliceOutcome) -> bool {
             ..
         } => *admitted == 0 && *published == 0 && *dispositions == 0,
         SliceOutcome::Sweep(report) => report.jobs_reclaimed == 0 && report.vectors_reclaimed == 0,
-        SliceOutcome::ReadFailed(_) => true,
+        SliceOutcome::ReadFailed(_) | SliceOutcome::Denied(_) => true,
     }
 }
