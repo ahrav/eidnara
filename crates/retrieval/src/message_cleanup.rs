@@ -10,8 +10,6 @@ use storage::GuardedConn;
 use crate::ProjectionError;
 use crate::batch::read_checkpoint;
 
-const CLASS: &str = "messages";
-
 /// A candidate is eligible while its tombstone sits at or below the cap and no job row names it.
 const ELIGIBLE: &str = "o.class='messages'
     AND t.invalidated_commit_seq<=?1
@@ -41,24 +39,24 @@ pub struct Candidate {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CandidatePage {
     pub candidates: Vec<Candidate>,
-    /// Tombstoned message occurrences visited, eligible or not.
+    /// Tombstones visited, whatever their class, eligible or not.
     pub inspected: usize,
     pub last_occurrence_id: Option<String>,
 }
 
-/// The tombstone key range drives the scan and each occurrence is probed by key: `+o.class` keeps the planner off `idx_occurrences_source`, which would visit every live message and sort, so a page costs what the page holds rather than what the table holds.
+/// The tombstone key range drives the scan and `LIMIT` counts every tombstone it visits, so a page costs what the page holds rather than what the table holds; the class is judged per row by `ELIGIBLE`, since a class predicate in `WHERE` would let `LIMIT` skip past other classes' tombstones without bound.
 fn candidates_sql() -> String {
     format!(
         "SELECT o.occurrence_id,t.invalidated_commit_seq,({ELIGIBLE})
          FROM occurrence_tombstones t
          JOIN occurrences o ON o.occurrence_id=t.occurrence_id
-         WHERE t.occurrence_id>?3 AND +o.class=?2
+         WHERE t.occurrence_id>?2
          ORDER BY t.occurrence_id
-         LIMIT ?4"
+         LIMIT ?3"
     )
 }
 
-/// Reads at most `max` tombstoned `messages` occurrences after `after`, returning those eligible under `acknowledged_through`.
+/// Reads at most `max` tombstoned occurrences of any class after `after`, returning the `messages` rows among them that are eligible under `acknowledged_through`.
 ///
 /// # Errors
 ///
@@ -74,7 +72,7 @@ pub fn candidates(
     let limit = i64::try_from(max.get()).unwrap_or(i64::MAX);
     let mut statement = conn.prepare_cached(&candidates_sql())?;
     let rows = statement
-        .query_map(params![cap, CLASS, after.unwrap_or(""), limit], |row| {
+        .query_map(params![cap, after.unwrap_or(""), limit], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -176,79 +174,106 @@ mod tests {
 
     use super::candidates_sql;
 
+    /// `live` message rows with eight of them tombstoned, and `other` tombstoned rows of another class whose ids sort before every message id.
+    fn projection(live: i64, other: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(
+            "INSERT INTO payloads VALUES ('p',x'61',1,0);
+             INSERT INTO projection_checkpoint(singleton,snapshot_commit_seq,checkpoint_commit_seq,hold_id,updated_at)
+             VALUES (1,1,100,'hold',0);",
+        )
+        .unwrap();
+        let insert = "WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<?1)
+             INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                 payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
+                 source_artifact_digest,created_commit_seq,persisted_at)
+             SELECT printf(?2,n),x'00','lineage',?3,1,?4,'p','domain','normal',
+                 'source','evidence','digest',1,0 FROM ids";
+        conn.execute(insert, params![live, "m%05d", "messages", "text"])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             SELECT occurrence_id,2,'retired',0 FROM occurrences
+             WHERE CAST(substr(occurrence_id,2) AS INTEGER)%(?1/8)=0",
+            [live],
+        )
+        .unwrap();
+        if other > 0 {
+            conn.execute(
+                insert,
+                params![other, "a%05d", "raw_tool_spans", "tool_output"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+                 SELECT occurrence_id,2,'retired',0 FROM occurrences WHERE class='raw_tool_spans'",
+                [],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Runs one page of four and returns the ids it visited with the statement's sort and step counts.
+    fn page(conn: &Connection) -> (Vec<String>, i32, i32) {
+        let sql = candidates_sql();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params![100, "", 4], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.first()
+                .is_some_and(|detail| detail.contains("occurrence_tombstones")),
+            "the tombstone table does not drive the scan: {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|detail| !detail.contains("TEMP B-TREE")),
+            "query plan sorts: {plan:?}"
+        );
+        let mut statement = conn.prepare(&sql).unwrap();
+        let ids = statement
+            .query_map(params![100, "", 4], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (
+            ids,
+            statement.get_status(StatementStatus::Sort),
+            statement.get_status(StatementStatus::VmStep),
+        )
+    }
+
     /// One page costs what the page holds, not what the table holds: the scan walks the tombstone key range and probes each occurrence by key, so no sort runs and the steps for a page stay flat while the live rows behind it grow.
     #[test]
     fn a_page_of_candidates_walks_the_tombstone_key_range_without_sorting() {
-        let mut measured = Vec::new();
-        for live in [1_024_i64, 16_384] {
-            let conn = Connection::open_in_memory().unwrap();
-            conn.execute_batch(crate::BASELINE).unwrap();
-            conn.pragma_update(None, "foreign_keys", true).unwrap();
-            conn.execute_batch(
-                "INSERT INTO payloads VALUES ('p',x'61',1,0);
-                 INSERT INTO projection_checkpoint(singleton,snapshot_commit_seq,checkpoint_commit_seq,hold_id,updated_at)
-                 VALUES (1,1,100,'hold',0);",
-            )
-            .unwrap();
-            conn.execute(
-                "WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<?1)
-                 INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
-                     payload_id,domain_id,sensitivity,source_object_id,source_evidence_id,
-                     source_artifact_digest,created_commit_seq,persisted_at)
-                 SELECT printf('%05d',n),x'00','lineage','messages',1,'text','p','domain','normal',
-                     'source','evidence','digest',1,0 FROM ids",
-                [live],
-            )
-            .unwrap();
-            // Eight tombstones spread through the id space, each below the checkpoint.
-            conn.execute(
-                "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
-                 SELECT occurrence_id,2,'retired',0 FROM occurrences
-                 WHERE CAST(occurrence_id AS INTEGER)%(?1/8)=0",
-                [live],
-            )
-            .unwrap();
-            let sql = candidates_sql();
-            let plan = conn
-                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                .unwrap()
-                .query_map(params![100, "messages", "", 4], |row| {
-                    row.get::<_, String>(3)
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            assert!(
-                plan.first()
-                    .is_some_and(|detail| detail.contains("occurrence_tombstones")),
-                "the tombstone table does not drive the scan: {plan:?}"
-            );
-            assert!(
-                plan.iter().all(|detail| !detail.contains("TEMP B-TREE")),
-                "query plan sorts: {plan:?}"
-            );
-            let mut statement = conn.prepare(&sql).unwrap();
-            let ids = statement
-                .query_map(params![100, "messages", "", 4], |row| {
-                    row.get::<_, String>(0)
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            assert_eq!(ids.len(), 4);
-            measured.push((
-                live,
-                statement.get_status(StatementStatus::Sort),
-                statement.get_status(StatementStatus::VmStep),
-            ));
-        }
-        let [(_, small_sorts, small_steps), (_, large_sorts, large_steps)] = measured[..] else {
-            unreachable!()
-        };
-        assert_eq!((small_sorts, large_sorts), (0, 0), "{measured:?}");
+        let small = page(&projection(1_024, 0));
+        let large = page(&projection(16_384, 0));
+        assert_eq!((small.0.len(), large.0.len()), (4, 4));
+        assert_eq!((small.1, large.1), (0, 0));
         assert!(
-            large_steps <= small_steps * 2,
-            "a page's cost grew with the live rows behind it: {measured:?}"
+            large.2 <= small.2 * 2,
+            "a page's cost grew with the live rows behind it: {small:?} {large:?}"
+        );
+    }
+
+    /// The page bound counts every tombstone the scan visits, whatever its class, so tombstones of other classes ahead of the messages cost one page each rather than one scan per slice.
+    #[test]
+    fn a_page_is_bounded_by_tombstones_visited_not_by_message_tombstones_found() {
+        let small = page(&projection(64, 1_024));
+        let large = page(&projection(64, 16_384));
+        assert!(
+            small.0.iter().all(|id| id.starts_with('a')),
+            "the first page is the other class's tombstones: {small:?}"
+        );
+        assert_eq!((small.0.len(), large.0.len()), (4, 4));
+        assert!(
+            large.2 <= small.2 * 2,
+            "a page's cost grew with the other class's tombstones ahead of it: {small:?} {large:?}"
         );
     }
 }

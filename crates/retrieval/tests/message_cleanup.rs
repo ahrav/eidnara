@@ -309,8 +309,8 @@ fn candidates_page_in_order_and_reclaim_rechecks_every_row_inside_the_transactio
         .unwrap();
     assert!(none.candidates.is_empty());
     assert_eq!(
-        none.inspected, 3,
-        "the three tombstoned message rows were visited"
+        none.inspected, 4,
+        "the three tombstoned message rows and the claim's tombstone were visited"
     );
     let ids = |page: &retrieval::message_cleanup::CandidatePage| {
         page.candidates
