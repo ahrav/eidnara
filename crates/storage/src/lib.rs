@@ -615,6 +615,14 @@ mod sqlite_backend {
         }
     }
 
+    /// Bytes the SQLite library holds through its allocator, across every connection in
+    /// the process, so an assertion on a delta must leave room for concurrent connections.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn library_memory_used() -> i64 {
+        // SAFETY: `sqlite3_memory_used` takes no pointers and reads no Rust-managed memory.
+        unsafe { rusqlite::ffi::sqlite3_memory_used() }
+    }
+
     /// Reaches pragmas and statement batches but not the authorizer, so a maintenance
     /// callback cannot replace the gate installed by [`SqliteStore`].
     pub struct MaintenanceConn<'a> {
@@ -2621,6 +2629,8 @@ mod sqlite_backend {
     }
 }
 
+#[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
+pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
