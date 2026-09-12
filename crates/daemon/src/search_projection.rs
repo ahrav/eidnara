@@ -81,6 +81,36 @@ pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
     }
 }
 
+/// `<data_home>/search/search.sqlite`.
+fn search_database_path(data_home: &Path) -> PathBuf {
+    data_home.join("search").join("search.sqlite")
+}
+
+/// The descriptor the projection at `data_home` opens under. The storage lease and fence key derive from it, so every operation on the family, opening it or deleting it, must present this same descriptor to contend for the same lease.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Io`] when the path is not valid UTF-8.
+pub(crate) fn search_descriptor(data_home: &Path) -> Result<StorageDescriptor, StoreError> {
+    let path = search_database_path(data_home);
+    Ok(StorageDescriptor {
+        module_id: "eidnara".to_string(),
+        storage_namespace: "search-projection".to_string(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: path
+                .to_str()
+                .ok_or_else(|| {
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "search projection path is not valid UTF-8",
+                    ))
+                })?
+                .to_owned(),
+        },
+    })
+}
+
 pub struct SearchProjection {
     store: SqliteStore,
     path: PathBuf,
@@ -106,23 +136,8 @@ impl SearchProjection {
     /// A baseline mismatch is a storage error.
     /// Returns [`SearchProjectionError::Connection`] on pragma value mismatches.
     pub fn open(data_home: &Path) -> Result<Self, SearchProjectionError> {
-        let path = data_home.join("search").join("search.sqlite");
-        let descriptor = StorageDescriptor {
-            module_id: "eidnara".to_string(),
-            storage_namespace: "search-projection".to_string(),
-            isolation: Isolation::Module,
-            backend: StorageBackend::Sqlite {
-                path: path
-                    .to_str()
-                    .ok_or_else(|| {
-                        StoreError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "search projection path is not valid UTF-8",
-                        ))
-                    })?
-                    .to_owned(),
-            },
-        };
+        let path = search_database_path(data_home);
+        let descriptor = search_descriptor(data_home)?;
         let store = open_sqlite(&descriptor, BASELINE)?;
         let projection = Self {
             store,

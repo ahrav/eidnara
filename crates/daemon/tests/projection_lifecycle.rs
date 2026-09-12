@@ -111,20 +111,19 @@ fn family_entries(data_home: &Path) -> Vec<String> {
     names
 }
 
-/// AC1, AC2: a recorded transition matches the independent ledger after reopen, field by field and in the raw file; the disposable family is deleted only after the record exists; reopening the projection starts a fresh database while the lifecycle still names the same identity, target, cause, authorization, and consumed allowance.
+/// Deletion requires an admitted recorded intent, no live holder of the family's storage lease, and an unexpired, unexhausted episode allowance; the intent persists independently of the deleted family.
 #[test]
 fn intent_survives_deleting_the_disposable_family_and_matches_the_ledger_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let gate = open_gate();
     let projection = SearchProjection::open(dir.path()).unwrap();
     let database = projection.path().to_path_buf();
-    drop(projection);
     assert!(database.exists());
 
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     assert_eq!(lifecycle.read(), ControlState::Absent);
     assert_eq!(
-        lifecycle.delete_disposable_family(&gate, dir.path()),
+        lifecycle.delete_disposable_family(&gate, NOW),
         Err(IntentRefusal::NoIntent),
         "nothing is deleted before an intent explains the deletion"
     );
@@ -143,14 +142,25 @@ fn intent_survives_deleting_the_disposable_family_and_matches_the_ledger_after_r
     let consumed = lifecycle.consume_episode(&gate, NOW + 1).unwrap();
     assert_eq!(consumed.consumed, 1);
     assert_eq!(
-        lifecycle.delete_disposable_family(&HookGate::closed(), dir.path()),
+        lifecycle.delete_disposable_family(&HookGate::closed(), NOW + 1),
         Err(IntentRefusal::Denied(Denial::NoManifest)),
         "the record alone does not authorize deleting the database"
     );
     assert!(database.exists());
-    let deleted = lifecycle
-        .delete_disposable_family(&gate, dir.path())
-        .unwrap();
+    assert_eq!(
+        lifecycle.delete_disposable_family(&gate, NOW + 1),
+        Err(IntentRefusal::FamilyHeld),
+        "a live projection holds the family's storage lease; the database is not unlinked under it"
+    );
+    assert!(database.exists());
+    drop(projection);
+    assert_eq!(
+        lifecycle.delete_disposable_family(&gate, NOW + 60_001),
+        Err(IntentRefusal::DeadlineExpired),
+        "the deadline bounds the deletion as it bounds the episodes"
+    );
+    assert!(database.exists());
+    let deleted = lifecycle.delete_disposable_family(&gate, NOW + 1).unwrap();
     assert_eq!(deleted, expected(&request, 1));
     assert!(!database.exists());
     assert!(
@@ -189,6 +199,7 @@ fn intent_survives_deleting_the_disposable_family_and_matches_the_ledger_after_r
         .read(|conn| retrieval::read_identity(conn))
         .unwrap();
     assert_eq!(identity, None);
+    drop(projection);
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     // A restart renews no allowance: one episode remains, then none, and none past the deadline.
     assert_eq!(
@@ -203,7 +214,56 @@ fn intent_survives_deleting_the_disposable_family_and_matches_the_ledger_after_r
         lifecycle.consume_episode(&gate, NOW + 3),
         Err(IntentRefusal::AllowanceExhausted)
     );
+    assert_eq!(
+        lifecycle.delete_disposable_family(&gate, NOW + 3),
+        Err(IntentRefusal::AllowanceExhausted),
+        "an exhausted intent authorizes no further deletion"
+    );
     assert_eq!(raw_record(dir.path()), recovery_ledger(2));
+}
+
+/// A request whose budget can never run an episode is refused before anything is read: zero allowance, or a deadline already passed.
+#[test]
+fn a_request_with_no_runnable_episode_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let gate = open_gate();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    assert_eq!(
+        lifecycle.record(
+            &gate,
+            &LifecycleRequest {
+                allowance: 0,
+                ..recovery_request()
+            },
+            NOW
+        ),
+        Err(IntentRefusal::AllowanceExhausted)
+    );
+    assert_eq!(
+        lifecycle.record(
+            &gate,
+            &LifecycleRequest {
+                deadline: NOW - 1,
+                ..recovery_request()
+            },
+            NOW
+        ),
+        Err(IntentRefusal::DeadlineExpired)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    assert!(!record_path(dir.path()).exists());
+    // A deadline equal to `now` still admits the request, as it still admits an episode.
+    lifecycle
+        .record(
+            &gate,
+            &LifecycleRequest {
+                deadline: NOW,
+                ..recovery_request()
+            },
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(lifecycle.consume_episode(&gate, NOW).unwrap().consumed, 1);
 }
 
 use std::os::unix::fs::PermissionsExt;
@@ -376,6 +436,68 @@ fn concurrent_duplicate_requests_leave_exactly_one_intent() {
     );
 }
 
+/// Two threads sharing one handle spend the allowance one episode at a time. The first writer is parked after it read `consumed = 0` and before its rename; a second writer on the same handle must wait for it rather than read the same `consumed = 0`, or the first writer's rename would erase the second's episode.
+#[test]
+fn a_shared_handle_serializes_its_own_threads() {
+    let dir = tempfile::tempdir().unwrap();
+    let gate = open_gate();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    lifecycle
+        .record(
+            &gate,
+            &LifecycleRequest {
+                allowance: 4,
+                ..recovery_request()
+            },
+            NOW,
+        )
+        .unwrap();
+    // The first arrival at `BeforeRename` reports itself and waits to be released; every later arrival passes.
+    let (reached_tx, reached_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let park = std::sync::Mutex::new(Some((reached_tx, release_rx)));
+    let lifecycle = lifecycle.with_write_barrier_for_test(move |barrier| {
+        if barrier != WriteBarrier::BeforeRename {
+            return;
+        }
+        let parked = park.lock().unwrap().take();
+        if let Some((reached, release)) = parked {
+            reached.send(()).unwrap();
+            release.recv().unwrap();
+        }
+    });
+    let outcomes = std::thread::scope(|scope| {
+        let first = scope.spawn(|| lifecycle.consume_episode(&gate, NOW + 1));
+        reached_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        // The first writer holds the handle's lock while parked; the second must block here.
+        let second = scope.spawn(|| lifecycle.consume_episode(&gate, NOW + 2));
+        std::thread::sleep(Duration::from_millis(300));
+        let second_ran_early = second.is_finished();
+        // Released before the assertion so a failure does not leave the parked thread for the scope to wait on.
+        release_tx.send(()).unwrap();
+        assert!(
+            !second_ran_early,
+            "the second writer ran while the first held the lock"
+        );
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert!(
+        outcomes.iter().all(Result::is_ok),
+        "both episodes are spent: {outcomes:?}"
+    );
+    assert_eq!(
+        lifecycle.read(),
+        ControlState::Intent(expected(
+            &LifecycleRequest {
+                allowance: 4,
+                ..recovery_request()
+            },
+            2
+        )),
+        "two episodes are consumed, not one written over the other"
+    );
+}
+
 /// AC5: the lifecycle entry runs under the gate. A closed gate refuses the request and writes nothing; a valid record enables no hook by itself; a corrupt, oversized, or world-readable record is unavailable and refuses both a new request and an episode.
 #[test]
 fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
@@ -425,7 +547,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
 
     type Corruption = fn(&Path);
-    let corruptions: [(&str, Corruption); 5] = [
+    let corruptions: [(&str, Corruption); 6] = [
         ("truncated", |path: &Path| {
             let mut bytes = fs::read(path).unwrap();
             bytes.truncate(bytes.len() / 2);
@@ -446,6 +568,11 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         }),
         ("oversized", |path: &Path| {
             fs::write(path, vec![b' '; 64 * 1024 + 1]).unwrap();
+        }),
+        ("recovery without authorization", |path: &Path| {
+            let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["transition"] = Value::from("AuthorizedRecovery");
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
     ];
     for (name, corrupt) in corruptions {
@@ -474,12 +601,29 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         );
         assert!(
             matches!(
-                lifecycle.delete_disposable_family(&open, dir.path()),
+                lifecycle.delete_disposable_family(&open, NOW),
                 Err(IntentRefusal::Unavailable(_))
             ),
             "{name}: an untrusted record deletes nothing"
         );
     }
+
+    // `record` rejects a request whose serialized record exceeds `MAX_RECORD_BYTES` before writing it.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    assert_eq!(
+        lifecycle.record(
+            &open,
+            &LifecycleRequest {
+                attempt_id: "a".repeat(64 * 1024),
+                ..rebuild_request()
+            },
+            NOW
+        ),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    assert!(!record_path(dir.path()).exists());
 
     // A well-formed record the daemon did not write: a symlink to one.
     let dir = tempfile::tempdir().unwrap();
@@ -528,7 +672,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         )))
     );
     assert_eq!(
-        lifecycle.delete_disposable_family(&withdrawn, dir.path()),
+        lifecycle.delete_disposable_family(&withdrawn, NOW),
         Err(IntentRefusal::Denied(Denial::Disabled(
             ProjectionHook::EmbeddingBackfill
         )))
