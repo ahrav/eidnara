@@ -155,13 +155,13 @@ Checks added with the mode-gated authorizer (implementation base
 | [Steady passes evict nothing][pass-probe] | A warm pass and four steady passes on one session prepare more distinct texts than the default capacity, fewer than the configured capacity with headroom, and re-create no cached statement. | unaudited |
 | [Foreign rename observed][rename-test] | After an `ALTER TABLE ... RENAME` on a second connection, the next callback denies a temp shadow of the new name, allows the old one, and still refuses a maintenance-left shadow. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4558-L4642
-[read-witness]: ../../../crates/storage/src/lib.rs#L4805-L4834
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L4841-L4864
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4870-L4922
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4928-L4958
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4965-L4985
-[gate-tests]: ../../../crates/storage/src/lib.rs#L2083-L2422
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4994-L5078
+[read-witness]: ../../../crates/storage/src/lib.rs#L5241-L5270
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L5277-L5300
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L5306-L5358
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L5364-L5394
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L5401-L5421
+[gate-tests]: ../../../crates/storage/src/lib.rs#L2274-L2613
 
 ## History render
 
@@ -293,21 +293,21 @@ that no related check exists anywhere in the repository.
 [upload-cap-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L910
 [upload-finish-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L965
 [upload-keep-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1103
-[scope-install]: ../../../crates/storage/src/lib.rs#L980-L1082
+[scope-install]: ../../../crates/storage/src/lib.rs#L1149-L1251
 [scope-restore]: ../../../crates/storage/src/lib.rs#L652-L705
 [facade-scope]: ../../../crates/memory-store/src/lib.rs#L5563-L5586
 [shadow-create-test]: ../../../crates/storage/src/lib.rs#L2506
 [shadow-test]: ../../../crates/storage/src/lib.rs#L2552
 [lower-test]: ../../../crates/storage/src/lib.rs#L2597
 [schema-test]: ../../../crates/storage/src/lib.rs#L2672
-[unwind-test]: ../../../crates/storage/src/lib.rs#L2364-L2413
-[durability-test]: ../../../crates/storage/src/lib.rs#L4052-L4117
+[unwind-test]: ../../../crates/storage/src/lib.rs#L2555-L2604
+[durability-test]: ../../../crates/storage/src/lib.rs#L4245-L4310
 [read-escape-test]: ../../../crates/storage/src/lib.rs#L3498
 [tx-escape-test]: ../../../crates/storage/src/lib.rs#L3548
 [fence-row-test]: ../../../crates/storage/src/lib.rs#L3595
 [format-test]: ../../../crates/storage/src/lib.rs#L3700
 [reentry-test]: ../../../crates/storage/src/lib.rs#L3832
-[cached-test]: ../../../crates/storage/src/lib.rs#L4511
+[cached-test]: ../../../crates/storage/src/lib.rs#L4947
 [snapshot-test]: ../../../crates/storage/src/lib.rs#L3946-L3981
 [read-tx-test]: ../../../crates/storage/src/lib.rs#L3986
 [attach-test]: ../../../crates/storage/src/lib.rs#L4019
@@ -416,11 +416,11 @@ that no related check exists anywhere in the repository.
 [shared-catalog]: ../shared-primitives/catalog.md
 [transform-catalog]: ../daemon/transform/catalog.md
 [memory-catalog]: ../memory-store/catalog.md
-[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2179-L2313
-[pin-test]: ../../../crates/storage/src/lib.rs#L2321-L2413
-[rename-test]: ../../../crates/storage/src/lib.rs#L4649-L4689
-[resource-pragma-test]: ../../../crates/storage/src/lib.rs#L4695-L4733
-[eviction-probe]: ../../../crates/storage/src/lib.rs#L4739-L4798
+[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2370-L2504
+[pin-test]: ../../../crates/storage/src/lib.rs#L2512-L2604
+[rename-test]: ../../../crates/storage/src/lib.rs#L5085-L5125
+[resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5131-L5169
+[eviction-probe]: ../../../crates/storage/src/lib.rs#L5175-L5234
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L15111-L15138
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L15145-L15170
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L24573-L24603
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L24602-L24632

@@ -88,7 +88,7 @@ existing checks and remain unaudited.
 [test]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L3946-L3981
 [rollback]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L4116
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
-[live-read]: ../../../../crates/storage/src/lib.rs#L269-L286
-[live-write]: ../../../../crates/storage/src/lib.rs#L335-L361
-[live-test]: ../../../../crates/storage/src/lib.rs#L4988-L5025
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L5158-L5184
+[live-read]: ../../../../crates/storage/src/lib.rs#L326-L343
+[live-write]: ../../../../crates/storage/src/lib.rs#L392-L456
+[live-test]: ../../../../crates/storage/src/lib.rs#L5424-L5461
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L5594-L5620
