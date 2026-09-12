@@ -50,6 +50,7 @@ pub enum PublicationEvent {
     GuardReleased,
     /// A stale current-input verdict has released the kernel writer.
     StaleWriterReleased,
+    QuarantineSynchronizing,
     /// The local transaction's reply was lost and durable rows are being read after the kernel writer was released.
     Reconciling,
     /// Quarantine at this boundary overrides an otherwise successful reconciliation.
@@ -130,7 +131,7 @@ enum Settled {
 /// The caller must hold the daemon's process-lifetime instance fence while this publisher can run. The current-input guard excludes mutations through its `KernelStore`; the instance fence excludes a successor store that could otherwise advance the durable writer fence through a replaced lease namespace.
 ///
 /// `publish` blocks on the kernel writer and the search connection, so it belongs on a blocking thread.
-/// Callbacks before a release event must call neither the kernel nor the projection. `GuardReleased` and `StaleWriterReleased` are alternative branch events; their callbacks and both reconciliation events run after the kernel writer is released and may call either dependency. An early error may return without a release event, so observers must not wait for one without a bound.
+/// Callbacks before a release event must call neither the kernel nor the projection. `GuardReleased` and `StaleWriterReleased` are alternative branch events; their callbacks, `QuarantineSynchronizing`, and both reconciliation events run after the kernel writer is released and may call either dependency. An early error may return without a release event, so observers must not wait for one without a bound.
 pub struct EmbeddingPublisher<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
@@ -275,12 +276,15 @@ impl<'a> EmbeddingPublisher<'a> {
             };
         match outcome {
             Ok(Settled::Published(publication)) => Ok(publication),
-            Ok(Settled::Quarantine { .. }) => Err(PublicationError::Quarantined(
-                self.projection.synchronize_quarantine(
-                    quarantine
-                        .expect("quarantine outcome must publish intent before guard release"),
-                ),
-            )),
+            Ok(Settled::Quarantine { .. }) => {
+                observer(PublicationEvent::QuarantineSynchronizing);
+                Err(PublicationError::Quarantined(
+                    self.projection.synchronize_quarantine(
+                        quarantine
+                            .expect("quarantine outcome must publish intent before guard release"),
+                    ),
+                ))
+            }
             // The store failed between BEGIN and COMMIT; the durable vector, not the error, says whether COMMIT took effect, and reading it needs no guard.
             Ok(Settled::CompletionUnresolved) => {
                 observer(PublicationEvent::Reconciling);

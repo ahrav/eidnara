@@ -2003,7 +2003,7 @@ fn stale_obsoletion_quarantines_a_terminal_job_missing_its_vector() {
     corpus.retire(&object);
 
     let mut intent_visible_at_release = false;
-    let mut writer_released_before_synchronization = false;
+    let mut synchronization_started_after_release = false;
     let result = publisher.publish(
         &publication,
         eligibility(&project),
@@ -2012,8 +2012,10 @@ fn stale_obsoletion_quarantines_a_terminal_job_missing_its_vector() {
         &mut |event| {
             if event == PublicationEvent::StaleWriterReleased {
                 intent_visible_at_release = projection.quarantine().is_some();
+            }
+            if event == PublicationEvent::QuarantineSynchronizing {
                 assert_kernel_writable(&corpus, "before-stale-quarantine-synchronization");
-                writer_released_before_synchronization = true;
+                synchronization_started_after_release = true;
             }
         },
     );
@@ -2022,7 +2024,7 @@ fn stale_obsoletion_quarantines_a_terminal_job_missing_its_vector() {
     };
     assert_eq!(quarantine.kind, QuarantineKind::Integrity);
     assert!(intent_visible_at_release);
-    assert!(writer_released_before_synchronization);
+    assert!(synchronization_started_after_release);
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("embedded".to_string()), None),
