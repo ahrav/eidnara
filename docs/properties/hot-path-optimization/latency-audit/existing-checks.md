@@ -199,6 +199,7 @@ not performance measurements or a full-workspace gate.
 | [`a_steady_pass_loads_meta_once_before_the_transform_and_the_full_row_once_after`][t-load-count] | A steady pass runs the `meta` select once and the full select never before the transform, and the full select once after the commit, split by the interleave hook, on handles that were never evicted. | unaudited |
 | [`pass_state_load_has_its_own_timing_bucket`][t-timing] | The pre-transform `meta` load is reported as the `pass_state_load` pass-trace bucket, present and non-zero on a steady pass. | unaudited |
 | [`historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store`][t-phase] | `historian_active` reads the phase from the pass load, from the store on a rerun, and treats a failed load as idle. | unaudited |
+| [`historian_active_rereads_a_loaded_active_phase_when_no_run_is_live`][t-phase-reread] | A loaded non-idle phase with no live run is re-read from the store; a run that committed idle after the pass load does not report active. | unaudited |
 
 None found: `first_divergence`
 NULL after a rejected pass; `receive_count` after an Emergency95 rerun that
@@ -661,6 +662,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-load-count]: ../../../../crates/daemon/src/lib.rs#L24695-L24747
 [t-timing]: ../../../../crates/daemon/src/lib.rs#L24753-L24765
 [t-phase]: ../../../../crates/daemon/src/lib.rs#L24771-L24784
+[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L24789-L24807
 
 The five checks above were added with the single-load pass (implementation
 base `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage

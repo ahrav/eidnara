@@ -172,8 +172,10 @@ deserialization is the largest cost of a full load. The
 full-sync and misses the cache as it did on its own failed load. The
 [last-response anchor][last-response] takes `Loaded`'s timestamp, `0` on
 `Unavailable`, and a `load_meta` read on `Reload`; the
-[historian-active check][active] takes `Loaded`'s phase, idle on `Unavailable`,
-and the phase alone from the store on `Reload`. The
+[historian-active check][active] takes `Loaded`'s phase when it is idle, idle on
+`Unavailable`, and the phase alone from the store on `Reload` and on a `Loaded`
+non-idle phase with no live run, since a run that completes after the pass load
+leaves the live map and commits idle. The
 [transform closure][run-transform] receives the pass state on its first run
 and `Reload` on every rerun after an inline firing or a live completion, and
 the load is dropped after the first run so a rerun can name nothing else.
@@ -192,28 +194,34 @@ The read point of the historian-active check and the last-response anchor
 moved earlier, from inside the transform closure to before the side-channel
 drain and the pass-trace write. Neither of those writes `cache_state`, so no
 in-process write is hidden; a concurrent publish landing inside that section is
-now read as the earlier phase. A stale active phase is the conservative
-direction, and a live run is reported active through the in-process live map
-before the durable phase is consulted.
+read as the earlier phase only while a run is live. A live run is reported
+active through the in-process live map before the durable phase is consulted;
+a loaded active phase with no live run is re-read, so a run that completed
+between the pass load and the check does not veto the pass.
 
 Post-commit scalar consumers read one `meta` field by
 [SQL JSON extraction][scalar-select]: `json_valid(meta, 1)` refuses text that
 is not strict JSON, since SQLite's parser accepts JSON5 that serde refuses;
-`json_type` tells an absent path, which takes the serde default, from a JSON
+`json_type(meta)` refuses strict JSON that is not an object (`null`, a number,
+an array), which deserializes to no `ModuleMeta` and would otherwise read every
+path as absent; `json_type(meta, path)` tells an absent path, which takes the
+serde default, from a JSON
 `null`; and `->>` yields the unquoted value, whose type is checked against the
 type text because `->>` renders a boolean as the integer `1` or `0`. The three
 functions share one parse of `meta`: the bundled SQLite keys its JSON parse
 cache on a negative auxdata slot, which every function in a statement sees. The
 Emergency95 [floor reads][floor-live] share one
 [`load_publication_floor_ordinal`][floor-accessor] closure; the wrapup epoch
-check uses [`load_revert_epoch`][epoch-accessor]; `historian_active` on
-`Reload` uses [`load_historian_phase`][phase-accessor].
+check uses [`load_revert_epoch`][epoch-accessor]; `historian_active` uses
+[`load_historian_phase`][phase-accessor] on `Reload` and on a loaded active
+phase with no live run.
 
 The [differential test][scalar-test] builds rows from a serialized default
 `meta` and shows each accessor equal to the full deserialization where that
 succeeds, and failing on its own field where the full load fails: a `null`,
 negative, textual, or boolean `revert_epoch`; a boolean floor; an unknown
-`historian.state`; JSON5; and malformed text. It also shows `load_meta` equal
+`historian.state`; JSON5; malformed text; and strict JSON that is not an
+object. It also shows `load_meta` equal
 to the full load's `meta` on every row both accept, and failing on every row
 both refuse. The recorded divergences are per-column and per-field versus
 per-row reading: a corrupt `core_state` fails only the full load, so
