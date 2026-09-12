@@ -752,7 +752,7 @@ fn selected_commits_are_retained_exactly_and_rebuild_without_the_repository() {
         read_selection(
             &RepositoryBinding {
                 repository_id: "repo-alpha".into(),
-                path: dir.path().join("alpha")
+                path: dir.path().join("alpha-moved")
             },
             std::slice::from_ref(&a1),
             bounds()
