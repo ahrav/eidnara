@@ -772,9 +772,12 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - Reject, success, repeated-reject, frozen-state, status,
-scheduler, and secret-session tests exist; none covers `first_divergence`
-after a rejected pass, `receive_count` after an Emergency95 rerun, or a
-`pass_trace` failure beside a successful cache commit.
+scheduler, and secret-session tests exist; the
+[outcome test](evidence/pass-trace-writes-count-every-pass-outside-the-cache-cas.md#receive-cost-evidence)
+covers a rejected, committed, and stable pass counting three receives and a
+`pass_trace` receive failure beside a successful cache commit; none covers
+`first_divergence` after a rejected pass or `receive_count` after an
+Emergency95 rerun.
 Guarantee: The receive breadcrumb is independent of the pass outcome and of
 the cache-state CAS, and diagnostics can neither veto nor enlarge the state
 commit.
@@ -805,9 +808,10 @@ violation); a stable pass; an Emergency95 pass that reruns and commits twice;
 a CAS conflict on the first commit attempt so the [retry loop][cas-retry]
 reruns `apply_once` and commits once (one breadcrumb, not zero or two); a
 fresh session whose first pass commits; an injected failure in the
-`pass_trace` upsert during a committing pass (no store seam exists at HEAD;
-the four `fail_next_*_for_test` seams at `memory-store/src/lib.rs:5900-5928`
-cover the side channel, the authority route read, and dreamer tasks only).
+`pass_trace` upsert during a committing pass, injected through
+[`fail_next_pass_trace_receive_for_test`][receive-seam], which fires inside
+the receive transaction at its UPSERT; the older `fail_next_*_for_test` seams
+cover the side channel, the authority route read, and dreamer tasks.
 Confidence: high - [Evidence](evidence/pass-trace-writes-count-every-pass-outside-the-cache-cas.md).
 [`trace_pass_received`][received] (its [doc][received-doc] says the write
 never contends with or extends the pass commit),
@@ -839,9 +843,13 @@ Type: safety
 Reachability: explicit-config-only
 Status: active
 Exercised: partial - Restart redelivery and per-kind fault isolation exist;
-none covers a crash between the mark commit and the delete commit, two
-overlapping drainers, ordering across firings, the per-kind limit, or the
-backoff values.
+the
+[crash test](evidence/side-channel-drain-delivers-each-row-once-and-keeps-its-schedule.md#single-transaction-evidence)
+covers a crash between the target insert and the retirement, and a drainer
+that delivers rows another drainer already retired; a crash between a mark
+commit and a delete commit is no longer constructible because delivery and
+retirement share one commit; none covers ordering across firings, the
+per-kind limit, or the backoff values.
 Guarantee: The outbox row is the only duplicate guard for events and user
 observations, and the drain's scheduling shape is unchanged by any
 transaction restructuring.
@@ -863,24 +871,30 @@ returned after the loop completes. `always` because
 [`user_memory_candidates`][obs-insert] are plain inserts with no dedupe
 (only [`primer_candidates`][primer-insert] upserts), and these rules define
 which rows a pass touches.
-Fault/timing angle: Process crash between the mark commit and the
-[per-row delete][delete-one]; the publish task's own drain
-([`:11074-11083`][publish-drain]) overlapping the pass drain on one session;
+Fault/timing angle: A failure between the target insert and the
+[retirement][retire] inside the delivery transaction; the publish task's own
+drain ([after a publish][publish-drain]) overlapping the pass drain on one
+session, so a drainer delivers a row another drainer already retired; a
+session reset that re-issues an outbox key while a stale handle is in flight;
 a target insert failing after the outbox state change in a reordered
-transaction; an empty-drain shortcut that skips the [leftover delete][delete-all];
-a delete-in-place that changes which rows [count as pending][status-sc].
+transaction; an empty-drain shortcut that skips the
+[sweep of rows an earlier build marked][delete-all]; a retirement that
+changes which rows [count as pending][status-sc].
 Required faults and enabling state: A published firing with events, primers,
-and user observations; a crash or abort injected between the two fenced
-transactions; a second drainer started between load and deliver; multiple
-rows per kind across two firings; an injected failure on one kind; `now_ms`
-before and after the computed `next_attempt_at_ms`.
+and user observations; a failure injected inside the delivery transaction
+after the insert; a second drainer that read the row before the first retired
+it; a row deleted and re-created under its key with another payload while a
+handle from the earlier read is held; multiple rows per kind across two
+firings; an injected failure on one kind; `now_ms` before and after the
+computed `next_attempt_at_ms`.
 Confidence: high - [Evidence](evidence/side-channel-drain-delivers-each-row-once-and-keeps-its-schedule.md).
 [`drain_historian_side_channels`][drain] and its [doc][drain-doc],
 [`load_due_historian_side_channels`][load-due] with the
 [order index][idx-order], [`deliver_historian_side_channel`][deliver],
-[`mark_historian_side_channel_delivered_tx`][mark] (requires `changed == 1`
-under `delivered_at_ms IS NULL`), and
-[`record_historian_side_channel_failure`][failure] are source-verified.
+[`retire_historian_side_channel_tx`][retire] (a `DELETE` under
+`delivered_at_ms IS NULL` and the row's payload that requires
+`changed == 1`), and [`record_historian_side_channel_failure`][failure] are
+source-verified.
 Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
 cover restart redelivery, per-kind isolation, CAS-loser enqueue, and revert
 deletion; all unaudited.
@@ -989,8 +1003,12 @@ Exercised: partial - [`status_diagnostics_surface_pending_historian_side_channel
 constructs one pending `event` row and a pass whose drain delivers it;
 [`historian_side_channel_faults_are_isolated_and_retryable_per_kind`][t-faults-sc]
 leaves one pending row per kind, one kind at a time, and drains it directly;
-no campaign marker records the situation and no run has all three kinds due
-in one pass drain.
+the
+[crash test](evidence/side-channel-row-is-due-during-a-drain.md#marker-evidence)
+records the `DueSideChannelMarker` for all three kinds due in one direct
+drain, a `reachable` witness for the drain function rather than a `sometimes`
+witness for a handler pass; no run has all three kinds due in a handler pass
+drain.
 Guarantee: A cache-state campaign reaches a pass drain with a due outbox row
 of each kind, so C3's per-row clauses are evaluated on real rows rather than
 on an empty drain.
@@ -2627,12 +2645,12 @@ evaluation of this area and its disposition are recorded in
 [tail-reclaim]: ../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../crates/memory-store/src/lib.rs#L210-L216
-[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8546-L8561
-[tag-content-policy]: ../../../../crates/memory-store/src/lib.rs#L2289-L2318
-[load-order]: ../../../../crates/memory-store/src/lib.rs#L7557-L7585
+[mint-prepared]: ../../../../crates/memory-store/src/lib.rs#L8861-L8876
+[tag-content-policy]: ../../../../crates/memory-store/src/lib.rs#L2339-L2368
+[load-order]: ../../../../crates/memory-store/src/lib.rs#L7847-L7875
 [serde-features]: ../../../../Cargo.toml#L45
-[load]: ../../../../crates/memory-store/src/lib.rs#L6388-L6415
-[full-select]: ../../../../crates/memory-store/src/lib.rs#L4703-L4704
+[load]: ../../../../crates/memory-store/src/lib.rs#L6640-L6667
+[full-select]: ../../../../crates/memory-store/src/lib.rs#L4905-L4906
 [epoch-read]: ../../../../crates/daemon/src/lib.rs#L4308-L4323
 [epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4190-L4220
 [active]: ../../../../crates/daemon/src/lib.rs#L4600-L4618
@@ -2640,7 +2658,7 @@ evaluation of this area and its disposition are recorded in
 [no-fire]: ../../../../crates/daemon/src/lib.rs#L5502-L5515
 [handler]: ../../../../crates/daemon/src/lib.rs#L8181-L8444
 [received-call]: ../../../../crates/daemon/src/lib.rs#L8206
-[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8280-L8287
+[rejected-call]: ../../../../crates/daemon/src/lib.rs#L8282-L8289
 [commit-call]: ../../../../crates/daemon/src/lib.rs#L8288-L8291
 [roots-insert]: ../../../../crates/daemon/src/lib.rs#L8297-L8302
 [floor-a]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
@@ -2657,47 +2675,47 @@ evaluation of this area and its disposition are recorded in
 [value-compare]: ../../../../crates/daemon/src/transform.rs#L3227
 [truncate]: ../../../../crates/daemon/src/transform.rs#L4139-L4145
 [sched-test]: ../../../../crates/daemon/src/transform.rs#L13689
-[received]: ../../../../crates/memory-store/src/lib.rs#L6797-L6847
-[received-doc]: ../../../../crates/memory-store/src/lib.rs#L6794-L6796
-[flagged]: ../../../../crates/memory-store/src/lib.rs#L6808-L6826
-[stable]: ../../../../crates/memory-store/src/lib.rs#L6852-L6944
-[completed]: ../../../../crates/memory-store/src/lib.rs#L6949-L6997
-[completed-doc]: ../../../../crates/memory-store/src/lib.rs#L6946-L6948
-[rejected]: ../../../../crates/memory-store/src/lib.rs#L7003-L7056
-[sched-history]: ../../../../crates/memory-store/src/lib.rs#L7104-L7137
+[received]: ../../../../crates/memory-store/src/lib.rs#L7049-L7122
+[received-doc]: ../../../../crates/memory-store/src/lib.rs#L7046-L7048
+[flagged]: ../../../../crates/memory-store/src/lib.rs#L7073-L7089
+[stable]: ../../../../crates/memory-store/src/lib.rs#L7127-L7234
+[completed]: ../../../../crates/memory-store/src/lib.rs#L7239-L7287
+[completed-doc]: ../../../../crates/memory-store/src/lib.rs#L7236-L7238
+[rejected]: ../../../../crates/memory-store/src/lib.rs#L7293-L7346
+[sched-history]: ../../../../crates/memory-store/src/lib.rs#L7394-L7427
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L852-L869
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8618-L8627
-[commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8739-L8806
-[json-content]: ../../../../crates/memory-store/src/lib.rs#L2201-L2211
-[record-scan]: ../../../../crates/memory-store/src/lib.rs#L2218-L2228
-[policy]: ../../../../crates/memory-store/src/lib.rs#L3162-L3183
-[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3201-L3211
-[single-pass]: ../../../../crates/memory-store/src/lib.rs#L3217-L3409
-[keys]: ../../../../crates/memory-store/src/lib.rs#L3267-L3280
-[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3291-L3392
-[walk-keys]: ../../../../crates/memory-store/src/lib.rs#L3382-L3388
-[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3403-L3408
-[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3411-L3412
-[unique]: ../../../../crates/memory-store/src/lib.rs#L3413-L3494
-[recomp]: ../../../../crates/memory-store/src/lib.rs#L10369-L10462
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8934-L8943
+[commit-trace]: ../../../../crates/memory-store/src/lib.rs#L9095-L9162
+[json-content]: ../../../../crates/memory-store/src/lib.rs#L2251-L2261
+[record-scan]: ../../../../crates/memory-store/src/lib.rs#L2268-L2278
+[policy]: ../../../../crates/memory-store/src/lib.rs#L3357-L3378
+[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3396-L3406
+[single-pass]: ../../../../crates/memory-store/src/lib.rs#L3412-L3604
+[keys]: ../../../../crates/memory-store/src/lib.rs#L3462-L3475
+[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3486-L3587
+[walk-keys]: ../../../../crates/memory-store/src/lib.rs#L3577-L3583
+[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3598-L3603
+[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3606-L3607
+[unique]: ../../../../crates/memory-store/src/lib.rs#L3608-L3689
+[recomp]: ../../../../crates/memory-store/src/lib.rs#L10769-L10862
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1472-L1473
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1588-L1589
 [phase]: ../../../../crates/memory-store/src/lib.rs#L622-L631
-[drain]: ../../../../crates/memory-store/src/lib.rs#L11118-L11163
-[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11115-L11117
-[status-sc]: ../../../../crates/memory-store/src/lib.rs#L11165-L11191
-[load-due]: ../../../../crates/memory-store/src/lib.rs#L11193-L11227
-[deliver]: ../../../../crates/memory-store/src/lib.rs#L11229-L11285
-[failure]: ../../../../crates/memory-store/src/lib.rs#L11287-L11326
-[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11328-L11341
-[delete-one]: ../../../../crates/memory-store/src/lib.rs#L11343-L11365
-[publish]: ../../../../crates/memory-store/src/lib.rs#L10871
-[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L11074-L11083
-[kinds]: ../../../../crates/memory-store/src/lib.rs#L4635-L4638
-[events-insert]: ../../../../crates/memory-store/src/lib.rs#L13892-L13913
-[mark]: ../../../../crates/memory-store/src/lib.rs#L14051-L14076
-[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L14078-L14120
-[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L14122-L14143
+[drain]: ../../../../crates/memory-store/src/lib.rs#L11520-L11578
+[drain-doc]: ../../../../crates/memory-store/src/lib.rs#L11515-L11519
+[status-sc]: ../../../../crates/memory-store/src/lib.rs#L11580-L11606
+[load-due]: ../../../../crates/memory-store/src/lib.rs#L11608-L11642
+[deliver]: ../../../../crates/memory-store/src/lib.rs#L11646-L11724
+[failure]: ../../../../crates/memory-store/src/lib.rs#L11726-L11765
+[delete-all]: ../../../../crates/memory-store/src/lib.rs#L11770-L11794
+[publish]: ../../../../crates/memory-store/src/lib.rs#L11271
+[publish-drain]: ../../../../crates/memory-store/src/lib.rs#L11474-L11483
+[kinds]: ../../../../crates/memory-store/src/lib.rs#L4830-L4833
+[events-insert]: ../../../../crates/memory-store/src/lib.rs#L14321-L14342
+[primer-insert]: ../../../../crates/memory-store/src/lib.rs#L14516-L14558
+[obs-insert]: ../../../../crates/memory-store/src/lib.rs#L14560-L14581
+[retire]: ../../../../crates/memory-store/src/lib.rs#L14489-L14514
+[receive-seam]: ../../../../crates/memory-store/src/lib.rs#L6326
 [idx-order]: ../../../../crates/memory-store/baseline.sql#L531-L535
 
 [ts-read]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
@@ -2856,8 +2874,8 @@ evaluation of this area and its disposition are recorded in
 [rules-radius-doc]: ../../../../crates/secret-scanner/default_rules.yaml#L12
 [airtable]: ../../../../crates/secret-scanner/default_rules.yaml#L297-L309
 [edge-margin]: ../../../../crates/context-core/src/redaction.rs#L380-L385
-[ms-content]: ../../../../crates/memory-store/src/lib.rs#L2155-L2163
-[ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2442-L2477
+[ms-content]: ../../../../crates/memory-store/src/lib.rs#L2205-L2213
+[ms-digest]: ../../../../crates/memory-store/src/lib.rs#L2506-L2541
 [snap-build]: ../../../../crates/daemon/src/historian_chunk.rs#L418-L430
 [as-item]: ../../../../crates/daemon/src/historian_chunk.rs#L40-L46
 [trunc-call]: ../../../../crates/daemon/src/historian_chunk.rs#L693
@@ -2927,13 +2945,13 @@ evaluation of this area and its disposition are recorded in
 [t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 
 [pass-drain]: ../../../../crates/daemon/src/lib.rs#L8199-L8203
-[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11205-L11206
-[backoff]: ../../../../crates/memory-store/src/lib.rs#L11293-L11297
-[fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6092-L6101
+[due-predicate]: ../../../../crates/memory-store/src/lib.rs#L11620-L11621
+[backoff]: ../../../../crates/memory-store/src/lib.rs#L11732-L11736
+[fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6313-L6353
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36750
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19314
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L19519
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36801
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20670
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L21046
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261
 [sched-due-projects]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L265-L296
 [sched-idle]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L36

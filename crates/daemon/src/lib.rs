@@ -24785,6 +24785,57 @@ mod tests {
         assert!(!handler.historian_active(&store, "never-seen", PassState::Reload));
     }
 
+    /// The receive breadcrumb counts every pass whatever its outcome, and a breadcrumb
+    /// that fails to write neither vetoes nor shrinks the cache commit: after a rejected,
+    /// a stable, and a committed pass the count is three, and a fourth pass whose receive
+    /// write is injected to fail still commits.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pass_trace_counts_every_outcome_and_a_failed_receive_does_not_veto_the_commit() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let (code, _) = error_frame(
+            call_transform_outcome(
+                &handler,
+                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
+            )
+            .await,
+        );
+        assert_eq!(code, "transform_failed", "rejected pass");
+        let messages = vec![ck("m1", 1, "one")];
+        let first = call_transform(&handler, messages.clone()).await;
+        assert_eq!(first["status"], "ok", "committed pass");
+        let committed_version = store.load("ses").unwrap().row_version;
+        let stable = call_transform(&handler, messages.clone()).await;
+        assert_eq!(stable["status"], "ok", "stable pass");
+        assert_eq!(
+            store.load("ses").unwrap().row_version,
+            committed_version,
+            "the repeated request commits nothing new"
+        );
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.receive_count, 3);
+        assert_eq!(trace.reject_count, 1);
+
+        store.fail_next_pass_trace_receive_for_test();
+        let grown = call_transform(&handler, vec![ck("m1", 1, "one"), ck("m2", 2, "two")]).await;
+        assert_eq!(
+            grown["status"], "ok",
+            "the commit succeeds despite the failed breadcrumb"
+        );
+        let after = store.load("ses").unwrap();
+        assert!(
+            after.row_version > committed_version,
+            "the cache commit landed, got {:?} after {committed_version:?}",
+            after.row_version
+        );
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(
+            trace.receive_count, 3,
+            "the failed receive write recorded nothing and vetoed nothing"
+        );
+    }
+
     /// A historian that completes after the pass load leaves the live map and commits
     /// `Idle`; the pass load's `Firing` is stale and must not veto.
     #[test]
