@@ -507,8 +507,8 @@ impl Corpus {
             .collect()
     }
 
-    /// The admission classes recorded for every live descriptor, keyed by descriptor object.
-    fn descriptor_admissions(&self) -> BTreeMap<String, (String, String)> {
+    /// The admission classes recorded for every live descriptor, one row per admission.
+    fn descriptor_admissions(&self) -> Vec<(String, (String, String))> {
         self.kernel_db()
             .prepare(
                 "SELECT a.subject_object_id,a.source_class,a.taint_class
@@ -771,7 +771,7 @@ fn ledger_predicts_inventory_exclusions_and_dense_work() {
     let admissions = corpus.descriptor_admissions();
     assert_eq!(admissions.len(), expected_rows.len());
     assert!(
-        admissions.values().all(|classes| *classes
+        admissions.iter().all(|(_, classes)| *classes
             == (
                 CLASSES.0.as_str().to_string(),
                 CLASSES.1.as_str().to_string()
@@ -1092,6 +1092,34 @@ fn unadmitted_decision_publishes_nothing_and_blocks_the_episode() {
         evidence, 0,
         "nothing was retained for the unadmitted decision"
     );
+}
+
+/// An episode against a kernel that never registered the consumer reports the unknown consumer and walks nothing.
+#[test]
+fn unregistered_consumer_blocks_the_episode() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "",
+    ));
+    let tip = corpus.kernel.tip().unwrap();
+    let report = corpus.materializer().run_episode(bounds(), NOW).unwrap();
+    assert!(
+        matches!(
+            report.end,
+            MaterializationEnd::Blocked(ClaimBlocked::UnknownConsumer)
+        ),
+        "{report:?}"
+    );
+    assert_eq!((report.commits_consumed, report.published), (0, 0));
+    assert_eq!(corpus.kernel.tip().unwrap(), tip, "nothing committed");
+    assert_eq!(corpus.checkpoint(), None, "no implicit registration");
 }
 
 /// AC5: a name-only remediation of the memory domain changes no identity, tuple, or payload, and a second episode publishes nothing; a mapping that folded the name into the identity would move.
