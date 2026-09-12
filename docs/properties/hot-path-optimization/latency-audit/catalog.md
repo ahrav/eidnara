@@ -2684,7 +2684,7 @@ evaluation of this area and its disposition are recorded in
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../crates/daemon/benches/hot_path.rs#L1-L10
-[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L197-L230
+[hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L241-L274
 [meta-bound]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [he-payload]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214

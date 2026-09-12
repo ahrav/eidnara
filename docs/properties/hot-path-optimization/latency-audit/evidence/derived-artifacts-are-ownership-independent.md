@@ -307,6 +307,18 @@ measurement gate for this work. Full workspace tests, cross-process campaigns,
 and independent reviews remain controller work. Historical execution evidence
 above is retained; this file exceeds the method's length target to preserve it.
 
+The projection bench corpus is built from typed parts, so its shells carry no
+retained message JSON. Under shared shells that input takes the `Arc::clone`
+branch on every message, a path a decoded request never takes because
+`WireMessage::deserialize` always retains its JSON. A guard added to the
+[bench corpus helper][bench-ingress] first failed on that shape, then passed
+once the helper round-trips the corpus through `serde_json`. `projection/full`
+measures the canonical-shell rebuild that a cold request pays. A separate
+[`projection/reattached_prefix`][bench-reattached] cell keeps the typed corpus
+and asserts every projected block points into a corpus shell, so it measures the
+share path a reattached prefix takes. `cargo test --bench hot_path` passes with
+both cells. These are shape corrections to the bench input, not measurements.
+
 ### Shell metadata preservation and review disposition
 
 The [reattachment test][shell-metadata] includes nonempty `origin` and
@@ -345,6 +357,8 @@ All-target/all-feature daemon Clippy with `-D warnings` and the scoped formatter
 also pass. The extension changes tests and documentation, not served behavior;
 the historical evidence and bound golden remain intact.
 
+[bench-ingress]: ../../../../../crates/daemon/benches/hot_path.rs#L69-L81
+[bench-reattached]: ../../../../../crates/daemon/benches/hot_path.rs#L102-L135
 [shell-owner]: ../../../../../crates/daemon/src/wire.rs#L33-L88
 [shell-build]: ../../../../../crates/daemon/src/wire.rs#L540-L559
 [shell-block]: ../../../../../crates/daemon/src/wire.rs#L89-L116
