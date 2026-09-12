@@ -108,7 +108,7 @@ variables).
 
 The [B4 evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md)
 separates the release-accessor prerequisite repair from the transcript-only
-pre-memo characterization. The [local payoff receipt](evidence/tail-hygiene-payoff.md)
+pre-memo characterization. The [historical payoff receipt](evidence/tail-hygiene-payoff.md)
 records three A/A pairs and five A/B pairs, without retries or discarded runs.
 It meets the ticket-local rule with a 73.1659% warm-call time reduction. Median
 and p95 describe batch-average call times, not individual-call latency. The
@@ -128,6 +128,21 @@ differential-golden tests, and the real-transform memo-hit test. Workspace
 all-target/all-feature clippy and formatting checks pass. The hygiene count
 decreases because parent test deduplication removes the standalone fixture
 mutation guard; the frozen corpus and digest-domain checks remain.
+
+The separate [integrated payoff receipt](evidence/tail-hygiene-integrated-payoff.md)
+resolves the merged-workload timing gap on `05c33bf0`. Archived parent
+`16542f5e` plus only the required release-accessor repair supplies A. Both
+arms use decoded ingress with retained original JSON. Three new A/A pairs
+precede five A/B pairs under the same fixed rule; all 16 processes are valid,
+with a 72.5513% warm-call time reduction and a 2.0888% A/A median span.
+The conditional paired interval and complete before/after table are in the
+receipt. This does not replace or generalize the historical 73.1659% result.
+The controller reports 14 gates passed on `05c33bf0`, with outputs at
+`/tmp/opencode/memo-integrated-*.log`. Log inspection corroborates recorded
+outputs, not an independent source-bound exit receipt for every gate.
+No tests, builds, or benchmarks run for this documentation update, and test
+adequacy remains unaudited. No production, concurrency, cold-call, or RSS
+payoff is established.
 
 The shared-shell campaign extends the complex native replay with request-shell
 pointer checks, fresh/reattached/shared projection equality, served-byte equality,
