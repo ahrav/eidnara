@@ -583,6 +583,36 @@ async fn a_blocked_checkpoint_attempt_ends_at_the_budget_deadline() {
     reader.execute_batch("COMMIT;").unwrap();
 }
 
+/// A budget cancelled after the close ends verification: the closed file is refused as `Cancelled`, no certificate is issued, and the lease is released so the caller reopens the projection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn cancellation_after_the_close_ends_verification_and_releases_the_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = embedded_fixture(dir.path()).await;
+    let budget = unbounded();
+    let cancel = budget.clone();
+    let refused = quiesce_with_barrier_for_test(
+        fixture.projection,
+        &open_gate(),
+        0,
+        &fixture.expected,
+        seed_bounds(),
+        &budget,
+        &mut |barrier| {
+            if barrier == SeedBarrier::AfterClose {
+                cancel.cancel();
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refused.refusal, SeedRefusal::Cancelled);
+    assert!(refused.projection.is_none(), "the file is closed");
+    let reopened = SearchProjection::open(dir.path()).unwrap();
+    let count: i64 = reopened
+        .read(|conn| Ok(conn.query_row("SELECT count(*) FROM occurrences", [], |row| row.get(0))?))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
 /// AC5: another handle, a running worker, or a closed gate refuses the seed before the checkpoint, and the projection is returned untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn active_handles_workers_and_a_closed_gate_refuse_the_seed() {
@@ -739,7 +769,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
     for (name, sql, refusal) in cases {
         tamper(sql);
         // Verification names the fault; staging sees only that the certificate names other bytes.
-        let verification = verify_closed(&path, &fixture.expected, u64::MAX);
+        let verification = verify_closed(&path, &fixture.expected, u64::MAX, &unbounded());
         let staged = stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new());
         assert_eq!(staged.unwrap_err(), SeedRefusal::BytesChanged, "{name}");
         if refusal == SeedRefusal::BytesChanged {
@@ -788,7 +818,13 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
     );
     fs::write(&path, &pristine).unwrap();
     assert_eq!(
-        verify_closed(&path, &fixture.expected, pristine.len() as u64 - 1).unwrap_err(),
+        verify_closed(
+            &path,
+            &fixture.expected,
+            pristine.len() as u64 - 1,
+            &unbounded()
+        )
+        .unwrap_err(),
         SeedRefusal::TooLarge {
             bytes: pristine.len() as u64,
             max: pristine.len() as u64 - 1,
@@ -800,7 +836,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
     live.execute_batch("BEGIN; SELECT count(*) FROM occurrences;")
         .unwrap();
     assert_eq!(
-        verify_closed(&path, &fixture.expected, u64::MAX).unwrap_err(),
+        verify_closed(&path, &fixture.expected, u64::MAX, &unbounded()).unwrap_err(),
         SeedRefusal::SidecarPresent("-wal".to_owned())
     );
     live.execute_batch("COMMIT;").unwrap();
@@ -813,7 +849,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         .unwrap();
     assert!(dir.path().join("other.db-wal").exists());
     assert_eq!(
-        verify_closed(&other, &fixture.expected, u64::MAX).unwrap_err(),
+        verify_closed(&other, &fixture.expected, u64::MAX, &unbounded()).unwrap_err(),
         SeedRefusal::SidecarPresent("-wal".to_owned())
     );
     live.execute_batch("COMMIT;").unwrap();
@@ -855,7 +891,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
 fn reopen_seed_after(path: &Path, expected: &ProjectionIdentity) -> ClosedSeed {
     ClosedSeed::for_test(
         path.to_path_buf(),
-        verify_closed(path, expected, u64::MAX).unwrap(),
+        verify_closed(path, expected, u64::MAX, &EvalBudget::unbounded()).unwrap(),
     )
 }
 

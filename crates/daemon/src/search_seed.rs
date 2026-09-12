@@ -358,7 +358,7 @@ fn quiesce_at(
     barrier(SeedBarrier::AfterCheckpoint);
     let (path, lease) = projection.close();
     barrier(SeedBarrier::AfterClose);
-    let verification = verify_closed(&path, expected, bounds.max_bytes)
+    let verification = verify_closed(&path, expected, bounds.max_bytes, budget)
         .map_err(|refusal| refused(None, refusal))?;
     Ok(ClosedSeed {
         path,
@@ -369,8 +369,12 @@ fn quiesce_at(
 
 /// # Errors
 ///
-/// Returns [`SeedRefusal::SidecarPresent`], [`SeedRefusal::TooLarge`], or [`SeedRefusal::Io`].
-fn closed_bytes(path: &Path, max_bytes: u64) -> Result<(u64, String), SeedRefusal> {
+/// Returns [`SeedRefusal::SidecarPresent`], [`SeedRefusal::TooLarge`], [`SeedRefusal::Cancelled`], or [`SeedRefusal::Io`].
+fn closed_bytes(
+    path: &Path,
+    max_bytes: u64,
+    budget: &EvalBudget,
+) -> Result<(u64, String), SeedRefusal> {
     let io = |error: io::Error| SeedRefusal::Io(error.kind().to_string());
     // SQLite unlinks the log and the shared-memory index when the last connection closes; a rollback journal belongs to no closed database.
     for suffix in JOURNAL_SUFFIXES {
@@ -387,20 +391,21 @@ fn closed_bytes(path: &Path, max_bytes: u64) -> Result<(u64, String), SeedRefusa
             max: max_bytes,
         });
     }
-    Ok((bytes, file_sha256(path).map_err(io)?))
+    Ok((bytes, file_sha256(path, budget)?))
 }
 
-/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, and every vector of the identity's dimension. Returns the report with the file's digest.
+/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, and every vector of the identity's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
 ///
 /// # Errors
 ///
-/// Returns the first failing check as its [`SeedRefusal`].
+/// Returns the first failing check as its [`SeedRefusal`], or [`SeedRefusal::Cancelled`] when the budget ends first.
 pub fn verify_closed(
     path: &Path,
     expected: &ProjectionIdentity,
     max_bytes: u64,
+    budget: &EvalBudget,
 ) -> Result<SeedVerification, SeedRefusal> {
-    let (bytes, sha256) = closed_bytes(path, max_bytes)?;
+    let (bytes, sha256) = closed_bytes(path, max_bytes, budget)?;
     // `immutable` reads the file as it is: no log is created, replayed, or expected.
     let conn = Connection::open_with_flags(
         immutable_uri(path),
@@ -409,7 +414,17 @@ pub fn verify_closed(
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| SeedRefusal::Store(error.to_string()))?;
-    let store = |error: rusqlite::Error| SeedRefusal::Store(error.to_string());
+    // The handler interrupts the running statement once the budget ends; the interrupted statement's error is reported as the cancellation it is.
+    let polled = budget.clone();
+    conn.progress_handler(1_000, Some(move || polled.is_exhausted()))
+        .map_err(|error| SeedRefusal::Store(error.to_string()))?;
+    let store = |error: rusqlite::Error| {
+        if budget.is_exhausted() {
+            SeedRefusal::Cancelled
+        } else {
+            SeedRefusal::Store(error.to_string())
+        }
+    };
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(store)?;
@@ -566,7 +581,7 @@ pub fn stage(
 ) -> Result<StagedSeed, SeedRefusal> {
     let io = |error: io::Error| SeedRefusal::Io(error.kind().to_string());
     // Every field of the report is a function of the file's bytes, so a matching digest is a matching report; the copy hashes the bytes again and refuses a mismatch of its own.
-    match closed_bytes(&seed.path, u64::MAX) {
+    match closed_bytes(&seed.path, u64::MAX, &EvalBudget::unbounded()) {
         Ok((bytes, sha256))
             if bytes == seed.verification.bytes && sha256 == seed.verification.sha256 => {}
         Ok(_) => return Err(SeedRefusal::BytesChanged),
@@ -625,12 +640,14 @@ pub fn stage(
     })
 }
 
-fn file_sha256(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+fn file_sha256(path: &Path, budget: &EvalBudget) -> Result<String, SeedRefusal> {
+    let io = |error: io::Error| SeedRefusal::Io(error.kind().to_string());
+    let mut file = File::open(path).map_err(io)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
     loop {
-        let read = file.read(&mut buffer)?;
+        budget.check().map_err(|_| SeedRefusal::Cancelled)?;
+        let read = file.read(&mut buffer).map_err(io)?;
         if read == 0 {
             break;
         }
