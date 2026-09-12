@@ -144,10 +144,15 @@ descends through, refuses or substitutes protected values, records detections,
 and sets a [`changed` flag][changed] when a value is replaced by different
 text. The separate key-validation pass and the clone-and-compare are gone; the
 [clean branch][clean-branch-live] returns the input when nothing changed and
-re-serializes otherwise. The two places the walk judges a subtree whole
-without descending, an identity-named value and an integrity-named value, run
-the [key validation][keys-live] over that subtree, so a secret-bearing key
-under `{"signature": {...}}` or `{"id": {...}}` is still refused. The
+re-serializes otherwise. The walk judges a subtree whole without descending in
+two cases, an integrity-named value and an identity-named value under a policy
+that does not preserve identities, and runs the [key validation][keys-live]
+over that subtree, so a secret-bearing key under `{"signature": {...}}` is
+refused there. Under the `DurablePreserveIdentities` policy that `meta` uses,
+an identity-named scalar is [preserved][preserved-live] and an identity-named
+container falls through to the ordinary walk, whose [object arm][walk-keys-live]
+validates each key, so a secret-bearing key under `{"id": {...}}` is refused
+by the walk itself. The
 [wrapper][collecting-live] that callers use asserts in debug builds that a
 change left a detection for the receipt; byte identity of clean output is the
 clean branch's construction rather than an assertion.
@@ -176,7 +181,8 @@ is the oracle), and the same `keyed` fixture refused with no row stored and
 every scan-audit table count unchanged from before the refused `commit`, so
 the detection the walk gathered before the refusal was discarded rather than
 recorded. Duplicate object names remain
-refused by [`parse_json_with_unique_names`][unique-live] and its existing test.
+refused by [`parse_json_with_unique_names`][unique-live] and its
+[existing test][t-dup-live].
 
 ### Focused execution, 2026-09-12
 
@@ -189,8 +195,11 @@ branch as well and passing in isolation.
 [changed]: ../../../../../crates/memory-store/src/lib.rs#L3403
 [clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3409-L3414
 [keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3273
+[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3311-L3321
+[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3388-L3394
 [collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3217
-[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3419
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3483-L3485
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L15717-L15729
 [unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15590
 [refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15592-L15629
 [store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725

@@ -2572,7 +2572,6 @@ evaluation of this area and its disposition are recorded in
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2126
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6377
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6843-L6868
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6888-L6893
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6966-L7028
 [mint-input]: ../../../../crates/daemon/src/transform.rs#L7228-L7233
 [append-mint]: ../../../../crates/daemon/src/transform.rs#L7335-L7358
@@ -2605,7 +2604,6 @@ evaluation of this area and its disposition are recorded in
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
-[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
@@ -2698,12 +2696,6 @@ evaluation of this area and its disposition are recorded in
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L300-L357
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
-[pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
-[pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
-[numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
-[bodyvalid]: ../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L494-L501
-[encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
-[utf8body]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
 [sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
 [log-gate-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
@@ -2711,8 +2703,6 @@ evaluation of this area and its disposition are recorded in
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[hostpage]: ../../../../crates/daemon/src/lib.rs#L748-L749
-[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9334-L9340
 
 [agents]: ../../../../crates/shm-transport/AGENTS.md
 [arena-const]: ../../../../crates/shm-transport/src/arena.rs#L4-L7
@@ -2837,7 +2827,6 @@ evaluation of this area and its disposition are recorded in
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24518
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21483
 [serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28292
-[tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
 [radius-window]: ../../../../crates/secret-scanner/src/evaluator.rs#L266-L297
