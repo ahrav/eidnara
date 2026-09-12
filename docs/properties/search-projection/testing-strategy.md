@@ -257,7 +257,7 @@ The remaining property is
 It applies across every group rather than adding another harness. The
 [export map](export-recovery/fault-map.md),
 [projection map](projection-coverage/fault-map.md), and
-[embedding map](embedding/fault-map.md) define 23/24/16 markers, 63 total.
+[embedding map](embedding/fault-map.md) define 23/24/18 markers, 65 total.
 Definitions are globally unique and constant. The aggregate marker is counted
 as a definition but excluded from its own prerequisite matrix.
 

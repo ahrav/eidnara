@@ -38,9 +38,9 @@ must reach before any "faster" claim is checkable.
   [`serde_json::from_value`][hp-req] against a [fresh tempfile store][hp-store]
   with a fixed [`ProducerContext`][hp-ctx]. The production handler wraps that
   call with the projection-cache lookup, side-channel drain, and receive
-  trace at [`:8107-8124`][h-pre], the `run_transform` closure's
+  trace at [`:8113-8130`][h-pre], the `run_transform` closure's
   `project_memory`, `historian_active`, and guidance reads at
-  [`:8130-8185`][h-run], and the response encoding in
+  [`:8136-8191`][h-run], and the response encoding in
   [`respond_transform`][respond]; none of that is in the bench.
 - The 1_400 and 1_000 points are pinned by
   [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound]
@@ -142,10 +142,10 @@ specification enumerates the stages, and no name is built at run time.
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12382-L12387
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27457-L27463
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8107-L8124
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8130-L8185
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14402
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14477-L14499
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8113-L8130
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8136-L8191
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14408
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14483-L14505
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1018-L1197
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L217-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214

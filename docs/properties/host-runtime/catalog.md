@@ -9978,7 +9978,7 @@ their existing checks named and unaudited. This set has its own per-part artifac
 [portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md), whose refinements R1, R2, R3 and R7 are
 applied below and whose remaining findings are queued there.
 
-**Index.** 16 records, in discovery order.
+**Index.** 17 records, in discovery order.
 
 | Slug | Type | Confidence |
 | --- | --- | --- |
@@ -9998,6 +9998,7 @@ applied below and whose remaining findings are queued there.
 | [synapse-degrades-to-disabled-and-keeps-the-context-routable](#synapse-degrades-to-disabled-and-keeps-the-context-routable) | liveness | medium |
 | [synapse-requests-are-validated-before-any-inference](#synapse-requests-are-validated-before-any-inference) | safety | medium |
 | [synapse-inference-runs-through-a-sealed-runtime-image](#synapse-inference-runs-through-a-sealed-runtime-image) | safety | medium |
+| [synapse-local-memory-reservation-is-honest](#synapse-local-memory-reservation-is-honest) | safety | high |
 
 ### host-proof-construction-matches-the-committed-vectors
 
@@ -10265,3 +10266,45 @@ Existing check: `source_replacement_cannot_change_verified_loader_bytes` (`crate
 Impact: Embeddings from an uncertified runtime under a certified identity.
 Open questions:
 - Whether `ort::init_from` loads from the given `/proc/self/fd/<n>` path and nothing else is unverified from this tree; it needs the `ort` source or a `/proc/self/maps` assertion. (needs human input)
+
+### synapse-local-memory-reservation-is-honest
+
+Type: safety
+Reachability: explicit-config-only - a configured Synapse component declares and
+allocates these pools before initialization; an unsupported component with no
+configured or ready lane declares no retained memory.
+Status: active
+Exercised: yes - unit tests construct valid default-shaped limits, arithmetic
+overflow, an unrepresentable result cap, exact local admission, completion, and
+release.
+Guarantee: Synapse's local input budget covers the maximum queued input charge
+plus the maximum retained job-metadata charge, and its host declaration also
+covers retained results; invalid arithmetic never becomes a zero declaration.
+Check: `always` - for valid limits, `local_inputs.capacity()` equals
+`max_queued_input_bytes + max_retained_input_bytes`, and
+`resources().retained_resident_bytes` equals that sum plus
+`max_retained_result_bytes`; all additions are checked for construction and
+saturating for the pre-initialization declaration, so an unrepresentable
+configuration declares `u64::MAX` and initialization rejects it. These values
+charge logical owned string bytes and vector bytes, not allocator or hash-table
+overhead.
+Fault/timing angle: Completion drops text but retains key and item metadata while
+another job can still fill the queued-input allowance. Configuration arithmetic
+can overflow before initialization reports its typed error.
+Required faults and enabling state: A completed retained job, queued input at its
+cap, maximal integer limits, and a configured component inspected before
+initialization.
+Confidence: high -
+[evidence](evidence/synapse-local-memory-reservation-is-honest.md). The queue and
+retained formulas, constructor fallback, declaration, and boundary tests were
+verified together.
+Existing check: `local_job_inputs_are_declared_as_retained_resident_memory`,
+`overflowing_unvalidated_limits_fail_initialization_without_panicking`,
+`maximal_retained_result_limit_declares_failure_without_panicking`, and
+`local_input_budget_refuses_before_copy_and_recovers_after_release` in
+`crates/host-runtime/src/synapse/mod.rs`; `exact_input_shape_refuses_an_unaccounted_item_identity`
+in `crates/host-runtime/src/synapse/jobs.rs`.
+Impact: Host admission can reserve less memory than Synapse retains, or a valid
+local job can fail because completed metadata consumed an unmodeled part of the
+same pool.
+Open questions: None.
