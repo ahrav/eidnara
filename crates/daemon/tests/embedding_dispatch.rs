@@ -2855,6 +2855,71 @@ async fn project_scan_cursor_advances_across_more_than_two_wrong_scope_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_retries_do_not_restart_another_projects_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object_b = corpus.publish_scoped("foreign-retry", "project B input", SCOPE_B);
+    let object_a = corpus.publish_scoped("ready-after-foreign", "project A input", SCOPE);
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence_a = occurrence_of(&rows, &object_a);
+    let occurrence_b = occurrence_of(&rows, &object_b);
+    insert_wrong_scope_jobs(dir.path(), occurrence_b, 2_047);
+    let conn = Connection::open(search_path(dir.path())).unwrap();
+    conn.execute(
+        "UPDATE embedding_jobs SET next_attempt_at=?1 WHERE created_at=0",
+        [NOW + 1],
+    )
+    .unwrap();
+    drop(conn);
+
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let one = DispatchBounds {
+        max_jobs: NonZeroUsize::new(1).unwrap(),
+        retry_after: 1,
+        ..bounds(Duration::from_secs(5))
+    };
+    let project_a = ProjectScope::new(PROJECT).unwrap();
+    let project_b = ProjectScope::new(PROJECT_B).unwrap();
+    let mut dispatcher_a = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut dispatcher_b = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    assert_eq!(
+        dispatcher_a
+            .run_pass(eligibility(&project_a), &one, NOW, &mut |_| {})
+            .unwrap(),
+        None
+    );
+    assert_eq!(ledger(dir.path(), occurrence_a).state, "pending");
+    for tick in 1..=3 {
+        *engine.count_failure.lock().unwrap() =
+            Some(InferenceError::Execution("retry count".to_owned()));
+        assert_eq!(
+            dispatcher_b
+                .run_pass(eligibility(&project_b), &one, NOW + tick, &mut |_| {})
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            ledger(dir.path(), occurrence_b).next_attempt_at,
+            Some(NOW + tick + 1)
+        );
+        assert_eq!(
+            dispatcher_a
+                .run_pass(eligibility(&project_a), &one, NOW + tick, &mut |_| {})
+                .unwrap(),
+            None
+        );
+    }
+    assert_eq!(
+        ledger(dir.path(), occurrence_a).state,
+        "embedded",
+        "foreign retry deadlines must not restart the project's forward scan"
+    );
+    assert_eq!(engine.calls(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_row_is_revisited_when_its_retry_becomes_due() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

@@ -343,6 +343,15 @@ impl<'a> EmbeddingDispatcher<'a> {
                 }
                 processed += 1;
                 scan_cursor = Some(candidate.cursor());
+                let classification = match (candidate.readiness, classification) {
+                    (_, CandidateClassification::Verdict(EligibilityVerdict::WrongScope)) => {
+                        classification
+                    }
+                    (CandidateReadiness::Deferred { until }, _) => {
+                        CandidateClassification::Deferred { until }
+                    }
+                    _ => classification,
+                };
                 match classification {
                     CandidateClassification::Deferred { until } => {
                         if !action_found {
@@ -1012,7 +1021,6 @@ fn eligibility_error(error: KernelError) -> DispatchError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreparedCandidate {
-    Deferred { until: i64 },
     InvalidIdentity,
     NeedsVerdict,
 }
@@ -1030,10 +1038,6 @@ fn prepare_candidates(
     let mut prepared = Vec::with_capacity(candidates.len());
     let mut kernel_candidates = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        if let CandidateReadiness::Deferred { until } = candidate.readiness {
-            prepared.push(PreparedCandidate::Deferred { until });
-            continue;
-        }
         let kernel_candidate = EligibilityCandidate {
             object_id: candidate.source_object_id.clone(),
             source_revision: candidate.source_revision,
@@ -1063,7 +1067,6 @@ fn classify_candidates(
     Ok(prepared
         .into_iter()
         .map(|candidate| match candidate {
-            PreparedCandidate::Deferred { until } => CandidateClassification::Deferred { until },
             PreparedCandidate::InvalidIdentity => CandidateClassification::InvalidIdentity,
             PreparedCandidate::NeedsVerdict => CandidateClassification::Verdict(
                 verdicts

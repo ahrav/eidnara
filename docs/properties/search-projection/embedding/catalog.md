@@ -477,7 +477,8 @@ row is also revisited when its retry becomes due, and a failed terminal write
 leaves its candidate visible for retry.
 Guarantee: One dispatch pass judges at most two pages of at most 1,024 candidates
 each. Before the first action, the dispatcher-retained cursor advances over each
-consecutive deferred or WrongScope row and records the earliest deferred retry.
+consecutive deferred or WrongScope row and records the earliest deferred retry
+only for rows not judged WrongScope.
 The cursor freezes before the first action, so an unresolved eligible, admitted,
 or terminal row remains visible. Scanning resets to the ordered beginning at the
 tail, when the project or destination binding changes, or when `now >= revisit_at`.
@@ -493,9 +494,9 @@ durable state leaves the open-row keyspace. Under a fixed finite WrongScope pref
 and successful passes, later eligible work cannot starve.
 Fault/timing angle: More than two full pages belong to another project. A failed
 terminal write must leave ordinary cursor progress uncommitted so the unresolved
-candidate is retried rather than skipped. A foreign-project deferred retry can
-reset scanning and cause bounded prefix retraversal, but each pass retains the
-two-page bound.
+candidate is retried rather than skipped. Repeated foreign-project retry
+rescheduling must not reset the requested project's scan progress; scope judgment
+precedes deferral.
 Required faults and enabling state: At least 2,048 older WrongScope rows, one
 later eligible row, repeated calls on the same dispatcher, and a bounded terminal
 write refusal before one retry.
@@ -506,10 +507,13 @@ integration tests were verified together.
 Existing check: `project_scan_cursor_advances_across_more_than_two_wrong_scope_pages`
 at `crates/daemon/tests/embedding_dispatch.rs:2822-2855`,
 `deferred_row_is_revisited_when_its_retry_becomes_due` at
-`crates/daemon/tests/embedding_dispatch.rs:2857-2912`, and
+`crates/daemon/tests/embedding_dispatch.rs:2922-2977`, and
 `terminal_search_deadline_preserves_the_candidate_for_retry` at
 `crates/daemon/tests/embedding_dispatch.rs:1973-2021`;
 `eligible_rows_are_taken_oldest_first_not_by_identifier` checks the keyset order.
+`foreign_retries_do_not_restart_another_projects_scan` in
+`crates/daemon/tests/embedding_dispatch.rs` verifies progress across repeated
+foreign retry reschedules by a second dispatcher.
 Impact: A project with a large older prefix can starve forever, or a failed
 disposition can be skipped permanently.
 Open questions: None.

@@ -26,29 +26,30 @@ WrongScope prefix starve work for the requested project.
 - `pass` uses a local scan cursor to inspect at most two pages. A separate
   dispatcher-retained cursor advances across the consecutive deferred and
   WrongScope prefix before the first actionable row:
-  `crates/daemon/src/embedding_dispatch.rs:294-408`.
+  `crates/daemon/src/embedding_dispatch.rs:294-417`.
 - WrongScope and deferred rows advance that persistent cursor without consuming
-  the action budget. Crossing a deferred row records its retry time. Once the
+  the action budget. Scope is judged before deferral, so only deferred rows not
+  classified WrongScope record a retry time. Once the
   pass finds an eligible or terminal row, the persistent cursor and revisit time
   freeze at the preceding safe position while the local scan may continue
-  filling the action budget: `crates/daemon/src/embedding_dispatch.rs:338-396`.
+  filling the action budget: `crates/daemon/src/embedding_dispatch.rs:338-405`.
 - A short or empty page resets the persistent cursor to `None` only when the
   scanned keyspace contained no action. This provides wraparound after the
   ordered keyspace is exhausted without skipping actionable rows:
-  `crates/daemon/src/embedding_dispatch.rs:312-323,398-404`.
+  `crates/daemon/src/embedding_dispatch.rs:312-323,407-413`.
 - Binding and due-revisit resets update `scan_position` before lane binding and
   later fallible work. A later failure can therefore retain a reset, but that
   reset only moves scanning to the beginning and cannot skip work:
   `crates/daemon/src/embedding_dispatch.rs:261-293`.
 - Ordinary cursor progress is stored only after terminal writes and selected job
-  driving complete successfully: `crates/daemon/src/embedding_dispatch.rs:409-437`.
+  driving complete successfully: `crates/daemon/src/embedding_dispatch.rs:418-446`.
 - A search deadline, kernel refusal, hydration error, or drive block returns
   without committing ordinary cursor progress.
 - `project_scan_cursor_advances_across_more_than_two_wrong_scope_pages` verifies
   cross-pass progress through 2,048 foreign rows:
   `crates/daemon/tests/embedding_dispatch.rs:2822-2855`.
 - `deferred_row_is_revisited_when_its_retry_becomes_due` verifies the revisit
-  reset: `crates/daemon/tests/embedding_dispatch.rs:2857-2912`.
+  reset: `crates/daemon/tests/embedding_dispatch.rs:2922-2977`.
 - `terminal_search_deadline_preserves_the_candidate_for_retry` verifies that a
   failed terminal write does not skip its row:
   `crates/daemon/tests/embedding_dispatch.rs:1973-2021`.
@@ -80,12 +81,14 @@ recorded revisit time, admitted or newly arriving work after the cursor can keep
 the row hidden until its episode deadline. Resetting when the retry becomes due
 makes that row visible without rescanning the deferred prefix on every pass.
 
-A deferred row can belong to a foreign project because readiness is classified
-before kernel scope judgment. When its retry becomes due, the reset can revisit a
-prefix that the requested project will classify `WrongScope`. This is bounded
-retraversal: each pass still reads at most two pages of at most 1,024 rows. The
-classification order is visible at `crates/retrieval/src/dispatch.rs:270-281` and
-`crates/daemon/src/embedding_dispatch.rs:325-338`.
+A foreign row can be rescheduled before each requested-project pass. Recording
+its retry time would repeatedly reset the cursor, starving healthy work beyond
+the two-page boundary even with a fixed foreign prefix. `prepare_candidates`
+includes deferred valid identities in kernel scope judgment. `pass` preserves
+WrongScope before applying deferral, so foreign retries do not reset progress.
+`foreign_retries_do_not_restart_another_projects_scan` in
+`crates/daemon/tests/embedding_dispatch.rs` exercises two dispatchers and three
+successive foreign retry reschedules; the requested project's job still embeds.
 
 ## Timing windows and dependencies
 
@@ -122,6 +125,10 @@ beginning, which preserves safety and bounded work but loses only scan progress.
 11. Place a deferred project-A row before a WrongScope row and an admitted
     project-A row, then advance logical time to the retry boundary and assert the
     deferred row is admitted before the carried cursor is reused.
+12. Put 2,048 foreign rows before one ready requested-project row. Defer the
+    oldest foreign row, then run its own dispatcher before each requested-project
+    pass to reschedule it through token-count execution failures. Assert the
+    requested job embeds within three further passes without foreign inference.
 
 ## Investigation log
 
