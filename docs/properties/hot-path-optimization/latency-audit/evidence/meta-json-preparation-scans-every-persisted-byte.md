@@ -168,11 +168,14 @@ the store test's `keyed` fixture, a `block_identity_by_mid` map whose `a-mid`
 entry carries a value secret and whose second key is itself a secret, and shows
 the caller's vector holding one detection when `prepare_json_content_collecting`
 returns the refusal. The [store test][store-live] shows, through `commit`,
-clean `meta` stored equal to `serde_json::to_string` of the value, a secret
-planted in a `block_identity_by_mid` entry's value substituted and recorded on
-the `meta` scan, and the same `keyed` fixture refused with no row stored and
-the `meta` detection count unchanged, so the detection the walk gathered before
-the refusal was discarded rather than recorded. Duplicate object names remain
+clean `meta` stored equal to `serde_json::to_string` of the value with a
+`meta` receipt whose `finding_count` is zero, a secret planted in a
+`block_identity_by_mid` entry's value substituted with a `meta` receipt whose
+`finding_count` is one (`scan_detections` deduplicates labels, so the count
+is the oracle), and the same `keyed` fixture refused with no row stored and
+every scan-audit table count unchanged from before the refused `commit`, so
+the detection the walk gathered before the refusal was discarded rather than
+recorded. Duplicate object names remain
 refused by [`parse_json_with_unique_names`][unique-live] and its existing test.
 
 ### Focused execution, 2026-09-12
@@ -190,4 +193,4 @@ branch as well and passing in isolation.
 [unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3419
 [unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15590
 [refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L15592-L15629
-[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L720
+[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
