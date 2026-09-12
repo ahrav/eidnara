@@ -514,10 +514,10 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4579-L4580
 [snapshot]: ../../../../../crates/daemon/src/transform.rs#L3006
 [snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6228-L6358
-[with-conn]: ../../../../../crates/storage/src/lib.rs#L286-L302
-[fenced]: ../../../../../crates/storage/src/lib.rs#L290-L316
-[pin-sync]: ../../../../../crates/storage/src/lib.rs#L906-L907
-[claim-fence]: ../../../../../crates/storage/src/lib.rs#L1765-L1783
+[with-conn]: ../../../../../crates/storage/src/lib.rs#L305-L321
+[fenced]: ../../../../../crates/storage/src/lib.rs#L370-L434
+[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1345-L1346
+[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2074-L2092
 [pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2245-L2272
 [audit]: ../../../../../crates/memory-store/src/lib.rs#L2291-L2449
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2470-L2473
@@ -641,4 +641,4 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15166
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15309
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L3445
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L4095

@@ -644,8 +644,8 @@ them without creating implementation tickets.
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L934
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
-[read-callback]: ../../../crates/storage/src/lib.rs#L229-L245
-[write-callback]: ../../../crates/storage/src/lib.rs#L290-L316
+[read-callback]: ../../../crates/storage/src/lib.rs#L305-L321
+[write-callback]: ../../../crates/storage/src/lib.rs#L370-L434
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4031-L4058
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
