@@ -606,6 +606,20 @@ impl KernelStore {
         self.commit_within(&AcquireLimit::until(deadline), intent, operation)
     }
 
+    /// `commit_before` for a caller carrying an [`EvalBudget`](crate::applicability::EvalBudget): the wait for the
+    /// writer stops at the budget's deadline or interrupt, whichever comes first,
+    /// and returns `KernelError::Deadline`. The operation itself is not
+    /// interrupted; a caller that must not act on an exhausted budget checks it
+    /// again inside the operation.
+    pub fn commit_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        intent: CommitIntent,
+        operation: impl FnOnce(&mut Envelope<'_>) -> Result<String, KernelError>,
+    ) -> Result<CommitReceipt, KernelError> {
+        self.commit_within(&budget.acquire_limit(), intent, operation)
+    }
+
     /// `commit_before` for a caller carrying a cooperative interrupt as well as,
     /// or instead of, a deadline.
     pub(crate) fn commit_within(

@@ -259,24 +259,25 @@ impl<'a> GitReconciler<'a> {
         let mut retained = Vec::new();
         let mut scanned = 0usize;
         let mut after = None;
+        let exceeded = || ReconcileBlocked::ScannedExceeded {
+            max: bounds.max_scanned.get(),
+        };
         loop {
             budget
                 .check()
                 .map_err(|_| ReconcileBlocked::Cancelled(ReconcilePhase::Inventory))?;
+            // A page asks for no more rows than the scan bound still allows, so the bound limits what the kernel reads and decodes, not only what is counted afterwards. The loop only continues while `scanned` is below the bound, so the allowance is at least one.
+            let allowance = NonZeroUsize::new(bounds.max_scanned.get() - scanned)
+                .ok_or_else(exceeded)?
+                .min(bounds.page_rows);
             let page = self.kernel.live_source_descriptors(
                 OccurrenceClass::GitCommits,
                 snapshot,
                 after.as_deref(),
-                bounds.page_rows,
+                allowance,
             )?;
             self.probe(Probe::AfterInventoryPage);
             for descriptor in page.rows {
-                if scanned == bounds.max_scanned.get() {
-                    return Err(ReconcileBlocked::ScannedExceeded {
-                        max: bounds.max_scanned.get(),
-                    }
-                    .into());
-                }
                 scanned += 1;
                 if !names_repository(&descriptor, &scope.binding.repository_id) {
                     continue;
@@ -303,6 +304,8 @@ impl<'a> GitReconciler<'a> {
                 });
             }
             match page.next {
+                // The lookahead says another row exists; a bound already spent refuses here rather than reading it.
+                Some(_) if scanned == bounds.max_scanned.get() => return Err(exceeded().into()),
                 Some(next) => after = Some(next),
                 None => return Ok(retained),
             }
@@ -311,7 +314,7 @@ impl<'a> GitReconciler<'a> {
 
     /// One receipt-keyed commit that invalidates the page's live descriptors; returns how many it invalidated, which excludes descriptors another writer invalidated first and every replayed receipt.
     ///
-    /// The wait for the kernel writer is bounded by the budget's deadline, and the budget is checked again once the writer is held, so a page whose budget ran out behind another writer is cancelled rather than committed.
+    /// The wait for the kernel writer stops at the budget's deadline or interrupt, and the budget is checked again once the writer is held, so a page whose budget ran out behind another writer is cancelled rather than committed.
     fn retire(
         &self,
         scope: &ReconcileScope,
@@ -346,14 +349,13 @@ impl<'a> GitReconciler<'a> {
             }
             Ok(String::new())
         };
-        let receipt = match budget.deadline() {
-            Some(deadline) => self.kernel.commit_before(deadline, intent, operation),
-            None => self.kernel.commit(intent, operation),
-        }
-        .map_err(|error| match error {
-            KernelError::Deadline => ReconcileBlocked::Cancelled(ReconcilePhase::Retirement),
-            error => ReconcileBlocked::Retire(error),
-        })?;
+        let receipt = self
+            .kernel
+            .commit_within_budget(budget, intent, operation)
+            .map_err(|error| match error {
+                KernelError::Deadline => ReconcileBlocked::Cancelled(ReconcilePhase::Retirement),
+                error => ReconcileBlocked::Retire(error),
+            })?;
         Ok(if receipt.replayed { 0 } else { retired })
     }
 }
@@ -388,8 +390,11 @@ fn traverse(
     if tips.is_empty() {
         return Ok(Traversal { tips, reachable });
     }
+    let hash = repo.object_hash();
+    // The commit graph is a cache of parent edges that nothing below verifies, so the walk reads every commit from the object store.
     let walk = repo
         .rev_walk(tips.iter().copied())
+        .use_commit_graph(false)
         .all()
         .map_err(|_| GitRefusal::Unreadable(tips[0].to_string()))?;
     for info in walk {
@@ -404,7 +409,18 @@ fn traverse(
             }
             .into());
         }
-        reachable.insert(info.id.to_string());
+        // The store does not rehash what it returns, so bytes stored under a commit's id that hash to another commit would give the walk that other commit's parents. As in `read_selection`, the id must identify the bytes before they count.
+        let oid = info.id.to_string();
+        let object = info
+            .id()
+            .object()
+            .map_err(|_| GitRefusal::Unreadable(oid.clone()))?;
+        let actual = gix::objs::compute_hash(hash, object.kind, &object.data)
+            .map_err(|_| GitRefusal::Unreadable(oid.clone()))?;
+        if actual != info.id {
+            return Err(GitRefusal::HashMismatch(oid).into());
+        }
+        reachable.insert(oid);
     }
     Ok(Traversal { tips, reachable })
 }

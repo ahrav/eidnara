@@ -197,14 +197,24 @@ impl Repo {
     }
 
     /// Garbles the loose object of `oid` in place.
-    fn garble(&self, oid: &str) {
-        let loose = self
-            .root
+    fn loose_object(&self, oid: &str) -> PathBuf {
+        self.root
             .join(".git/objects")
             .join(&oid[..2])
-            .join(&oid[2..]);
+            .join(&oid[2..])
+    }
+
+    fn garble(&self, oid: &str) {
+        let loose = self.loose_object(oid);
         std::fs::set_permissions(&loose, PermissionsExt::from_mode(0o644)).unwrap();
         std::fs::write(&loose, b"not zlib").unwrap();
+    }
+
+    /// Stores `source`'s bytes under `oid`, so the object named `oid` decodes as a valid commit that does not hash to its id.
+    fn substitute(&self, oid: &str, source: &str) {
+        let loose = self.loose_object(oid);
+        std::fs::set_permissions(&loose, PermissionsExt::from_mode(0o644)).unwrap();
+        std::fs::copy(self.loose_object(source), loose).unwrap();
     }
 }
 
@@ -820,6 +830,83 @@ fn inventory_refuses_a_payload_bound_to_another_object_id() {
     );
 }
 
+/// A tip whose stored bytes are another, parentless commit's bytes is refused: the walk would otherwise certify only the tip as reachable and retire its real ancestors.
+#[test]
+fn traversal_refuses_a_commit_that_does_not_hash_to_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    let c2 = repo.commit(MAIN, &[&c1], "two\n", 2);
+    let c3 = repo.commit(MAIN, &[&c2], "three\n", 3);
+    corpus.publish(&repo, &[c1.clone(), c2.clone(), c3.clone()]);
+    repo.substitute(&c3, &c1);
+    let report = corpus.reconcile(&repo.scope(&[MAIN]));
+    assert_eq!(
+        report.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Repository(GitRefusal::HashMismatch(
+            c3.clone()
+        ))),
+        "{report:?}"
+    );
+    assert_eq!(report.retired, 0);
+    assert_eq!(corpus.live_oids(), set(&[&c1, &c2, &c3]));
+}
+
+/// A budget with no deadline cancels the wait for the kernel writer through its interrupt, so a cancelled episode returns while another writer still holds the kernel rather than after it lets go.
+#[test]
+fn retirement_stops_waiting_for_the_writer_when_the_budget_is_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    let c2 = repo.commit(MAIN, &[&c1], "two\n", 2);
+    corpus.publish(&repo, &[c1.clone(), c2.clone()]);
+    repo.point_ref(MAIN, &c1);
+    let budget = EvalBudget::new(None, Arc::new(AtomicBool::new(false)));
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let kernel = &corpus.kernel;
+    let (report, waited) = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _ = kernel.commit(intent("hold-writer"), |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(KernelError::Fault)
+            });
+        });
+        held_rx.recv().unwrap();
+        let cancel = &budget;
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            cancel.cancel();
+        });
+        // The holder lets go only long after the cancellation; an episode that returns sooner did not wait it out.
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_secs(5));
+            release_tx.send(()).unwrap();
+        });
+        let started = Instant::now();
+        let report = GitReconciler::new(&corpus.kernel)
+            .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+            .unwrap();
+        (report, started.elapsed())
+    });
+    assert_eq!(
+        report.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Retirement)),
+        "{report:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(4),
+        "waited {waited:?} for the writer"
+    );
+    assert_eq!(report.retired, 0);
+    assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
+}
+
 /// AC2, AC3, AC6: a missing permitted ref, an unopenable repository, an unreadable commit in the traversal, an exhausted budget, an exceeded traversal bound, and an exceeded inventory bound each end the episode without retiring any commit, and the report claims no coverage for the phase that did not complete.
 #[test]
 fn incomplete_scans_retire_nothing() {
@@ -1063,6 +1150,31 @@ fn inventory_is_bounded_and_agrees_with_the_export() {
         "{scanned:?}"
     );
     assert_eq!((scanned.retained, scanned.retired), (0, 0));
+
+    // The scan bound limits the rows the kernel is asked for, not only the rows counted after they arrive: with pages of one row and a bound of two, the overflow is reported after the second page's lookahead, without a third page.
+    let pages = std::cell::Cell::new(0usize);
+    let clamped = GitReconciler::new(&corpus.kernel)
+        .with_probe_for_test(Probe::AfterInventoryPage, || pages.set(pages.get() + 1))
+        .run_episode(
+            &repo.scope(&[MAIN]),
+            InventoryBounds {
+                page_rows: NonZeroUsize::new(1).unwrap(),
+                max_scanned: NonZeroUsize::new(2).unwrap(),
+                ..bounds()
+            },
+            &unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        clamped.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::ScannedExceeded { max: 2 }),
+        "{clamped:?}"
+    );
+    assert_eq!(
+        pages.get(),
+        2,
+        "a third page would exceed the scan bound before its rows were counted"
+    );
 
     // A budget cancelled after the first inventory page stops the inventory itself, not the traversal after it.
     let budget = unbounded();
