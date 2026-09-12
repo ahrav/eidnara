@@ -20,7 +20,7 @@ bound before either moves.
   divides it by one connection's `arena_bytes` charge;
   [`process_limits`][process-limits] refuses `requested > affordable` with
   `ExceedsResidentBytes`. The host calls it at
-  [runtime.rs:792-793][runtime-limits]; [`HostLimits::default`][config-default]
+  [runtime.rs:792-796][runtime-limits]; [`HostLimits::default`][config-default]
   and [`validate`][config-validate] use the same quotient. Nothing reads
   residency; [`resident_arena_pages`][resident-api] is a `mincore` probe
   documented for tests.
@@ -29,14 +29,14 @@ bound before either moves.
   doubles it for two directions ([profile.rs:155-158][charge]), so eight
   connections fit under 1 GiB.
 - [`try_reserve`][try-reserve] calls `reclaim_completed` at
-  [`:1281`][try-reserve] on every reservation.
+  [`:1263-1340`][try-reserve] on every reservation.
   [`reclaim_completed_inner`][reclaim] walks released slots, and at
   [`:2129-2134`][punch-decision] punches only when
   `new_reclaimed - punched >= punch_batch_bytes()`.
   [`punch_batch_bytes`][batch] is `arena_bytes / PUNCH_BATCH_DIVISOR` with
   [divisor 4][divisor], so 16 MiB;
   [`punch_dead_pages`][punch] leaves `punched` page-aligned below `reclaimed`
-  ([`:2240`][punch]), so the boundary page stays until the next batch.
+  ([`:2163-2242`][punch]), so the boundary page stays until the next batch.
 - [`removal_ranges`][removal-ranges] rounds inward to whole pages and splits
   at the arena end; [`remove_pages`][remove-pages] carries the `SAFETY`
   comment "page-aligned range inside the live shared mapping with no live
@@ -45,8 +45,8 @@ bound before either moves.
 - [`abort_reservation`][abort] punches `[arena_write, reserved_end)` through
   `punch_range`, again rounded inward, so a page shared with live bytes stays.
 - [`trim`][trim] punches every dead page including the partial one; its
-  comment at [`:2254-2255`][trim] names the idle-ring role. Only tests call it
-  ([ring.rs:3086][t-syscall] and siblings); the client crate has no caller and
+  comment at [`:2244-2266`][trim] names the idle-ring role. Only tests call it
+  ([ring.rs:3086-3087][t-syscall] and siblings); the client crate has no caller and
   runs the same [`reserve_until`][native-reserve] path.
 - [§7.7][wire77] states no timed ring poll or prefault exists; [§7.5.1][wire751]
   calls the Synapse cap an accounting boundary, not an RSS claim.
@@ -151,11 +151,11 @@ piece once; none asserts the inequality over a run or measures an idle ring.
 [trim]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2244-L2266
 [abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2268-L2304
 [t-syscall]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3086-L3087
-[t-abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3677-L3693
-[t-batch]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4016-L4044
-[t-reuse]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4073-L4088
-[t-subpage]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4091-L4115
-[t-punchfail]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4243-L4258
+[t-abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3667-L3685
+[t-batch]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4018-L4046
+[t-reuse]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4075-L4091
+[t-subpage]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4093-L4118
+[t-punchfail]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4245-L4261
 [madv]: ../../../../../crates/shm-transport/src/backend/sys.rs#L135-L149
 [native-reserve]: ../../../../../packages/shm-native/src/lib.rs#L1024
 [bench]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L296-L306

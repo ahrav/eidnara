@@ -19,6 +19,24 @@ use crate::object_write::{
 use crate::redaction::{RedactedField, identity_field, redact};
 use crate::{KernelError, Sensitivity, map_sqlite};
 
+pub const DECISION_INSERT_KIND: &str = "decision_insert";
+/// An event append leaves the decision text unchanged.
+pub const DECISION_EVENT_APPEND_KIND: &str = "decision_event_append";
+/// A successor row that replaces the predecessor named by `replaced_object_id`.
+pub const DECISION_CORRECT_KIND: &str = "decision_correct";
+pub const DECISION_RETIRE_KIND: &str = "decision_retire";
+/// Emitted on an `adr_accepted` decision's registry row when its approval is revoked, which invalidates the decision.
+pub const APPROVAL_REVOKE_KIND: &str = "approval_revoke";
+
+/// The change kinds the slice and admission writers emit on decision registry rows.
+pub const DECISION_CHANGE_KINDS: [&str; 5] = [
+    DECISION_INSERT_KIND,
+    DECISION_EVENT_APPEND_KIND,
+    DECISION_CORRECT_KIND,
+    DECISION_RETIRE_KIND,
+    APPROVAL_REVOKE_KIND,
+];
+
 struct RedactedDecision {
     decision_id: RedactedField,
     object_id: RedactedField,
@@ -119,7 +137,7 @@ impl Envelope<'_> {
         let outcome = spec.outcome();
         self.changes.push(PendingChange {
             object: spec.object_row(self.commit_seq),
-            kind: "decision_insert",
+            kind: DECISION_INSERT_KIND,
             replaced_object_id: None,
             redactions: spec.text_fields(),
             audit: None,
@@ -235,7 +253,7 @@ impl Envelope<'_> {
         )?;
         self.changes.push(PendingChange {
             object,
-            kind: "decision_event_append",
+            kind: DECISION_EVENT_APPEND_KIND,
             replaced_object_id: None,
             redactions: event_fields,
             audit: Some(serde_json::json!({
@@ -343,7 +361,7 @@ impl Envelope<'_> {
         redactions.push(("replaced_object_id".to_string(), replaced_object_id.clone()));
         self.changes.push(PendingChange {
             object,
-            kind: "decision_correct",
+            kind: DECISION_CORRECT_KIND,
             replaced_object_id: Some(replaced_object_id.text.clone()),
             redactions,
             audit: None,
@@ -521,7 +539,7 @@ impl Envelope<'_> {
         self.changes.push(PendingChange {
             object,
             kind: match object_kind {
-                "decision" => "decision_retire",
+                "decision" => DECISION_RETIRE_KIND,
                 _ => "observation_retire",
             },
             replaced_object_id: None,

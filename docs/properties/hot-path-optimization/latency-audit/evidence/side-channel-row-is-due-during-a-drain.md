@@ -24,14 +24,14 @@ constructible from fixtures that already exist in `crates/memory-store` and
   each kind in [`HISTORIAN_SIDE_CHANNEL_KINDS`][kinds] loads due rows with
   [`load_due_historian_side_channels`][load-due], whose predicate is
   `delivered_at_ms IS NULL AND next_attempt_at_ms <= ?3`
-  ([`:10893-10894`][due-predicate]). An empty outbox makes the loop a no-op.
+  ([`:11205-11206`][due-predicate]). An empty outbox makes the loop a no-op.
 - Rows enter the outbox inside the publish transaction
   ([`enqueue_historian_side_channels_tx`][enqueue]) and are drained inline
-  right after the commit ([`:10762-10771`][publish-drain]), so on the happy
+  right after the commit ([`:11074-11083`][publish-drain]), so on the happy
   path nothing is pending when the next pass drains.
 - A failed delivery records `attempt_count + 1` and
   `next_attempt_at_ms = now + 1000 * 2^min(attempt, 6)` capped at 60 000 ms
-  ([`:10981-10985`][backoff]); the first failure defers the row by 1000 ms.
+  ([`:11293-11297`][backoff]); the first failure defers the row by 1000 ms.
 - The publish itself needs a configured [`model_chain`][cfg-models]; user
   observation rows also need
   [`user_memory_collection_enabled`][cfg-user-mem]. Both default off, so a
@@ -132,5 +132,5 @@ call to the drain function, not a handler pass, so the witness is `reachable`
 for the drain function rather than the `sometimes` witness the record's
 guarantee names. A handler-pass run with all three kinds due is still open.
 
-[drain-live]: ../../../../../crates/memory-store/src/lib.rs#L11259-L11317
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20032-L20171
+[drain-live]: ../../../../../crates/memory-store/src/lib.rs#L11520-L11578
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20883-L21043

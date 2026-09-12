@@ -2,10 +2,12 @@
 
 This lens records what the per-turn `transform` pass reads from and writes to
 `cache_state`, `pass_trace`, and `historian_side_channel_outbox`, and what any
-change to that traffic must preserve. Anchors are checked in
-`/local/home/ahrav/scratch/eidnara` at
-`913234433ae36a80a6e22c6aac14c7f9aab74386` on 2026-09-10. It is analysis only;
-no test ran and nothing outside this file changed. Fencing, `synchronous=FULL`,
+change to that traffic must preserve. Discovery baseline is
+`913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10. Live anchors are
+checked against the PR 509 worktree on 2026-09-12; the outbox delivery
+paragraphs describe that tree, and the baseline design they replaced is
+named where it matters. It is analysis only; no test ran and nothing outside
+this file changed. Fencing, `synchronous=FULL`,
 snapshot isolation, and CAS obligations stay with the [memory-store][ms-catalog]
 and [shared-primitives][sp-catalog] catalogs; callback batching boundaries stay
 with [S2][s2]; prepared-field audit ownership stays with [R1][r1], [R2][r2],
@@ -45,12 +47,13 @@ untouched on conflict and initializes it to `0` on a fresh insert.
 
 The historian outbox drain runs [before the transform][drain-call] on every
 pass with per-kind limit 32. [`drain_historian_side_channels`][drain] first
-[deletes already-delivered rows][delete-all] in one fenced transaction, then
-per kind loads due rows in a read transaction, delivers each row by inserting
-the target row and marking `delivered_at_ms` in [one fenced
-transaction][deliver], and then deletes the marked row in [a second fenced
-transaction][delete-one]. The [doc comment][drain-doc] states the
-mark-then-delete design intent. Rows are [enqueued][enqueue] by the publish
+[sweeps rows an earlier build marked delivered][delete-all], gated by a read
+that finds any, then per kind loads due rows in a read transaction and
+delivers each row by inserting the target row and [deleting the outbox
+row][retire] in [one fenced transaction][deliver], guarded by
+`delivered_at_ms IS NULL`. The baseline marked the row in that transaction and
+deleted it in a second one; the [doc comment][drain-doc] states the
+one-transaction design. Rows are [enqueued][enqueue] by the publish
 transaction into the [outbox table][outbox-sql], whose primary key is the
 delivery identity and whose [due index][idx-due] serves the pending count. The
 same drain also runs [after a historian publish][publish-drain] on the
@@ -98,7 +101,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   a publication landing between the transform and the floor check; a CAS
   conflict injected between snapshot and commit.
 - Reachability: default-production - the handler path at
-  [lib.rs:8202-8377][handler] runs for every transform request;
+  [lib.rs:8171-8434][handler] runs for every transform request;
   `compaction_enabled` defaults to `true` ([config.rs:121][cfg-compaction]).
   The Emergency95 arm needs usage at or above the emergency threshold.
 - Existing check: [`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`][t-no-fire]
@@ -138,7 +141,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   [`expand_transform_tail_delta`][epoch-read-delta] map any load error to
   `None`, and [`historian_active`][active] maps it to `false`; a corrupt
   `core_state` column trips both because [`load`][load] decodes both columns.
-  The comment at [lib.rs:4174][epoch-comment] states why the epoch must be the
+  The comment at [lib.rs:4203][epoch-comment] states why the epoch must be the
   persisted one. `ModuleMeta` has no `deny_unknown_fields` and no `flatten`, and
   `revert_epoch` grows by `saturating_add`, so the SQLite integer range is not
   a practical concern but belongs in the equivalence statement.
@@ -189,10 +192,10 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   transaction at all ([`record_stable_pass_trace`][stable-call] runs only when
   `!committed`). Consumers: [session status][status-read] and
   [health][health-read] JSON, the `newest_pass_at` age computation at
-  [lib.rs:6245-6254][age], and the plugin's `Passes: N received, M rejected`
-  line at [command-handler.ts:267][plugin]. No scheduler decision reads
+  [lib.rs:6300-6311][age], and the plugin's `Passes: N received, M rejected`
+  line at [command-handler.ts:265-268][plugin]. No scheduler decision reads
   `pass_trace`; [`load_pass_scheduler_history`][sched-history] has one
-  non-store caller and it is a test at [transform.rs:13564][sched-test].
+  non-store caller and it is a test at [transform.rs:13578][sched-test].
 - Fault/timing angle: A fold moves the bump after `run_transform`, so a
   rejected or stable pass under-counts, or a rerun Emergency95 pass
   double-counts if the bump is attached to every commit.
@@ -200,8 +203,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   violation); a stable pass; an Emergency95 pass that reruns and commits
   twice; a fresh session whose first pass commits.
 - Reachability: default-production - every transform request.
-- Existing check: [`transform_reject_records_trace_without_advancing_row_version`][t-reject],
-  [`transform_success_records_received_and_completed_trace`][t-success],
+- Existing check: [`transform_success_records_received_and_completed_trace`][t-success],
   [`repeated_rejects_increment_trace_and_overwrite_last_error`][t-repeat],
   [`sequential_failing_passes_trace_every_reject_while_cache_state_stays_frozen`][t-frozen],
   [`status_and_health_surface_pass_trace_for_rejected_sessions`][t-status],
@@ -227,8 +229,8 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   ignores trace-write errors with `let _ =` on every call site.
 - Guarantee: Diagnostics cannot veto or enlarge the state commit.
 - Rationale: Every trace call site discards its result
-  ([8131][received-call], [8196][rejected-call], [8436][completed-call],
-  [1836][stable-call]). The doc comments on [`trace_pass_received`][received-doc]
+  ([8206][received-call], [8280-8287][rejected-call], [8512][completed-call],
+  [1823-1847][stable-call]). The doc comments on [`trace_pass_received`][received-doc]
   and [`trace_pass_completed`][completed-doc] state that these writes stay
   outside the fenced cache-state transaction so they cannot contend with,
   extend, or alter CAS semantics. Folding the bump into `commit_transform`
@@ -265,27 +267,29 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Guarantee: The outbox row is the only duplicate guard for events and user
   observations.
 - Rationale: [`deliver_historian_side_channel`][deliver] inserts the target
-  and calls [`mark_historian_side_channel_delivered_tx`][mark] in one fenced
-  transaction; the mark requires `changed == 1` under
-  `delivered_at_ms IS NULL` and returns an error otherwise, which rolls the
+  and calls [`retire_historian_side_channel_tx`][retire] in one fenced
+  transaction; the retirement is a `DELETE` under `delivered_at_ms IS NULL`
+  that requires `changed == 1` and returns an error otherwise, which rolls the
   fenced transaction back. [`load_due_historian_side_channels`][load-due]
-  selects only `delivered_at_ms IS NULL`, so a marked row is never redelivered
-  even if the process dies before the [per-row delete][delete-one]; the
-  [drain start][drain] deletes leftovers. The publish task also drains
-  ([lib.rs:10766-10770][publish-drain]), so two drainers can load the same due
-  row; the loser's mark returns `changed == 0`. With delete-in-place the
-  equivalent guard is a `DELETE` that affects one row, else rollback.
+  selects only `delivered_at_ms IS NULL`, so a retired row is absent rather
+  than marked and nothing remains for a restart to redeliver; the [drain
+  start][drain] sweeps rows an earlier build marked without deleting. The
+  publish task also [drains after a publish][publish-drain], so two drainers
+  can load the same due row; the loser's delete affects zero rows and its
+  insert rolls back. The baseline marked in the delivery transaction and
+  deleted in a second one, leaving a crash window between the two commits.
   [`historian_side_channel_status`][status-sc] counts pending as
   `delivered_at_ms IS NULL`, so retiring by delete keeps the pending count
   unchanged.
-- Fault/timing angle: Process crash between the mark commit and the delete
-  commit; two drainers overlapping on one session; a target insert failing
-  after the outbox state change in a reordered transaction.
+- Fault/timing angle: An injected failure between the target insert and the
+  retirement; two drainers overlapping on one session; a target insert
+  failing after the outbox state change in a reordered transaction.
 - Required faults and enabling state: A published firing with events, primers,
-  and user observations; a crash or abort injected between the two fenced
-  transactions; a second drainer started between load and deliver.
+  and user observations; a failure injected inside the delivery transaction
+  after the insert; a second drainer that read the row before the first
+  retired it.
 - Reachability: default-production for the drain call
-  ([lib.rs:8124][drain-call]); explicit-config-only for row delivery, because
+  ([lib.rs:8199-8203][drain-call]); explicit-config-only for row delivery, because
   outbox rows come from [`publish_historian_chunk`][publish] and firing
   requires a configured `model_chain` ([config.rs:119][cfg-models],
   [`no_models` gate][no-models]); `user_observation` rows further require
@@ -346,7 +350,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Guarantee: No byte reaches the `meta` column that the scanner did not walk,
   and the audit receipt matches the bytes stored.
 - Rationale: `commit_transform` serializes `meta` and hands the text to
-  `json_content` at [lib.rs:8306-8315][commit-meta]. The [comment][unique-doc]
+  `json_content` at [lib.rs:8934-8943][commit-meta]. The [comment][unique-doc]
   on [`parse_json_with_unique_names`][unique] states the security invariant:
   `serde_json::Value` keeps only the last duplicate name, so an earlier
   secret-bearing value would bypass `prepare_value` and persist when the
@@ -396,7 +400,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   the interleaving that makes the first property meaningful may never occur.
 - Guarantee: The campaign exercises the state that distinguishes
   one-load-per-pass from per-consumer loads.
-- Rationale: The rerun logic at [lib.rs:8365-8384][floor-b] exists for this
+- Rationale: The rerun logic at [lib.rs:8425-8444][floor-b] exists for this
   interleaving. Without it, a single-load design and the current design are
   indistinguishable.
 - Fault/timing angle: The window between `commit_transform` and
@@ -421,7 +425,6 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`transform_snapshot_keeps_row_version_and_overlays_from_one_commit`][t-snap-keeps] | snapshot row_version matches overlays from the same commit | unaudited |
 | [`transform_cas_conflict_leaves_every_overlay_table_empty`][t-cas-empty] | CAS loser commits no overlay rows | unaudited |
 | [`competing_pass_counter_survives_direct_primary_lifecycle_and_reopen`][t-counter] | CAS loser rejected; state survives reopen | unaudited |
-| [`transform_reject_records_trace_without_advancing_row_version`][t-reject] | reject: `receive_count == 1`, `reject_count == 1`, row_version unchanged | unaudited |
 | [`transform_success_records_received_and_completed_trace`][t-success] | success: received then completed timestamps | unaudited |
 | [`repeated_rejects_increment_trace_and_overwrite_last_error`][t-repeat] | counters increment per pass; last error overwritten | unaudited |
 | [`sequential_failing_passes_trace_every_reject_while_cache_state_stays_frozen`][t-frozen] | four rejects: `receive_count == 4`, row_version frozen | unaudited |
@@ -440,7 +443,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`preserved_json_identities_do_not_exempt_integrity_fields_credential_names_or_nested_values`][t-preserved] | identity preservation limited to structural scalar names | unaudited |
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | commit redacts core payload, preserves legacy ids, refuses integrity secret in meta | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | new-versus-existing session decided inside the fenced transaction | unaudited |
-| [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` pinned on open and re-pinned per fenced write | unaudited |
+| [`a_read_callback_cannot_lower_fence_durability`][t-sync] | `synchronous=FULL` pinned on open and re-pinned by the first fenced write after a maintenance callback | unaudited |
 
 None found:
 
@@ -470,11 +473,11 @@ with `let _ =` in the handler, so a regression in either surfaces only through
   "cannot alter CAS semantics or hold the commit transaction open longer". The
   code matches both. A fold into `commit_transform` contradicts both
   statements and must rewrite them.
-- Documented intent versus the proposed delete-in-place, not code. The
-  [drain doc][drain-doc] says the acknowledgement row "is deleted only after
-  that commit, so restart replay is idempotent". The code matches. Delete in
-  the delivery transaction keeps replay idempotent by a different mechanism;
-  the comment must change with it.
+- Resolved by the delete-in-transaction implementation. The baseline
+  [drain doc][drain-doc] said the acknowledgement row "is deleted only after
+  that commit, so restart replay is idempotent"; the live doc says a
+  successful target write retires the row in the same fenced transaction,
+  guarded by the row still being pending, and the code matches it.
 - [`record_no_fire`][no-fire-doc] carries the doc comment `/// Delete`, which
   describes nothing the function does; it commits `last_no_fire` under CAS.
   Stale documentation, no behavioral disagreement.
@@ -485,12 +488,13 @@ with `let _ =` in the handler, so a regression in either surfaces only through
 - Sibling catalog anchors are stale against this HEAD. The memory-store
   record [preserved-identity-name-does-not-exempt-its-value][ms-preserved]
   cites `lib.rs:4027-4036` and `lib.rs:17258`; the preparation code is at
-  [3109-3287][prepare-collecting] and the test is at [15166][t-preserved]
+  [3396-3406][prepare-collecting] and the test is at [16337][t-preserved]
   here. Not edited by this lens.
 
 ## Anchors
 
-Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
+Corrections to the anchors supplied at the discovery baseline, in that
+tree's line numbers: `MemoryStore::load` closes at 6223, not
 6222. The daemon call at 4170 is inside `expand_transform_tail_delta`
 (4151), not `lookup_full_projection_cache` (4271-4289, load at 4278).
 `prepare_json_content_collecting` spans 3109-3287, not 3276-3290;
@@ -509,136 +513,133 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [ms-preserved]: ../../../memory-store/catalog.md#preserved-identity-name-does-not-exempt-its-value
 [ms-refused]: ../../../memory-store/catalog.md#refused-durable-write-leaves-no-row-and-no-receipt
 
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6196-L6223
-[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4581-L4582
-[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4579-L4580
-[snapshot]: ../../../../../crates/daemon/src/transform.rs#L3006
-[snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6228-L6358
-[with-conn]: ../../../../../crates/storage/src/lib.rs#L286-L302
-[fenced]: ../../../../../crates/storage/src/lib.rs#L290-L316
-[pin-sync]: ../../../../../crates/storage/src/lib.rs#L906-L907
-[claim-fence]: ../../../../../crates/storage/src/lib.rs#L1765-L1783
-[pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2245-L2272
-[audit]: ../../../../../crates/memory-store/src/lib.rs#L2291-L2449
-[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2629-L2637
-[max-text]: ../../../../../crates/memory-store/src/lib.rs#L465
+[load]: ../../../../../crates/memory-store/src/lib.rs#L6640-L6667
+[full-select]: ../../../../../crates/memory-store/src/lib.rs#L4905-L4906
+[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4903-L4904
+[snapshot]: ../../../../../crates/daemon/src/transform.rs#L3009
+[snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6792-L6922
+[with-conn]: ../../../../../crates/storage/src/lib.rs#L343-L360
+[fenced]: ../../../../../crates/storage/src/lib.rs#L409-L473
+[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1500-L1501
+[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2229-L2247
+[pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2380-L2407
+[audit]: ../../../../../crates/memory-store/src/lib.rs#L2430-L2598
+[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
+[max-text]: ../../../../../crates/memory-store/src/lib.rs#L550
 
-[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4278-L4296
-[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4158-L4187
-[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4174
-[active]: ../../../../../crates/daemon/src/lib.rs#L4574-L4587
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5001-L5074
-[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5457-L5470
-[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5456
-[no-models]: ../../../../../crates/daemon/src/lib.rs#L5196-L5203
-[handler]: ../../../../../crates/daemon/src/lib.rs#L8122-L8384
-[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8131-L8135
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8138
-[run]: ../../../../../crates/daemon/src/lib.rs#L8146-L8200
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8201-L8208
-[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8222-L8230
-[rerun]: ../../../../../crates/daemon/src/lib.rs#L8271-L8278
-[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8365-L8384
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8443
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8231-L8239
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6204-L6254
-[age]: ../../../../../crates/daemon/src/lib.rs#L6245-L6254
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7833-L7881
+[epoch-read]: ../../../../../crates/daemon/src/lib.rs#L4305-L4323
+[epoch-read-delta]: ../../../../../crates/daemon/src/lib.rs#L4187-L4217
+[epoch-comment]: ../../../../../crates/daemon/src/lib.rs#L4203
+[active]: ../../../../../crates/daemon/src/lib.rs#L4597-L4615
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5043-L5116
+[no-fire]: ../../../../../crates/daemon/src/lib.rs#L5499-L5512
+[no-fire-doc]: ../../../../../crates/daemon/src/lib.rs#L5498
+[no-models]: ../../../../../crates/daemon/src/lib.rs#L5238-L5245
+[handler]: ../../../../../crates/daemon/src/lib.rs#L8171-L8434
+[drain-call]: ../../../../../crates/daemon/src/lib.rs#L8199-L8203
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8206
+[run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8280-L8287
+[floor-a]: ../../../../../crates/daemon/src/lib.rs#L8303-L8308
+[rerun]: ../../../../../crates/daemon/src/lib.rs#L8330-L8337
+[floor-b]: ../../../../../crates/daemon/src/lib.rs#L8425-L8444
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8512
+[hook]: ../../../../../crates/daemon/src/lib.rs#L8308-L8316
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6246-L6300
+[age]: ../../../../../crates/daemon/src/lib.rs#L6300-L6311
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7903-L7942
 [cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L121
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268
 
-[cas-retry]: ../../../../../crates/daemon/src/transform.rs#L1948-L1987
-[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1827-L1851
-[descent-load]: ../../../../../crates/daemon/src/transform.rs#L2918
-[descend]: ../../../../../crates/daemon/src/transform.rs#L2929-L2940
-[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3192
-[truncate]: ../../../../../crates/daemon/src/transform.rs#L4097-L4103
-[truncate-reload]: ../../../../../crates/daemon/src/transform.rs#L4115
-[main-commit]: ../../../../../crates/daemon/src/transform.rs#L4947
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13575
+[cas-retry]: ../../../../../crates/daemon/src/transform.rs#L1951-L1990
+[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1823-L1847
+[descent-load]: ../../../../../crates/daemon/src/transform.rs#L2921
+[descend]: ../../../../../crates/daemon/src/transform.rs#L2932-L2943
+[value-compare]: ../../../../../crates/daemon/src/transform.rs#L3195
+[truncate]: ../../../../../crates/daemon/src/transform.rs#L4100-L4106
+[truncate-reload]: ../../../../../crates/daemon/src/transform.rs#L4118
+[main-commit]: ../../../../../crates/daemon/src/transform.rs#L4950
+[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13578
 
-[received]: ../../../../../crates/memory-store/src/lib.rs#L6485-L6535
-[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6484
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6496-L6514
-[stable]: ../../../../../crates/memory-store/src/lib.rs#L6540-L6632
-[completed]: ../../../../../crates/memory-store/src/lib.rs#L6637-L6685
-[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6634-L6636
-[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6691-L6744
-[load-trace]: ../../../../../crates/memory-store/src/lib.rs#L6747-L6787
-[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L6792-L6825
-[passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L767-L784
+[received]: ../../../../../crates/memory-store/src/lib.rs#L7049-L7122
+[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L7046-L7048
+[flagged]: ../../../../../crates/memory-store/src/lib.rs#L7073-L7089
+[stable]: ../../../../../crates/memory-store/src/lib.rs#L7127-L7234
+[completed]: ../../../../../crates/memory-store/src/lib.rs#L7239-L7287
+[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L7236-L7238
+[rejected]: ../../../../../crates/memory-store/src/lib.rs#L7293-L7346
+[load-trace]: ../../../../../crates/memory-store/src/lib.rs#L7349-L7389
+[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L7394-L7427
+[passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L852-L869
 [pass-trace-sql]: ../../../../../crates/memory-store/baseline.sql#L83-L91
-
-[commit]: ../../../../../crates/memory-store/src/lib.rs#L8172-L8632
-[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8306-L8315
-[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8427-L8494
-[json-content]: ../../../../../crates/memory-store/src/lib.rs#L2116-L2126
-[record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2133-L2143
-[prepare-field]: ../../../../../crates/memory-store/src/lib.rs#L2204-L2243
-[policy]: ../../../../../crates/memory-store/src/lib.rs#L3077-L3098
-[prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3109-L3287
-[keys]: ../../../../../crates/memory-store/src/lib.rs#L3157-L3170
-[prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3181-L3276
-[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3282-L3286
-[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3289-L3290
-[unique]: ../../../../../crates/memory-store/src/lib.rs#L3291-L3372
-[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10057-L10150
+[commit]: ../../../../../crates/memory-store/src/lib.rs#L8774-L9344
+[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8934-L8943
+[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L9095-L9162
+[json-content]: ../../../../../crates/memory-store/src/lib.rs#L2251-L2261
+[record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2268-L2278
+[prepare-field]: ../../../../../crates/memory-store/src/lib.rs#L2339-L2378
+[policy]: ../../../../../crates/memory-store/src/lib.rs#L3357-L3378
+[prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3396-L3406
+[keys]: ../../../../../crates/memory-store/src/lib.rs#L3462-L3475
+[prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3486-L3587
+[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3598-L3603
+[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3606-L3607
+[unique]: ../../../../../crates/memory-store/src/lib.rs#L3608-L3689
+[recomp]: ../../../../../crates/memory-store/src/lib.rs#L10769-L10862
 [serde-feat]: ../../../../../Cargo.toml#L45
 
-[meta-struct]: ../../../../../crates/memory-store/src/lib.rs#L1341
-[meta-epoch]: ../../../../../crates/memory-store/src/lib.rs#L1387-L1388
-[meta-pending]: ../../../../../crates/memory-store/src/lib.rs#L1395-L1396
-[meta-historian]: ../../../../../crates/memory-store/src/lib.rs#L1503-L1504
-[meta-floor]: ../../../../../crates/memory-store/src/lib.rs#L1508-L1509
-[phase]: ../../../../../crates/memory-store/src/lib.rs#L537-L546
-[hds-state]: ../../../../../crates/memory-store/src/lib.rs#L579-L582
+[meta-struct]: ../../../../../crates/memory-store/src/lib.rs#L1426
+[meta-epoch]: ../../../../../crates/memory-store/src/lib.rs#L1472-L1473
+[meta-pending]: ../../../../../crates/memory-store/src/lib.rs#L1480-L1481
+[meta-historian]: ../../../../../crates/memory-store/src/lib.rs#L1588-L1589
+[meta-floor]: ../../../../../crates/memory-store/src/lib.rs#L1593-L1594
+[phase]: ../../../../../crates/memory-store/src/lib.rs#L622-L631
+[hds-state]: ../../../../../crates/memory-store/src/lib.rs#L664-L667
 
-[drain]: ../../../../../crates/memory-store/src/lib.rs#L10806-L10851
-[drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L10803-L10805
-[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L10853-L10879
-[load-due]: ../../../../../crates/memory-store/src/lib.rs#L10881-L10915
-[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11385-L11472
-[failure]: ../../../../../crates/memory-store/src/lib.rs#L10975-L11014
-[delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11016-L11029
-[delete-one]: ../../../../../crates/memory-store/src/lib.rs#L11031-L11053
-[publish]: ../../../../../crates/memory-store/src/lib.rs#L10559
-[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10762-L10771
-[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4513-L4516
-[events-insert]: ../../../../../crates/memory-store/src/lib.rs#L13580-L13601
-[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L13713-L13737
-[mark]: ../../../../../crates/memory-store/src/lib.rs#L13739-L13764
-[primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L13766-L13808
-[obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L13810-L13831
+[drain]: ../../../../../crates/memory-store/src/lib.rs#L11520-L11578
+[drain-doc]: ../../../../../crates/memory-store/src/lib.rs#L11515-L11519
+[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L11580-L11606
+[load-due]: ../../../../../crates/memory-store/src/lib.rs#L11608-L11642
+[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11646-L11724
+[failure]: ../../../../../crates/memory-store/src/lib.rs#L11726-L11765
+[delete-all]: ../../../../../crates/memory-store/src/lib.rs#L11770-L11794
+[publish]: ../../../../../crates/memory-store/src/lib.rs#L11271
+[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L11474-L11483
+[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4830-L4833
+[events-insert]: ../../../../../crates/memory-store/src/lib.rs#L14321-L14342
+[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L14454-L14478
+[primer-insert]: ../../../../../crates/memory-store/src/lib.rs#L14516-L14558
+[obs-insert]: ../../../../../crates/memory-store/src/lib.rs#L14560-L14581
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14489-L14514
 [outbox-sql]: ../../../../../crates/memory-store/baseline.sql#L489-L505
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36044
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L35276
-[t-cas]: ../../../../../crates/daemon/src/lib.rs#L22951
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23798
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23828
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23844
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23876
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23908
-[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L31994
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13532
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36886
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36093
+[t-cas]: ../../../../../crates/daemon/src/lib.rs#L23425
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24606
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L24809
+[t-divergence]: ../../../../../crates/daemon/src/lib.rs#L32860
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
 [t-counter]: ../../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L16453
-[t-snap-keeps]: ../../../../../crates/memory-store/src/lib.rs#L16507
-[t-cas-empty]: ../../../../../crates/memory-store/src/lib.rs#L16576
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L17545
-[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15376
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L18920
-[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L18704
-[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19067
-[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L20529
-[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15112
-[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15029
-[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15129
-[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15166
-[t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L15309
-[t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L606
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L3445
+[t-snap-resist]: ../../../../../crates/memory-store/src/lib.rs#L18542
+[t-snap-keeps]: ../../../../../crates/memory-store/src/lib.rs#L18596
+[t-cas-empty]: ../../../../../crates/memory-store/src/lib.rs#L18665
+[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L19556
+[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L16547
+[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L21046
+[t-faults]: ../../../../../crates/memory-store/src/lib.rs#L20670
+[t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L21164
+[t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L22626
+[t-dup]: ../../../../../crates/memory-store/src/lib.rs#L16283
+[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L16200
+[t-container]: ../../../../../crates/memory-store/src/lib.rs#L16300
+[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L16337
+[t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L16480
+[t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L728
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L4286-L4351

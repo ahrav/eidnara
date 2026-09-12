@@ -97,8 +97,8 @@ forwarded). Neither constructs a cached deny first. None found for the
 deny-then-failure case.
 Open questions:
 - When no verdict is cached and the read fails, the pass sends
-  `todo_tool_present: true` ([:85][combinedseed] `?? false`). Is fail-open
-  the intended default, given the comment at [:1057][failclosed] says
+  `todo_tool_present: true` ([:85-96][combinedseed] `?? false`). Is fail-open
+  the intended default, given the comment at [:1056-1057][failclosed] says
   synthesis fails closed when evidence is missing? (needs human input)
 
 ### cached-todowrite-verdict-matches-live-evaluation-for-the-pass-inputs
@@ -395,27 +395,27 @@ Suspiciously quiet: `transform-stage-logger.ts` has no test file;
 
 ## Contract-versus-code disagreements
 
-1. Live read frequency. [ctx-reduce-availability.ts:17][doc17] says
+1. Live read frequency. [ctx-reduce-availability.ts:15-17][doc17] says
    "Todowrite checks live permissions only at cache-busting boundaries" and
    [:57-58][doc57] says defer passes "reuse the cached permission verdict
    without a live permission read". The code at [:85-96][combinedseed]
    issues the live read on every pass whenever `deps.client` is set and uses
    the cache only as the fallback on failure. The host applies the
-   bust-pass discipline ([injection.rs:202][injection]); the plugin does not
+   bust-pass discipline ([injection.rs:195-230][injection]); the plugin does not
    know which pass is a bust pass.
-2. Fail-closed claim. [rust-mode-transform.ts:1057][failclosed] says
+2. Fail-closed claim. [rust-mode-transform.ts:1056-1057][failclosed] says
    "Synthesis fails closed when host evidence is provisional or missing".
    For the permission read, a failure with no cached verdict defaults to
-   `false` (not denied) at [:85][combinedseed], so the pass sends
+   `false` (not denied) at [:85-96][combinedseed], so the pass sends
    `todo_tool_present: true`. [t466] and [t119] pin this outcome under names
    that say "cached verdict" while constructing no cached verdict.
-3. Lone surrogate byte count. [frame-channel.ts:186-190][utf8len] says
+3. Lone surrogate byte count. [frame-channel.ts:184-193][utf8len] says
    `Buffer.byteLength` "may count a lone surrogate as two bytes". Bun 1.3.14
    and Node v24.18.0 both return 3 at authoring. The replacement is harmless
    and the guarantee stands; the stated rationale is not reproduced.
 4. Page cap measure. [module-wire.ts:9][pagemax] says the facade accepts
    pages up to 512 KiB; the host enforces 512 KiB on the `serde_json`
-   re-serialization ([lib.rs:9324-9330][hostpagecheck]) while the plugin measures
+   re-serialization ([lib.rs:9375-9381][hostpagecheck]) while the plugin measures
    `JSON.stringify` output. Both say 512 KiB; the measured text differs.
 5. Audit framing (not a source contract). The audit describes "synchronous
    file flushes" per line and a regex scan of the body. The logger batches
@@ -483,9 +483,9 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [evlog]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
 [redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [injection]: ../../../../../crates/daemon/src/injection.rs#L195-L230
-[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15318-L15492
+[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15369-L15543
 [hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9324-L9330
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9375-L9381
 [t377]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L377
 [t440]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
 [t466]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466

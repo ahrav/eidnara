@@ -108,7 +108,7 @@ because the decoded type exposes no copy count.
 
 - Sources examined: the [page apply][pageapply] call into
   `handle_transform_unpaged_value`, the [512 KiB page cap][hostpagecheck], and
-  the staging constants at [`:735-736`][hostpage] (128 MiB staged maximum).
+  the staging constants at [`:742-743`][hostpage] (128 MiB staged maximum).
 - Findings: The assembled `Value` reaches the typed decode with the per-page
   reservation history only; no `value_footprint_bound` runs on the whole.
 - Missing evidence: A statement of which budget covers the assembled tree.
@@ -124,21 +124,21 @@ because the decoded type exposes no copy count.
 - Conclusion: needs human input.
 
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11812-L11834
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15479-L15495
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15434-L15462
-[copies]: ../../../../../crates/daemon/src/lib.rs#L15415-L15424
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15465-L15470
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15472-L15477
-[freeze]: ../../../../../crates/daemon/src/lib.rs#L8043-L8044
-[routechan]: ../../../../../crates/daemon/src/lib.rs#L8052-L8055
-[accept]: ../../../../../crates/daemon/src/lib.rs#L8073
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11882-L11904
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15574-L15590
+[footprint]: ../../../../../crates/daemon/src/lib.rs#L15516-L15552
+[copies]: ../../../../../crates/daemon/src/lib.rs#L15511-L15514
+[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15559-L15565
+[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15567-L15572
+[freeze]: ../../../../../crates/daemon/src/lib.rs#L8085-L8086
+[routechan]: ../../../../../crates/daemon/src/lib.rs#L8113-L8116
+[accept]: ../../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../../crates/daemon/src/lib.rs#L581-L638
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9432-L9440
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9487-L9510
 [hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9324-L9330
-[settle]: ../../../../../crates/daemon/src/lib.rs#L12079-L12094
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12491-L12506
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9375-L9381
+[settle]: ../../../../../crates/daemon/src/lib.rs#L12130-L12145
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12568-L12577
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264
 [reserve]: ../../../../../crates/host-runtime/src/handler.rs#L474-L484

@@ -46,9 +46,9 @@ three direct `tokenizer::estimate_tokens` calls in production transform code.
   by that statement.
 - Direct `tokenizer::estimate_tokens` calls in production transform code:
   the SOFT predicate's `m0_tokens` and `m1_tokens` at
-  [`:4306-4317`][soft-direct] (W9); the tag-mint `token_count` persisted into
-  `TagMintInput` at [`:7160`][mint-direct]; `ActiveTagForNudge.token_count`
-  at [`:8569`][nudge-direct]. The tokenizer crate's
+  [`:4309-4320`][soft-direct] (W9); the tag-mint `token_count` persisted into
+  `TagMintInput` at [`:7163`][mint-direct]; `ActiveTagForNudge.token_count`
+  at [`:8572`][nudge-direct]. The tokenizer crate's
   [`estimate_tokens`][tok-fn] exposes no call counter.
 - The existing source scan
   [`protected_floor_has_no_global_estimator_bypass`][t-bypass] slices the
@@ -99,8 +99,8 @@ declared sum, measures contention, or scans the whole `apply_once` body.
 
 ### Q: Should `:7160` and `:8558` stay direct or route through the interface?
 
-- Sources examined: [`:7160`][mint-direct] in the tag-mint loop,
-  [`:8569`][nudge-direct] in the nudge derivation.
+- Sources examined: [`:7163`][mint-direct] in the tag-mint loop,
+  [`:8572`][nudge-direct] in the nudge derivation.
 - Findings: Both count `taggable_source` text of tail blocks and store the
   result in a durable or served `token_count`; neither is counted in
   `tokenize_calls`, and neither is reachable by an injected estimator.
@@ -147,12 +147,12 @@ declaration sum remain outside this change.
 [tc-cet]: ../../../../../crates/daemon/src/token_cache.rs#L165-L181
 [th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
 [declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2250-L2264
-[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1807-L1823
-[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1865-L1867
-[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2844-L2853
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4306-L4317
-[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8569
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24455-L24466
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2256-L2286
+[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
+[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1868-L1870
+[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2856
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
+[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7163
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8572
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24458-L24469
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148

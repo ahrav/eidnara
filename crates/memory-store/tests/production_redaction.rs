@@ -622,14 +622,17 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
             )
             .unwrap()
     };
-    let meta_detections = |connection: &Connection| -> i64 {
+    let meta_finding_counts = |connection: &Connection| -> Vec<i64> {
         connection
-            .query_row(
-                "SELECT COUNT(*) FROM scan_detections d JOIN field_scans s ON s.scan_id = d.scan_id \
-                 JOIN scan_owner_copies o ON o.scan_id = s.scan_id WHERE o.field_id = 'meta'",
-                [],
-                |row| row.get(0),
+            .prepare(
+                "SELECT finding_count FROM field_scans WHERE scan_id IN \
+                 (SELECT scan_id FROM scan_owner_copies WHERE field_id = 'meta') \
+                 ORDER BY finding_count",
             )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
             .unwrap()
     };
 
@@ -652,9 +655,9 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
     );
     let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     assert_eq!(
-        meta_detections(&connection),
-        0,
-        "clean meta records no detection"
+        meta_finding_counts(&connection),
+        [0],
+        "clean meta records one receipt with no finding"
     );
     drop(connection);
 
@@ -675,9 +678,9 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
     assert!(stored.contains("password=<REDACTED:password>"), "{stored}");
     let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
     assert_eq!(
-        meta_detections(&connection),
-        1,
-        "the substitution left exactly one detection on the meta scan"
+        meta_finding_counts(&connection),
+        [0, 1],
+        "the substitution left exactly one finding on the planted meta scan"
     );
     drop(connection);
 
@@ -696,6 +699,7 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
             byte_fingerprint: "fp".to_string(),
         }],
     );
+    let audit_before_refusal = scan_audit_counts(temp.path());
     let refused = store
         .commit("keyed", None, &CoreState::empty(), &keyed)
         .unwrap_err();
@@ -713,9 +717,10 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
         .unwrap();
     assert_eq!(keyed_rows, 0, "a refused meta stores nothing");
     assert_eq!(
-        meta_detections(&connection),
-        1,
-        "a refused meta records no receipt; only the planted session's detection remains"
+        scan_audit_counts(temp.path()),
+        audit_before_refusal,
+        "a refused meta leaves every scan-audit table unchanged, so the detection gathered \
+         before the refusal was discarded with the write"
     );
 }
 

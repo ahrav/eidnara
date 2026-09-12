@@ -170,7 +170,7 @@ Guarantee: A concurrent peer store of the same shape yields stale bytes, never
 a mixed-size data race, and a receiver never reads uninitialized process
 memory as payload.
 Fault/timing angle: The zero-fill at [`to_vec:331`][to-vec-fill] is what makes
-the `Vec` initialized before any early `Err` return at [`:334-345`][to-vec];
+the `Vec` initialized before any early `Err` return at [`:328-348`][to-vec];
 replacing it with capacity plus `set_len` or `MaybeUninit` moves the
 initialization proof onto the span-length checks, which run per span. A
 `memcpy` replacement would form a reference over peer-writable memory, which
@@ -198,7 +198,7 @@ Check: `always` - for every [`DirectFrame`][direct-frame] handed to
 [`publish_direct`][publish-direct], either the serializer writes exactly
 `body_len` bytes and `commit(body_len)` publishes one frame whose header `len`
 equals `body_len`, or no frame becomes visible to the peer: a short write
-fails `commit` with `Underfill` ([`:2551-2555`][commit-underfill]), an
+fails `commit` with `Underfill` ([`:2533-2570`][commit-underfill]), an
 over-write fails [`ReservationWriter::write`][res-writer] through
 [`ProducerReservation::write`][res-write] with `Overflow`, a serializer `Err`
 or panic drops the reservation, and each path runs
@@ -251,9 +251,9 @@ Open questions:
 Type: safety
 Check: `always` - a Direct [`OutputBuffer`][outbuf] holds an egress
 `ByteCharge` of exactly `exact_len + HEADER_LEN`
-([`reserve_direct:528`][reserve-direct]), [`into_parts`][into-parts] passes it
+([`reserve_direct:517-554`][reserve-direct]), [`into_parts`][into-parts] passes it
 through unshrunk, the charge is dropped only after `commit` in
-[`publish_one:784`][publish-one], and any request-owned bytes the serializer
+[`publish_one:749-786`][publish-one], and any request-owned bytes the serializer
 closure captures (the transform segments, their scratch charge) are counted as
 retained until that same point. `always` because [E2][e2] requires each charge
 to cover its resource's lifetime and the closure extends the resource's
@@ -288,7 +288,7 @@ Open questions:
 Type: safety
 Check: `always` - for every ingest, `check_budget` runs under the exclusive
 [writer lock][lock-writer] before the reservation row, the shard creation, and
-the publish rename ([`ingest.rs:477-490`][ingest-lock]); it refuses with
+the publish rename ([`ingest.rs:407-416`][ingest-lock]); it refuses with
 `Capacity` carrying `usage` and `cap` when `usage + byte_length >
 artifact_cap`, adds zero for a digest already present
 ([`object_is_present`][present]), and counts invalidated-but-retained objects
@@ -298,7 +298,7 @@ Guarantee: No ingest publishes bytes that would raise the on-disk regular-file
 sum under `objects` above `artifact_cap`, and a refused ingest leaves no
 reservation row and no published object.
 Fault/timing angle: The temp file is written and synced under `tmp`
-([`:382-402`][ingest-temp]) before the lock and before the check, so `tmp`
+([`:379-405`][ingest-temp]) before the lock and before the check, so `tmp`
 bytes are never counted and a refused ingest still cost one full write; two
 ingests serialize on the writer lock, so the walk cannot race a concurrent
 publish, but it does race the health sampler's lock-free walk. A counter
@@ -503,7 +503,7 @@ the kernel. Five adjacent observations, not disagreements:
   [`commit`][commit-underfill] refuses unless `cursor == body_len`, so every
   published byte was written, and the memfd is private to one connection. The
   test pins a side effect of eager punching that deferral would change.
-- The comment at [`trim:2254-2255`][trim] describes an idle-ring role that no
+- The comment at [`trim:2244-2266`][trim] describes an idle-ring role that no
   shipped code performs; [`trim-removes-only-dead-pages-below-the-write-cursor`][shm-trim]
   already records the absence of a caller.
 - The owned path classifies a serializer failure as a request-scoped
@@ -578,8 +578,8 @@ the kernel. Five adjacent observations, not disagreements:
 [native-reserve]: ../../../../../packages/shm-native/src/lib.rs#L1024
 [measure]: ../../../../../crates/daemon/src/dispatch.rs#L129-L148
 [write-to]: ../../../../../crates/daemon/src/dispatch.rs#L236-L262
-[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12021-L12077
-[settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12079-L12094
+[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12093-L12148
+[settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12150-L12165
 [ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L361-L663
 [ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L379-L405
 [ingest-lock]: ../../../../../crates/kernel/src/cas/ingest.rs#L407-L416
@@ -622,34 +622,34 @@ the kernel. Five adjacent observations, not disagreements:
 [bench]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L296-L306
 [fixture-arm]: ../../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [t-limits]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1052-L1074
-[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1857-L1887
+[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
 [t-parts]: ../../../../../crates/host-runtime/src/handler.rs#L596-L626
 [t-parts2]: ../../../../../crates/host-runtime/src/handler.rs#L628-L645
 [t-parts3]: ../../../../../crates/host-runtime/src/handler.rs#L647-L673
 [t-syscall]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3086-L3087
-[t-commitq]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3208
-[t-trim-order]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3329-L3344
-[t-abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3677-L3693
-[t-batch]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4016-L4044
-[t-reuse]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4073-L4089
-[t-subpage]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4091-L4116
-[t-trim-res]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4136-L4161
-[t-punchfail]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4243-L4258
+[t-commitq]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3198
+[t-trim-order]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3319-L3335
+[t-abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L3667-L3685
+[t-batch]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4018-L4046
+[t-reuse]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4075-L4091
+[t-subpage]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4093-L4118
+[t-trim-res]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4138-L4164
+[t-punchfail]: ../../../../../crates/shm-transport/src/backend/ring.rs#L4245-L4261
 [t-roundtrip]: ../../../../../crates/shm-transport/src/lease.rs#L475-L506
 [t-readbyte]: ../../../../../crates/shm-transport/src/lease.rs#L543
 [t-concurrent]: ../../../../../crates/shm-transport/src/lease.rs#L581-L619
 [t-fifo]: ../../../../../crates/shm-transport/tests/ring.rs#L124-L174
-[t-sparse]: ../../../../../crates/shm-transport/tests/ring.rs#L250-L254
+[t-sparse]: ../../../../../crates/shm-transport/tests/ring.rs#L230-L273
 [t-cap]: ../../../../../crates/kernel/tests/kernel_cas.rs#L418-L433
 [t-retained]: ../../../../../crates/kernel/tests/kernel_cas.rs#L436-L450
 [t-payload]: ../../../../../crates/kernel/tests/kernel_cas.rs#L214-L234
-[t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L543-L562
-[t-cancel]: ../../../../../crates/kernel/tests/kernel_gc.rs#L565-L599
-[t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L602-L642
+[t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
+[t-cancel]: ../../../../../crates/kernel/tests/kernel_gc.rs#L556-L591
+[t-orphan]: ../../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
 [t-oracle]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
 [t-recover-twice]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L384-L389
 [t-faults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
 [t-gcfaults]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
-[t-gone]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L860
-[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L924-L990
-[t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3728-L3756
+[t-gone]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L838
+[t-crash]: ../../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
+[t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3600-L3629

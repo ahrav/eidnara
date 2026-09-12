@@ -35,9 +35,9 @@ privilege rules that a project tier must never bypass.
   project value only when it tightens the user value.
 - Per-pass callers: [`maybe_spawn_reattach`][call-reattach],
   [`prepare_historian_fire`][call-fire] after the state load, pending-rewrite,
-  and live-historian early returns ([`:5013-5051`][fire-early]), and the
-  wrapup path at [`:5368`][call-wrapup]. [`bind`][call-bind] freezes a copy
-  into `SessionBinding`, whose doc at [`:216-217`][binding-doc] says config
+  and live-historian early returns ([`:5062-5100`][fire-early]), and the
+  wrapup path at [`:5417`][call-wrapup]. [`bind`][call-bind] freezes a copy
+  into `SessionBinding`, whose doc at [`:223-224`][binding-doc] says config
   can change while the route stays open.
 - The mtime test at [`:2165-2202`][t-mtime] rewrites the user file with the
   original mtime restored and asserts the old value is returned, then
@@ -80,8 +80,8 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 
 ### Q: Keep reporting tier read failures on every load?
 
-- Sources examined: [`:266-267`][eff-warn-doc], [`:283-285`][eff-warn],
-  [`read_tier_cached:370-371`][tier-cached].
+- Sources examined: [`:266-267`][eff-warn-doc], [`:268-288`][eff-warn],
+  [`read_tier_cached:368-398`][tier-cached].
 - Findings: The cache bypasses its hit path when `warning` is set, so a
   failing file is re-read and re-warned on every call. The doc states this as
   intent. A merged cache that stores the result silences the repeat unless it
@@ -91,8 +91,8 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 
 ### Q: Should the historian read the bind-frozen config instead?
 
-- Sources examined: [`:5051`][call-fire], [`:11788`][call-bind],
-  [`:216-217`][binding-doc].
+- Sources examined: [`:5100`][call-fire], [`:11846`][call-bind],
+  [`:223-224`][binding-doc].
 - Findings: The binding doc freezes the fallback history budget because
   config can change while the route stays open; the historian deliberately
   reads a fresh merge per pass. Switching it to the frozen copy removes the
@@ -100,13 +100,13 @@ call. Unit tests built with `fixed_config` (`lib.rs:3859`, returned at
 - Missing evidence: A specification decision.
 - Conclusion: needs human input.
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4563-L4572
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4586-L4595
 [binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4797
-[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5020-L5058
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5058
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5375
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11795
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4839
+[fire-early]: ../../../../../crates/daemon/src/lib.rs#L5062-L5100
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5100
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5417
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11846
 [tier-struct]: ../../../../../crates/daemon/src/config.rs#L222-L228
 [cache-struct]: ../../../../../crates/daemon/src/config.rs#L230-L235
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245

@@ -1031,6 +1031,8 @@ pub struct TransformTimings {
     #[serde(default)]
     pub request_observed_to_handler: f64,
     #[serde(default)]
+    pub pass_state_load: f64,
+    #[serde(default)]
     pub delta_expand: f64,
     #[serde(default)]
     pub side_channel_drain: f64,
@@ -1242,7 +1244,7 @@ pub fn format_pass_timing_line(
     };
     format!(
         "eidnara-pass-timing session={session} total={:.1} handler_total={:.1} request_observed_to_handler={:.1} \
-         delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
+         pass_state_load={:.1} delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
          native_attach={:.1} trace_complete={:.1} response_observation={:.1} retained_size={:.1} snapshot_store={:.1} projection={:.1} \
          projection_reused_messages={} projection_projected_messages={} store_cache_state={:.1} store_tags={:.1} store_temporal={:.1} \
          store_user_hints={:.1} store_channel1={:.1} store_overlay_frontier={:.1} \
@@ -1268,6 +1270,7 @@ pub fn format_pass_timing_line(
         timings.total,
         timings.handler_total,
         timings.request_observed_to_handler,
+        timings.pass_state_load,
         timings.delta_expand,
         timings.side_channel_drain,
         timings.trace_received,
