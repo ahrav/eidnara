@@ -27,7 +27,7 @@ impl Drop for CallbackPollGuard {
     }
 }
 
-fn callback_is_polling() -> bool {
+pub(crate) fn callback_is_polling() -> bool {
     CALLBACK_POLL_DEPTH
         .try_with(|depth| depth.get() != 0)
         .unwrap_or(false)

@@ -10,14 +10,14 @@ close starts. The witness must describe overlap, not a forbidden outcome.
 
 ## Evidence trail
 
-- [dispatch.rs:857-934][start] installs pending identity before dispatch and
+- [dispatch.rs:857-940][start] installs pending identity before dispatch and
   starts the tracked handler with cancellation and charged input.
-- [dispatch.rs:937-954][cancel] requests abort and waits for callback completion.
-- [dispatch.rs:1226-1268][close] initiates cancellation before waiting for route
+- [dispatch.rs:944-960][cancel] requests abort and waits for callback completion.
+- [dispatch.rs:1227-1298][close] initiates cancellation before waiting for route
   quiescence, so an active-request close is a production lifecycle situation.
-- [tests/dispatch.rs:357-399][test] waits for dispatch before cancellation and
+- [tests/dispatch.rs:356-449][test] waits for dispatch before cancellation and
   checks the terminal; it is not a future transform-worker completion witness.
-- [tests/dispatch.rs:832-887][overlap] overlaps a hanging callback with route
+- [tests/dispatch.rs:1156-1212][overlap] overlaps a hanging callback with route
   Goodbye and checks cancellation plus one cleanup callback; it is unaudited.
 
 ## Failure scenario
@@ -56,7 +56,7 @@ gap, not proof of liveness failure. No witness runs here; checks are unaudited.
   is BLOCKED. Default-production reachability describes the existing callback
   lifecycle, whose witness must extend to owned physical work if execution moves.
 
-[start]: ../../../../crates/host-runtime/src/dispatch.rs#L857-L931
+[start]: ../../../../crates/host-runtime/src/dispatch.rs#L857-L940
 [cancel]: ../../../../crates/host-runtime/src/dispatch.rs#L944-L960
 [close]: ../../../../crates/host-runtime/src/dispatch.rs#L1227-L1298
 [test]: ../../../../crates/host-runtime/tests/dispatch.rs#L356-L449

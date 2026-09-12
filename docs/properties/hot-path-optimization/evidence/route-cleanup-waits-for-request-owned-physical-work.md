@@ -82,8 +82,10 @@ same guard, so a destructor panic in the value or in a panic payload is
 redacted too; a panic surfaces to the handler as
 [`BlockingWorkFailed::Panicked`][failed], a runtime stop as `RuntimeStopped`,
 and an offer made once the route's fence has closed as `RouteClosing`: such
-work is refused rather than run outside every join, with the residual race
-between reading the fence and its own drain stated in the doc. The join itself runs in a task of its own, entered in
+work is refused rather than run outside every join. Registration takes a route
+tracker token before checking whether the fence has closed. An accepted offer
+therefore holds the drain open before submitting its closure. The join itself
+runs in a task of its own, entered in
 [two ledgers][work-ledgers]: the request tracker that
 [`dispatch_request` creates][ctx-work] for each request, and the route tracker
 that is the existing handler completion fence. Dropping the future the handler
@@ -157,7 +159,7 @@ hook.
 `cargo test -p host-runtime --locked` passed every suite, `tests/dispatch.rs`
 with 27 tests including the seven above.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L595-L621
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L593-L619
 [work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L452-L455
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L460-L468
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L495-L530
@@ -168,7 +170,7 @@ with 27 tests including the seven above.
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1274-L1289
 [daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
-[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L577-L620
+[t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L660
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776
 [t-close]: ../../../../crates/host-runtime/tests/dispatch.rs#L781-L825
 [t-detached]: ../../../../crates/host-runtime/tests/dispatch.rs#L830-L866

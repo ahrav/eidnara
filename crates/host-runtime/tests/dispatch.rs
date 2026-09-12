@@ -1472,3 +1472,68 @@ async fn saturated_general_capacity_cannot_consume_the_broca_reserve() {
 
     host.shutdown().await.expect("graceful shutdown");
 }
+
+/// Work offered from a task that outlived its handler is either joined by route close or
+/// refused: no closure starts after route-gone has run. The test opens and closes the route
+/// 500 times to expose the race window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_offered_while_the_route_drains_is_joined_or_refused() {
+    let host = TestHost::start().await;
+    let mut client = host.client().await;
+    for round in 0..500usize {
+        let (channel, epoch) = client
+            .route_open(
+                LINKED_MODULE_ID,
+                ROOT,
+                "opencode",
+                &format!("orphan-{round}"),
+            )
+            .await
+            .expect("route");
+        let corr = client.next_corr();
+        client
+            .send_frame(
+                TY_REQUEST,
+                FLAGS_INTERACTIVE,
+                channel,
+                epoch,
+                corr,
+                &mode_body(serde_json::json!({"mode": "blocking_orphan"})),
+            )
+            .await
+            .expect("send");
+        let frame = client.frame_within(BUDGET).await.expect("terminal");
+        assert_eq!((frame.corr, frame.ty), (corr, TY_RESPONSE));
+
+        // The varying close delay samples different offer/close interleavings.
+        let goodbye_at =
+            std::time::Instant::now() + Duration::from_nanos((round % 300) as u64 * 200);
+        while std::time::Instant::now() < goodbye_at {
+            std::hint::spin_loop();
+        }
+        client
+            .send_frame(TY_GOODBYE, FLAGS_PURE_HEADER, channel, epoch, 0, &[])
+            .await
+            .expect("route goodbye");
+        let deadline = tokio::time::Instant::now() + BUDGET;
+        while host.handler.blocking_refused() <= round
+            || !host
+                .handler
+                .route_gones()
+                .iter()
+                .any(|handle| handle.channel == channel && handle.epoch == epoch)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "round {round}: the offer was never refused or route-gone never ran"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            host.handler.blocking_started(),
+            host.handler.blocking_started_at_route_gone(),
+            "round {round}: blocking work started after route-gone ran"
+        );
+    }
+    host.shutdown_gracefully().await;
+}

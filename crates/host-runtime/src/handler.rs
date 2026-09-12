@@ -588,8 +588,6 @@ impl RequestCtx {
     /// from a task that outlives it, after the cancel arm has waited on the request ledger,
     /// is joined by route close alone, and once the route's fence has closed the work is
     /// refused with [`BlockingWorkFailed::RouteClosing`] rather than run outside every join.
-    /// The refusal reads the fence before entering the work, so an offer that races the
-    /// fence's own drain by a few instructions can still slip past it.
     ///
     /// [`cancel_signal`]: RequestCtx::cancel_signal
     pub fn run_blocking<T: Send + 'static>(
@@ -597,6 +595,8 @@ impl RequestCtx {
         work: impl FnOnce() -> T + Send + 'static,
     ) -> impl Future<Output = Result<T, BlockingWorkFailed>> + Send + 'static {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        // Registration precedes the closed check so accepted work holds the drain open.
+        let route_work = self.work.route.token();
         if self.work.route.is_closed() {
             drop(result_tx);
             return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
@@ -607,15 +607,13 @@ impl RequestCtx {
         // non-empty until the thread finishes whether or not the handler is still waiting.
         // The result is handed over, or dropped when no one waits, under the redaction guard,
         // so a destructor panic in the value or in a panic payload is redacted too.
-        let join_task = self
-            .work
-            .request
-            .track_future(self.work.route.track_future(async move {
-                let outcome = blocking.await;
-                crate::panic_boundary::redact_sync(|| {
-                    let _ = result_tx.send(outcome);
-                });
-            }));
+        let join_task = self.work.request.track_future(async move {
+            let _route_work = route_work;
+            let outcome = blocking.await;
+            crate::panic_boundary::redact_sync(|| {
+                let _ = result_tx.send(outcome);
+            });
+        });
         tokio::spawn(join_task);
         blocking_result(result_rx, BlockingWorkFailed::RuntimeStopped)
     }
@@ -628,7 +626,11 @@ async fn blocking_result<T: Send + 'static>(
 ) -> Result<T, BlockingWorkFailed> {
     match result_rx.await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(join)) if join.is_panic() => Err(BlockingWorkFailed::Panicked),
+        Ok(Err(join)) if join.is_panic() => {
+            // `JoinError` owns the panic payload; drop it under the redaction guard.
+            crate::panic_boundary::redact_sync(|| drop(join));
+            Err(BlockingWorkFailed::Panicked)
+        }
         Ok(Err(_)) | Err(_) => Err(unrun),
     }
 }
@@ -806,5 +808,37 @@ mod tests {
             "the unused reservation's memory must be returned, not just its permits"
         );
         assert_eq!(budget.available(), (1 << 20) - charge.bytes());
+    }
+
+    /// A payload that records whether the redaction guard was active when it was dropped.
+    struct RecordsPollingOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for RecordsPollingOnDrop {
+        fn drop(&mut self) {
+            self.0.store(
+                crate::panic_boundary::callback_is_polling(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// The `JoinError` of panicked blocking work owns the panic payload; the receiver that
+    /// translates it drops that payload under the redaction guard, so a destructor panic in
+    /// the payload is redacted wherever the returned future is awaited.
+    #[tokio::test]
+    async fn a_blocking_panic_payload_is_dropped_under_the_redaction_guard() {
+        let seen_polling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let payload = RecordsPollingOnDrop(seen_polling.clone());
+        let outcome = tokio::task::spawn_blocking(move || std::panic::panic_any(payload)).await;
+        assert!(outcome.as_ref().is_err_and(|join| join.is_panic()));
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        result_tx.send(outcome).expect("receiver is held");
+        let result = blocking_result::<()>(result_rx, BlockingWorkFailed::RuntimeStopped).await;
+        assert_eq!(result, Err(BlockingWorkFailed::Panicked));
+        assert!(
+            seen_polling.load(std::sync::atomic::Ordering::SeqCst),
+            "the panic payload was dropped outside the redaction guard"
+        );
     }
 }

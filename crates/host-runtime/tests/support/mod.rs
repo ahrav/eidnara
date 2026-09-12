@@ -130,6 +130,8 @@ struct Inner {
     blocking_started: Arc<AtomicUsize>,
     /// Incremented when the `blocking_hold` closure's captured charge is dropped.
     blocking_charge_released: Arc<AtomicUsize>,
+    blocking_started_at_route_gone: AtomicUsize,
+    blocking_refused: Arc<AtomicUsize>,
 }
 
 /// Releases a captured resident charge and counts the release, whichever side drops it.
@@ -188,6 +190,8 @@ impl TestHandler {
                 blocking_gate: Arc::new((Mutex::new(false), Condvar::new())),
                 blocking_started: Arc::new(AtomicUsize::new(0)),
                 blocking_charge_released: Arc::new(AtomicUsize::new(0)),
+                blocking_started_at_route_gone: AtomicUsize::new(0),
+                blocking_refused: Arc::new(AtomicUsize::new(0)),
             }),
             record_runtime_drop: false,
         }
@@ -201,6 +205,16 @@ impl TestHandler {
     /// How many times a `blocking_hold` closure's charge was released.
     pub fn blocking_charges_released(&self) -> usize {
         self.inner.blocking_charge_released.load(Ordering::SeqCst)
+    }
+
+    pub fn blocking_started_at_route_gone(&self) -> usize {
+        self.inner
+            .blocking_started_at_route_gone
+            .load(Ordering::SeqCst)
+    }
+
+    pub fn blocking_refused(&self) -> usize {
+        self.inner.blocking_refused.load(Ordering::SeqCst)
     }
 
     /// Lets every held `blocking_hold` closure finish.
@@ -574,6 +588,32 @@ impl HostHandler for TestHandler {
             "panic" => panic!("{}", String::from_utf8_lossy(CANARY_BODY)),
             // `blocking_hold` awaits held work; `blocking_detached` starts it and answers at
             // once, so only route close can join it; `blocking_panic` panics on the thread.
+            // `blocking_orphan` returns its response immediately and spawns a task that
+            // repeatedly calls `ctx.run_blocking` until the route refuses the offer.
+            "blocking_orphan" => {
+                let response = response_from_slice(&ctx, b"orphaned", false).await;
+                let started = Arc::clone(&self.inner.blocking_started);
+                let refused = Arc::clone(&self.inner.blocking_refused);
+                tokio::spawn(async move {
+                    loop {
+                        let started = Arc::clone(&started);
+                        match ctx
+                            .run_blocking(move || {
+                                started.fetch_add(1, Ordering::SeqCst);
+                            })
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(host_runtime::BlockingWorkFailed::RouteClosing) => {
+                                refused.fetch_add(1, Ordering::SeqCst);
+                                return;
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                });
+                response
+            }
             "blocking_hold" | "blocking_detached" | "blocking_panic" => {
                 let Some(charge) = ctx.try_reserve_resident(1024) else {
                     return RequestOutcome::error(
@@ -644,6 +684,10 @@ impl HostHandler for TestHandler {
                 .await
                 .expect("route-gone gate remains open");
         }
+        self.inner.blocking_started_at_route_gone.store(
+            self.inner.blocking_started.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
         self.push(Event::RouteGone(route));
     }
 
