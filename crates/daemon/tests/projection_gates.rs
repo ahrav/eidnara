@@ -6,9 +6,10 @@ use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use daemon::embedding_dispatch::Blocked;
+use daemon::embedding_dispatch::{Blocked, DispatchEvent, Stage};
 use daemon::embedding_supervisor::{
     EmbeddingSupervisor, Maintained, SliceBounds, SliceKind, SliceOutcome, SupervisorEvent,
 };
@@ -24,11 +25,14 @@ use daemon::projection_gates::{
 };
 use host_runtime::synapse::SynapseLimits;
 use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
 use kernel::{ArtifactDestination, KernelStore, ProjectScope};
+use retrieval::batch::dense_eligible;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use support::embedding_fixtures::{
-    Corpus, GateGuard, NOW, PROJECT, TestEngine, bounds, component, inspect, occurrence_of,
+    Corpus, GateGuard, NOW, PROJECT, TestEngine, bounds as dispatch_bounds, bounds, component,
+    inspect, occurrence_of,
 };
 use support::projection_gate::{identity, open_gate, passing_evaluator};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -68,6 +72,135 @@ fn manifest_json(hooks: &[ProjectionHook]) -> Value {
 
 fn passing() -> EvidenceEvaluator {
     passing_evaluator(&identity("k", 8), 10, &ProjectionHook::ALL)
+}
+
+fn construction_contracts() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../kernel/tests/fixtures/search-projection/construction-contracts.json");
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+fn str_set(value: &Value) -> BTreeSet<&str> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect()
+}
+
+/// The gate's tables agree with the frozen construction contract: limit names, hook keys and their classes, capability dispositions, harnesses, and the invalidation-identity field set. A rename on either side fails here rather than turning every conforming manifest into a refusal.
+#[test]
+fn gate_tables_match_the_frozen_construction_contract() {
+    let contracts = construction_contracts();
+
+    let limits: BTreeSet<&str> = contracts["limit_manifest_interface"]["limits"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(REQUIRED_LIMITS.into_iter().collect::<BTreeSet<_>>(), limits);
+
+    let hooks = contracts["hooks"].as_object().unwrap();
+    assert_eq!(
+        ProjectionHook::ALL
+            .iter()
+            .map(|hook| hook.id())
+            .collect::<BTreeSet<_>>(),
+        hooks.keys().map(String::as_str).collect::<BTreeSet<_>>()
+    );
+    for hook in ProjectionHook::ALL {
+        let classes: BTreeSet<&str> = hook.classes().iter().map(|class| class.code()).collect();
+        assert_eq!(
+            classes,
+            str_set(&hooks[hook.id()]["classes"]),
+            "{}",
+            hook.id()
+        );
+    }
+    // The dense hooks require exactly the dense-eligible classes, so a class that becomes dense-eligible is covered without a second list to update.
+    let dense: BTreeSet<&str> = OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| dense_eligible(*class))
+        .map(|class| class.code())
+        .collect();
+    for hook in [
+        ProjectionHook::EmbeddingBootstrap,
+        ProjectionHook::EmbeddingRouting,
+        ProjectionHook::EmbeddingRegistry,
+        ProjectionHook::EmbeddingBackfill,
+        ProjectionHook::EmbeddingIdentityGc,
+    ] {
+        let classes: BTreeSet<&str> = hook.classes().iter().map(|class| class.code()).collect();
+        assert_eq!(classes, dense, "{}", hook.id());
+    }
+
+    let listed: Vec<(&str, &str)> = contracts["capability_dispositions"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|capability| {
+            let disposition = capability["opencode"].as_str().unwrap();
+            assert_eq!(disposition, capability["pi"].as_str().unwrap());
+            (disposition != "not_applicable")
+                .then(|| (capability["capability"].as_str().unwrap(), disposition))
+        })
+        .collect();
+    let gate: Vec<(&str, &str)> = CAPABILITIES
+        .iter()
+        .map(|capability| {
+            let disposition = match capability.disposition {
+                CapabilityDisposition::Required => "required",
+                CapabilityDisposition::OptionalDisabled => "optional_disabled",
+            };
+            (capability.name, disposition)
+        })
+        .collect();
+    assert_eq!(gate, listed);
+    assert_eq!(
+        str_set(&contracts["hook_defaults"]["both_harness_evidence"]),
+        HARNESSES.into_iter().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        EntryPoint::ALL
+            .iter()
+            .map(|entry| entry.id())
+            .collect::<BTreeSet<_>>(),
+        str_set(&contracts["hook_defaults"]["entry_points"])
+    );
+
+    // The identity struct requires every field the contract lists and refuses every other, so an object of exactly the contract's fields deserializes and nothing else does.
+    let fields = str_set(&contracts["hook_defaults"]["invalidation_identity"]);
+    let typed = manifest_json(&[])["invalidation_identity"]
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        typed.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        fields,
+        "the test manifest carries the contract's identity fields"
+    );
+    let contract_shaped: serde_json::Map<String, Value> = fields
+        .iter()
+        .map(|field| ((*field).to_owned(), typed[*field].clone()))
+        .collect();
+    serde_json::from_value::<InvalidationIdentity>(Value::Object(contract_shaped.clone()))
+        .expect("the contract's identity tuple is the struct's field set");
+    for field in &fields {
+        let mut missing = contract_shaped.clone();
+        missing.remove(*field);
+        assert!(
+            serde_json::from_value::<InvalidationIdentity>(Value::Object(missing)).is_err(),
+            "{field} is required"
+        );
+    }
+    let mut extra = contract_shaped;
+    extra.insert("kernel_incarnation_id".to_owned(), json!("k"));
+    assert!(
+        serde_json::from_value::<InvalidationIdentity>(Value::Object(extra)).is_err(),
+        "the kernel incarnation is not part of the invalidation identity"
+    );
 }
 
 /// The durable rows of every projection table a hook may write, so "no new durable work" is a comparison rather than a claim.
@@ -242,13 +375,31 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
     let hook = ProjectionHook::EmbeddingBackfill;
     passing().judge(hook).unwrap();
     let gate = HookGate::closed();
+    assert_eq!(
+        gate.admit_all(&[], EntryPoint::Dispatch).map(|a| a.len()),
+        Err(Denial::NoManifest),
+        "asking for nothing is not a grant"
+    );
     gate.install(passing());
+    assert_eq!(
+        gate.admit_all(&[], EntryPoint::Dispatch).map(|a| a.len()),
+        Err(Denial::NoManifest),
+        "asking for nothing is not a grant even under a manifest"
+    );
+    let mut last = None;
     for entry in EntryPoint::ALL {
         let admission = gate.admit(hook, entry).unwrap();
         assert_eq!((admission.hook, admission.entry), (hook, entry));
-        assert_eq!(admission.protocol_version, "limits.v1");
         assert!(!admission.invalidated.is_cancelled());
+        last = Some(admission);
     }
+    // Closing the gate cancels every outstanding grant and denies what follows.
+    gate.close();
+    assert!(last.unwrap().invalidated.is_cancelled());
+    assert_eq!(
+        gate.admit(hook, EntryPoint::Dispatch).unwrap_err(),
+        Denial::NoManifest
+    );
 
     let mut absent_flag = passing();
     absent_flag.manifest.enabled.remove(&hook);
@@ -274,6 +425,21 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         other_coverage.judge(hook),
         Err(Denial::EvidenceIdentity),
         "a coverage report of another generation is not this projection's"
+    );
+    // The report's identity can be current while its counts were taken for another registered generation; the generation it names is bound too.
+    let mut other_generation = passing();
+    other_generation
+        .evidence
+        .coverage
+        .as_mut()
+        .unwrap()
+        .report
+        .generation
+        .generation_epoch += 1;
+    assert_eq!(
+        other_generation.judge(hook),
+        Err(Denial::EvidenceIdentity),
+        "coverage counted for another vector generation is not this projection's"
     );
 
     let mut no_coverage = passing();
@@ -302,15 +468,28 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         "a hook that does not touch the unreported class is unaffected"
     );
 
+    // The lag is measured from the tip the coverage packet itself records: the observer's snapshot, not a tip supplied beside it.
     let mut stale = passing();
-    stale.evidence.kernel_tip += 5;
+    stale
+        .evidence
+        .coverage
+        .as_mut()
+        .unwrap()
+        .kernel_snapshot
+        .tip += 5;
     stale
         .manifest
         .limits
         .insert("catchup_lag_commits".to_owned(), 4);
     assert_eq!(stale.judge(hook), Err(Denial::Stale { lag: 5, max: 4 }));
     let mut ahead = passing();
-    ahead.evidence.kernel_tip -= 1;
+    ahead
+        .evidence
+        .coverage
+        .as_mut()
+        .unwrap()
+        .kernel_snapshot
+        .tip -= 1;
     assert_eq!(
         ahead.judge(hook),
         Err(Denial::Stale {
@@ -386,16 +565,15 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
     );
 
     let mut failed_run = passing();
-    failed_run.evidence.harness_runs.insert(
-        HARNESSES[0].to_owned(),
-        HarnessRun::Failed {
-            reason: "timeout".to_owned(),
-        },
-    );
-    assert!(matches!(
+    failed_run
+        .evidence
+        .harness_runs
+        .insert(HARNESSES[0].to_owned(), HarnessRun::Failed);
+    // The denial names the harness, never the run's own text: refusal diagnostics carry identities, not content (CC11).
+    assert_eq!(
         failed_run.judge(hook),
-        Err(Denial::Failed(Gate::BothHarness, _))
-    ));
+        Err(Denial::Failed(Gate::BothHarness, HARNESSES[0].to_owned()))
+    );
     let mut one_harness = passing();
     one_harness.evidence.harness_runs.remove(HARNESSES[1]);
     assert_eq!(
@@ -414,6 +592,58 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         Err(Denial::EvidenceIdentity),
         "a run under an earlier identity does not carry over"
     );
+
+    // The matrix's cells: every hook at every entry point, through the gate, with a missing, a failed, an unsupported, and an inapplicable packet beside the passing control. A per-hook shortcut in the evaluator fails here.
+    let mut failed_run = passing();
+    failed_run
+        .evidence
+        .harness_runs
+        .insert(HARNESSES[0].to_owned(), HarnessRun::Failed);
+    let mut inapplicable = passing();
+    inapplicable.evidence.identity.generation_epoch += 1;
+    let packets: [(&str, EvidenceEvaluator, Denial); 4] = [
+        (
+            "missing",
+            no_coverage.clone(),
+            Denial::Missing(Gate::ClassCoverage),
+        ),
+        (
+            "failed",
+            failed_run,
+            Denial::Failed(Gate::BothHarness, HARNESSES[0].to_owned()),
+        ),
+        (
+            "unsupported",
+            unsupported.clone(),
+            Denial::Unsupported {
+                harness: HARNESSES[1].to_owned(),
+                capability: required.name.to_owned(),
+            },
+        ),
+        ("inapplicable", inapplicable, Denial::EvidenceIdentity),
+    ];
+    let gate = HookGate::closed();
+    for hook in ProjectionHook::ALL {
+        for entry in EntryPoint::ALL {
+            gate.install(passing());
+            assert!(
+                gate.admit(hook, entry).is_ok(),
+                "{}@{} passing control",
+                hook.id(),
+                entry.id()
+            );
+            for (name, packet, denial) in &packets {
+                gate.install(packet.clone());
+                assert_eq!(
+                    gate.admit(hook, entry).map(|_| ()),
+                    Err(denial.clone()),
+                    "{}@{}@{name}",
+                    hook.id(),
+                    entry.id()
+                );
+            }
+        }
+    }
 }
 
 /// AC1, AC2: with the gate closed, every product entry path — both supervisor slices, message cleanup, git ingest, and git reconciliation — reaches the ledger under its hooks, and the ledger's hook set is exactly the product's. Nothing executes: no durable row changes, no repository is opened, no native call is made.
@@ -460,7 +690,12 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
         .unwrap();
     assert_eq!(engine.calls(), 0);
 
-    let mut cleanup = MessageCleanup::new(&projection, i64::MAX);
+    let kernel_incarnation_id = projection
+        .read(|conn| retrieval::read_identity(conn))
+        .unwrap()
+        .expect("the bootstrap installed an identity")
+        .kernel_incarnation_id;
+    let mut cleanup = MessageCleanup::new(&projection, kernel_incarnation_id, i64::MAX);
     let report = cleanup
         .run_slice(
             &gate,
@@ -500,8 +735,10 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
             },
             InventoryBounds {
                 page_rows: NonZeroUsize::new(2).unwrap(),
+                max_scanned: NonZeroUsize::new(64).unwrap(),
                 max_retained: NonZeroUsize::new(16).unwrap(),
                 max_commits: NonZeroUsize::new(16).unwrap(),
+                max_object_bytes: NonZeroU64::new(4096).unwrap(),
             },
             &unbounded(),
         )
@@ -617,6 +854,94 @@ async fn invalidation_cancels_the_running_slice_and_keeps_admitted_work_owned() 
     }
     let report = supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
     assert_eq!(report.held_results, 1);
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// A grant revoked between two jobs of one pass is seen on the slice thread itself: the second job is refused before its native call even when the async cancellation branch cannot run, so revocation never depends on the supervisor being scheduled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn revocation_between_jobs_is_seen_on_the_slice_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", "first text");
+    corpus.publish("second", "second text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let projection = Arc::new(projection);
+    let engine = TestEngine::new();
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let gate = open_gate();
+    let (sender, mut events) = unbounded_channel();
+    let mut bounds = slice_bounds(Duration::from_secs(30));
+    bounds.dispatch = daemon::embedding_dispatch::DispatchBounds {
+        result_wait: Duration::from_millis(50),
+        ..dispatch_bounds()
+    };
+    let supervisor = EmbeddingSupervisor::new(
+        Maintained {
+            gate: Arc::clone(&gate),
+            kernel: Arc::clone(&corpus.kernel),
+            projection: Arc::clone(&projection),
+            synapse: Arc::clone(&synapse),
+            project: ProjectScope::new(PROJECT).unwrap(),
+            destination: ArtifactDestination::Remote,
+        },
+        bounds,
+        Arc::new(|| NOW),
+        sender,
+    );
+    // The gate closes on the slice thread as the second job reaches admission; the count of submissions is the oracle.
+    let admits = Arc::new(AtomicUsize::new(0));
+    let submitted = Arc::new(AtomicUsize::new(0));
+    let (closer, seen_admits, seen_submitted) = (
+        Arc::clone(&gate),
+        Arc::clone(&admits),
+        Arc::clone(&submitted),
+    );
+    supervisor.tap_dispatch_events_for_test(move |event| match event {
+        DispatchEvent::Stage {
+            stage: Stage::Admit,
+            ..
+        } => {
+            if seen_admits.fetch_add(1, Ordering::SeqCst) == 1 {
+                closer.close();
+            }
+        }
+        DispatchEvent::Submitted { .. } => {
+            seen_submitted.fetch_add(1, Ordering::SeqCst);
+        }
+        _ => {}
+    });
+    // The supervisor's first poll spawns the slice; the task spawned after it then holds the runtime's only worker, so the supervisor's cancellation branch cannot run while the slice works.
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    tokio::spawn(async { std::thread::sleep(Duration::from_secs(1)) })
+        .await
+        .unwrap();
+    assert_eq!(
+        admits.load(Ordering::SeqCst),
+        2,
+        "both jobs reached admission"
+    );
+
+    match ended(&mut events, SliceKind::Backfill).await {
+        SliceOutcome::Backfill { end, admitted, .. } => {
+            assert_eq!((end, admitted), (Some(Blocked::BudgetExhausted), 1));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        submitted.load(Ordering::SeqCst),
+        1,
+        "the second job was not submitted under the revoked grant"
+    );
+    assert_eq!(
+        ended(&mut events, SliceKind::Sweep).await,
+        SliceOutcome::Denied(Denial::NoManifest)
+    );
+
+    supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), running)
         .await
         .unwrap()

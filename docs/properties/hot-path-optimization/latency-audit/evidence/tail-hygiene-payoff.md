@@ -156,7 +156,7 @@ B's benchmark owns and primes its fixed-slot pool before the callback. Slot
 selection, memo locking, validity checks, bookkeeping, and full measurement
 construction/drop remain inside each timed call, as does loop overhead.
 The linked [benchmark](../../../../../crates/daemon/benches/hot_path.rs#L161-L199)
-and [wrapper](../../../../../crates/daemon/src/lib.rs#L154-L180) show the
+and [wrapper](../../../../../crates/daemon/src/lib.rs#L155-L181) show the
 current session-table source, with namespace 0 and session ID `benchmark`,
 not measured B. Its table lookup and `Arc` clone are unmeasured by this run.
 The fixture has empty core state, no populated tags or caveman units, no

@@ -157,34 +157,42 @@ impl ServedMessage {
         Self::from_message_reusing(message, None)
     }
 
-    /// Reuse a projected block's retained hash only when its served wire is identical.
+    /// Reuse a projected block's retained hash only when its complete identity matches.
     ///
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
     /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
-        let canonical = serde_json::to_value(&message)
-            .expect("CK wire messages must always have a JSON representation");
-        let canonical_bytes =
-            serde_json::to_vec(&canonical).expect("CK wire message values must always serialize");
+        let canonical_bytes = crate::served_json::to_vec(&message)
+            .expect("CK wire message values must always serialize");
+        let mut by_index = HashMap::new();
+        for flat in projected_blocks.into_iter().flatten().copied() {
+            by_index.entry(flat.block_index).or_insert(flat);
+        }
+        let by_identity = std::cell::OnceCell::new();
         let block_fingerprints = message
             .content()
             .iter()
             .enumerate()
             .map(|(served_index, block)| {
-                let projected = projected_blocks.and_then(|blocks| {
-                    blocks
-                        .iter()
-                        .find(|flat| flat.block_index == served_index)
-                        .copied()
-                        .or_else(|| {
-                            // Full-drop paths compact content indexes; match by wire value.
-                            blocks
-                                .iter()
-                                .copied()
-                                .find(|flat| flat.wire.as_ref() == block)
-                        })
-                });
-                if let Some(fp) = wire::fingerprint_from_projected_wire(block, projected) {
+                let reused = if let Some(flat) = by_index.get(&served_index) {
+                    wire::fingerprint_from_projected_wire(block, Some(flat))
+                } else if let Some(blocks) = projected_blocks.filter(|blocks| !blocks.is_empty()) {
+                    let index = by_identity.get_or_init(|| {
+                        let mut index = HashMap::new();
+                        for flat in blocks.iter().copied() {
+                            index
+                                .entry(wire::block_identity_digest(&flat.wire))
+                                .or_insert(flat);
+                        }
+                        index
+                    });
+                    index
+                        .get(&wire::block_identity_digest(block))
+                        .and_then(|flat| wire::fingerprint_from_projected_wire(block, Some(flat)))
+                } else {
+                    None
+                };
+                if let Some(fp) = reused {
                     return fp;
                 }
                 let serialized = serde_json::to_string(block)
@@ -1023,6 +1031,8 @@ pub struct TransformTimings {
     #[serde(default)]
     pub request_observed_to_handler: f64,
     #[serde(default)]
+    pub pass_state_load: f64,
+    #[serde(default)]
     pub delta_expand: f64,
     #[serde(default)]
     pub side_channel_drain: f64,
@@ -1234,7 +1244,7 @@ pub fn format_pass_timing_line(
     };
     format!(
         "eidnara-pass-timing session={session} total={:.1} handler_total={:.1} request_observed_to_handler={:.1} \
-         delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
+         pass_state_load={:.1} delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
          native_attach={:.1} trace_complete={:.1} response_observation={:.1} retained_size={:.1} snapshot_store={:.1} projection={:.1} \
          projection_reused_messages={} projection_projected_messages={} store_cache_state={:.1} store_tags={:.1} store_temporal={:.1} \
          store_user_hints={:.1} store_channel1={:.1} store_overlay_frontier={:.1} \
@@ -1260,6 +1270,7 @@ pub fn format_pass_timing_line(
         timings.total,
         timings.handler_total,
         timings.request_observed_to_handler,
+        timings.pass_state_load,
         timings.delta_expand,
         timings.side_channel_drain,
         timings.trace_received,
@@ -13697,6 +13708,264 @@ pub(crate) mod tests {
         );
         assert!(last_divergence["pass_id"].is_number());
         assert!(last_divergence["timestamp_ms"].is_number());
+    }
+
+    #[test]
+    fn served_canonical_shell_bytes_and_segments_are_frozen() {
+        let original: WireMessage = serde_json::from_str(
+            r#"{"z":null,"role":"user","content":[{"kind":{"type":"text","text":"é\n"},"unknown":{"😀":-0.0,"é":1.25,"a":18446744073709551615}}],"meta":{"synthetic":false,"future":true}}"#,
+        )
+        .unwrap();
+        let original_bytes = r#"{"content":[{"kind":{"text":"é\n","type":"text"},"unknown":{"a":18446744073709551615,"é":1.25,"😀":-0.0}}],"meta":{"future":true,"synthetic":false},"role":"user","z":null}"#;
+        let typed_bytes = r#"{"content":[{"kind":{"text":"é\n","type":"text"},"unknown":{"a":18446744073709551615,"é":1.25,"😀":-0.0}}],"meta":{"synthetic":true},"role":"user"}"#;
+        let edited_bytes = r#"{"content":[{"kind":{"text":"edited","type":"text"}}],"meta":{"synthetic":true},"role":"user"}"#;
+        let mut latent = original.clone();
+        latent.meta.synthetic = true;
+        let mut typed = latent.clone();
+        typed.mark_modified();
+        let mut edited = typed.clone();
+        *edited.content_mut()[0].kind_mut() = wire::BlockKind::Text {
+            text: "edited".into(),
+        };
+        for (message, expected) in [
+            (original, original_bytes),
+            (latent, original_bytes),
+            (typed, typed_bytes),
+            (edited, edited_bytes),
+        ] {
+            let served = ServedMessage::from_message(message);
+            assert_eq!(served.canonical_bytes(), expected.as_bytes());
+            assert_eq!(
+                served.canonical_hash,
+                <[u8; 32]>::from(Sha256::digest(expected.as_bytes()))
+            );
+            assert_eq!(
+                served.output_identity.as_ref(),
+                format!("{:x}", Sha256::digest(expected.as_bytes()))
+            );
+            let output = crate::dispatch::PreparedOutput::transform_segments(
+                json!({"messages": null}),
+                vec![crate::dispatch::PreparedSegment::served(served)],
+            )
+            .unwrap();
+            let measured = output.measure().unwrap();
+            let mut bytes = Vec::new();
+            measured.write_to(&mut bytes).unwrap();
+            assert_eq!(bytes, format!("{{\"messages\":[{expected}]}}").as_bytes());
+            assert_eq!(measured.len(), bytes.len());
+        }
+    }
+
+    #[test]
+    fn served_canonical_frozen_corpus_matches_value_reference_for_both_shells() {
+        let messages: Vec<WireMessage> =
+            serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
+        let mut identities = Vec::new();
+        for message in messages {
+            let mut typed = message.clone();
+            typed.mark_modified();
+            for block in typed.content_mut() {
+                block.mark_modified();
+            }
+            for message in [message, typed] {
+                for block in message.content() {
+                    identities.push((block.clone(), wire::block_identity_digest(block)));
+                }
+                let expected =
+                    serde_json::to_vec(&serde_json::to_value(&message).unwrap()).unwrap();
+                let served = ServedMessage::from_message(message);
+                assert_eq!(served.canonical_bytes(), expected);
+                let output = crate::dispatch::PreparedOutput::transform_segments(
+                    json!({"messages": null}),
+                    vec![crate::dispatch::PreparedSegment::served(served)],
+                )
+                .unwrap();
+                let mut expected_frame = b"{\"messages\":[".to_vec();
+                expected_frame.extend(expected);
+                expected_frame.extend(b"]}");
+                assert_eq!(output.as_ref(), expected_frame);
+            }
+        }
+        for (left, left_digest) in &identities {
+            for (right, right_digest) in &identities {
+                assert_eq!(left == right, left_digest == right_digest);
+            }
+        }
+    }
+
+    #[test]
+    fn served_fingerprint_fallback_preserves_complete_identity_and_first_match() {
+        assert!(serde_json::from_value::<WireBlock>(Value::Null).is_err());
+        let raw: WireBlock = serde_json::from_value(json!({
+            "kind": {"type": "text", "text": "same"},
+            "unknown": {"x": 1}
+        }))
+        .unwrap();
+        let mut latent = raw.clone();
+        latent
+            .provider_extras
+            .insert("provider".into(), BTreeMap::from([("x".into(), json!(1))]));
+        let mut typed = raw.clone();
+        typed.mark_modified();
+        let mut unknown = serde_json::to_value(&raw).unwrap();
+        unknown["unknown"]["x"] = json!(2);
+        let unknown: WireBlock = serde_json::from_value(unknown).unwrap();
+        let negative: WireBlock = serde_json::from_str(
+            r#"{"kind":{"type":"opaque","source":null,"kind":"zero","raw":-0.0}}"#,
+        )
+        .unwrap();
+        let positive: WireBlock = serde_json::from_str(
+            r#"{"kind":{"type":"opaque","source":null,"kind":"zero","raw":0.0}}"#,
+        )
+        .unwrap();
+        let integer: WireBlock = serde_json::from_str(
+            r#"{"kind":{"type":"opaque","source":null,"kind":"zero","raw":0}}"#,
+        )
+        .unwrap();
+        assert_ne!(integer, positive);
+        assert_eq!(negative, positive);
+        assert_ne!(
+            serde_json::to_string(&negative).unwrap(),
+            serde_json::to_string(&positive).unwrap()
+        );
+        let candidates = [
+            latent,
+            typed,
+            unknown,
+            raw.clone(),
+            raw.clone(),
+            integer,
+            negative,
+            positive.clone(),
+        ];
+        for positive_first in [false, true] {
+            for typed_zeros in [false, true] {
+                let mut ordered = candidates.clone();
+                if positive_first {
+                    ordered.swap(6, 7);
+                }
+                if typed_zeros {
+                    for block in &mut ordered[5..] {
+                        block.mark_modified();
+                    }
+                }
+                let mut ingress = wire_item("user", "reference", 0, &[]);
+                *ingress.ck.content_mut() = ordered.to_vec();
+                let mut projection = project_messages(&[Arc::new(ingress)]).unwrap();
+                for flat in &mut projection.blocks {
+                    flat.block_index += 10;
+                }
+                let projected: Vec<_> = projection.blocks.iter().collect();
+                let mut message = wire_item("user", "served", 0, &[]).ck;
+                *message.content_mut() = ordered.to_vec();
+                message.content_mut().push(ordered[3].clone());
+                let reference = message
+                    .content()
+                    .iter()
+                    .enumerate()
+                    .map(|(served_index, block)| {
+                        let projected = projected
+                            .iter()
+                            .find(|flat| flat.block_index == served_index)
+                            .copied()
+                            .or_else(|| {
+                                projected
+                                    .iter()
+                                    .copied()
+                                    .find(|flat| flat.wire.as_ref() == block)
+                            });
+                        if let Some(flat) = projected.filter(|flat| flat.wire.as_ref() == block) {
+                            return (
+                                wire::fingerprint_digest(&flat.content_hash),
+                                flat.bytes.len(),
+                            );
+                        }
+                        let serialized = serde_json::to_string(block).unwrap();
+                        (wire::fingerprint(&serialized), serialized.len())
+                    })
+                    .collect::<Vec<_>>();
+                let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
+                let fresh = ServedMessage::from_message(message);
+                assert_eq!(served.block_fingerprints.as_ref(), reference);
+                assert_eq!(served.canonical_bytes(), fresh.canonical_bytes());
+                assert_eq!(served.block_fingerprints[7], served.block_fingerprints[6]);
+                assert_ne!(served.block_fingerprints[7], fresh.block_fingerprints[7]);
+                assert_eq!(served.block_fingerprints[8], served.block_fingerprints[3]);
+                assert_eq!(ordered[0].kind(), ordered[3].kind());
+                assert_ne!(ordered[0].provider_extras, ordered[3].provider_extras);
+                assert_eq!(ordered[1].kind(), ordered[3].kind());
+                assert!(ordered[1].original().is_none());
+                assert!(ordered[3].original().is_some());
+            }
+        }
+        let mut ingress = wire_item("user", "fallback", 0, &[]);
+        *ingress.ck.content_mut() = candidates.to_vec();
+        let mut projection = project_messages(&[Arc::new(ingress)]).unwrap();
+        // Distinct receipts make equal-candidate selection observable independently of content.
+        for (index, flat) in projection.blocks.iter_mut().enumerate() {
+            flat.block_index += 10;
+            flat.content_hash = [index as u8; 32];
+        }
+        let projected: Vec<_> = projection.blocks.iter().collect();
+        let mut message = wire_item("user", "served", 0, &[]).ck;
+        *message.content_mut() = vec![raw.clone(), raw, positive];
+        let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
+        assert_eq!(
+            served.block_fingerprints[0].0,
+            wire::fingerprint_digest(&[3; 32])
+        );
+        assert_eq!(
+            served.block_fingerprints[1].0,
+            wire::fingerprint_digest(&[3; 32])
+        );
+        assert_eq!(
+            served.block_fingerprints[2].0,
+            wire::fingerprint_digest(&[6; 32])
+        );
+        assert_eq!(
+            served.block_fingerprints[2].1,
+            projection.blocks[6].bytes.len()
+        );
+
+        // A present but unequal positional candidate prevents fallback to another index.
+        projection.blocks[0].block_index = 0;
+        projection.blocks[3].block_index = 0;
+        let projected: Vec<_> = projection.blocks.iter().collect();
+        let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
+        assert_eq!(
+            served.block_fingerprints[0],
+            ServedMessage::from_message(message).block_fingerprints[0]
+        );
+    }
+
+    #[test]
+    fn served_serialization_has_no_value_round_trip_and_fallback_reuses_receipt_helper() {
+        let source = include_str!("transform.rs");
+        let constructor = source
+            .split_once("    fn from_message_reusing(")
+            .unwrap()
+            .1
+            .split_once("    fn with_output_identity(")
+            .unwrap()
+            .0;
+        assert!(!constructor.contains("serde_json::to_value"));
+        let fallback = constructor
+            .split_once("} else if let Some(blocks) = projected_blocks")
+            .unwrap()
+            .1
+            .split_once("} else {")
+            .unwrap()
+            .0;
+        assert_eq!(fallback.matches("by_identity.get_or_init").count(), 1);
+        assert!(!fallback.contains(".find("));
+        assert_eq!(
+            fallback
+                .matches("wire::fingerprint_from_projected_wire(block, Some(flat))")
+                .count(),
+            1
+        );
+        assert!(!fallback.contains("wire::fingerprint_digest("));
+        assert!(!fallback.contains("flat.bytes.len()"));
     }
 
     fn comparable_response(response: TransformResponse) -> Value {

@@ -46,6 +46,7 @@ pub mod search_projection;
 pub mod search_seed;
 pub mod search_writer;
 pub mod selection;
+pub mod served_json;
 pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
@@ -93,7 +94,7 @@ use memory_store::dreamer_ledger::{
 };
 use memory_store::{
     AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
-    MemoryStoreError, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
+    MemoryStoreError, ModuleDropSeedRow, ModuleMeta, ModuleStateSyncError, ModuleStateSyncRequest,
     ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow, NoteCasOutcome,
     NoteConditionCompile, NoteEvalAbandonOutcome, NoteEvalAcquireOutcome, NoteEvalCandidate,
     NoteEvalClaim, NoteEvalCompleteOutcome, NoteEvalReducedState, NoteEvalRenewOutcome,
@@ -2255,6 +2256,12 @@ const _: () = assert!(
         <= TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
 );
 
+/// Connections the daemon opens through `storage::open_sqlite`: the memory store
+/// (`crates/memory-store/src/lib.rs`) and the search projection
+/// (`crates/daemon/src/search_projection.rs`). `tests/search_projection.rs` counts the
+/// call sites against this constant.
+pub const STORAGE_CONNECTIONS: u64 = 2;
+
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
@@ -2262,6 +2269,10 @@ const _: () = assert!(
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
+/// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
+/// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
+/// The search projection's connection holds `search_projection::CACHE_KIB` of page cache.
+/// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2274,6 +2285,10 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
     + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
+    + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64 * STORAGE_CONNECTIONS
+    + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
+    + memory_store::MMAP_BUDGET_BYTES as u64
+    + search_projection::CACHE_KIB as u64 * 1024
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
@@ -3497,6 +3512,29 @@ impl HistorianProducerFactory for MissingProducerFactory {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PassState<'a> {
+    Loaded(&'a ModuleMeta),
+    Unavailable,
+    Reload,
+}
+
+impl<'a> PassState<'a> {
+    fn from(load: &'a Result<ModuleMeta, MemoryStoreError>) -> Self {
+        match load {
+            Ok(meta) => Self::Loaded(meta),
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+    fn loaded(self) -> Option<&'a ModuleMeta> {
+        match self {
+            Self::Loaded(meta) => Some(meta),
+            Self::Unavailable | Self::Reload => None,
+        }
+    }
+}
+
 impl Handler {
     /// Creates a handler without a host connection file.
     pub fn new() -> Self {
@@ -4177,6 +4215,7 @@ impl Handler {
     fn expand_transform_tail_delta(
         &self,
         parsed: &mut TransformRequest,
+        pass_state: PassState<'_>,
     ) -> Option<NativeDeltaFrontier> {
         let delta = parsed.tail_delta.as_ref().and_then(Value::as_object)?;
         let after = delta.get("after").and_then(Value::as_str)?.to_string();
@@ -4190,13 +4229,10 @@ impl Handler {
             .and_then(|value| usize::try_from(value).ok())?;
         parsed.full_array_fingerprint.as_ref()?;
 
-        // The code loads the persisted epoch before inspecting bounded projection and native cores so stale request state cannot select an outdated entry after a store-side rewrite.
-        let current_revert_epoch = self
-            .store()?
-            .load(&parsed.session_id)
-            .ok()?
-            .meta
-            .revert_epoch;
+        // The persisted epoch is checked before the bounded projection and native cores so
+        // stale request state cannot select an outdated entry after a store-side rewrite;
+        // a pass without a loaded state takes the full-sync branch.
+        let current_revert_epoch = pass_state.loaded()?.revert_epoch;
         let projection_cache = self.lookup_projection_cache(
             parsed,
             current_revert_epoch,
@@ -4290,14 +4326,10 @@ impl Handler {
     fn lookup_full_projection_cache(
         &self,
         request: &TransformRequest,
+        pass_state: PassState<'_>,
     ) -> Option<ProjectionCacheInput> {
         let after = request.full_array_fingerprint.as_deref()?;
-        let revert_epoch = self
-            .store()?
-            .load(&request.session_id)
-            .ok()?
-            .meta
-            .revert_epoch;
+        let revert_epoch = pass_state.loaded()?.revert_epoch;
         self.lookup_projection_cache(
             request,
             revert_epoch,
@@ -4583,7 +4615,12 @@ impl Handler {
             .effective_for_project(project_root)
     }
 
-    fn historian_active(&self, store: &MemoryStore, session_id: &str) -> bool {
+    fn historian_active(
+        &self,
+        store: &MemoryStore,
+        session_id: &str,
+        pass_state: PassState<'_>,
+    ) -> bool {
         if self
             .live_historian_sessions
             .lock()
@@ -4592,10 +4629,15 @@ impl Handler {
         {
             return true;
         }
-        store
-            .load(session_id)
-            .map(|state| state.meta.historian.state != HistorianPhase::Idle)
-            .unwrap_or(false)
+        match pass_state {
+            // A loaded non-idle phase without a live run may have completed since the pass load.
+            PassState::Loaded(meta) if meta.historian.state == HistorianPhase::Idle => false,
+            PassState::Unavailable => false,
+            PassState::Loaded(_) | PassState::Reload => store
+                .load_historian_phase(session_id)
+                .map(|phase| phase != HistorianPhase::Idle)
+                .unwrap_or(false),
+        }
     }
 
     fn wrapup_active(&self, session_id: &str) -> bool {
@@ -4605,7 +4647,12 @@ impl Handler {
             .contains_key(session_id)
     }
 
-    fn observed_last_response_at_ms(&self, store: &MemoryStore, session_id: &str) -> Option<i64> {
+    fn observed_last_response_at_ms(
+        &self,
+        store: &MemoryStore,
+        session_id: &str,
+        pass_state: PassState<'_>,
+    ) -> Option<i64> {
         let mut observations = self
             .scheduler_observations
             .lock()
@@ -4615,11 +4662,15 @@ impl Handler {
                 .observed_in_process
                 .then_some(observation.last_response_at_ms);
         }
-        let anchor = store
-            .load(session_id)
-            .ok()
-            .map(|state| state.meta.last_committed_pass_at_ms)
-            .unwrap_or(0);
+        let anchor = match pass_state {
+            PassState::Loaded(meta) => meta.last_committed_pass_at_ms,
+            PassState::Unavailable => 0,
+            PassState::Reload => store
+                .load_meta(session_id)
+                .ok()
+                .map(|meta| meta.last_committed_pass_at_ms)
+                .unwrap_or(0),
+        };
         observations.insert(
             session_id.to_string(),
             SchedulerObservation {
@@ -6424,7 +6475,7 @@ impl Handler {
         if !generation_current {
             return Ok(false);
         }
-        Ok(store.load(session_id)?.meta.revert_epoch == revert_epoch)
+        Ok(store.load_revert_epoch(session_id)? == revert_epoch)
     }
 
     fn retryable_wrapup_response(
@@ -8072,9 +8123,16 @@ impl Handler {
             .lock()
             .expect("transform route channels mutex")
             .insert(channel, (binding.session.clone(), lineage_root.clone()));
+        // One `cache_state` load serves every pre-transform consumer of this pass. The
+        // transform takes its own snapshot as its linearization point, and consumers that
+        // run after a commit read the store again.
+        let pass_state_load_started_at = Instant::now();
+        let pass_load = store.load_meta(&parsed.session_id);
+        let pass_state_load_ms = pass_state_load_started_at.elapsed().as_secs_f64() * 1_000.0;
+        let pass_state = PassState::from(&pass_load);
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
-            let expanded = self.expand_transform_tail_delta(&mut parsed);
+            let expanded = self.expand_transform_tail_delta(&mut parsed, pass_state);
             delta_expand_ms = delta_expand_started_at.elapsed().as_secs_f64() * 1_000.0;
             let Some(frontier) = expanded else {
                 return need_full_sync_response(&parsed);
@@ -8143,7 +8201,7 @@ impl Handler {
         let projection_cache_input = native_delta_frontier
             .as_ref()
             .and_then(|frontier| frontier.projection_cache.clone())
-            .or_else(|| self.lookup_full_projection_cache(&parsed));
+            .or_else(|| self.lookup_full_projection_cache(&parsed, pass_state));
         let projection_cache_lookup_ms =
             projection_cache_lookup_started_at.elapsed().as_secs_f64() * 1_000.0;
         let side_channel_drain_started_at = Instant::now();
@@ -8162,7 +8220,15 @@ impl Handler {
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
         let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
-        let run_transform = || {
+        // The first run consumes the pass load; a rerun after an inline firing or a live
+        // completion runs after a commit and reads the store again. The floor is read after
+        // every commit the same way.
+        let read_floor = || {
+            store
+                .load_publication_floor_ordinal(&parsed.session_id)
+                .unwrap_or(None)
+        };
+        let run_transform = |pass_state: PassState<'_>| {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
                     binding
@@ -8196,10 +8262,13 @@ impl Handler {
                 cache_ttl: resolved_cache_ttl.value,
                 cache_ttl_provenance: resolved_cache_ttl.provenance,
                 model_key: binding.model_key.clone(),
-                observed_last_response_at_ms: self
-                    .observed_last_response_at_ms(&store, &parsed.session_id),
+                observed_last_response_at_ms: self.observed_last_response_at_ms(
+                    &store,
+                    &parsed.session_id,
+                    pass_state,
+                ),
                 guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, pass_now)),
-                historian_active: self.historian_active(&store, &parsed.session_id),
+                historian_active: self.historian_active(&store, &parsed.session_id, pass_state),
                 wrapup_active: self.wrapup_active(&parsed.session_id),
                 #[cfg(test)]
                 injected_reductions: self
@@ -8225,10 +8294,12 @@ impl Handler {
                 message,
             }
         };
-        let mut result = match run_transform() {
+        let mut result = match run_transform(pass_state) {
             Ok(result) => result,
             Err(e) => return reject_transform(e),
         };
+        // Dropping the load makes `Reload` the only state a rerun can name.
+        drop(pass_load);
         // Lineage is proof that this root produced accepted session state, so it is recorded
         // only after the transform succeeds; a rejected attempt must not authorize facade
         // routes for a root the session never served.
@@ -8240,10 +8311,7 @@ impl Handler {
             .insert(lineage_root);
         let mut emergency_pre_floor =
             if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
-                store
-                    .load(&parsed.session_id)
-                    .map(|state| state.meta.publication_floor_ordinal)
-                    .unwrap_or(None)
+                read_floor()
             } else {
                 None
             };
@@ -8287,14 +8355,11 @@ impl Handler {
                     completion,
                 } => {
                     if self.await_live_historian_completion(completion).await {
-                        result = match run_transform() {
+                        result = match run_transform(PassState::Reload) {
                             Ok(result) => result,
                             Err(e) => return reject_transform(e),
                         };
-                        emergency_pre_floor = store
-                            .load(&parsed.session_id)
-                            .map(|state| state.meta.publication_floor_ordinal)
-                            .unwrap_or(None);
+                        emergency_pre_floor = read_floor();
                         match self.prepare_historian_fire(
                             Arc::clone(&store),
                             &parsed,
@@ -8314,14 +8379,11 @@ impl Handler {
                                 let diagnostics = prepared.diagnostics.clone();
                                 match self.run_historian_firing_inline(prepared.task).await {
                                     Ok(_) => {
-                                        result = match run_transform() {
+                                        result = match run_transform(PassState::Reload) {
                                             Ok(result) => result,
                                             Err(e) => return reject_transform(e),
                                         };
-                                        emergency_pre_floor = store
-                                            .load(&parsed.session_id)
-                                            .map(|state| state.meta.publication_floor_ordinal)
-                                            .unwrap_or(None);
+                                        emergency_pre_floor = read_floor();
                                         diagnostics
                                     }
                                     Err(_) => self.refresh_historian_diagnostics(
@@ -8340,14 +8402,11 @@ impl Handler {
                     let diagnostics = prepared.diagnostics.clone();
                     match self.run_historian_firing_inline(prepared.task).await {
                         Ok(_) => {
-                            result = match run_transform() {
+                            result = match run_transform(PassState::Reload) {
                                 Ok(result) => result,
                                 Err(e) => return reject_transform(e),
                             };
-                            emergency_pre_floor = store
-                                .load(&parsed.session_id)
-                                .map(|state| state.meta.publication_floor_ordinal)
-                                .unwrap_or(None);
+                            emergency_pre_floor = read_floor();
                             diagnostics
                         }
                         Err(_) => self.refresh_historian_diagnostics(
@@ -8391,11 +8450,11 @@ impl Handler {
         // bytes.
         if !parsed.is_subagent && result.scheduler_pass == scheduler::PassDecision::Emergency95 {
             let floor_advanced = store
-                .load(&parsed.session_id)
-                .map(|state| state.meta.publication_floor_ordinal != emergency_pre_floor)
+                .load_publication_floor_ordinal(&parsed.session_id)
+                .map(|floor| floor != emergency_pre_floor)
                 .unwrap_or(false);
             if floor_advanced {
-                result = match run_transform() {
+                result = match run_transform(PassState::Reload) {
                     Ok(result) => result,
                     Err(e) => return reject_transform(e),
                 };
@@ -8489,6 +8548,7 @@ impl Handler {
         if let Some(timings) = response.timings.as_mut() {
             timings.handler_total = handler_started_at.elapsed().as_secs_f64() * 1_000.0;
             timings.request_observed_to_handler = request_observed_to_handler;
+            timings.pass_state_load = pass_state_load_ms;
             timings.delta_expand = delta_expand_ms;
             timings.side_channel_drain = side_channel_drain_ms;
             timings.trace_received = trace_received_ms;
@@ -16660,7 +16720,7 @@ fn cached_boundary_messages<'a>(
                 .flat_map(|range| projection.blocks[range.clone()].iter())
                 .filter(|block| block.mid == message.mid && !block.synthetic)
                 .map(|block| BoundaryBlock {
-                    id: block.id.clone(),
+                    id: std::borrow::Cow::Borrowed(&block.id),
                     ordinal: block.ordinal,
                     kind: sel_kind_for_flat(block),
                     provider_executed: block.provider_executed,
@@ -16763,9 +16823,9 @@ fn projected_post_drop_percentage(
     for message in messages {
         for block in &message.blocks {
             current_sizes.insert(
-                block.id.clone(),
+                block.id.to_string(),
                 frozen_sizes
-                    .get(&block.id)
+                    .get(block.id.as_ref())
                     .copied()
                     .map(|tokens| tokens as f64)
                     .unwrap_or(block.original_token_count as f64),
@@ -17125,8 +17185,8 @@ mod tests {
     use cache_stability::CoreState;
     use historian_producer::{ProducerOutput, RunHandle};
     use memory_store::{
-        HistorianChunkRange, HistorianDurableState, ModuleMeta, ModuleUsage, NoteEvaluationInput,
-        PendingAgentDrop, StoredCompartment, TagMintInput,
+        CacheStateSelect, HistorianChunkRange, HistorianDurableState, ModuleUsage,
+        NoteEvaluationInput, PendingAgentDrop, StoredCompartment, TagMintInput,
     };
     use tokio::sync::Notify;
 
@@ -17416,7 +17476,7 @@ mod tests {
                         Role::Assistant
                     },
                     blocks: vec![BoundaryBlock {
-                        id: format!("m-{index}#0"),
+                        id: format!("m-{index}#0").into(),
                         ordinal: index as u64 + 1,
                         kind: SelKind::Text,
                         provider_executed: false,
@@ -17458,9 +17518,9 @@ mod tests {
             for block in &message.blocks {
                 let raw = tokenizer::estimate_tokens(&block.original) as f64;
                 current_sizes.insert(
-                    block.id.clone(),
+                    block.id.to_string(),
                     frozen_sizes
-                        .get(&block.id)
+                        .get(block.id.as_ref())
                         .copied()
                         .map(|tokens| tokens as f64)
                         .unwrap_or(raw),
@@ -17562,6 +17622,335 @@ mod tests {
         bounded.replace("second", second);
         assert!(!bounded.sessions.contains_key("first"));
         assert!(bounded.sessions.contains_key("second"));
+    }
+
+    #[test]
+    fn historian_boundary_construction_matches_owned_reference() {
+        let pair = injection::build_synthetic_todo_pair(
+            r#"[{"content":"historian exclusion","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let mut empty = ck("empty", 1, "");
+        empty.ck.content_mut().clear();
+        let mut request = transform_request(
+            vec![
+                wire_with_role("system", 0, "system", "system sentinel"),
+                empty,
+                ck("unicode", 2, "α🙂e\u{301} 中文"),
+                assistant_tool_call("call-corpus", 3),
+                tool_result("result-corpus", 4, "tool output 🙂"),
+                ck("oversize", 5, &"word ".repeat(2_000)),
+                IngressMessage {
+                    mid: "synthetic-call".into(),
+                    ordinal: 6,
+                    ck: pair.assistant_msg,
+                },
+                IngressMessage {
+                    mid: "synthetic-result".into(),
+                    ordinal: 7,
+                    ck: pair.tool_msg,
+                },
+                wire_with_role("reply", 8, "assistant", "kept reply"),
+                ck("excluded-tail", 9, "outside eligible range"),
+            ],
+            90_000,
+            100_000,
+        );
+        let projection = crate::wire::project_messages(&request.messages).unwrap();
+        for message in &request.messages[6..8] {
+            assert!(message.ck.meta.synthetic);
+            assert!(message.ck.content().iter().any(|block| match block.kind() {
+                BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } => {
+                    injection::is_synthetic_todo_id(id)
+                }
+                _ => false,
+            }));
+            assert!(!projection.identity_by_mid.contains_key(&message.mid));
+        }
+        let (_handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        // Historian preparation reads original request flags alongside the transform's normalized projection.
+        // Reserved synthetic IDs remain excluded from live projection blocks during unflagged replay.
+        for replayed_unflagged in [false, true] {
+            for message in &mut request.messages[6..8] {
+                Arc::make_mut(message).ck.meta.synthetic = !replayed_unflagged;
+            }
+            for include_system in [false, true] {
+                let cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
+                let actual =
+                    cached_boundary_messages(&request, &projection, &cache, include_system);
+                let reference = request
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.ck.meta.synthetic
+                            && (include_system || message.ck.role != "system")
+                    })
+                    .map(|message| BoundaryMsg {
+                        message_ordinal: message.ordinal,
+                        message_id: message.mid.clone(),
+                        role: Role::from_provider(&message.ck.role),
+                        blocks: projection
+                            .blocks
+                            .iter()
+                            .filter(|block| block.mid == message.mid && !block.synthetic)
+                            .map(|block| BoundaryBlock {
+                                id: block.id.clone().into(),
+                                ordinal: block.ordinal,
+                                kind: sel_kind_for_flat(block),
+                                provider_executed: block.provider_executed,
+                                byte_size: block.bytes.len(),
+                                arc_id: block.arc_id.clone(),
+                                original_token_count: tokenizer::estimate_tokens(&block.bytes),
+                                original: Arc::from(block.bytes.to_string()),
+                                rendered: None,
+                                ignored: false,
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(format!("{:?}", actual.messages), format!("{reference:?}"));
+                assert_eq!(
+                    actual.messages.len(),
+                    7 + usize::from(include_system) + 2 * usize::from(replayed_unflagged)
+                );
+                for source in &request.messages[6..8] {
+                    let boundary = actual
+                        .messages
+                        .iter()
+                        .find(|message| message.message_id == source.mid);
+                    assert_eq!(boundary.is_some(), replayed_unflagged);
+                    if let Some(boundary) = boundary {
+                        assert!(boundary.blocks.is_empty());
+                    }
+                }
+                for message in &actual.messages {
+                    for block in &message.blocks {
+                        let source = projection
+                            .blocks
+                            .iter()
+                            .find(|source| source.id == block.id)
+                            .unwrap();
+                        assert!(Arc::ptr_eq(&block.original, &source.bytes));
+                        assert!(matches!(block.id, std::borrow::Cow::Borrowed(_)));
+                        assert_eq!(block.id.as_ptr(), source.id.as_ptr());
+                    }
+                }
+                let target = actual
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .find(|block| block.id == "oversize#0")
+                    .unwrap();
+                let frozen = [frozen_drop(target.id.as_ref())];
+                let pending = [pending_drop(target.id.as_ref())];
+                assert_eq!(frozen[0].key.strip_prefix("red:"), Some(target.id.as_ref()));
+                let frozen_tokens = tokenizer::estimate_tokens(&frozen[0].frozen_payload);
+                assert!(target.original_token_count > frozen_tokens);
+                let other_tokens: usize = actual
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .filter(|block| block.id != target.id)
+                    .map(|block| block.original_token_count)
+                    .sum();
+                let expected_percentage = Some(
+                    (90_000.0
+                        * (1.0 - frozen_tokens as f64 / (other_tokens + frozen_tokens) as f64))
+                        / 100_000.0
+                        * 100.0,
+                );
+                let actual_percentage = projected_post_drop_percentage(
+                    &actual.messages,
+                    &pending,
+                    &frozen,
+                    90_000.0,
+                    100_000.0,
+                );
+                assert_eq!(actual_percentage, expected_percentage);
+                assert_eq!(
+                    actual_percentage,
+                    projected_post_drop_percentage_retokenized_reference(
+                        &reference, &pending, &frozen, 90_000.0, 100_000.0,
+                    )
+                );
+                assert_ne!(
+                    actual_percentage,
+                    projected_post_drop_percentage(
+                        &actual.messages,
+                        &pending,
+                        &[],
+                        90_000.0,
+                        100_000.0,
+                    )
+                );
+                for usage_percentage in [50.0, 81.0, 96.0] {
+                    let context = TriggerContext {
+                        boundary: BoundaryContext {
+                            usage_percentage,
+                            usage_input_tokens: usage_percentage * 1_000.0,
+                            context_limit: 100_000.0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        boundary::check_compartment_trigger(&actual.messages, &context),
+                        boundary::check_compartment_trigger(&reference, &context),
+                    );
+                }
+            }
+            for budget in [1, 128, 32_000] {
+                let live = projection
+                    .blocks
+                    .iter()
+                    .filter(|block| !block.synthetic)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let outcome = assemble_historian_firing(
+                    &store,
+                    &request.messages,
+                    &live,
+                    &projection.identity_by_mid,
+                    HistorianAssemblerConfig {
+                        session_id: request.session_id.clone(),
+                        project_path: "/proj".into(),
+                        project_slug: "proj".into(),
+                        model_chain: vec!["test/model".into()],
+                        token_budget: budget,
+                        boundary: boundary::BoundaryResolution {
+                            protected_start_ordinal: 9,
+                            eligible_head: 0..9,
+                            n_tokens: 0.0,
+                            floored_by_live_prompt: false,
+                            fenced_by_open_arc: false,
+                            true_raw_eligible_tokens: 0.0,
+                            oversize_atomic_unit: false,
+                            raw_message_count: 10,
+                            boundary_reason: "corpus".into(),
+                        },
+                        memory_enabled: false,
+                        project_memory: None,
+                        auto_promote: false,
+                        user_memory_collection_enabled: false,
+                        extraction_free: false,
+                        in_emergency: true,
+                        force_keep_last_compartment: false,
+                        fold_is_only_reclaim: false,
+                        failure_backoff_at_ms: 0,
+                        min_chunk_tokens: 512,
+                    },
+                    0,
+                )
+                .unwrap();
+                if replayed_unflagged && budget == 32_000 {
+                    assert!(matches!(outcome, AssembleHistorianFiringOutcome::NoFire(
+                        historian_chunk::HistorianNoFireReason::MissingBlockIdentity { ref message_id }
+                    ) if message_id == "synthetic-call"));
+                    continue;
+                }
+                let AssembleHistorianFiringOutcome::Fire(firing) = outcome else {
+                    panic!("corpus must fire: {outcome:?}")
+                };
+                let owned_snapshot = live
+                    .iter()
+                    .filter(|block| {
+                        !block.synthetic
+                            && block.role != "system"
+                            && block.ordinal >= firing.chunk.chunk.start_index
+                            && block.ordinal <= firing.chunk.chunk.end_index
+                    })
+                    .map(|block| {
+                        (
+                            block.id.clone(),
+                            block.kind_tag.clone(),
+                            block.bytes.to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let reference_fingerprint = owned_snapshot
+                    .iter()
+                    .map(|(id, kind, bytes)| format!("{id}:{kind}:{}", bytes.len()))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                assert_eq!(
+                    firing.chunk_fingerprint.as_bytes(),
+                    reference_fingerprint.as_bytes()
+                );
+                assert_eq!(firing.chunk.snapshot.len(), owned_snapshot.len());
+                for (item, (id, kind, bytes)) in firing.chunk.snapshot.iter().zip(&owned_snapshot) {
+                    assert_eq!(
+                        (&item.id, &item.kind, item.byte_len),
+                        (id, kind, bytes.len())
+                    );
+                }
+                assert!(!firing.chunk_fingerprint.contains("synthetic"));
+                assert!(!firing.chunk_fingerprint.contains("system"));
+                assert!(!firing.chunk_fingerprint.contains("excluded-tail"));
+                assert_eq!(
+                    firing.chunk.chunk.present_ordinals.contains(&7),
+                    replayed_unflagged
+                );
+                let (expected_text, expected_end) = match budget {
+                    1 => ("[1-2] U: α🙂e\u{301} 中文".to_string(), 2),
+                    128 => (
+                        "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash".to_string(),
+                        4,
+                    ),
+                    _ => (
+                        format!(
+                            "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash\n[5] U: {}\n[8] A: kept reply",
+                            "word ".repeat(2_000).trim_end(),
+                        ),
+                        8,
+                    ),
+                };
+                assert_eq!(firing.chunk.text.as_bytes(), expected_text.as_bytes());
+                assert_eq!(firing.to_ordinal, expected_end);
+                let expected_input = if budget == 1 {
+                    assert!(firing.chunk.token_estimate > budget);
+                    "\n[… tokens truncated by the daemon to fit the historian window …]"
+                } else {
+                    &expected_text
+                };
+                let references = historian_prompt::build_reference_blocks_from_stored(
+                    &request.session_id,
+                    1,
+                    &[],
+                );
+                let expected_prompt = historian_prompt::build_compartment_agent_prompt(
+                    &historian_prompt::CompartmentPromptInputs {
+                        seed_examples: &references.seed_examples,
+                        session_references: &references.session_references,
+                        project_memory: "",
+                        input_source: expected_input,
+                        memory_enabled: false,
+                        extraction_free: false,
+                    },
+                );
+                assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
+                let expected_raw = request
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        !message.ck.meta.synthetic && (1..=expected_end).contains(&message.ordinal)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    firing.raw_chunk_messages.as_bytes(),
+                    serde_json::to_vec(&expected_raw).unwrap()
+                );
+                let expected_digest = match budget {
+                    1 => "38304e8a6ce873573260fbc9967ed890fd10757d9cb9eb49f452b4b551bde4ae",
+                    128 => "f2e94e33234ce5ccb894fe7ca26805cecb16b2d1b775be2a585dc7c9e4876a56",
+                    _ => "aa1ff018eccefed2d25ded6fe08b537bb5cdd43b31dd7012114824a69ac96ce6",
+                };
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
+                    expected_digest
+                );
+            }
+        }
     }
 
     #[test]
@@ -17807,7 +18196,7 @@ mod tests {
             message_id: "m1".to_string(),
             role: Role::User,
             blocks: vec![BoundaryBlock {
-                id: "drop#0".to_string(),
+                id: "drop#0".into(),
                 ordinal: 0,
                 kind: SelKind::Text,
                 provider_executed: false,
@@ -17842,7 +18231,7 @@ mod tests {
     #[test]
     fn trigger_suppresses_fire_when_projected_drops_hit_relative_target() {
         let block = |id: &str, text: &str| BoundaryBlock {
-            id: id.to_string(),
+            id: id.to_string().into(),
             ordinal: 0,
             kind: SelKind::Text,
             provider_executed: false,
@@ -20799,8 +21188,10 @@ mod tests {
             "replace_from": 4,
             "native_replace_from": 2,
         }));
+        let pass_load = _store.load_meta(&second_request.session_id);
+        let pass_state = PassState::from(&pass_load);
         let frontier = handler
-            .expand_transform_tail_delta(&mut second_request)
+            .expand_transform_tail_delta(&mut second_request, pass_state)
             .expect("cached native prefix must reattach");
         assert_eq!(
             serde_json::to_value(&second_request).unwrap(),
@@ -21122,8 +21513,10 @@ mod tests {
             "replace_from": 3,
             "native_replace_from": 3,
         }));
+        let pass_load = _store.load_meta(&delta.session_id);
+        let pass_state = PassState::from(&pass_load);
         let frontier = handler
-            .expand_transform_tail_delta(&mut delta)
+            .expand_transform_tail_delta(&mut delta, pass_state)
             .expect("full snapshot must supply the evicted native prefix");
         assert!(frontier.projection_cache.is_none());
         for (reattached, original) in delta.messages.iter().zip(&request.messages) {
@@ -21314,8 +21707,10 @@ mod tests {
             "native_replace_from": GIANT_MESSAGE_COUNT,
         }));
 
+        let pass_load = _store.load_meta(&delta.session_id);
+        let pass_state = PassState::from(&pass_load);
         let frontier = handler
-            .expand_transform_tail_delta(&mut delta)
+            .expand_transform_tail_delta(&mut delta, pass_state)
             .expect("required cores must accept the tail delta without a full-request snapshot");
         let reusable_projection = frontier
             .projection_cache
@@ -23418,6 +23813,10 @@ mod tests {
             );
             wait_for_count(&producer.starts, 1).await;
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
+                "f8600b851c98346e9ccede4e9bbdf04b0c1067c3235da0d19a39156248f85776"
+            );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
             assert!(!first_prompt.contains("replayed synthetic carrier sentinel"));
@@ -23442,8 +23841,10 @@ mod tests {
             reference.messages.extend(third.messages.iter().cloned());
             reference.tail_delta = None;
             let mut reattached = third.clone();
+            let pass_load = store.load_meta(&reattached.session_id);
+            let pass_state = PassState::from(&pass_load);
             let frontier = handler
-                .expand_transform_tail_delta(&mut reattached)
+                .expand_transform_tail_delta(&mut reattached, pass_state)
                 .expect("third delta reattaches");
             assert!(
                 frontier.projection_cache.is_some(),
@@ -23534,6 +23935,10 @@ mod tests {
             );
             wait_for_count(&producer.starts, 2).await;
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
+                "3dff45d4a9291a345afccf1f2251d2a860993ac1a84b95165e7845467ed5f882"
+            );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
             let native = if let Some(suffix) = third_response.get("native_messages_delta") {
@@ -24254,6 +24659,220 @@ mod tests {
         assert_eq!(
             trace.last_reject_error.as_deref(),
             Some("live-source ordinals not strictly increasing")
+        );
+    }
+
+    /// rusqlite's default prepared-statement capacity, which the memory store replaces.
+    const RUSQLITE_DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 16;
+
+    /// The memory store's statement cache is sized for the whole hot set. A warm pass
+    /// followed by steady passes on the same growing session prepares fewer distinct texts
+    /// than the capacity, with margin for formatted variants, and re-creates no statement
+    /// after it has run. rusqlite evicts only on insertion past capacity, so the distinct
+    /// count is the load-bearing claim and the eviction count is its consequence; the
+    /// undersized case is exercised in the storage crate's eviction probe.
+    #[tokio::test(flavor = "current_thread")]
+    async fn steady_passes_evict_no_statement_from_the_memory_store_cache() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let mut messages = vec![ck("m1", 1, "turn 1")];
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["status"], "ok", "warm pass");
+        store.start_statement_reuse_probe();
+        for turn in 2..=5u64 {
+            messages.push(ck(&format!("m{turn}"), turn, &format!("turn {turn}")));
+            let response = call_transform(&handler, messages.clone()).await;
+            assert_eq!(response["status"], "ok", "pass {turn}");
+        }
+        let reuse = store.statement_evictions();
+        let margin = memory_store::STATEMENT_CACHE_CAPACITY / 4;
+        assert!(
+            reuse.len() + margin <= memory_store::STATEMENT_CACHE_CAPACITY,
+            "{} distinct cached statements leave less than {margin} of headroom under {}",
+            reuse.len(),
+            memory_store::STATEMENT_CACHE_CAPACITY
+        );
+        assert!(
+            reuse.len() > RUSQLITE_DEFAULT_STATEMENT_CACHE_CAPACITY,
+            "the steady passes exercise more than the default capacity, got {}",
+            reuse.len()
+        );
+        let evicted: Vec<_> = reuse.iter().filter(|(_, count)| **count > 0).collect();
+        assert!(
+            evicted.is_empty(),
+            "statements were re-created after eviction: {evicted:?}"
+        );
+    }
+
+    /// A steady pass reads `cache_state` through the statement cache exactly twice: the
+    /// `meta` projection once before the transform, shared by the tail-delta expansion, the
+    /// projection-cache lookup, the last-response anchor, and the historian-active check;
+    /// and the full row once after the commit in `prepare_historian_fire`. The interleave
+    /// hook runs after the transform commit and before the post-commit load. Each run count
+    /// is read on one handle, so the test also requires that neither handle was evicted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_steady_pass_loads_meta_once_before_the_transform_and_the_full_row_once_after() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store.start_statement_reuse_probe();
+        let mut messages = vec![ck("m1", 1, "turn 1")];
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["status"], "ok", "warm pass");
+        let counts = |store: &MemoryStore| {
+            (
+                store.cache_state_load_runs(CacheStateSelect::Meta),
+                store.cache_state_load_runs(CacheStateSelect::Full),
+            )
+        };
+        let (meta_after_warm, full_after_warm) = counts(&store);
+        let at_hook = Arc::new(Mutex::new(None));
+        {
+            let store = Arc::clone(&store);
+            let at_hook = Arc::clone(&at_hook);
+            *handler
+                .between_transform_and_prepare
+                .lock()
+                .expect("interleave hook mutex") = Some(Box::new(move || {
+                *at_hook.lock().expect("hook cell") = Some(counts(&store));
+            }));
+        }
+        messages.push(ck("m2", 2, "turn 2"));
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["status"], "ok", "steady pass");
+        let (meta_at_hook, full_at_hook) =
+            at_hook.lock().expect("hook cell").expect("the hook ran");
+        assert_eq!(
+            (
+                meta_at_hook - meta_after_warm,
+                full_at_hook - full_after_warm
+            ),
+            (1, 0),
+            "one meta load and no full load before the transform"
+        );
+        let (meta_after, full_after) = counts(&store);
+        assert_eq!(
+            (meta_after - meta_at_hook, full_after - full_at_hook),
+            (0, 1),
+            "one full load and no meta load after the commit"
+        );
+        assert_eq!(
+            (
+                store.cache_state_load_evictions(CacheStateSelect::Meta),
+                store.cache_state_load_evictions(CacheStateSelect::Full),
+            ),
+            (0, 0),
+            "neither counted handle was re-created"
+        );
+    }
+
+    /// The pass-state load runs before the tail-delta expansion, outside the `delta_expand`
+    /// and `projection_cache_lookup` windows, so it carries its own pass-trace bucket; the
+    /// phase timings otherwise shrink by the read's cost while `handler_total` does not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pass_state_load_has_its_own_timing_bucket() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let response = call_transform(&handler, vec![ck("m1", 1, "turn 1")]).await;
+        assert_eq!(response["status"], "ok");
+        let pass_state_load = response["timings"]["pass_state_load"]
+            .as_f64()
+            .expect("the pass-state load is timed");
+        assert!(
+            pass_state_load > 0.0,
+            "the bucket wraps the read: {pass_state_load}"
+        );
+    }
+
+    /// The durable historian phase decides `historian_active` when no live run is
+    /// registered: a pass with its own load reads the phase from that load, a rerun reads
+    /// it from the store, and a pass whose load failed treats the historian as idle.
+    #[test]
+    fn historian_active_reads_the_durable_phase_from_the_pass_state_or_the_store() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Firing;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let meta = store.load_meta("ses").unwrap();
+        assert!(handler.historian_active(&store, "ses", PassState::Loaded(&meta)));
+        assert!(handler.historian_active(&store, "ses", PassState::Reload));
+        assert!(!handler.historian_active(&store, "ses", PassState::Unavailable));
+        assert!(!handler.historian_active(&store, "never-seen", PassState::Reload));
+    }
+
+    /// The receive breadcrumb counts every pass whatever its outcome, and a breadcrumb
+    /// that fails to write neither vetoes nor shrinks the cache commit: after a rejected,
+    /// a stable, and a committed pass the count is three, and a fourth pass whose receive
+    /// write is injected to fail still commits.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pass_trace_counts_every_outcome_and_a_failed_receive_does_not_veto_the_commit() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+
+        let (code, _) = error_frame(
+            call_transform_outcome(
+                &handler,
+                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
+            )
+            .await,
+        );
+        assert_eq!(code, "transform_failed", "rejected pass");
+        let messages = vec![ck("m1", 1, "one")];
+        let first = call_transform(&handler, messages.clone()).await;
+        assert_eq!(first["status"], "ok", "committed pass");
+        let committed_version = store.load("ses").unwrap().row_version;
+        let stable = call_transform(&handler, messages.clone()).await;
+        assert_eq!(stable["status"], "ok", "stable pass");
+        assert_eq!(
+            store.load("ses").unwrap().row_version,
+            committed_version,
+            "the repeated request commits nothing new"
+        );
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.receive_count, 3);
+        assert_eq!(trace.reject_count, 1);
+
+        store.fail_next_pass_trace_receive_for_test();
+        let grown = call_transform(&handler, vec![ck("m1", 1, "one"), ck("m2", 2, "two")]).await;
+        assert_eq!(
+            grown["status"], "ok",
+            "the commit succeeds despite the failed breadcrumb"
+        );
+        let after = store.load("ses").unwrap();
+        assert!(
+            after.row_version > committed_version,
+            "the cache commit landed, got {:?} after {committed_version:?}",
+            after.row_version
+        );
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(
+            trace.receive_count, 3,
+            "the failed receive write recorded nothing and vetoed nothing"
+        );
+    }
+
+    /// A historian that completes after the pass load leaves the live map and commits
+    /// `Idle`; the pass load's `Firing` is stale and must not veto.
+    #[test]
+    fn historian_active_rereads_a_loaded_active_phase_when_no_run_is_live() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Firing;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let pass_meta = store.load_meta("ses").unwrap();
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Idle;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        assert!(
+            !handler.historian_active(&store, "ses", PassState::Loaded(&pass_meta)),
+            "the completed run committed Idle after the pass load"
         );
     }
 
@@ -35435,6 +36054,42 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
+    /// The wrapup's entry load reads the full row before any scalar `meta` read, so a row
+    /// whose core no longer deserializes is refused instead of answering `nothing_to_compact`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_refuses_a_row_whose_core_state_is_corrupt() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        store
+            .replace_compartments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
+            .unwrap();
+        cache_wrapup_messages(
+            &handler,
+            vec![ck("m1", 1, "one"), ck("m2", 2, "two"), ck("m3", 3, "three")],
+        );
+        store
+            .execute_tag_sql_for_test(
+                "UPDATE cache_state SET core_state = '{not json' WHERE session_id = 'ses'",
+            )
+            .unwrap();
+
+        let outcome = handler
+            .dispatch_value(
+                test_route(7),
+                json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+            )
+            .await;
+        assert!(
+            matches!(&outcome, PreparedOutcome::Error { code, .. } if code == "store_load_failed"),
+            "a corrupt core is refused, got {outcome:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_busy_dedups_while_firing_is_in_progress() {
         let producer = Arc::new(ProducerState::default());
@@ -35521,23 +36176,35 @@ mod tests {
         // The interleave seam runs between the request's pre-fold transform and `Emergency95` prepare.
         // By prepare time, the run has published and released its live-map entry.
         // Only `Complete`'s row-advance check can fold the run.
-        // response.
+        // The hook also records the foreign-write witness: the row version the transform
+        // committed and the row version the publish committed after it, read from the store
+        // rather than from the pass's own post-commit read.
+        let witness: Arc<Mutex<Option<(u64, u64)>>> = Arc::new(Mutex::new(None));
         {
             let producer = Arc::clone(&producer);
             let store_for_hook = Arc::clone(&store);
+            let witness = Arc::clone(&witness);
             *handler
                 .between_transform_and_prepare
                 .lock()
                 .expect("interleave hook mutex") = Some(Box::new(move || {
+                let transform_committed = store_for_hook
+                    .load("ses")
+                    .ok()
+                    .and_then(|s| s.row_version)
+                    .expect("the transform committed a row before the hook");
                 producer.block_output.store(false, Ordering::SeqCst);
                 producer.notify.notify_waiters();
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
-                    let idle = store_for_hook
+                    let published = store_for_hook
                         .load("ses")
-                        .map(|s| s.meta.historian.state == HistorianPhase::Idle)
-                        .unwrap_or(false);
-                    if idle {
+                        .ok()
+                        .filter(|s| s.meta.historian.state == HistorianPhase::Idle)
+                        .and_then(|s| s.row_version);
+                    if let Some(published) = published {
+                        *witness.lock().expect("witness mutex") =
+                            Some((transform_committed, published));
                         break;
                     }
                     assert!(
@@ -35553,6 +36220,16 @@ mod tests {
         assert!(
             m0_text(&response).contains("autonomous summary"),
             "a fold published between the transform and the live-map check must land in this response"
+        );
+        let (transform_committed, published) = witness
+            .lock()
+            .expect("witness mutex")
+            .expect("the hook ran and recorded both row versions");
+        assert!(
+            published > transform_committed,
+            "the foreign publish committed row version {published} after the transform's \
+             {transform_committed} and after the pass's pre-hook floor read, before \
+             prepare_historian_fire's load and the final floor check"
         );
         // A second producer start is valid because eligible content still crosses the trigger bar after the first fold.
         // Eligible content still crosses the trigger bar after the first fold publishes.
@@ -36752,7 +37429,8 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
     // Route-bound compaction settings can differ while the session and ingress stay the same.
     for (pass, compaction_enabled) in [false, true, true, false, true].into_iter().enumerate() {
         ctx.compaction_enabled = compaction_enabled;
-        let cached = handler.lookup_full_projection_cache(&request);
+        let pass_load = store.load_meta(&request.session_id);
+        let cached = handler.lookup_full_projection_cache(&request, PassState::from(&pass_load));
         assert_eq!(cached.is_some(), pass > 0);
         if let Some(cache) = &cached {
             assert_eq!(cache.replace_from, request.messages.len());

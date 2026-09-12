@@ -32,7 +32,7 @@ three direct `tokenizer::estimate_tokens` calls in production transform code.
   sharding note at [`:112-113`][tc-shard] is conditional ("if concurrent
   sessions ever contend here") and cites no measurement.
 - Key domains: tail hygiene hashes `kind_name ‖ NUL ‖ content` and calls
-  `count_with_digest` at [`tail_hygiene.rs:264`][th-cwd];
+  `count_with_digest` at [`tail_hygiene.rs:614`][th-cwd];
   [`cached_estimate_tokens`][tc-cet] hashes `NUL ‖ content`, bypasses inputs
   under `MIN_CACHED_LEN = 64` with a `bypassed` bump, and the two domains are
   disjoint because no kind name can prefix a NUL.
@@ -46,9 +46,9 @@ three direct `tokenizer::estimate_tokens` calls in production transform code.
   by that statement.
 - Direct `tokenizer::estimate_tokens` calls in production transform code:
   the SOFT predicate's `m0_tokens` and `m1_tokens` at
-  [`:4298-4309`][soft-direct] (W9); the tag-mint `token_count` persisted into
-  `TagMintInput` at [`:7160`][mint-direct]; `ActiveTagForNudge.token_count`
-  at [`:8561`][nudge-direct]. The tokenizer crate's
+  [`:4309-4320`][soft-direct] (W9); the tag-mint `token_count` persisted into
+  `TagMintInput` at [`:7163`][mint-direct]; `ActiveTagForNudge.token_count`
+  at [`:8572`][nudge-direct]. The tokenizer crate's
   [`estimate_tokens`][tok-fn] exposes no call counter.
 - The existing source scan
   [`protected_floor_has_no_global_estimator_bypass`][t-bypass] slices the
@@ -99,8 +99,8 @@ declared sum, measures contention, or scans the whole `apply_once` body.
 
 ### Q: Should `:7160` and `:8558` stay direct or route through the interface?
 
-- Sources examined: [`:7160`][mint-direct] in the tag-mint loop,
-  [`:8561`][nudge-direct] in the nudge derivation.
+- Sources examined: [`:7163`][mint-direct] in the tag-mint loop,
+  [`:8572`][nudge-direct] in the nudge derivation.
 - Findings: Both count `taggable_source` text of tail blocks and store the
   result in a durable or served `token_count`; neither is counted in
   `tokenize_calls`, and neither is reachable by an injected estimator.
@@ -145,14 +145,14 @@ declaration sum remain outside this change.
 [tc-shard]: ../../../../../crates/daemon/src/token_cache.rs#L112-L113
 [tc-u32]: ../../../../../crates/daemon/src/token_cache.rs#L135-L137
 [tc-cet]: ../../../../../crates/daemon/src/token_cache.rs#L165-L181
-[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L264
-[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2242-L2247
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2249-L2263
-[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1799-L1815
-[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1857-L1859
-[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2836-L2845
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
-[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8561
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24173-L24184
+[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
+[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2256-L2286
+[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
+[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1868-L1870
+[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2856
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
+[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7163
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8572
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24458-L24469
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use kernel::Sensitivity;
 use kernel::source_identity::{Occurrence, OccurrenceRefusal, Span};
+use retrieval::eligibility::live_candidates;
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, PersistedOccurrence, ProjectionError,
     ProjectionIdentity, Tombstone, TombstoneReason, install_identity, persist_occurrences,
@@ -226,7 +227,7 @@ fn identity() -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: "kernel-incarnation-1".to_string(),
         projection_policy_version: "source-policy.v1".to_string(),
-        identity_contract_version: "search-projection-identity-v2".to_string(),
+        identity_contract_version: "search-projection-identity-v3".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),
@@ -848,6 +849,27 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn live_candidates_with_a_bound_at_or_past_i64_max_returns_every_live_row() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, &[record]).unwrap()))
+        .unwrap();
+    for max in [
+        NonZeroUsize::new(i64::MAX as usize).unwrap(),
+        NonZeroUsize::MAX,
+    ] {
+        let live = store
+            .with_conn(|conn| Ok(live_candidates(conn, None, max)))
+            .unwrap()
+            .unwrap_or_else(|err| panic!("max={max}: {err}"));
+        assert_eq!(live.len(), 1, "max={max}");
+    }
 }
 
 #[test]

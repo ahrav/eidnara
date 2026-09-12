@@ -15,6 +15,7 @@ use super::KernelStore;
 use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
+use super::source_hold::{Descriptors, descriptor_rows_sql};
 use super::source_identity::{
     self, EncodedOccurrence, Occurrence, OccurrenceClass, OccurrenceRefusal, encode,
     encode_preserving_span, payload_id, select, well_formed_value,
@@ -549,43 +550,41 @@ pub struct LiveDescriptor {
 }
 
 impl KernelStore {
-    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`, read through the registry's descriptor page index. Every row is re-encoded from its stored identity before it is returned, so a row whose identity does not round-trip is refused rather than handed to a caller that may retire it.
+    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`. The page uses the export's liveness predicate, so a descriptor whose cited evidence was deleted is absent here as it is from every export snapshot. A row whose stored identity does not re-encode to itself, or whose lineage and revision do not name its own object id, is refused rather than handed to a caller that may retire it. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when a stored descriptor does not decode or re-encode to its stored identity.
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when a stored descriptor does not decode or re-encode to its stored identity.
     pub fn live_source_descriptors(
         &self,
         class: OccurrenceClass,
         requested: i64,
         after: Option<&str>,
         max_rows: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
     ) -> Result<LiveDescriptorPage, KernelError> {
-        let mut reader = self.lock_reader()?;
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         let tx = reader
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
-        let mut statement = tx
-            .prepare_cached(
-                "SELECT o.object_id,o.domain_id,b.observation_payload
-                 FROM object_registry o
-                 JOIN observations b ON b.object_id=o.object_id
-                 WHERE o.source_kind=?1 AND o.object_id GLOB 'srcdesc:*'
-                   AND o.object_kind='observation' AND b.observation_kind=?2
-                   AND o.created_commit_seq<=?3
-                   AND (o.invalidated_commit_seq IS NULL OR o.invalidated_commit_seq>?3)
-                   AND o.object_id>?4
-                 ORDER BY o.object_id
-                 LIMIT ?5",
-            )
-            .map_err(map_sqlite)?;
+        let sql = format!(
+            "SELECT o.object_id,o.domain_id,b.observation_payload
+             {rows}
+               AND o.source_kind=?1 AND o.object_kind='observation'
+               AND {live}
+               AND o.object_id>?3
+             ORDER BY o.object_id
+             LIMIT ?4",
+            rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
+            live = Descriptors::LiveAtEnd.predicate("?2", "0"),
+        );
+        let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
         let raw: Vec<(String, String, Vec<u8>)> = statement
             .query_map(
                 rusqlite::params![
                     class.code(),
-                    SOURCE_DESCRIPTOR_KIND,
                     requested,
                     after.unwrap_or(""),
                     limit.saturating_add(1)
@@ -601,7 +600,10 @@ impl KernelStore {
             .take(max_rows.get())
             .map(|(object_id, domain_id, payload)| {
                 let detail = stored_detail(&payload)?;
-                if detail.class != class.code() || reencoded_identity(&detail).is_none() {
+                if detail.class != class.code()
+                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
+                    || reencoded_identity(&detail).is_none()
+                {
                     return Err(KernelError::CorruptCanonicalRow);
                 }
                 Ok(LiveDescriptor {

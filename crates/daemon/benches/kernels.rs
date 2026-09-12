@@ -108,7 +108,7 @@ fn text_block(
 ) -> BoundaryBlock<'_> {
     let token_count = estimate_tokens(&text);
     BoundaryBlock {
-        id,
+        id: id.into(),
         ordinal,
         kind,
         provider_executed: false,
@@ -299,7 +299,7 @@ fn selection_items<'a>(messages: &[BoundaryMsg<'a>]) -> Vec<SelItem<'a>> {
                 _ => SelMessageRole::NonAssistant,
             };
             message.blocks.iter().map(move |block| SelItem {
-                id: block.id.clone(),
+                id: block.id.to_string(),
                 ordinal: message.message_ordinal,
                 message_role: role,
                 kind: block.kind.clone(),

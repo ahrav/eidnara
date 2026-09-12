@@ -11,7 +11,8 @@ mod support;
 
 use daemon::harness_sources::{Representation, SourcePublisher, SourceUnit};
 use daemon::message_cleanup::{CleanupBounds, CleanupStop, MessageCleanup};
-use daemon::search_projection::SearchProjection;
+use daemon::search_projection::{SearchProjection, SearchProjectionError};
+use daemon::search_writer::QuarantineKind;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
@@ -241,7 +242,7 @@ impl Corpus {
                         schema_version: retrieval::SCHEMA_VERSION,
                         kernel_incarnation_id: kernel_incarnation_id.clone(),
                         projection_policy_version: POLICY.to_string(),
-                        identity_contract_version: "search-projection-identity-v2".to_string(),
+                        identity_contract_version: "search-projection-identity-v3".to_string(),
                         limit_manifest_protocol_version: "limits.v1".to_string(),
                         embedding_model: MODEL.to_string(),
                         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -469,6 +470,14 @@ impl Fixture {
         self.projection.as_ref().unwrap()
     }
 
+    fn cleanup(&self, acknowledged: i64) -> MessageCleanup<'_> {
+        MessageCleanup::new(
+            self.projection(),
+            self.corpus.kernel_incarnation_id(),
+            acknowledged,
+        )
+    }
+
     /// Closes the projection and opens it again from its files.
     fn reopen(&mut self) {
         drop(self.projection.take());
@@ -533,7 +542,24 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
         .map(|row| row.3.clone());
     let payloads_before = payloads(fixture.data_home());
 
-    let mut cleanup = MessageCleanup::new(fixture.projection(), fixture.acknowledged);
+    // A slice run under another kernel incarnation is refused before it selects, and removes nothing.
+    let refused = MessageCleanup::new(
+        fixture.projection(),
+        "another-kernel".to_string(),
+        fixture.acknowledged,
+    )
+    .run_slice(
+        &support::projection_gate::open_gate(),
+        bounds(),
+        &unbounded(),
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        fixture.present(),
+        before.iter().map(|row| row.0.clone()).collect()
+    );
+
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
     let report = cleanup
         .run_slice(
             &support::projection_gate::open_gate(),
@@ -580,7 +606,8 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
         assert!(payloads_after.contains(&shared));
     }
 
-    let again = MessageCleanup::new(fixture.projection(), fixture.acknowledged)
+    let again = fixture
+        .cleanup(fixture.acknowledged)
         .run_slice(
             &support::projection_gate::open_gate(),
             bounds(),
@@ -609,8 +636,7 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
         "the replayed window queued nothing"
     );
     fixture.reopen();
-    let reopened = fixture.projection();
-    let mut cleanup = MessageCleanup::new(reopened, fixture.acknowledged);
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
     let report = cleanup
         .run_slice(
             &support::projection_gate::open_gate(),
@@ -629,7 +655,8 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
 
     // The late tombstone becomes eligible once the acknowledged prefix covers it; the held ones never do while their job rows exist, and the other class never does. A prefix claimed above the projection's own checkpoint is capped by the store.
     let tip = fixture.corpus.kernel.tip().unwrap();
-    let report = MessageCleanup::new(reopened, tip + 1_000)
+    let report = fixture
+        .cleanup(tip + 1_000)
         .run_slice(
             &support::projection_gate::open_gate(),
             bounds(),
@@ -647,6 +674,128 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
         .into_iter()
         .collect()
     );
+}
+
+/// A page shorter than `page_rows` that the row bound did not cut proves the scan exhausted: the slice reports no cursor and no stop, so the next slice starts from the beginning instead of reading an empty page first.
+#[test]
+fn a_short_final_page_exhausts_the_scan_without_a_further_read() {
+    let fixture = Fixture::build();
+    let one_wide_page = CleanupBounds {
+        page_rows: NonZeroUsize::new(16).unwrap(),
+        max_pages: NonZeroUsize::new(1).unwrap(),
+        max_reclaimed: NonZeroUsize::new(16).unwrap(),
+    };
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
+    let report = cleanup
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            one_wide_page,
+            &unbounded(),
+        )
+        .unwrap();
+    assert_eq!(report.reclaimed.occurrences, fixture.eligible.len());
+    assert!(report.inspected < 16, "{report:?}");
+    assert_eq!(
+        (report.cursor.as_deref(), report.stop.as_ref()),
+        (None, None),
+        "{report:?}"
+    );
+    assert_eq!(cleanup.cursor(), None);
+}
+
+/// A quarantined projection refuses a slice before any read, as it refuses every other writer; a scan with nothing to reclaim does not report success instead.
+#[test]
+fn a_quarantined_projection_refuses_a_slice_before_it_reads() {
+    let fixture = Fixture::build();
+    let quarantine = fixture
+        .projection()
+        .enter_quarantine_for_test(QuarantineKind::Storage, &"disk full");
+    let error = fixture
+        .cleanup(0)
+        .run_slice(
+            &support::projection_gate::open_gate(),
+            bounds(),
+            &unbounded(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, SearchProjectionError::Quarantined(found) if *found == quarantine),
+        "{error:?}"
+    );
+}
+
+/// When a write's reply is lost and the deadline has passed by the time the loss is noticed, reconciling the page from its rows honors the deadline too: the slice reports the write unresolved without another wait on the connection, counts only what it confirmed, keeps the page-start cursor, and the next slice counts nothing twice.
+#[test]
+fn lost_write_reconciliation_stops_at_the_deadline() {
+    let fixture = Fixture::build();
+    let whole = CleanupBounds {
+        page_rows: NonZeroUsize::new(16).unwrap(),
+        ..bounds()
+    };
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
+    cleanup.lose_next_write_reply_for_test();
+    let budget = EvalBudget::new(
+        Some(Instant::now() + std::time::Duration::from_millis(200)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &budget)
+        .unwrap();
+    assert!(
+        matches!(report.stop, Some(CleanupStop::Unresolved(_))),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.reclaimed.occurrences, 0,
+        "no row was confirmed gone inside the deadline: {report:?}"
+    );
+    assert_eq!(report.cursor, None, "the page is re-selected next slice");
+
+    let again = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &unbounded())
+        .unwrap();
+    assert_eq!(again.stop, None, "{again:?}");
+    assert_eq!(again.reclaimed.occurrences, 0, "nothing is counted twice");
+}
+
+/// The budget's deadline bounds the wait for the projection connection before selection as it bounds the wait before the write: a slice that starts while another operation holds the connection returns `Cancelled` at its deadline, before the holder releases, and removes nothing.
+#[test]
+fn a_slice_stops_at_its_deadline_while_another_operation_holds_the_connection() {
+    let fixture = Fixture::build();
+    let (took, taken) = std::sync::mpsc::channel::<()>();
+    let hold = std::time::Duration::from_secs(3);
+    let report = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            fixture
+                .projection()
+                .read(|_| {
+                    took.send(()).unwrap();
+                    std::thread::sleep(hold);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        taken.recv().unwrap();
+        let started = Instant::now();
+        let budget = EvalBudget::new(
+            Some(started + std::time::Duration::from_millis(200)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let report = fixture
+            .cleanup(fixture.acknowledged)
+            .run_slice(&support::projection_gate::open_gate(), bounds(), &budget)
+            .unwrap();
+        assert!(
+            started.elapsed() < hold / 2,
+            "the slice waited {:?} for the held connection, past its deadline",
+            started.elapsed()
+        );
+        report
+    });
+    assert_eq!(report.stop, Some(CleanupStop::Cancelled));
+    assert_eq!((report.inspected, report.reclaimed.occurrences), (0, 0));
+    assert_eq!(report.cursor, None);
+    assert_eq!(fixture.present().len(), 10);
 }
 
 /// AC4, AC5: a row bound stops the slice after exactly that many rows with a cursor the next slice resumes from; the original budget's cancellation and deadline stop admission before any page and cannot be renewed by the same identity, while a fresh budget proceeds.
@@ -667,7 +816,7 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
 
     let cancelled = unbounded();
     cancelled.cancel();
-    let mut cleanup = MessageCleanup::new(fixture.projection(), fixture.acknowledged);
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
     let report = cleanup
         .run_slice(&support::projection_gate::open_gate(), bounds(), &cancelled)
         .unwrap();
@@ -695,29 +844,33 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     );
     assert_eq!(fixture.present().len(), 10);
 
-    // One row per slice: each slice reclaims exactly one and hands the cursor on.
+    // One row per slice: each slice reclaims exactly one and hands the cursor on, until a short final page proves the scan exhausted.
     let one = CleanupBounds {
         max_reclaimed: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
     let mut removed = BTreeSet::new();
     let mut cursor = None;
-    for _ in 0..fixture.eligible.len() {
-        let mut slice = MessageCleanup::new(fixture.projection(), fixture.acknowledged)
+    for remaining in (1..=fixture.eligible.len()).rev() {
+        let mut slice = fixture
+            .cleanup(fixture.acknowledged)
             .resuming(cursor.clone());
         let report = slice
             .run_slice(&support::projection_gate::open_gate(), one, &unbounded())
             .unwrap();
         assert_eq!(report.reclaimed.occurrences, 1, "{report:?}");
-        assert_eq!(report.stop, Some(CleanupStop::BoundReached));
-        assert!(report.cursor.is_some());
+        if report.cursor.is_some() {
+            assert_eq!(report.stop, Some(CleanupStop::BoundReached));
+        } else {
+            assert_eq!((remaining, report.stop.as_ref()), (1, None), "{report:?}");
+        }
         cursor = report.cursor;
         let now = fixture.present();
         let gone: BTreeSet<String> = fixture.eligible.difference(&now).cloned().collect();
         assert_eq!(gone.len(), removed.len() + 1);
         removed = gone;
     }
-    let mut last = MessageCleanup::new(fixture.projection(), fixture.acknowledged).resuming(cursor);
+    let mut last = fixture.cleanup(fixture.acknowledged).resuming(cursor);
     let report = last
         .run_slice(&support::projection_gate::open_gate(), one, &unbounded())
         .unwrap();
@@ -725,17 +878,83 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     assert_eq!(report.cursor, None, "the scan is exhausted");
     assert_eq!(fixture.present(), expected_final);
 
+    // A grant revoked between pages stops the slice at the next admission: the first page stands, nothing later is inspected.
+    let fixture = Fixture::build();
+    let gate = support::projection_gate::open_gate();
+    let closer = Arc::clone(&gate);
+    let mut revoked = fixture
+        .cleanup(fixture.acknowledged)
+        .with_after_page_for_test(move || closer.close());
+    let report = revoked.run_slice(&gate, bounds(), &unbounded()).unwrap();
+    assert_eq!(report.stop, Some(CleanupStop::Cancelled), "{report:?}");
+    assert_eq!(report.inspected, 2, "one page, then the revoked grant");
+    assert_eq!(
+        fixture.present().len(),
+        10 - report.reclaimed.occurrences,
+        "only the committed page's rows are gone"
+    );
+
     // A page bound of one page per slice inspects only one page and resumes.
     let fixture = Fixture::build();
     let page = CleanupBounds {
         max_pages: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
-    let mut slice = MessageCleanup::new(fixture.projection(), fixture.acknowledged);
+    let mut slice = fixture.cleanup(fixture.acknowledged);
     let report = slice
         .run_slice(&support::projection_gate::open_gate(), page, &unbounded())
         .unwrap();
     assert_eq!(report.inspected, 2);
     assert_eq!(report.stop, Some(CleanupStop::BoundReached));
     assert!(report.cursor.is_some());
+}
+
+/// When the store applies a page but loses its COMMIT reply, the report counts the rows that are gone, names the outcome unresolved, keeps the page-start cursor, and the next slice counts nothing twice.
+#[test]
+fn a_lost_write_reply_is_reconciled_from_the_rows_not_reported_as_unchanged() {
+    let fixture = Fixture::build();
+    let expected_final: BTreeSet<String> = fixture
+        .live
+        .iter()
+        .chain([
+            &fixture.held,
+            &fixture.admitted,
+            &fixture.late,
+            &fixture.tool,
+        ])
+        .cloned()
+        .collect();
+    let whole = CleanupBounds {
+        page_rows: NonZeroUsize::new(16).unwrap(),
+        ..bounds()
+    };
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
+    cleanup.lose_next_write_reply_for_test();
+    let report = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &unbounded())
+        .unwrap();
+    assert_eq!(
+        fixture.present(),
+        expected_final,
+        "the store applied the page before its reply was lost"
+    );
+    assert_eq!(
+        report.reclaimed.occurrences,
+        fixture.eligible.len(),
+        "the rows that are gone are the rows reclaimed: {report:?}"
+    );
+    assert!(
+        matches!(report.stop, Some(CleanupStop::Unresolved(_))),
+        "{report:?}"
+    );
+    assert_eq!(report.cursor, None, "the page is re-selected next slice");
+    assert_eq!(cleanup.cursor(), None);
+
+    let again = cleanup
+        .run_slice(&support::projection_gate::open_gate(), whole, &unbounded())
+        .unwrap();
+    assert_eq!(again.stop, None, "{again:?}");
+    assert_eq!(again.reclaimed.occurrences, 0, "nothing is counted twice");
+    assert_eq!(again.cursor, None, "the scan is exhausted");
+    assert_eq!(fixture.present(), expected_final);
 }

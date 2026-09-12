@@ -110,7 +110,7 @@ fn projection_identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
-        identity_contract_version: "search-projection-identity-v2".to_string(),
+        identity_contract_version: "search-projection-identity-v3".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: MODEL.to_string(),
         tokenizer_fingerprint: FINGERPRINT.to_string(),
@@ -312,6 +312,12 @@ impl Corpus {
 
     /// Three domains (the memory domain, another, and one merely named after it), one project scope, the search consumer, and the claim consumer.
     fn seed(&self) {
+        self.seed_kernel();
+        ClaimMaterializer::register(&self.kernel, NOW).unwrap();
+    }
+
+    /// Omits the claim consumer registration so callers can create decisions before it.
+    fn seed_kernel(&self) {
         self.kernel
             .commit(intent("seed"), |envelope| {
                 for (domain, name) in [
@@ -348,7 +354,6 @@ impl Corpus {
                 Ok(String::new())
             })
             .unwrap();
-        ClaimMaterializer::register(&self.kernel, NOW).unwrap();
     }
 
     /// Inserts one admitted decision.
@@ -502,8 +507,8 @@ impl Corpus {
             .collect()
     }
 
-    /// The admission classes recorded for every live descriptor, keyed by descriptor object.
-    fn descriptor_admissions(&self) -> BTreeMap<String, (String, String)> {
+    /// The admission classes recorded for every live descriptor, one row per admission.
+    fn descriptor_admissions(&self) -> Vec<(String, (String, String))> {
         self.kernel_db()
             .prepare(
                 "SELECT a.subject_object_id,a.source_class,a.taint_class
@@ -766,7 +771,7 @@ fn ledger_predicts_inventory_exclusions_and_dense_work() {
     let admissions = corpus.descriptor_admissions();
     assert_eq!(admissions.len(), expected_rows.len());
     assert!(
-        admissions.values().all(|classes| *classes
+        admissions.iter().all(|(_, classes)| *classes
             == (
                 CLASSES.0.as_str().to_string(),
                 CLASSES.1.as_str().to_string()
@@ -1046,6 +1051,172 @@ fn lost_and_skipped_acknowledgements_replay_from_receipts() {
     );
 }
 
+/// A fold into a live survivor that the same commit then retires publishes nothing for the survivor and retires every descriptor; the episode reaches its target instead of blocking on the survivor's invalidated row.
+#[test]
+fn fold_then_retire_in_one_commit_retires_and_reaches_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let a = Seed::scoped("a", MEMORY, "PROJECT_RULES", 1, CONTRACT, "First.");
+    let b = Seed::scoped("b", MEMORY, "PROJECT_RULES", 2, CONTRACT, "Second.");
+    corpus.decide(a);
+    // `b` shares `a`'s source lineage at a later revision, so `a` can fold into it.
+    let b_spec = DecisionSpec {
+        source_id: "a-lineage".to_string(),
+        ..b.spec()
+    };
+    corpus
+        .kernel
+        .commit(intent("decide:b"), |envelope| {
+            envelope.insert_decision(b_spec.clone())?;
+            envelope.record_admission(admission("b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(corpus.materialize().published, 6);
+
+    corpus
+        .kernel
+        .commit(intent("fold-and-retire"), |envelope| {
+            envelope.correct_decision("a", b_spec.clone())?;
+            envelope.retire_decision("b")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (0, 6), "{report:?}");
+    assert_eq!(corpus.checkpoint(), Some(report.target));
+    assert!(corpus.inventory().is_empty());
+}
+
+/// A merge that supersedes several predecessors with one successor in a single commit retires every predecessor before the successor is published, so no commit holds a predecessor beside its successor.
+#[test]
+fn merge_retires_every_predecessor_before_publishing_the_successor() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let a = Seed::scoped("a", MEMORY, "PROJECT_RULES", 1, CONTRACT, "First.");
+    let b = Seed::scoped("b", MEMORY, "PROJECT_RULES", 1, "Keep it.", "Second.");
+    corpus.decide(a);
+    // Both predecessors sit on one source lineage, as a merge requires.
+    corpus
+        .kernel
+        .commit(intent("decide:b"), |envelope| {
+            envelope.insert_decision(DecisionSpec {
+                source_id: "a-lineage".to_string(),
+                ..b.spec()
+            })?;
+            envelope.record_admission(admission("b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(corpus.materialize().published, 6);
+    let successor = Seed::scoped("c", MEMORY, "PROJECT_RULES", 2, CONTRACT, "Merged.");
+    let c_spec = DecisionSpec {
+        source_id: "a-lineage".to_string(),
+        ..successor.spec()
+    };
+    corpus
+        .kernel
+        .commit(intent("merge"), |envelope| {
+            let c = envelope.correct_decision("a", c_spec.clone())?;
+            envelope.correct_decision("b", c_spec.clone())?;
+            envelope.record_admission(admission(&c.object_id))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (3, 6), "{report:?}");
+    let (new_rows, _) = successor.ledger();
+    assert_eq!(corpus.inventory(), new_rows.iter().cloned().collect());
+
+    // Every predecessor descriptor is invalidated at a commit before the first successor descriptor is created.
+    let db = corpus.kernel_db();
+    let commit_of = |expected: &Expected, column: &str| -> i64 {
+        let encoded = encode_preserving_span(&Occurrence {
+            class: expected.class,
+            identity: &[(expected.field, &expected.object_id)],
+            revision: &expected.revision.to_string(),
+            representation: expected.representation,
+            span: None,
+        })
+        .unwrap();
+        let object_id =
+            kernel::descriptor_object_id(&encoded.lineage_id, &expected.revision.to_string());
+        db.query_row(
+            &format!("SELECT {column} FROM object_registry WHERE object_id=?1"),
+            [object_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let last_retired = a
+        .ledger()
+        .0
+        .iter()
+        .chain(&b.ledger().0)
+        .map(|row| commit_of(row, "invalidated_commit_seq"))
+        .max()
+        .unwrap();
+    let first_published = new_rows
+        .iter()
+        .map(|row| commit_of(row, "created_commit_seq"))
+        .min()
+        .unwrap();
+    assert!(
+        last_retired < first_published,
+        "predecessors retired at {last_retired}, successor published at {first_published}"
+    );
+}
+
+/// AC3: an acknowledgement whose outcome is unknown and whose durable checkpoint still sits below the page blocks the episode; the published page stays, and the next episode re-drives it from receipts and acknowledges.
+#[test]
+fn unresolved_acknowledgement_blocks_and_the_next_episode_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    let before = corpus.checkpoint();
+    let failed = corpus
+        .materializer()
+        .run_episode_with_fault_for_test(bounds(), NOW, EpisodeFault::FailAcknowledgement)
+        .unwrap();
+    assert!(
+        matches!(
+            failed.end,
+            MaterializationEnd::Blocked(ClaimBlocked::AcknowledgementUnresolved { through, checkpoint })
+                if through == failed.target && checkpoint == before
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(failed.published, 3);
+    assert_eq!(corpus.checkpoint(), before, "the checkpoint did not move");
+    let inventory = corpus.inventory();
+    assert_eq!(inventory.len(), 3);
+
+    let tip = corpus.kernel.tip().unwrap();
+    let recovered = corpus.materialize();
+    assert_eq!(
+        (recovered.published, recovered.replayed),
+        (0, 3),
+        "{recovered:?}"
+    );
+    assert_eq!(corpus.checkpoint(), Some(recovered.target));
+    assert_eq!(
+        corpus.kernel.tip().unwrap(),
+        tip,
+        "a replayed page commits nothing"
+    );
+    assert_eq!(corpus.inventory(), inventory);
+}
+
 /// AC2: a decision with no admission decision authorizes nothing: its descriptors are refused before any byte is retained and the checkpoint does not pass it.
 #[test]
 fn unadmitted_decision_publishes_nothing_and_blocks_the_episode() {
@@ -1087,6 +1258,34 @@ fn unadmitted_decision_publishes_nothing_and_blocks_the_episode() {
         evidence, 0,
         "nothing was retained for the unadmitted decision"
     );
+}
+
+/// An episode against a kernel that never registered the consumer reports the unknown consumer and walks nothing.
+#[test]
+fn unregistered_consumer_blocks_the_episode() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "",
+    ));
+    let tip = corpus.kernel.tip().unwrap();
+    let report = corpus.materializer().run_episode(bounds(), NOW).unwrap();
+    assert!(
+        matches!(
+            report.end,
+            MaterializationEnd::Blocked(ClaimBlocked::UnknownConsumer)
+        ),
+        "{report:?}"
+    );
+    assert_eq!((report.commits_consumed, report.published), (0, 0));
+    assert_eq!(corpus.kernel.tip().unwrap(), tip, "nothing committed");
+    assert_eq!(corpus.checkpoint(), None, "no implicit registration");
 }
 
 /// AC5: a name-only remediation of the memory domain changes no identity, tuple, or payload, and a second episode publishes nothing; a mapping that folded the name into the identity would move.
@@ -1172,6 +1371,124 @@ fn domain_name_is_not_an_input() {
     .unwrap()
     .occurrence_id;
     assert!(!recomputed_ids.contains(&with_name));
+}
+
+/// Revoking an approval retires its published descriptors.
+#[test]
+fn approval_revocation_retires_descriptors() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "approval",
+        MEMORY,
+        "adr_accepted",
+        1,
+        "Accept the ADR.",
+        "It was reviewed.",
+    ));
+    let report = corpus.materialize();
+    assert_eq!(report.published, 2, "{report:?}");
+    corpus
+        .kernel
+        .commit(intent("revoke:approval"), |envelope| {
+            envelope.revoke_approval("approval", "the ADR was withdrawn")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (0, 2), "{report:?}");
+    assert!(corpus.inventory().is_empty());
+    assert_eq!(corpus.checkpoint(), Some(report.target));
+}
+
+/// The kernel accepts a decision object id the source-identity encoding refuses. Such a decision is an exclusion on insert and a no-op on retire; the episode reaches its target both times.
+#[test]
+fn malformed_object_id_is_excluded_on_insert_and_ignored_on_retire() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let long = "x".repeat(600);
+    let seeds = [
+        Seed::scoped(
+            "tab\tbed",
+            MEMORY,
+            "PROJECT_RULES",
+            1,
+            "Control character.",
+            "In the id.",
+        ),
+        Seed {
+            object: &long,
+            domain: MEMORY,
+            kind: "PROJECT_RULES",
+            revision: 1,
+            summary: "Over the length bound.",
+            rationale: "",
+            scoped: true,
+        },
+    ];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let report = corpus.materialize();
+    assert_eq!(report.published, 0, "{report:?}");
+    assert_eq!(
+        report.exclusions,
+        seeds
+            .iter()
+            .map(|seed| (seed.object.to_string(), ClaimExclusion::MalformedIdentity))
+            .collect::<Vec<_>>()
+    );
+    assert!(corpus.inventory().is_empty());
+    for seed in seeds {
+        corpus.retire(seed.object);
+    }
+    let report = corpus.materialize();
+    assert_eq!((report.published, report.retired), (0, 0), "{report:?}");
+    assert_eq!(corpus.checkpoint(), Some(report.target));
+}
+
+/// Registration acknowledges through its own commit: decisions committed before it are not walked, a decision after it is, and a repeated registration replays without moving the checkpoint back or forward.
+#[test]
+fn registration_starts_after_its_own_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    corpus.decide(Seed::scoped(
+        "before",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        "Committed before registration.",
+        "",
+    ));
+    ClaimMaterializer::register(&corpus.kernel, NOW).unwrap();
+    let registered_at = corpus.kernel.tip().unwrap();
+    assert_eq!(corpus.checkpoint(), Some(registered_at));
+    let report = corpus.materialize();
+    assert_eq!(
+        (report.published, report.commits_consumed),
+        (0, 0),
+        "{report:?}"
+    );
+    assert!(corpus.inventory().is_empty());
+
+    corpus.decide(Seed::scoped(
+        "after",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        "Committed after registration.",
+        "",
+    ));
+    let report = corpus.materialize();
+    assert_eq!(report.published, 2, "{report:?}");
+    let advanced = corpus.checkpoint();
+    assert!(advanced > Some(registered_at));
+
+    ClaimMaterializer::register(&corpus.kernel, NOW + 1).unwrap();
+    assert_eq!(corpus.checkpoint(), advanced);
 }
 
 /// A subject and decision naming different objects, or a non-decision registry row, are refused rather than mapped.

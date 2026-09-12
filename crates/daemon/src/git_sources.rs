@@ -1,6 +1,6 @@
 //! Reads an explicit, bounded selection of commits from one bound repository and turns each commit's exact message bytes into a `git_commits` source unit keyed by repository id, object format, and full object id. Nothing is traversed: a commit not named in the selection is not read, and a name, path, or ref is never an identity.
 //!
-//! Every object header is admitted against the read bounds before any object is decoded, and the decoded size is charged again, so a selection with a missing, corrupt, non-commit, repeated, or oversized object is refused whole. A commit whose message is not UTF-8, or that declares another encoding, is an explicit disposition rather than a converted or dropped row.
+//! Object headers, the store's allocations, and decoded sizes are bounded independently; a selection is refused whole if any object is missing, corrupt, non-commit, repeated, or exceeds a bound. A non-UTF-8 message or a declared non-UTF-8 encoding is an explicit disposition rather than a converted or dropped row.
 
 use std::collections::HashSet;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -38,7 +38,7 @@ pub struct GitReadBounds {
     pub max_total_object_bytes: NonZeroU64,
 }
 
-/// Why a selection produced no units. Every variant names an identity or a size, never message content or a path.
+/// Identifies why a selection produces no units.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GitRefusal {
     #[error("the selection names {count} commits, above the bound of {max}")]
@@ -49,8 +49,12 @@ pub enum GitRefusal {
     Open,
     #[error("the repository's object format is not supported")]
     UnsupportedObjectFormat,
-    #[error("{0} is not a full lowercase object id of the repository's format")]
-    MalformedOid(String),
+    /// The repository has a shallow boundary, so a traversal from its refs cannot reach every ancestor the object store holds.
+    #[error("the repository is shallow")]
+    Shallow,
+    /// Stores the invalid entry's zero-based selection index rather than its unvalidated bytes.
+    #[error("selection entry {0} is not a full lowercase object id of the repository's format")]
+    MalformedOid(usize),
     #[error("object {0} is missing")]
     MissingObject(String),
     #[error("object {0} is not a commit")]
@@ -58,8 +62,14 @@ pub enum GitRefusal {
     /// The object store failed to read or decode the object; absence is not inferred from it.
     #[error("object {0} could not be read")]
     Unreadable(String),
+    /// The returned bytes do not hash to the id, so they cannot represent that object.
+    #[error("object {0} does not hash to its id")]
+    HashMismatch(String),
     #[error("object {oid} decodes to {bytes} bytes, above the bound of {max}")]
     ObjectTooLarge { oid: String, bytes: u64, max: u64 },
+    /// Materializing the object needs an allocation above the per-object bound. The store refuses before those bytes exist, so no decoded size is known.
+    #[error("object {oid} needs more than {max} bytes to materialize")]
+    DecodeTooLarge { oid: String, max: u64 },
     #[error("the selection decodes to {bytes} bytes, above the bound of {max}")]
     TotalBytesExceeded { bytes: u64, max: u64 },
     /// The gate denied git ingest or its durable rows; the repository was not opened.
@@ -85,31 +95,70 @@ pub struct GitSelection {
     pub dispositions: Vec<GitDisposition>,
 }
 
-fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
+/// `gix::hash::Kind` is non-exhaustive, so the wildcard refuses a hash kind this build does not read.
+pub(crate) fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
     match hash {
         gix::hash::Kind::Sha1 => Ok("sha1"),
         _ => Err(GitRefusal::UnsupportedObjectFormat),
     }
 }
 
+/// gix reports an `extensions.objectFormat` value this build does not read as a typed-string error on that key rather than a dedicated variant, so the refusal is recognized by the key it names.
+fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
+    match error {
+        gix::open::Error::Config(gix::config::Error::ConfigTypedString(error)) => {
+            error.key == "extensions.objectFormat"
+        }
+        _ => false,
+    }
+}
+
 /// Opens the repository without user, system, or installation configuration and with replacement refs ignored, so neither a repository's own settings nor a `refs/replace` entry can substitute another object for a selected id.
-fn open(path: &Path) -> Result<gix::Repository, GitRefusal> {
-    let mut repo =
-        gix::open_opts(path, gix::open::Options::isolated()).map_err(|_| GitRefusal::Open)?;
+///
+/// `max_object_bytes` is also installed as gix's allocation limit. A packed delta's header states only the final object size, while materializing it inflates every base in its chain; the limit makes the store refuse a base above the bound instead of allocating it. The override is applied after the repository's own configuration, so a repository cannot raise it.
+pub(crate) fn open(
+    path: &Path,
+    max_object_bytes: NonZeroU64,
+) -> Result<gix::Repository, GitRefusal> {
+    let options = gix::open::Options::isolated().config_overrides([format!(
+        "gitoxide.objects.allocLimit={}",
+        max_object_bytes.get()
+    )]);
+    let mut repo = gix::open_opts(path, options).map_err(|error| {
+        if declares_unsupported_object_format(&error) {
+            GitRefusal::UnsupportedObjectFormat
+        } else {
+            GitRefusal::Open
+        }
+    })?;
     repo.objects.ignore_replacements = true;
     Ok(repo)
 }
 
-/// A full lowercase hex id of the repository's format; any other spelling could name two objects or none.
-fn parse_oid(oid: &str, hash: gix::hash::Kind) -> Result<gix::ObjectId, GitRefusal> {
+/// Whether the store refused an object because materializing it needs an allocation above its limit, anywhere in a delta chain.
+fn exceeds_allocation(error: &gix::objs::find::Error) -> bool {
+    use gix::odb::store::find::Error as Store;
+    fn walk(error: &Store) -> bool {
+        match error {
+            Store::Pack(gix::odb::pack::data::decode::Error::OutOfMemory)
+            | Store::Loose(gix::odb::loose::find::Error::OutOfMemory { .. }) => true,
+            Store::DeltaBaseLookup { err, .. } => walk(err),
+            _ => false,
+        }
+    }
+    error.downcast_ref::<Store>().is_some_and(walk)
+}
+
+/// Returns `None` unless `oid` is a full lowercase hexadecimal id for `hash`.
+fn parse_oid(oid: &str, hash: gix::hash::Kind) -> Option<gix::ObjectId> {
     if oid.len() != hash.len_in_hex()
         || !oid
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(GitRefusal::MalformedOid(oid.to_owned()));
+        return None;
     }
-    gix::ObjectId::from_hex(oid.as_bytes()).map_err(|_| GitRefusal::MalformedOid(oid.to_owned()))
+    gix::ObjectId::from_hex(oid.as_bytes()).ok()
 }
 
 fn escaped_prefix(bytes: &[u8]) -> String {
@@ -122,7 +171,7 @@ fn escaped_prefix(bytes: &[u8]) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`GitRefusal`] when the selection is over its bound or names an id twice, the repository cannot be opened or uses an unsupported format, an id is malformed, an object is missing, unreadable, or not a commit, or the object sizes exceed the bounds before or after decoding. No unit is produced from a refused selection.
+/// Returns [`GitRefusal`] when the selection is over its bound or names an id twice, the repository cannot be opened or uses an unsupported format, an id is malformed, an object is missing, unreadable, or not a commit, or the object sizes exceed the bounds before, during, or after decoding. No unit is produced from a refused selection.
 pub fn read_selection(
     gate: &HookGate,
     binding: &RepositoryBinding,
@@ -140,14 +189,15 @@ pub fn read_selection(
             max: bounds.max_commits.get(),
         });
     }
-    let repo = open(&binding.path)?;
+    let repo = open(&binding.path, bounds.max_object_bytes)?;
     let hash = repo.object_hash();
     let format = object_format(hash)?;
     let mut seen = HashSet::new();
     let ids: Vec<gix::ObjectId> = oids
         .iter()
-        .map(|oid| {
-            let id = parse_oid(oid, hash)?;
+        .enumerate()
+        .map(|(index, oid)| {
+            let id = parse_oid(oid, hash).ok_or(GitRefusal::MalformedOid(index))?;
             if !seen.insert(id) {
                 return Err(GitRefusal::DuplicateOid(oid.clone()));
             }
@@ -192,16 +242,32 @@ pub fn read_selection(
             gix::object::find::existing::Error::NotFound { .. } => {
                 GitRefusal::MissingObject(oid.clone())
             }
+            gix::object::find::existing::Error::Find(error) if exceeds_allocation(&error) => {
+                GitRefusal::DecodeTooLarge {
+                    oid: oid.clone(),
+                    max: bounds.max_object_bytes.get(),
+                }
+            }
             _ => GitRefusal::Unreadable(oid.clone()),
         })?;
         charge(oid, object.data.len() as u64, &mut decoded_total)?;
+        // A hash mismatch refuses the selection rather than retaining bytes under an id that does not identify them.
+        let actual = gix::objs::compute_hash(hash, object.kind, &object.data)
+            .map_err(|_| GitRefusal::Unreadable(oid.clone()))?;
+        if actual != *id {
+            return Err(GitRefusal::HashMismatch(oid.clone()));
+        }
         let commit = object
             .try_into_commit()
             .map_err(|_| GitRefusal::NotACommit(oid.clone()))?;
         let decoded = commit
             .decode()
             .map_err(|_| GitRefusal::Unreadable(oid.clone()))?;
-        let utf8_declared = decoded.encoding.is_none_or(|encoding| {
+        // gix recognizes `encoding` only directly after `committer`; git honors it at any header position, and JGit writes it after `gpgsig`. Either position declares the message's encoding.
+        let declared = decoded
+            .encoding
+            .or_else(|| decoded.extra_headers().find("encoding"));
+        let utf8_declared = declared.is_none_or(|encoding| {
             encoding.eq_ignore_ascii_case(b"utf-8") || encoding.eq_ignore_ascii_case(b"utf8")
         });
         let text = if utf8_declared {
@@ -212,7 +278,7 @@ pub fn read_selection(
         let Some(text) = text else {
             dispositions.push(GitDisposition::UnsupportedEncoding {
                 oid: oid.clone(),
-                declared: decoded.encoding.map(|encoding| escaped_prefix(encoding)),
+                declared: declared.map(|encoding| escaped_prefix(encoding)),
             });
             continue;
         };

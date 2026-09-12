@@ -43,13 +43,13 @@ only; no test ran and nothing outside this file changed.
   on an already-typed request built by [`serde_json::from_value`][hp-req]
   against a [fresh tempfile store][hp-store]. The production handler wraps
   that call with work the bench never sees: the projection-cache lookup,
-  side-channel drain, and `trace_pass_received` at [8120-8131][h-pre], the
+  side-channel drain, and `trace_pass_received` at [8181-8198][h-pre], the
   `project_memory` read, `historian_active`, and guidance-date lookups inside
   [`run_transform`][h-run], a `Some` projection-cache input at
-  [8186-8192][h-call], `prepare_historian_fire`, and response encoding in
+  [8250-8256][h-call], `prepare_historian_fire`, and response encoding in
   [`respond_transform`][respond]. The bench tops out at 1_000 messages because
   the store's 512 KiB durable-text bound rejects a 1_400-message first HARD
-  pass ([hot_path.rs:30-35][hp-counts], [267-269][hp-cliff]); that cliff is
+  pass ([hot_path.rs:29-35][hp-counts], [291-293][hp-cliff]); that cliff is
   pinned by [`transform_meta_bound.rs`][meta-bound]. The two
   production-sized fixtures that do exist are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] at 1_400 messages and
@@ -108,10 +108,10 @@ only; no test ran and nothing outside this file changed.
 - Guarantee: A stage that reports a smaller number after the change got
   faster rather than moving out from under its timer.
 - Rationale: Every `TransformTimings` field carries `#[serde(default)]`
-  ([1018-1197][tt]), so a dropped field deserializes as zero and the plugin
+  ([1026-1207][tt]), so a dropped field deserializes as zero and the plugin
   prints `n/a` only when the key is absent from the JSON object
   ([1019-1024][ts-stage-fn]). The handler assigns its stage fields from
-  `Instant` pairs taken on the handler task at [8463-8488][h-timings]; a
+  `Instant` pairs taken on the handler task at [8540-8564][h-timings]; a
   `spawn_blocking` relocation separates those pairs from the worker's.
   [`record_token_cache_delta`][rtcd] subtracts two reads of the
   [thread-local counters][tc-local]; both reads sit inside the synchronous
@@ -127,8 +127,8 @@ only; no test ran and nothing outside this file changed.
 - Required faults and enabling state: none beyond a code change and a pass
   that populates `timings`.
 - Reachability: default-production - the handler populates `timings` on the
-  ordinary path ([8463][h-timings]) and [`respond_transform`][respond] emits
-  the line for every response ([14463-14481][emit-call]).
+  ordinary path ([8540-8564][h-timings]) and [`respond_transform`][respond] emits
+  the line for every response ([14521-14539][emit-call]).
 - Existing check: [`pass_timing_line_is_parseable_for_an_empty_session`][t-line]
   pins the line's key set; [`timings_are_present_and_old_responses_deserialize_without_them`][t-timings]
   pins the default; the plugin test at [test.ts:244][ts-test] asserts the
@@ -158,12 +158,12 @@ only; no test ran and nothing outside this file changed.
   exactly two generations of that cap and is one term of
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared], whose doc says the runtime
   bound holds only when the declaration is truthful and lists each retention
-  class so a change cannot omit one ([2236-2241][declared-doc]); no test
+  class so a change cannot omit one ([2243-2248][declared-doc]); no test
   checks the sum. [`count_with_digest`][tc-cwd] returns counts above `u32`
   uncached ([135-137][tc-u32]) and tokenizes outside the lock, so concurrent
   misses may tokenize twice ([107-109][tc-concurrent]).
   [`cached_estimate_tokens`][tc-cet] prefixes a NUL so raw content cannot
-  alias a tail-hygiene key; [`tail_hygiene.rs:264`][th-cwd] and
+  alias a tail-hygiene key; [`tail_hygiene.rs:614`][th-cwd] and
   [`m0_compose` via `bench_internals`][bi-trim] are the other callers.
 - Fault/timing angle: Two sessions miss on the same digest at once; a
   generation rotation at the cap while a promote-on-hit insert runs.
@@ -199,13 +199,15 @@ only; no test ran and nothing outside this file changed.
   invisible to the pass's own accounting, and a test can substitute the
   estimator to reach a threshold.
 - Rationale: `apply_once` takes `estimate_tokens: impl Fn(&str) -> usize +
-  Copy` ([2836-2840][ao-sig]). The existing test is a source-text scan
+  Copy` ([2847-2851][ao-sig]). The existing test is a source-text scan
   limited to the span from [`protected_tail_floor_ordinal`][floor] to
   `post_end_revision_inputs_moved`. Direct `tokenizer::estimate_tokens`
   calls in production transform code at HEAD: the SOFT pressure predicate's
-  `m0_tokens` and `m1_tokens` at [4298-4309][soft-direct] (finding 10), the
-  tag-mint `token_count` persisted into tag rows at [7160][mint-direct], and
-  `ActiveTagForNudge.token_count` at [8558][nudge-direct]. The tokenizer
+  `m0_tokens` and `m1_tokens` at [4298-4309][soft-direct] (finding 10) and
+  `ActiveTagForNudge.token_count` at [8558][nudge-direct]; the tag-mint
+  `token_count` persisted into tag rows now goes through
+  [`cached_estimate_tokens`][mint-direct] (transform.rs:7234), whose cache accounting
+  the [tag-mint check][mint-check] covers. The tokenizer
   crate exposes no call counter ([`estimate_tokens`][tok-fn]), so the only
   runtime oracle is the injected estimator plus the thread-local stats.
 - Fault/timing angle: none.
@@ -256,7 +258,7 @@ only; no test ran and nothing outside this file changed.
   [comment at rules.rs:382][digest-doc] says evaluator semantics are bound
   by `semantic_digest_version`, pinned by
   [`evaluator_constants_are_pinned`][t-pinned]. The memory store persists
-  the digest per scan batch ([2357-2392][ms-digest]), so an evaluator
+  the digest per scan batch ([2442-2477][ms-digest]), so an evaluator
   change without a bump makes old and new audit rows indistinguishable.
 - Fault/timing angle: none; a data-shape difference.
 - Required faults and enabling state: An input where a rule's match and its
@@ -306,9 +308,9 @@ only; no test ran and nothing outside this file changed.
   The differential test's header says the probe sequence must be preserved
   because token counts are not monotonic in prefix length
   ([1-11][diff-header]); it pins byte equality against the frozen reference
-  at production windows ([100-113][diff-prod], 24 cases, budget 1..32_001),
-  small windows ([131-140][diff-small]), and the exact-budget identity
-  ([115-129][diff-exact]). The golden
+  at production windows ([102-112][diff-prod], 24 cases, budget 1..32_001),
+  small windows ([133-140][diff-small]), and the exact-budget identity
+  ([117-128][diff-exact]). The golden
   [`forced_overflow_preserves_existing_truncation_output`][t-golden] pins
   one case from `testdata/historian-chunk-golden.json`.
 - Fault/timing angle: A fingerprint format change lands while a firing is
@@ -343,7 +345,7 @@ only; no test ran and nothing outside this file changed.
 - Rationale: [`parse_cron`][parse] accepts day-of-month 1..31 independent of
   month, so `0 0 30 2 *` is valid and unsatisfiable; [`matches_day`][vixie]
   implements Vixie OR semantics; the stepper evaluates local civil fields
-  for each epoch minute ([166-192][stepper]), so a spring-forward gap skips
+  for each epoch minute ([163-192][stepper]), so a spring-forward gap skips
   that day and a fall-back overlap matches the earlier instant. The cap is
   [`MAX_SEARCH_MS`][cap], 4 x 366 days, 2_108_160 iterations per call for an
   unsatisfiable expression through [`next_cron_occurrence`][occurrence];
@@ -351,7 +353,7 @@ only; no test ran and nothing outside this file changed.
   ([236-239][note-cap]). The dreamer scheduler calls it as
   [`next_due`][sched-due] on its async task; the schedule defaults to `None`
   ([config.rs:127][sched-default]) and is accepted by
-  [`is_valid_smart_note_cron`][valid] at [config.rs:887][sched-accept].
+  [`is_valid_smart_note_cron`][valid] at [config.rs:881-895][sched-accept].
 - Fault/timing angle: The scheduler's tick runs the stepper synchronously;
   an unsatisfiable schedule pays the full cap on that task.
 - Required faults and enabling state: A `Local` zone with DST; expressions
@@ -394,11 +396,11 @@ only; no test ran and nothing outside this file changed.
   clone of the merged config at [288][eff-clone]. Per-pass callers are
   [`maybe_spawn_reattach`][call-reattach],
   [`prepare_historian_fire`][call-fire], and the wrapup path
-  [5368][call-wrapup]; [`bind`][call-bind] freezes a copy into
+  [5417][call-wrapup]; [`bind`][call-bind] freezes a copy into
   `SessionBinding`, whose doc says config can change while the route stays
-  open ([lib.rs:216-217][binding-doc]). One `ConfigCache` per handler holds
+  open ([lib.rs:223-224][binding-doc]). One `ConfigCache` per handler holds
   one project tier, so two bound project roots alternating re-read the file
-  every call ([368-372][tier-cached]). The staleness contract at HEAD
+  every call ([368-398][tier-cached]). The staleness contract at HEAD
   already ignores a same-mtime edit ([test 2182-2188][t-mtime]).
 - Fault/timing angle: A tier edit between two passes; two routes on
   different project roots alternating; the override edited without touching
@@ -449,13 +451,13 @@ only; no test ran and nothing outside this file changed.
 - Every process-global cache is declared.
   [`DECLARED_RETAINED_RESIDENT_BYTES`][declared]
   lists each retention class so a budget change cannot omit one
-  ([2236-2241][declared-doc]); a merged-config cache, a sharded token cache,
+  ([2243-2248][declared-doc]); a merged-config cache, a sharded token cache,
   a cron cache, or a scanner anchor index adds its bound there. No test
   checks the sum.
 - Scanner semantics are versioned. An evaluator change that can alter any
   finding bumps [`REVISION.semantic_digest_version`][revision]
   ([rules.rs:382][digest-doc]); the memory store persists the digest per
-  scan batch ([2357-2392][ms-digest]).
+  scan batch ([2442-2477][ms-digest]).
 - Bench targets stay out of nextest and run in CI only as smoke.
   [`.config/nextest.toml`][nextest]; [`ci.yml:514-518`][ci-bench]. A new
   bench must also compile and pass in test mode.
@@ -521,7 +523,7 @@ itself tooling only.
 
 - [`default_rules.yaml:12`][rules-radius-doc] describes `radius` as the
   "Byte radius around an anchor match fed to the regex". The evaluator feeds
-  the whole input to the regex ([112][captures]) and uses `radius` only for
+  the whole input to the regex ([112-128][captures]) and uses `radius` only for
   the context window around the full match ([266-297][radius-window]). The
   doc describes a design the code does not implement; a bounded scan would
   move the code toward the doc and must be judged against the property above,
@@ -541,7 +543,7 @@ itself tooling only.
 - [`config.rs:266-267`][eff-warn-doc] states tier read failures are reported
   on every load. The code matches. A merged-config cache contradicts the
   statement and must rewrite it or preserve the behavior.
-- [`hot_path.rs:30-33`][hp-counts] attributes the 512 KiB cliff to `meta`
+- [`hot_path.rs:29-35`][hp-counts] attributes the 512 KiB cliff to `meta`
   growing about 460 bytes per message. The cliff is pinned by
   [`transform_meta_bound.rs`][meta-bound] at 1_000 ok and 1_400 refused; the
   per-message figure is unverified here.
@@ -584,8 +586,8 @@ call site.
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L291-L293
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
-[bi-tc]: ../../../../../crates/daemon/src/lib.rs#L191-L199
-[bi-trim]: ../../../../../crates/daemon/src/lib.rs#L172-L180
+[bi-tc]: ../../../../../crates/daemon/src/lib.rs#L192-L200
+[bi-trim]: ../../../../../crates/daemon/src/lib.rs#L173-L181
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
 [he-blocked]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286
@@ -593,23 +595,22 @@ call site.
 [pm-body]: ../../../../../crates/host-runtime/tests/support/perf_measurement.rs#L16-L19
 [ring-body]: ../../../../../crates/host-runtime/benches/support/ring.rs#L77
 [evidence]: ../../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
-[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12381-L12386
-[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27398-L27403
-
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8121-L8138
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8144-L8199
-[h-call]: ../../../../../crates/daemon/src/lib.rs#L8192-L8198
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8469-L8494
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14410
-[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14469-L14487
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14491-L14513
-[tt]: ../../../../../crates/daemon/src/transform.rs#L1018-L1197
-[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1199-L1210
-[fmt]: ../../../../../crates/daemon/src/transform.rs#L1216-L1349
-[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2373
-[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2852
-[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12231
-[t-line]: ../../../../../crates/daemon/src/transform.rs#L12281
+[fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
+[fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8181-L8198
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8195-L8261
+[h-call]: ../../../../../crates/daemon/src/lib.rs#L8250-L8256
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8540-L8564
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14462
+[emit-call]: ../../../../../crates/daemon/src/lib.rs#L14521-L14539
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14543-L14565
+[tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1207
+[rtcd]: ../../../../../crates/daemon/src/transform.rs#L1209-L1220
+[fmt]: ../../../../../crates/daemon/src/transform.rs#L1226-L1360
+[snap-add]: ../../../../../crates/daemon/src/transform.rs#L2384
+[snap-once]: ../../../../../crates/daemon/src/transform.rs#L2863
+[t-timings]: ../../../../../crates/daemon/src/transform.rs#L12322
+[t-line]: ../../../../../crates/daemon/src/transform.rs#L12372
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
@@ -627,19 +628,20 @@ call site.
 [tc-cet]: ../../../../../crates/daemon/src/token_cache.rs#L165-L181
 [t-tc-match]: ../../../../../crates/daemon/src/token_cache.rs#L188
 [t-tc-hits]: ../../../../../crates/daemon/src/token_cache.rs#L209
-[t-tc-rotate]: ../../../../../crates/daemon/src/token_cache.rs#L233
-[t-tc-stats]: ../../../../../crates/daemon/src/token_cache.rs#L249
-[t-tc-alias]: ../../../../../crates/daemon/src/token_cache.rs#L266
-[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L264
-[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1799-L1815
-[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2242-L2247
-[declared]: ../../../../../crates/daemon/src/lib.rs#L2249-L2263
-[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2836-L2840
-[floor]: ../../../../../crates/daemon/src/transform.rs#L5838
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
-[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8561
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24173-L24184
+[t-tc-rotate]: ../../../../../crates/daemon/src/token_cache.rs#L208
+[t-tc-stats]: ../../../../../crates/daemon/src/token_cache.rs#L224
+[t-tc-alias]: ../../../../../crates/daemon/src/token_cache.rs#L241
+[th-cwd]: ../../../../../crates/daemon/src/tail_hygiene.rs#L614
+[tc-inject]: ../../../../../crates/daemon/src/transform.rs#L1810-L1826
+[declared-doc]: ../../../../../crates/daemon/src/lib.rs#L2243-L2248
+[declared]: ../../../../../crates/daemon/src/lib.rs#L2256-L2286
+[ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2847-L2851
+[floor]: ../../../../../crates/daemon/src/transform.rs#L5849
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
+[mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7234
+[mint-check]: ../../../../../crates/daemon/src/transform.rs#L29170-L29194
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8572
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24458-L24469
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148
 
 [eval]: ../../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
@@ -664,26 +666,25 @@ call site.
 [edge-margin]: ../../../../../crates/context-core/src/redaction.rs#L380-L385
 [t-windows]: ../../../../../crates/context-core/src/redaction.rs#L827-L856
 [t-only-path]: ../../../../../crates/context-core/src/redaction.rs#L857
-[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2070-L2078
-[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2357-L2392
+[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2155-L2163
+[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2442-L2477
 
 [snap-build]: ../../../../../crates/daemon/src/historian_chunk.rs#L417-L429
 [as-item]: ../../../../../crates/daemon/src/historian_chunk.rs#L37-L46
 [trunc-call]: ../../../../../crates/daemon/src/historian_chunk.rs#L692
 [trunc]: ../../../../../crates/daemon/src/historian_chunk.rs#L742-L777
 [t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1749-L1760
-[t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1762-L1763
+[t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1743-L1757
 [fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
-[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L588
+[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L673
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
-[t-fp]: ../../../../../crates/daemon/src/historian.rs#L4006-L4033
+[t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925
 [diff-header]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L13-L58
-[diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L100-L113
-[diff-exact]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L115-L129
-[diff-small]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L131-L140
-
+[diff-prod]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L102-L112
+[diff-exact]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L117-L128
+[diff-small]: ../../../../../crates/daemon/tests/historian_truncate_differential.rs#L133-L140
 [cap]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L31-L34
 [parse]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L125-L145
 [vixie]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L150-L160
@@ -692,18 +693,18 @@ call site.
 [occurrence]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L212-L218
 [note-cap]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L236-L239
 [t-golden-cron]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1126
-[t-extreme]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1580-L1591
-[t-vixie]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1594
+[t-extreme]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1570-L1582
+[t-vixie]: ../../../../../crates/daemon/src/smart_note_evaluation.rs#L1584
 [sched-due]: ../../../../../crates/daemon/src/dreamer_scheduler.rs#L412-L416
 [sched-default]: ../../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../../crates/daemon/src/config.rs#L881-L895
 
-[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4562-L4571
-[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L222-L223
-[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4796
-[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5057
-[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5374
-[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11794
+[eff-cfg]: ../../../../../crates/daemon/src/lib.rs#L4586-L4595
+[binding-doc]: ../../../../../crates/daemon/src/lib.rs#L223-L224
+[call-reattach]: ../../../../../crates/daemon/src/lib.rs#L4839
+[call-fire]: ../../../../../crates/daemon/src/lib.rs#L5100
+[call-wrapup]: ../../../../../crates/daemon/src/lib.rs#L5417
+[call-bind]: ../../../../../crates/daemon/src/lib.rs#L11846
 [eff-proj]: ../../../../../crates/daemon/src/config.rs#L242-L245
 [eff-warn-doc]: ../../../../../crates/daemon/src/config.rs#L266-L267
 [eff-warn]: ../../../../../crates/daemon/src/config.rs#L268-L288
@@ -713,12 +714,11 @@ call site.
 [merge]: ../../../../../crates/daemon/src/config.rs#L716
 [raise-only]: ../../../../../crates/daemon/src/config.rs#L740
 [t-raise]: ../../../../../crates/daemon/src/config.rs#L1314
-[t-gate]: ../../../../../crates/daemon/src/config.rs#L1654
-[t-hostile]: ../../../../../crates/daemon/src/config.rs#L1722
-[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2165-L2202
-
-[open-sqlite]: ../../../../../crates/storage/src/lib.rs#L1117-L1125
-[classify]: ../../../../../crates/storage/src/lib.rs#L1644-L1674
+[t-gate]: ../../../../../crates/daemon/src/config.rs#L1649
+[t-hostile]: ../../../../../crates/daemon/src/config.rs#L1715
+[t-mtime]: ../../../../../crates/daemon/src/config.rs#L2117-L2155
+[open-sqlite]: ../../../../../crates/storage/src/lib.rs#L1550-L1558
+[classify]: ../../../../../crates/storage/src/lib.rs#L2099-L2149
 [forbid-daemon]: ../../../../../crates/daemon/src/lib.rs
 [forbid-ms]: ../../../../../crates/memory-store/src/lib.rs
 [forbid-cc]: ../../../../../crates/context-core/src/lib.rs

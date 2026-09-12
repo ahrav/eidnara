@@ -27,8 +27,8 @@ use kernel::source_identity::{
     encode_preserving_span, identity_digest, select,
 };
 use kernel::{MAX_PAYLOAD_BYTES, Sensitivity};
-use rusqlite::{CachedStatement, OptionalExtension, params};
-use storage::GuardedConn;
+use rusqlite::{OptionalExtension, params};
+use storage::{CachedStatement, GuardedConn};
 
 /// The complete schema, applied once to a pristine file by
 /// `storage::open_sqlite`. The bytes of this text are part of the store

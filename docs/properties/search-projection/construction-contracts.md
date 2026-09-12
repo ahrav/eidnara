@@ -25,7 +25,7 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`search-projection-identity-v2`), which is one of the invalidation identities every hook
+(`search-projection-identity-v3`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
@@ -273,7 +273,12 @@ different identity is inapplicable and does not pass.
 
 The invalidation identity is the tuple `(schema_version,
 tokenizer_fingerprint, embedding_model, projection_policy_version,
-identity_contract_version, limit_manifest_protocol_version)`.
+identity_contract_version, limit_manifest_protocol_version,
+vector_dimension, generation_epoch)`: every projection identity field except
+the kernel incarnation, which changes on every kernel restart while the
+evidence about the projection's content, model, and limits stays valid. A new
+generation epoch or vector dimension invalidates coverage evidence, since the
+vectors it counted belong to the earlier generation.
 
 | Hook | Classes | Built by |
 | --- | --- | --- |

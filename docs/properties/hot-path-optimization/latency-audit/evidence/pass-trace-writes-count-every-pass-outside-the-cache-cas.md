@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The implementation evidence below describes the live code.
 
 ## Discovery trigger
 
@@ -27,25 +29,25 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   contends with or extends the pass commit. A secret-bearing `session_id` is
   [tolerated only when the row already exists][flagged].
 - [`trace_pass_rejected`][rejected] updates `reject_count + 1`
-  ([`:6738`][reject-bump]); its [doc][rejected-doc] calls it a single plain
+  ([`:7050`][reject-bump]); its [doc][rejected-doc] calls it a single plain
   UPSERT outside the fenced transaction. [`trace_pass_completed`][completed]'s
   [doc][completed-doc] says it cannot alter CAS semantics or hold the commit
   transaction open longer.
 - [`trace_pass_stable`][stable] appends one `scheduler_history` observation
-  with the 256-entry ring ([`:6594-6601`][stable-ring]); the
+  with the 256-entry ring ([`:6906-6913`][stable-ring]); the
   [in-commit upsert][commit-trace] does the same, initializes `receive_count`
-  to `0` on a fresh insert ([`:8441`][commit-init]), and leaves it alone on
+  to `0` on a fresh insert ([`:8753`][commit-init]), and leaves it alone on
   conflict.
 - The [`PassTrace` doc][passtrace-doc] says the counters are stored apart from
   `cache_state` so a rejected pass leaves a trail without advancing
   `row_version`.
 - Readers: [session status][status-read] and [health][health-read] JSON, the
-  `newest_pass_at` age at [`:6238`][age], and the plugin's
+  `newest_pass_at` age at [`:6300-6311`][age], and the plugin's
   [`Passes: N received, M rejected`][plugin] line.
   [`load_pass_scheduler_history`][sched-history] has one non-store caller,
   a [test][sched-test].
-- An Emergency95 pass can rerun `run_transform` at [`:8264-8267`][rerun-a] and
-  [`:8372-8375`][rerun-b] after one receive breadcrumb.
+- An Emergency95 pass can rerun `run_transform` at [`:8349-8352`][rerun-a] and
+  [`:8448-8451`][rerun-b] after one receive breadcrumb.
 
 ## Failure scenario
 
@@ -75,7 +77,7 @@ unchanged; `first_divergence` is NULL after a reject; `scheduler_history`
 gains one observation per accepted pass; and the cache-state row commits when
 the trace write fails. The
 [state checks](../existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list seven pass-trace tests ([`t-reject`][t-reject], [`t-success`][t-success],
+list six pass-trace tests ([`t-success`][t-success],
 [`t-repeat`][t-repeat], [`t-frozen`][t-frozen], [`t-status`][t-status],
 [`t-upserts`][t-upserts], [`t-sched`][t-sched]) and the identity gate
 ([`t-secret`][t-secret]); none covers `first_divergence` after a reject,
@@ -93,8 +95,7 @@ channel, the authority route read, and dreamer tasks only.
 ### Q: Is under-counting rejected passes an acceptable semantic change?
 
 - Sources examined: [`trace_pass_received`][received], the
-  [`PassTrace` doc][passtrace-doc], [`t-reject`][t-reject],
-  [`t-frozen`][t-frozen].
+  [`PassTrace` doc][passtrace-doc], [`t-frozen`][t-frozen].
 - Findings: The doc states the reject-trail purpose; the tests encode
   `receive_count == reject_count` after rejects. A fold cannot preserve that
   without a second write on the reject path.
@@ -121,36 +122,182 @@ channel, the authority route read, and dreamer tasks only.
 - Conclusion: unresolved, needs R3's owner-relationship normalization.
 
 [r3]: ../../catalog.md#redaction-audit-does-not-depend-on-retained-payload
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8137
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8200-L8207
-[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8270-L8273
-[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8378-L8381
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8442
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6203-L6253
-[age]: ../../../../../crates/daemon/src/lib.rs#L6244
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7832-L7880
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23464
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23494
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23510
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23538
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23571
-[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1819-L1843
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13524
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13567
-[passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L767-L784
-[received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6482-L6484
-[received]: ../../../../../crates/memory-store/src/lib.rs#L6485-L6535
-[flagged]: ../../../../../crates/memory-store/src/lib.rs#L6496-L6514
-[stable]: ../../../../../crates/memory-store/src/lib.rs#L6540-L6632
-[stable-ring]: ../../../../../crates/memory-store/src/lib.rs#L6594-L6601
-[completed-doc]: ../../../../../crates/memory-store/src/lib.rs#L6634-L6636
-[completed]: ../../../../../crates/memory-store/src/lib.rs#L6637-L6685
-[rejected-doc]: ../../../../../crates/memory-store/src/lib.rs#L6687-L6690
-[rejected]: ../../../../../crates/memory-store/src/lib.rs#L6691-L6744
-[reject-bump]: ../../../../../crates/memory-store/src/lib.rs#L6738
-[sched-history]: ../../../../../crates/memory-store/src/lib.rs#L6792-L6825
-[commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8427-L8494
-[commit-init]: ../../../../../crates/memory-store/src/lib.rs#L8441
-[t-secret]: ../../../../../crates/memory-store/src/lib.rs#L15376
-[t-upserts]: ../../../../../crates/memory-store/src/lib.rs#L17545
+[received-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8131
+[rejected-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8194-L8201
+[rerun-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8264-L8267
+[rerun-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8372-L8375
+[completed-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8436
+[status-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L6197-L6247
+[age]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L6238
+[health-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7826-L7874
+[t-success]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23479
+[t-repeat]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23495
+[t-frozen]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23523
+[t-status]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23556
+[stable-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L1819-L1843
+[t-sched]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L13524
+[sched-test]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L13567
+[passtrace-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L767-L784
+[received-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6482-L6484
+[received]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6485-L6535
+[flagged]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6496-L6514
+[stable]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6540-L6632
+[stable-ring]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6594-L6601
+[completed-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6634-L6636
+[completed]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6637-L6685
+[rejected-doc]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6687-L6690
+[rejected]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6691-L6744
+[reject-bump]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6738
+[sched-history]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6792-L6825
+[commit-trace]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L8427-L8494
+[commit-init]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L8441
+[t-secret]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L15376
+[t-upserts]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L17545
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268
+
+## Receive-cost evidence
+
+Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
+that precede it on the branch.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/434)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+The receive write stays outside the cache compare-and-swap; the specification
+excludes folding it in because the counter increment is not idempotent. Its
+cost falls two ways. Audit identifiers are [generated in Rust][opaque-id] from
+the workspace random source, so an audit write spends no statement per
+identifier; the per-row link copy keeps SQLite's `randomblob` because it needs
+one value per selected row. The receive write [opts in][receive-opt-in] to
+[skipping its audit rows][audit-skip] when its one scan preserved an existing
+identity and found nothing: it substituted no byte, refused nothing, and
+carries no detection. The opt-in is per write. The completed-trace, authority,
+lineage, and compartment writes keep recording their clean scans, so the R1
+parity check and the redaction receipts other tests count are unchanged. Any
+substituting, rejecting, or detecting scan keeps the receive write's rows, and
+the [receive test][receive-test] shows a clean receive leaving the audit
+tables alone while a detected identity on a known session still records its
+row. The skip applies only to a `session_id` that `pass_trace` or `cache_state`
+already holds, decided by [one point lookup][receive-known] inside the
+transaction: the receive that introduces a session is the only durable write
+for that identity until the pass commits or rejects, so it keeps its
+zero-finding receipt, as the [first-receive test][first-receive-test] shows.
+The identifiers are generated inside the fenced transaction, so a random
+source failure now aborts the write where `randomblob` could not fail; on
+Linux after boot that failure is not reachable.
+
+The scans a pass records for the identity, `core_state`, and `meta` bytes the
+next pass replaces are owned by [one fixed pass owner][pass-owner] that the
+next pass [retires after every replay check has passed][retire]; the key is
+not per row version because other writers (historian publish, lineage descent,
+recomputation reset) bump `row_version` without registering an owner, and a
+key they never wrote could not be retired. Every scan for bytes that outlive
+the pass is [reassigned][overlay-owner] to a [retained owner][retained-owner]
+the pass never retires: the tag, temporal-mark, user-hint, and channel-1
+overlay rows, the root added to `transform_session_roots`, the
+`scheduler_observation` and `scheduler_interesting` entries appended to the
+`pass_trace` history rings, and a `first_divergence` that stays readable as
+`last_divergence` after a pass with none. The ring, fingerprint, and
+divergence receipts sit under a separate [history owner][history-owner] so the
+eviction below scans only those receipts, bounded by the two rings, and not
+the session's accumulated overlay receipts; the owner index covers the owner
+id alone. Reassignment leaves the write's
+default owner list alone, so a scan prepared after it keeps the pass owner;
+the [reassignment test][reassign-test] holds that. The retained owner is
+registered only when the pass carries such a scan, and its key differs from
+the `cache_state` key that stores written before the pass owner existed carry,
+so legacy per-pass rows on those stores stay separable from live ones. Those
+legacy rows are not retired by this change; they stop growing, and a targeted
+cleanup remains open.
+
+The retirement adds a fixed number of cached statements to the fenced commit
+(one scope lookup, one retired-scan select, one owner delete, one
+[set-based orphan-scan prune and one batch prune][prune] over the retired ids
+bound as a JSON array, and a scope prune) that the receive-side saving does
+not offset; the branch's stated cost claim is about the receive write, and the
+retirement is what keeps the pass-owned audit rows bounded. The retained
+owner's rows grow with the bytes they describe: one receipt per stored root,
+per ring entry, and one for the divergence readable as `last_divergence`. The
+history rings keep 256 entries, so a pass that appends to a full ring
+[evicts the oldest retained receipt][ring-evict] for that field in the same
+transaction, and a new divergence evicts the receipt of the one it replaces;
+the [ring test][ring-test] shows the receipt count for each ring field equal
+to its ring length across 296 passes. A root the session already stores
+[keeps its earlier receipt][root-stored]: the re-observing pass's scan stays
+under the pass owner and is retired by the next pass, so the
+[root test][root-test] shows one retained root receipt and one divergence
+receipt across five passes that repeat both. A `scheduler_full_array_fingerprint`
+is stored only inside a `scheduler_interesting` entry, so its scan
+[joins the history owner][fingerprint-retained] only when that entry is
+written and the fingerprint fits the diagnostic byte bound that the entry
+applies; an oversized fingerprint is scanned but not stored, so its scan stays
+the live pass's and evicts nothing, as the
+[oversized-fingerprint test][fingerprint-bound-test] shows. Only `commit_transform` appends interesting entries, so the
+fingerprint receipts and the fingerprint-bearing entries share one order, and
+each append keeps exactly as many fingerprint receipts as the ring still holds
+fingerprint-bearing entries; the [fingerprint test][fingerprint-test] shows
+five passes with a fingerprint and no interesting entry holding no retained
+fingerprint receipt, and the [fingerprint-eviction test][fingerprint-evict-test]
+shows one fingerprint-bearing entry followed by 256 without leaving no
+fingerprint receipt behind. The receipts are counts per
+ring, not links to individual entries, and the count is exact because every
+writer that appends to a ring registers the same history owner:
+[`trace_pass_stable`][stable-ring-owner] places its observation receipt under
+that owner and [evicts][stable-ring-evict] past the ring length after its own
+append, so an observation a commit recorded leaves when stable passes push
+its entry out, as the [two-writer test][two-writer-test] shows. Lineage descent copies the source scope's live scans, which after
+retirement are the latest pass's scans plus the retained scans rather than
+every pass the source ever ran. The [retirement test][retire-test] shows the
+`field_scans` and `scan_owner_copies` counts flat across six passes, flat
+again across passes after a historian publish bumped the row version, a tag
+mint's scans added and kept through the next pass, and the pass owner, the
+retained owner, and the publish owner each holding exactly their own copies.
+The [retained-fields test][retained-test] shows a second pass keeping the
+receipts for the first pass's root, scheduler observation, interesting
+observation, and divergence while both roots, both history entries, and the
+divergence stay stored, and a third pass adding to them. The
+[conflict test][seq-conflict-test] shows a pass that loses the
+compartment-generation check retiring nothing.
+
+The [daemon test][outcome-test] shows a rejected, a committed, and a stable
+pass counting three receives, and a fourth pass whose receive UPSERT is
+[injected to fail inside its own transaction][receive-fail] still committing
+its cache state.
+
+### Focused execution, 2026-09-12
+
+`cargo test -p memory-store --locked` passed 183 tests including the six
+above; `cargo test -p daemon --locked` passed 1022 unit tests, and the
+`embedding_dispatch` integration test
+`publication_search_deadline_preserves_admission_without_recharging` fails when
+its file runs as a group and passes in isolation, on the unmodified branch head
+as well.
+
+[opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
+[audit-skip]: ../../../../../crates/memory-store/src/lib.rs#L2438
+[receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16877-L16919
+[receive-opt-in]: ../../../../../crates/memory-store/src/lib.rs#L7058
+[receive-known]: ../../../../../crates/memory-store/src/lib.rs#L7088-L7100
+[first-receive-test]: ../../../../../crates/memory-store/src/lib.rs#L16855-L16872
+[seq-conflict-test]: ../../../../../crates/memory-store/src/lib.rs#L16821-L16850
+[pass-owner]: ../../../../../crates/memory-store/src/lib.rs#L2866
+[retained-owner]: ../../../../../crates/memory-store/src/lib.rs#L2869
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L9074-L9080
+[prune]: ../../../../../crates/memory-store/src/lib.rs#L2638-L2680
+[overlay-owner]: ../../../../../crates/memory-store/src/lib.rs#L9008-L9013
+[retire-test]: ../../../../../crates/memory-store/src/lib.rs#L16659-L16816
+[retained-test]: ../../../../../crates/memory-store/src/lib.rs#L16986-L17085
+[history-owner]: ../../../../../crates/memory-store/src/lib.rs#L2875
+[ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L9163-L9192
+[ring-test]: ../../../../../crates/memory-store/src/lib.rs#L17471-L17534
+[root-stored]: ../../../../../crates/memory-store/src/lib.rs#L9194-L9207
+[root-test]: ../../../../../crates/memory-store/src/lib.rs#L17090-L17135
+[fingerprint-retained]: ../../../../../crates/memory-store/src/lib.rs#L8987-L8997
+[fingerprint-evict-test]: ../../../../../crates/memory-store/src/lib.rs#L17192-L17241
+[fingerprint-bound-test]: ../../../../../crates/memory-store/src/lib.rs#L17246-L17306
+[stable-ring-owner]: ../../../../../crates/memory-store/src/lib.rs#L7140-L7148
+[stable-ring-evict]: ../../../../../crates/memory-store/src/lib.rs#L7225-L7230
+[two-writer-test]: ../../../../../crates/memory-store/src/lib.rs#L17311-L17360
+[fingerprint-test]: ../../../../../crates/memory-store/src/lib.rs#L17140-L17187
+[reassign-test]: ../../../../../crates/memory-store/src/lib.rs#L24780-L24803
+[outcome-test]: ../../../../../crates/daemon/src/lib.rs#L24791-L24835
+[receive-fail]: ../../../../../crates/memory-store/src/lib.rs#L7067
