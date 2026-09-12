@@ -236,7 +236,7 @@ only the five values asserted by the retained tests.
 [identity-exclusion]: ../../../../../crates/daemon/src/wire.rs#L615-L617
 [assembly-identity]: ../../../../../crates/daemon/src/historian_chunk.rs#L646-L658
 [fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
-[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L582
+[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L673
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925

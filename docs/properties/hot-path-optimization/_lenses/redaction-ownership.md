@@ -27,6 +27,6 @@ identities retain their existing exception. The redundant allocation is
 already redacted; removing it is not itself a security repair. No observable
 contract depends on String object identity.
 
-[prepare]: ../../../../crates/memory-store/src/lib.rs#L2198-L2237
-[audit]: ../../../../crates/memory-store/src/lib.rs#L2344-L2418
-[json]: ../../../../crates/memory-store/src/lib.rs#L2127-L2137
+[prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
+[audit]: ../../../../crates/memory-store/src/lib.rs#L2435-L2509
+[json]: ../../../../crates/memory-store/src/lib.rs#L2218-L2228

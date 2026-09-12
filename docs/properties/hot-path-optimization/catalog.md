@@ -642,12 +642,12 @@ them without creating implementation tickets.
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1237-L1268
 [read-callback]: ../../../crates/storage/src/lib.rs#L343-L360
 [write-callback]: ../../../crates/storage/src/lib.rs#L409-L473
-[prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271
+[prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2330-L2356
 [hard-compose]: ../../../crates/daemon/src/transform.rs#L4034-L4061
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
-[core-prep]: ../../../crates/memory-store/src/lib.rs#L3459-L3490
-[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3493-L3525
-[prepare-field]: ../../../crates/memory-store/src/lib.rs#L2198-L2237
+[core-prep]: ../../../crates/memory-store/src/lib.rs#L3550-L3581
+[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3584-L3616
+[prepare-field]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L21-L32
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3132-L3298

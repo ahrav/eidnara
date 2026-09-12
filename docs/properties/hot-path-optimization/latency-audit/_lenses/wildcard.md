@@ -664,8 +664,8 @@ call site.
 [edge-margin]: ../../../../../crates/context-core/src/redaction.rs#L380-L385
 [t-windows]: ../../../../../crates/context-core/src/redaction.rs#L827-L856
 [t-only-path]: ../../../../../crates/context-core/src/redaction.rs#L857
-[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2064-L2072
-[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2351-L2386
+[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2155-L2163
+[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2442-L2477
 
 [snap-build]: ../../../../../crates/daemon/src/historian_chunk.rs#L417-L429
 [as-item]: ../../../../../crates/daemon/src/historian_chunk.rs#L37-L46
@@ -674,7 +674,7 @@ call site.
 [t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1749-L1760
 [t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1762-L1763
 [fp]: ../../../../../crates/daemon/src/historian.rs#L140-L158
-[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L582
+[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L673
 [fp-verify]: ../../../../../crates/daemon/src/historian.rs#L326-L334
 [fp-predicate]: ../../../../../crates/daemon/src/historian.rs#L407-L417
 [t-fp]: ../../../../../crates/daemon/src/historian.rs#L3925

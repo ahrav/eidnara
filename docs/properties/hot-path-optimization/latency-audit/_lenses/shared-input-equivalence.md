@@ -544,9 +544,9 @@ both sides and neither resolved here:
 [from-parts]: ../../../../../crates/memory-store/src/lib.rs#L166-L180
 [meta-doc]: ../../../../../crates/memory-store/src/lib.rs#L210-L216
 [ser-block]: ../../../../../crates/memory-store/src/lib.rs#L266-L280
-[tagrow]: ../../../../../crates/memory-store/src/lib.rs#L1707-L1715
-[mint-prepared]: ../../../../../crates/memory-store/src/lib.rs#L7346-L7354
-[load-order]: ../../../../../crates/memory-store/src/lib.rs#L7435-L7463
+[tagrow]: ../../../../../crates/memory-store/src/lib.rs#L1798-L1806
+[mint-prepared]: ../../../../../crates/memory-store/src/lib.rs#L7458-L7466
+[load-order]: ../../../../../crates/memory-store/src/lib.rs#L7547-L7575
 [serde-features]: ../../../../../Cargo.toml#L45
 [t-segments]: ../../../../../crates/daemon/tests/prepared_output.rs#L34-L54
 [t-seldiff]: ../../../../../crates/daemon/tests/selection_differential.rs#L1-L5

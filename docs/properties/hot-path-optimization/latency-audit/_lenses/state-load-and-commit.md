@@ -636,9 +636,9 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-publish-cas]: ../../../../../crates/memory-store/src/lib.rs#L19787
 [t-truncate]: ../../../../../crates/memory-store/src/lib.rs#L21249
 [t-dup]: ../../../../../crates/memory-store/src/lib.rs#L15832
-[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15219
-[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15578
-[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15645
+[t-keydir]: ../../../../../crates/memory-store/src/lib.rs#L15749
+[t-container]: ../../../../../crates/memory-store/src/lib.rs#L15849
+[t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L15886
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L16029
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L728
 [t-sync]: ../../../../../crates/storage/src/lib.rs#L4278-L4343
