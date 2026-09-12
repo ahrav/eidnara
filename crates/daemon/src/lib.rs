@@ -15445,8 +15445,11 @@ const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 /// The object key serde_json's `raw_value` feature reserves. A `Value` parse reads an
 /// object whose first key is this token as one boxed JSON document: its value must be a
-/// string holding a document and no key may follow it. serde_json keeps the token private;
-/// the `raw_value_token_matches_serde_json` test detects a change to it.
+/// string holding a document and no key may follow it. A `Value` re-read through
+/// `from_value` sees the object's keys sorted, where the token sorts before any letter, so
+/// a retained `Value` holding the token at any position meets the rule on the tree lane.
+/// serde_json keeps the token private; the `raw_value_token_matches_serde_json` test
+/// detects a change to it.
 const RAW_VALUE_TOKEN: &str = "$serde_json::private::RawValue";
 
 #[derive(Default)]
@@ -15548,8 +15551,9 @@ impl<'de> Deserialize<'de> for ProbeKey {
 
 /// Skips one value through `deserialize_any`, so every check the deserializer applies to a
 /// `Value` parse applies here: the nesting limit, number range, string escapes, and UTF-8.
-/// An object whose first key is [`RAW_VALUE_TOKEN`] is refused because a `Value` parse
-/// reads that object as a boxed raw document under its own rule.
+/// An object holding [`RAW_VALUE_TOKEN`] as any key is refused: the tree lane reads it as a
+/// boxed raw document when the token is the first key it sees, and a retained `Value`
+/// re-read from the sorted tree sees it first wherever the body placed it.
 struct SkippedValue;
 
 impl<'de> Deserialize<'de> for SkippedValue {
@@ -15595,9 +15599,8 @@ impl<'de> Deserialize<'de> for SkippedValue {
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                if map.next_key::<SkippedFirstKey>()?.is_some() {
+                while map.next_key::<SkippedKey>()?.is_some() {
                     map.next_value::<SkippedValue>()?;
-                    while map.next_entry::<SkippedValue, SkippedValue>()?.is_some() {}
                 }
                 Ok(SkippedValue)
             }
@@ -15607,17 +15610,17 @@ impl<'de> Deserialize<'de> for SkippedValue {
     }
 }
 
-/// The first key of a skipped object; [`RAW_VALUE_TOKEN`] in that position is an error.
-struct SkippedFirstKey;
+/// A key of a skipped object; [`RAW_VALUE_TOKEN`] in any position is an error.
+struct SkippedKey;
 
-impl<'de> Deserialize<'de> for SkippedFirstKey {
+impl<'de> Deserialize<'de> for SkippedKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Visitor;
 
-        struct FirstKeyVisitor;
+        struct KeyVisitor;
 
-        impl Visitor<'_> for FirstKeyVisitor {
-            type Value = SkippedFirstKey;
+        impl Visitor<'_> for KeyVisitor {
+            type Value = SkippedKey;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("an object key other than the raw-value token")
@@ -15625,13 +15628,13 @@ impl<'de> Deserialize<'de> for SkippedFirstKey {
 
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
                 if value == RAW_VALUE_TOKEN {
-                    return Err(E::custom("raw-value token opens an object"));
+                    return Err(E::custom("raw-value token names an object key"));
                 }
-                Ok(SkippedFirstKey)
+                Ok(SkippedKey)
             }
         }
 
-        deserializer.deserialize_str(FirstKeyVisitor)
+        deserializer.deserialize_str(KeyVisitor)
     }
 }
 
@@ -19413,8 +19416,8 @@ mod tests {
         assert!(!tree_decode_parses(nested(deepest_tree + 1).as_bytes()));
     }
 
-    /// The witness refuses exactly what a `Value` parse refuses, plus an object whose first
-    /// key is the raw-value token.
+    /// The witness refuses exactly what a `Value` parse refuses, plus an object holding the
+    /// raw-value token as any key.
     #[test]
     fn tree_parse_witness_refuses_what_the_tree_refuses() {
         let witness = |body: &str| tree_decode_parses(body.as_bytes());
@@ -19441,7 +19444,11 @@ mod tests {
         assert!(!witness(&document));
         let later = format!(r#"{{"a":{{"b":1,"{RAW_VALUE_TOKEN}":1}}}}"#);
         assert!(tree(&later));
-        assert!(witness(&later));
+        assert!(!witness(&later));
+        // The tree re-reads a retained `Value` with its keys sorted, so the token it passed
+        // over in the body is the first key it sees there.
+        let retained: Value = serde_json::from_str(&later).unwrap();
+        assert!(serde_json::from_value::<Value>(retained["a"].clone()).is_err());
     }
 
     /// serde_json reads an object whose first key is the token as a boxed raw document,
@@ -19607,6 +19614,28 @@ mod tests {
                 "raw-value token not in first position",
                 valid(&format!(r#","x":{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)),
             ),
+            (
+                "raw-value token after a key under tail_delta",
+                valid(&format!(r#","tail_delta":{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)),
+            ),
+            (
+                "raw-value token after a key in a native message",
+                valid(&format!(
+                    r#","native_messages":[{{"a":1,"{RAW_VALUE_TOKEN}":1}}]"#
+                )),
+            ),
+            ("raw-value token after a key inside a message", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(
+                    &format!("[{message}]"),
+                    &format!(
+                        r#"[{{"z":{{"a":1,"{RAW_VALUE_TOKEN}":1}},{}]"#,
+                        &message[1..]
+                    ),
+                    1,
+                )
+                .into_bytes()
+            }),
         ];
         let nested = |depth: usize| {
             valid(&format!(
@@ -19694,6 +19723,7 @@ mod tests {
                 "other route",
                 "raw-value token holding a document",
                 "raw-value token not in first position",
+                "raw-value token after a key inside a message",
                 "nesting at the tree limit",
             ],
             "the bodies both decodes accept"
@@ -19717,9 +19747,12 @@ mod tests {
                 "raw-value token with a sibling key",
                 "raw-value token inside an ignored array",
                 "raw-value token under the discriminator",
+                "raw-value token after a key under tail_delta",
+                "raw-value token after a key in a native message",
                 "nesting past the tree limit",
             ],
-            "the derive skips an ignored field without the tree's checks"
+            "the derive skips an ignored field without the tree's checks, and the tree's \
+             re-read of a retained value refuses a token the body placed after another key"
         );
         for name in direct_only {
             let (_, body) = corpus
@@ -19824,7 +19857,6 @@ mod tests {
                 "missing serializer profile",
                 "unknown serializer profile",
                 "non-string discriminator with kind",
-                "raw-value token not in first position",
                 "nesting at the tree limit",
             ],
             "the bodies that decode typed from their bytes; the rest take the tree lane"
