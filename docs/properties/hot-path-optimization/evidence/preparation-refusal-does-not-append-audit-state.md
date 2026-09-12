@@ -17,7 +17,7 @@ leave metadata behind even when no output value is returned.
   fenced transaction; a callback error propagates rather than applying audit.
 - [9233-9243][refusal] turns transaction preparation failure into an error
   because returning a successful Replay disposition would commit earlier writes.
-- [23217-23248][test] constructs a fitting input whose redacted output exceeds
+- [23212-23248][test] constructs a fitting input whose redacted output exceeds
   the bound, then a replacement-adjusted exactly fitting output.
 
 ## Failure scenario
@@ -59,5 +59,5 @@ The bound and rollback tests are [unaudited][checks]; no new experiment runs.
 [prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
 [execute]: ../../../../crates/memory-store/src/lib.rs#L2330-L2356
 [refusal]: ../../../../crates/memory-store/src/lib.rs#L9233-L9243
-[test]: ../../../../crates/memory-store/src/lib.rs#L23217-L23248
+[test]: ../../../../crates/memory-store/src/lib.rs#L23212-L23248
 [checks]: ../existing-checks.md#redaction-ownership
