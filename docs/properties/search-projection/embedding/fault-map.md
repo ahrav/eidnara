@@ -3,8 +3,9 @@
 Date: 2026-09-10. Repository: `/local/home/ahrav/scratch/eidnara`.
 Revision: `913234433ae36a80a6e22c6aac14c7f9aab74386`.
 Sources and external scope: [catalog source register](catalog.md#source-register).
-All proposed records are unexercised. Availability below describes construction
-seams in source, not executed coverage.
+The original proposed records are unexercised. The bounded-dispatch additions
+name executed checks; availability for the other records still describes source
+seams rather than execution coverage.
 
 ## Fault classes and availability
 
@@ -19,6 +20,7 @@ seams in source, not executed coverage.
 | F7 | Saturated backfill with an independently available query slot. | Gated native engine and FIFO trace exist. Product priority admission and its approved service envelope are missing. |
 | F8 | GC selection races active references, newer identity, or late completion. | ResultLease provides a local lifetime seam. Durable identity GC/reference accounting is missing. |
 | F9 | Cancellation/deadline during wait, count, inference, or persistence; another supervisor slice is due. | Kernel EvalBudget, RequestCtx cancellation, and ManualClock exist separately. Async query lane/EvalBudget integration is a shared prerequisite with RP2.7.U3; RP2.1.U3 integrates priority and embedding maintenance. |
+| F10 | More than two WrongScope pages precede eligible work, a deferred row becomes due behind a carried cursor, or selected and terminal candidates compete for one pass budget. | The dispatcher has a private two-page cursor with a deferred-revisit time and a shared action counter; integration tests exercise each case. |
 
 The deterministic engine records calls before its blocking gate and increments
 completed-text count afterward (`crates/host-runtime/tests/support/synapse.rs:99-122`).
@@ -46,6 +48,8 @@ maps. An optional or unreached inference path cannot pass embedding acceptance.
 | [embedding-backfill-preserves-query-admission](catalog.md#embedding-backfill-preserves-query-admission) | F7; backfill fills its declared envelope before a valid query arrives with query occupancy below its cap. | `search_projection_embedding_query_arrives_during_backfill_saturation` |
 | [embedding-identity-gc-preserves-live-work](catalog.md#embedding-identity-gc-preserves-live-work) | F8; obsolete candidate selected while a result/reference is held; identity update or dispatch races its deletion phase. | `search_projection_embedding_gc_candidate_has_concurrent_holder` |
 | [embedding-supervisor-shares-budget-and-joins](catalog.md#embedding-supervisor-shares-budget-and-joins) | F9; cancellation/deadline is observed independently while native work is blocked and another slice is due. | `search_projection_embedding_stop_occurs_with_native_work_held` |
+| [embedding-dispatch-scan-makes-bounded-progress](catalog.md#embedding-dispatch-scan-makes-bounded-progress) | F10; 2,048 WrongScope rows precede one eligible row, or a deferred row becomes due before the carried cursor wraps, and the same dispatcher runs repeated successful passes. | `search_projection_embedding_wrong_scope_prefix_crosses_page_budget` |
+| [embedding-dispatch-actions-respect-pass-budget](catalog.md#embedding-dispatch-actions-respect-pass-budget) | F10; `max_jobs=1` with mixed terminal, malformed, WrongScope, and valid candidates. | `search_projection_embedding_terminal_actions_hit_pass_bound` |
 
 ### Completion-fence scenario dimensions
 

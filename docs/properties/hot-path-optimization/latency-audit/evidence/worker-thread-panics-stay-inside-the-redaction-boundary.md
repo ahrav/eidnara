@@ -62,7 +62,7 @@ widens to every pass.
 - The other production `thread_local!` the boundary crosses is the
   token-cache counter block at [`token_cache.rs:57`][tc-local] (W2). The
   third in the inspected crates is `#[cfg(test)]`
-  ([`transform.rs:487-490`][tl-test]).
+  ([`transform.rs:495-498`][tl-test]).
 - The host-runtime catalog's
   [every-callback-invocation-is-inside-the-redaction-guard][hr-redact]
   inventories the host's own call sites and
@@ -114,7 +114,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 
 - Sources examined: [`dispatch.rs:985-989`][terminal],
   [`mod.rs:460-468`][blocking], [`read.rs:296-322`][read-arms],
-  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3808-3810`][spawn-store-open].
+  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3815-3817`][spawn-store-open].
 - Findings: Three distinct mappings exist for a `JoinError` from a worker
   panic: an `internal_error` terminal (host), a `store_unavailable` response
   (kernel routes), and a re-panic (store open). The kernel-route mapping is a
@@ -163,10 +163,10 @@ settle a worker panic as an `unavailable` response by documented intent.
 [blk-read-rows]: ../../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3808-L3810
+[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3815-L3817
 [routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L458-L459
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
-[tl-test]: ../../../../../crates/daemon/src/transform.rs#L487-L490
+[tl-test]: ../../../../../crates/daemon/src/transform.rs#L495-L498
 [t-panic-stderr]: ../../../../../crates/host-runtime/tests/dispatch.rs#L603-L628
 [t-panic-child]: ../../../../../crates/host-runtime/tests/dispatch.rs#L631-L660
 [hr-redact]: ../../../host-runtime/catalog.md#every-callback-invocation-is-inside-the-redaction-guard
