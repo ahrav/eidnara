@@ -14,8 +14,9 @@ const _: () = assert!(
 );
 use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactErrorKind, ArtifactIngestRequest, CommitIntent,
-    EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, Sensitivity, SourceClass,
-    SourceDescriptorError, SourceDescriptorPolicy, SourceDescriptorRequest, TaintClass,
+    EventKind, KernelError, KernelStore, ProjectScope, ProviderEgress, RepositoryProvenance,
+    Sensitivity, SourceClass, SourceDescriptorError, SourceDescriptorPolicy,
+    SourceDescriptorRequest, TaintClass,
 };
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -51,6 +52,7 @@ pub enum Representation {
     DecisionSummary,
     Rationale,
     Summary,
+    CommitMessage,
 }
 
 impl Representation {
@@ -62,12 +64,16 @@ impl Representation {
             Self::DecisionSummary => "decision_summary",
             Self::Rationale => "rationale",
             Self::Summary => "summary",
+            Self::CommitMessage => "commit_message",
         }
     }
 }
 
 /// Units with this role take their admission classes from the source decision's own admission at publication instead of a role mapping.
 pub const CANONICAL_ROLE: &str = "canonical";
+
+/// The frozen git source policy every `git_commits` descriptor is published under: the exact commit message bytes of one explicitly selected commit, no traversal.
+pub const GIT_SOURCE_POLICY_VERSION: &str = "git-commit-message.v1";
 
 /// One publishable occurrence: its class, its complete native identity in the class's field order, its canonical revision, and the exact text of the block.
 #[derive(Clone, PartialEq, Eq)]
@@ -103,9 +109,32 @@ impl SourceUnit {
             .map(|(_, value)| value.as_str())
     }
 
-    /// The actor a unit's commits and evidence are recorded under: the harness that produced it, or the canonical role for a unit derived from a kernel decision.
+    /// The actor a unit's commits and evidence are recorded under: the harness that produced it, the repository a commit came from, or the canonical role for a unit derived from a kernel decision.
     fn origin(&self) -> &str {
-        self.identity_value("harness").unwrap_or(CANONICAL_ROLE)
+        self.identity_value("harness")
+            .or_else(|| self.identity_value("repository_id"))
+            .unwrap_or(CANONICAL_ROLE)
+    }
+
+    /// The kernel accepts a `git_commits` descriptor only under the git policy and every other class only under the native one.
+    fn source_policy(&self) -> SourceDescriptorPolicy {
+        match self.class {
+            OccurrenceClass::GitCommits => SourceDescriptorPolicy::Git {
+                version: GIT_SOURCE_POLICY_VERSION.to_owned(),
+            },
+            _ => SourceDescriptorPolicy::Native,
+        }
+    }
+
+    /// A commit's bytes name the repository and object they were read from. The store treats that as affirmative provenance: an asserted `Normal` class is kept instead of folded to `Sensitive`, so the publisher's `sensitivity` decides whether repository text may leave the host. `None` for a unit that is not a commit or lacks either field; the encoder has already refused the latter.
+    fn repository_provenance(&self) -> Option<RepositoryProvenance> {
+        if self.class != OccurrenceClass::GitCommits {
+            return None;
+        }
+        Some(RepositoryProvenance {
+            repository_id: self.identity_value("repository_id")?.to_owned(),
+            revision: self.identity_value("oid")?.to_owned(),
+        })
     }
 }
 
@@ -550,7 +579,7 @@ impl SourcePublisher<'_> {
                 retain_until: None,
                 asserted_sensitivity: self.sensitivity,
                 provider_egress: self.egress,
-                provenance: None,
+                provenance: unit.repository_provenance(),
             })
             .map_err(|error| match error.kind() {
                 ArtifactErrorKind::OperationKeyReused => PublishError::IdentityReused,
@@ -577,7 +606,7 @@ impl SourcePublisher<'_> {
             let published = envelope
                 .publish_source_descriptor(&SourceDescriptorRequest {
                     occurrence: occurrence.clone(),
-                    source_policy: SourceDescriptorPolicy::Native,
+                    source_policy: unit.source_policy(),
                     domain_id: self.domain_id,
                     scope_id: self.scope_id,
                     evidence_id: &handle.evidence_id,
@@ -774,7 +803,7 @@ impl ProvenanceRule {
     }
 }
 
-/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, user text is explicit, and other text is model inference. The caller has encoded the unit, so the class's identity field is present.
+/// Admission provenance follows the class and the native role: a canonical class inherits its decision's classes whatever role the unit carries, every tool string is an untrusted tool result, a commit message is untrusted repository text, user text is explicit, and other text is model inference. The caller has encoded the unit, so the class's identity field is present.
 fn provenance(unit: &SourceUnit) -> ProvenanceRule {
     match (unit.class, unit.role.as_str()) {
         (OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory, _) => {
@@ -788,6 +817,10 @@ fn provenance(unit: &SourceUnit) -> ProvenanceRule {
         (OccurrenceClass::RawToolSpans, _) => ProvenanceRule::Fixed(
             SourceClass::TrustedToolResult,
             TaintClass::ToolUntrustedOutput,
+        ),
+        (OccurrenceClass::GitCommits, _) => ProvenanceRule::Fixed(
+            SourceClass::UntrustedRepoText,
+            TaintClass::RepoUntrustedText,
         ),
         (_, "user") => ProvenanceRule::Fixed(SourceClass::ExplicitUser, TaintClass::UserExplicit),
         _ => ProvenanceRule::Fixed(SourceClass::ModelInference, TaintClass::AssistantInference),

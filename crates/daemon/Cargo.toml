@@ -34,6 +34,8 @@ lease = { workspace = true }
 # dependency through gix, so it adds no new supply-chain root.
 arc-swap = "1"
 tokenizer = { workspace = true }
+# Reads explicitly selected commit objects for the git source class with the same isolated gix APIs the kernel uses; no git CLI.
+gix = { workspace = true }
 host-runtime = { workspace = true }
 async-trait = "0.1"
 serde = { workspace = true }
