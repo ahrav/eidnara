@@ -398,6 +398,8 @@ pub enum Admission {
     Charged { attempts: u32 },
     /// The same host job is already recorded, so a lost reply was not a lost charge.
     AlreadyCharged,
+    /// The current row names a different episode than the submitted item, so the row is unchanged.
+    EpisodeChanged,
     /// The episode has no attempt left or its deadline passed; the row is stopped with that reason.
     Stopped(&'static str),
     /// The row is not pending.
@@ -405,12 +407,14 @@ pub enum Admission {
 }
 
 /// Charges one attempt for admitting `job_id` to `host` as `host_job_id`.
+/// `expected_episode_id` is the item identity submitted to the host.
 /// A row without an episode opens one from `grant`; a row with an episode keeps
 /// its allowance and deadline. The charge is refused, and the row stopped,
 /// when the episode is exhausted or expired.
 pub fn charge_admission(
     conn: &GuardedConn<'_>,
     job_id: &str,
+    expected_episode_id: &str,
     host: &LaneBinding,
     host_job_id: &str,
     grant: EpisodeGrant,
@@ -419,6 +423,14 @@ pub fn charge_admission(
     let Some(ledger) = job_ledger(conn, job_id)? else {
         return Ok(Admission::NotPending);
     };
+    let episode = ledger.episode()?;
+    let episode_matches = match &episode {
+        Some(episode) => episode.id == expected_episode_id,
+        None => first_episode_id(job_id) == expected_episode_id,
+    };
+    if !episode_matches {
+        return Ok(Admission::EpisodeChanged);
+    }
     if ledger.state == "admitted" && ledger.host_job_id.as_deref() == Some(host_job_id) {
         return Ok(Admission::AlreadyCharged);
     }
@@ -426,7 +438,6 @@ pub fn charge_admission(
         return Ok(Admission::NotPending);
     }
     let attempts = ledger.attempts;
-    let episode = ledger.episode()?;
     if let Some(reason) = refusal(attempts, episode.as_ref(), grant, now) {
         stop_job(conn, job_id, reason, now)?;
         return Ok(Admission::Stopped(reason));

@@ -14,8 +14,9 @@ use daemon::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
     lane_binding,
 };
-use daemon::embedding_publication::Publication;
+use daemon::embedding_publication::{EmbeddingPublisher, Publication};
 use daemon::search_projection::SearchProjection;
+use daemon::search_writer::QuarantineKind;
 use host_runtime::synapse::inference::InferenceError;
 use host_runtime::synapse::{
     EmbedTokens, EmbeddingEngine, LaneInfo, LaneUnavailableState, PollOutcome, SubmitOutcome,
@@ -800,22 +801,67 @@ async fn payload_corruption_quarantines_before_tokenization_or_inference() {
     let synapse = component(&engine, SynapseLimits::default());
     let project = ProjectScope::new(PROJECT).unwrap();
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
-    for _ in 0..2 {
-        let result = dispatcher.run_pass(
-            eligibility(&project),
-            &bounds(Duration::from_secs(5)),
-            NOW,
-            &mut |_| {},
-        );
-        assert!(
-            matches!(result, Err(DispatchError::Quarantined(ref quarantine))
-            if quarantine.kind == daemon::search_writer::QuarantineKind::Integrity),
-            "{result:?}"
-        );
-        assert_eq!(ledger(dir.path(), occurrence), before);
-        assert_eq!(engine.count_calls(), 0);
-        assert_eq!(engine.calls(), 0);
-    }
+    let result = dispatcher.run_pass(
+        eligibility(&project),
+        &bounds(Duration::from_secs(5)),
+        NOW,
+        &mut |_| {},
+    );
+    let Err(DispatchError::Quarantined(quarantine)) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+    assert_eq!(projection.quarantine(), Some(quarantine.clone()));
+
+    let mut fresh = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let again = fresh.run_pass(
+        eligibility(&project),
+        &bounds(Duration::from_secs(5)),
+        NOW,
+        &mut |_| panic!("shared quarantine permits no work"),
+    );
+    assert!(matches!(again, Err(DispatchError::Quarantined(q)) if q == quarantine));
+    let publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    assert_eq!(publisher.quarantine(), Some(quarantine));
+    assert_eq!(ledger(dir.path(), occurrence), before);
+    assert_eq!(engine.count_calls(), 0);
+    assert_eq!(engine.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quarantine_entered_after_binding_stops_dispatch_before_submission_or_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("shared-quarantine", "never submitted");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object);
+    let before = ledger(dir.path(), occurrence);
+    let engine = TestEngine::new();
+    let synapse = component(&engine, SynapseLimits::default());
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &synapse);
+    let mut entered = None;
+
+    let result = dispatcher.run_pass(
+        eligibility(&project),
+        &bounds(Duration::from_secs(5)),
+        NOW,
+        &mut |event| {
+            if matches!(event, DispatchEvent::Bound(_)) {
+                entered = Some(projection.enter_quarantine_for_test(
+                    QuarantineKind::Storage,
+                    &"concurrent projection writer",
+                ));
+            }
+        },
+    );
+
+    let quarantine = entered.expect("binding observer enters quarantine");
+    assert!(matches!(result, Err(DispatchError::Quarantined(q)) if q == quarantine));
+    assert_eq!(ledger(dir.path(), occurrence), before);
+    assert_eq!(engine.count_calls(), 0, "quarantine precedes preflight");
+    assert_eq!(engine.calls(), 0, "quarantine precedes inference");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1775,6 +1821,7 @@ async fn admission_full_and_lost_replies_never_charge_twice() {
             charge_admission(
                 conn,
                 &held.job_id,
+                held.episode.as_deref().unwrap(),
                 &host,
                 held.host_job_id.as_deref().unwrap(),
                 short.grant,

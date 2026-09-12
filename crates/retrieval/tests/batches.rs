@@ -1471,14 +1471,16 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
     for authorization in ["A", "B"] {
         store
             .with_conn_fenced(|conn| {
+                let episode_id = format!("{job_id}/auth/{authorization}");
                 assert_eq!(
                     authorize_recovery(conn, job_id, authorization, grant, 5).unwrap(),
                     Recovery::Granted {
-                        episode_id: format!("{job_id}/auth/{authorization}")
+                        episode_id: episode_id.clone()
                     }
                 );
                 assert_eq!(
-                    charge_admission(conn, job_id, &host, authorization, grant, 6).unwrap(),
+                    charge_admission(conn, job_id, &episode_id, &host, authorization, grant, 6,)
+                        .unwrap(),
                     Admission::Charged { attempts: 1 }
                 );
                 assert_eq!(
@@ -1529,6 +1531,80 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
                 "consumed history is checked before the non-stopped state"
             );
             assert_eq!(job_ledger(conn, job_id).unwrap(), pending);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn admission_charge_is_fenced_to_the_submitted_episode() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{
+        Admission, EpisodeGrant, LaneBinding, Recovery, authorize_recovery, charge_admission,
+        dispatch_jobs, eligible_job_candidates, job_ledger, stop_job,
+    };
+    use std::num::NonZeroU32;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "episode-fence",
+        1,
+        Some("input"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    let grant = EpisodeGrant {
+        allowance: NonZeroU32::new(2).unwrap(),
+        deadline: 100,
+    };
+    let host = LaneBinding {
+        embedding_model: "model-a".to_owned(),
+        bundle_fingerprint: "fp-a".to_owned(),
+        vector_dimension: 8,
+        table_epoch: 1,
+        host_incarnation: "host".to_owned(),
+    };
+
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let candidates =
+                eligible_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+            let job_ids = [candidates[0].job_id.clone()];
+            let job = dispatch_jobs(conn, &job_ids, 3).unwrap().remove(0);
+            let submitted_episode = job.item_id();
+            assert!(stop_job(conn, &job.job_id, "operator_recovery", 4).unwrap());
+            let Recovery::Granted { episode_id } =
+                authorize_recovery(conn, &job.job_id, "B", grant, 5).unwrap()
+            else {
+                panic!("recovery did not open episode B");
+            };
+            let before = job_ledger(conn, &job.job_id).unwrap().unwrap();
+
+            assert_eq!(
+                charge_admission(
+                    conn,
+                    &job.job_id,
+                    &submitted_episode,
+                    &host,
+                    "host-job-A",
+                    grant,
+                    6,
+                )
+                .unwrap(),
+                Admission::EpisodeChanged
+            );
+            let after = job_ledger(conn, &job.job_id).unwrap().unwrap();
+            assert_eq!(after, before, "a stale submission cannot mutate episode B");
+            assert_eq!(after.episode_id.as_deref(), Some(episode_id.as_str()));
+            assert_eq!((after.state.as_str(), after.attempts), ("pending", 0));
+            assert_eq!(after.host_job_id, None);
             Ok(())
         })
         .unwrap();

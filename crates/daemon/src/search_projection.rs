@@ -123,6 +123,16 @@ impl SearchProjection {
             .clone()
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn enter_quarantine_for_test(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        self.enter_quarantine(kind, error)
+    }
+
     /// Bounds the page cache and keeps transient sort and index storage in
     /// memory, where the bound applies, rather than in unowned temp files.
     fn pin_connection(&self) -> Result<(), SearchProjectionError> {

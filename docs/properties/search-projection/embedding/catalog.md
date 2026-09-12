@@ -215,24 +215,34 @@ Type: safety
 Reachability: test-only - no production RP2.1 durable pending source or driver
 exists; `crates/host-runtime/src/synapse/jobs.rs:162-196` is process-local state.
 Status: active
-Exercised: not yet - durable pending operations and admission trace are absent.
+Exercised: partial - the dispatcher covers durable pending admission, lost charge
+replies, capacity refusal, and a recovery episode replacing a submitted episode
+before charge. A production caller and crash-spanning acceptance trace are absent.
 Guarantee: Every product batch dispatch is backed by durable pending work and
-uses the existing JobTable admission and result-lifetime authority.
+uses the existing JobTable admission and result-lifetime authority. The durable
+attempt charge applies only to the episode identity submitted as the host item.
 Check: `always` - each new batch worker has a preceding durable Pending(K) and
 one `Admitted` result from the component's JobTable; `Existing` creates no
 worker; refusal or lost response does not erase Pending(K); accepted pending
 mutations and resident admissions stay within their separate approved limits;
 check each transition because durable discovery is not a second runnable queue.
+Before charging or recognizing an existing charge, the ledger episode equals
+the submitted item identity. If recovery replaces episode A with B before A is
+charged, B remains pending with zero attempts and no A host job identity.
 Fault/timing angle: Dispatch before local commit, concurrent sweeps of one row,
-full admission, and response loss between admission and descriptor observation.
+full admission, response loss between admission and descriptor observation, and
+operator recovery between host submission and durable charge.
 Required faults and enabling state: A committed pending row, two discovery
-attempts for it, a full JobTable, and a lost admission response. Local transaction
+attempts for it, a full JobTable, a lost admission response, and a stopped A
+episode that recovery replaces with B before A's charge. Local transaction
 creation is supplied by the projection lane.
 Confidence: medium - [evidence](evidence/embedding-pending-drives-one-job-table.md).
 P1 line 109 and P2 line 54 name the ownership; JobTable reuse is source-verified.
-Existing check: `crates/host-runtime/src/synapse/jobs.rs:387-489` and
-`crates/host-runtime/tests/synapse_protocol.rs:990-1045` cover local admission
-and replay, unaudited. No durable-to-process handoff check exists.
+Existing check: `admission_full_and_lost_replies_never_charge_twice` in
+`crates/daemon/tests/embedding_dispatch.rs` covers local capacity and charge
+reconciliation. `admission_charge_is_fenced_to_the_submitted_episode` at
+`crates/retrieval/tests/batches.rs:1540-1610` covers the A-to-B recovery race in
+one serialized transaction. No crash-spanning durable-to-process trace exists.
 Impact: Required work disappears on restart or duplicate routing/lease machinery
 acquires conflicting ownership and resource accounting.
 Open questions:
