@@ -213,7 +213,7 @@ pub mod bench_internals {
 mod differential_goldens;
 use transform::{
     HistorianDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
-    transform_with_projection_cached,
+    TransformWithProjection, transform_with_projection_cached,
 };
 
 /// The binding freezes the project, harness, session-slot value, and fallback render budget at bind.
@@ -3506,6 +3506,78 @@ impl HistorianProducerFactory for MissingProducerFactory {
         ))
     }
 }
+
+/// What a pass hands from the pre-transform checks to its store work: everything the checks
+/// produced, owned.
+struct PassIntake {
+    store: Arc<MemoryStore>,
+    parsed: TransformRequest,
+    binding: SessionBinding,
+    lineage_root: PathBuf,
+    serializer_profile: Option<SerializerProfile>,
+    pass_load: Result<LoadedState, MemoryStoreError>,
+    native_delta_frontier: Option<NativeDeltaFrontier>,
+    snapshot_generation: u64,
+    entry: EntryTimings,
+}
+
+/// The fixed context of one transform pass. Every transform attempt and the settle read it;
+/// nothing mutates it.
+struct PassEnv {
+    store: Arc<MemoryStore>,
+    parsed: Arc<TransformRequest>,
+    binding: SessionBinding,
+    route_project_root: String,
+    project_path: String,
+    note_project_path: String,
+    project_memory: Option<canonical_memory::CanonicalMemoryRead>,
+    projection_cache_input: Option<ProjectionCacheInput>,
+    native_delta_frontier: Option<NativeDeltaFrontier>,
+    snapshot_generation: u64,
+    pass_now: i64,
+    timings: PassTimings,
+}
+
+/// What the first transform consumes: the pass load it transforms against and the lineage
+/// root it records once the transform succeeds.
+struct PassStart {
+    pass_load: Result<LoadedState, MemoryStoreError>,
+    lineage_root: PathBuf,
+}
+
+/// A pass that has transformed at least once. The result is replaced by each rerun; the floor
+/// is the publication floor read after the first transform and after each rerun that a
+/// historian step follows, which the settle's final check compares against; the trigger
+/// timings accumulate across the historian preparations.
+struct TransformedPass {
+    result: TransformWithProjection,
+    emergency_pre_floor: Option<u64>,
+    trigger_timings: HistorianTriggerTimings,
+}
+
+/// The handler-side timing brackets taken before the pass's store work begins.
+struct EntryTimings {
+    handler_started_at: Instant,
+    request_observed_to_handler: f64,
+    delta_expand_ms: f64,
+}
+
+/// The handler-side timing brackets taken before the transform, reported with the response.
+struct PassTimings {
+    entry: EntryTimings,
+    projection_cache_lookup_ms: f64,
+    side_channel_drain_ms: f64,
+    trace_received_ms: f64,
+}
+
+/// The assertion, not review, keeps the pass state `Send + 'static`.
+const _: () = {
+    const fn assert_send<T: Send + 'static>() {}
+    assert_send::<PassIntake>();
+    assert_send::<PassEnv>();
+    assert_send::<PassStart>();
+    assert_send::<TransformedPass>();
+};
 
 /// Where a pre-transform consumer takes its `cache_state` from. The pass loads the row once;
 /// a consumer that runs again after a commit reads the store, and a pass whose load failed
@@ -8187,17 +8259,56 @@ impl HandlerCore {
             .lock()
             .expect("transform snapshots mutex")
             .begin(&parsed.session_id);
+        let intake = PassIntake {
+            store,
+            parsed,
+            binding,
+            lineage_root,
+            serializer_profile,
+            pass_load,
+            native_delta_frontier,
+            snapshot_generation,
+            entry: EntryTimings {
+                handler_started_at,
+                request_observed_to_handler,
+                delta_expand_ms,
+            },
+        };
+        let (env, start) = match self.start_transform_pass(intake) {
+            Ok(started) => started,
+            Err(outcome) => return outcome,
+        };
+        let mut pass = match self.first_transform(&env, start) {
+            Ok(pass) => pass,
+            Err(outcome) => return outcome,
+        };
+        let diagnostics = match self.resolve_historian(&env, &mut pass).await {
+            Ok(diagnostics) => diagnostics,
+            Err(outcome) => return outcome,
+        };
+        self.settle_transform_pass(&env, pass, diagnostics)
+    }
+
+    /// Runs the store work that precedes the transform and builds the pass environment. The
+    /// store calls here read, drain, and trace; the commit is [`Self::first_transform`]'s.
+    fn start_transform_pass(
+        &self,
+        intake: PassIntake,
+    ) -> Result<(PassEnv, PassStart), PreparedOutcome> {
+        let PassIntake {
+            store,
+            mut parsed,
+            binding,
+            lineage_root,
+            serializer_profile,
+            pass_load,
+            native_delta_frontier,
+            snapshot_generation,
+            entry,
+        } = intake;
         let route_project_root = binding.project_root.to_string_lossy().to_string();
-        let project_path =
-            match Self::authority_project_path(&store, &route_project_root, "memories") {
-                Ok(project) => project,
-                Err(outcome) => return outcome,
-            };
-        let note_project_path =
-            match Self::authority_project_path(&store, &route_project_root, "notes") {
-                Ok(project) => project,
-                Err(outcome) => return outcome,
-            };
+        let project_path = Self::authority_project_path(&store, &route_project_root, "memories")?;
+        let note_project_path = Self::authority_project_path(&store, &route_project_root, "notes")?;
         let pass_now = now_ms();
         match serializer_profile {
             Some(SerializerProfile::OpencodeAiSdk) => {
@@ -8209,10 +8320,10 @@ impl HandlerCore {
                         pass_now,
                     )
                 {
-                    return PreparedOutcome::Error {
+                    return Err(PreparedOutcome::Error {
                         code: "mural_artifact_store_failed".to_string(),
                         message: error.to_string(),
-                    };
+                    });
                 }
             }
             Some(SerializerProfile::ClaudeCodeAnthropic) => {
@@ -8221,16 +8332,17 @@ impl HandlerCore {
                         parsed.mural = mural;
                     }
                     Err(error) => {
-                        return PreparedOutcome::Error {
+                        return Err(PreparedOutcome::Error {
                             code: "mural_artifact_store_failed".to_string(),
                             message: error.to_string(),
-                        };
+                        });
                     }
                 }
             }
             _ => {}
         }
         let parsed = Arc::new(parsed);
+        let pass_state = PassState::from(&pass_load);
         let projection_cache_lookup_started_at = Instant::now();
         let projection_cache_input = native_delta_frontier
             .as_ref()
@@ -8250,88 +8362,169 @@ impl HandlerCore {
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
         // One canonical read per pass: every memory surface of the pass (m0, the
         // m1 revision signal, and a historian firing this pass triggers), and
-        // every attempt the closure below makes, composes from the same pinned
+        // every attempt the transform makes, composes from the same pinned
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
         let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
-        // The first run consumes the pass load; a rerun after an inline firing or a live
-        // completion runs after a commit and reads the store again. The floor is read after
-        // every commit the same way.
-        let read_floor = || {
-            store
-                .load_publication_floor_ordinal(&parsed.session_id)
-                .unwrap_or(None)
+        let env = PassEnv {
+            store,
+            parsed,
+            binding,
+            route_project_root,
+            project_path,
+            note_project_path,
+            project_memory,
+            projection_cache_input,
+            native_delta_frontier,
+            snapshot_generation,
+            pass_now,
+            timings: PassTimings {
+                entry,
+                projection_cache_lookup_ms,
+                side_channel_drain_ms,
+                trace_received_ms,
+            },
         };
-        let run_transform = |pass_state: PassState<'_>| {
-            let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
-                || {
-                    binding
-                        .config
-                        .resolve_cache_ttl_with_provenance(parsed.model_key.as_deref())
-                },
-                |value| config::ResolvedCacheTtl {
-                    value,
-                    provenance: config::CacheTtlProvenance::Default,
-                },
-            );
-            let producer_ctx = transform::ProducerContext {
-                project_memory: project_memory.clone(),
-                project_path: &project_path,
-                note_project_path: &note_project_path,
-                project_directory: &route_project_root,
-                history_budget_tokens: parsed
-                    .history_budget_tokens
-                    .filter(|budget| budget.is_finite() && *budget >= 0.0)
-                    .unwrap_or(binding.history_budget_tokens),
-                memory_enabled: binding.config.memory_enabled,
-                inject_docs: binding.config.inject_docs,
-                temporal_awareness: binding.config.temporal_awareness,
-                user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
-                now_ms: pass_now,
-                execute_threshold_percentage: parsed
-                    .execute_threshold_or(binding.config.execute_threshold_percentage),
-                compaction_enabled: binding.config.compaction_enabled,
-                smart_drops: binding.config.smart_drops,
-                // Claude Code omits the value, so the host resolves the request model and records whether lookup matched.
-                cache_ttl: resolved_cache_ttl.value,
-                cache_ttl_provenance: resolved_cache_ttl.provenance,
-                model_key: binding.model_key.clone(),
-                observed_last_response_at_ms: self.observed_last_response_at_ms(
-                    &store,
-                    &parsed.session_id,
-                    pass_state,
-                ),
-                guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, pass_now)),
-                historian_active: self.historian_active(&store, &parsed.session_id, pass_state),
-                wrapup_active: self.wrapup_active(&parsed.session_id),
-                #[cfg(test)]
-                injected_reductions: self
-                    .reduction_injection
-                    .lock()
-                    .expect("reduction injection mutex")
-                    .remove(&parsed.session_id)
-                    .unwrap_or_default(),
-            };
-            transform_with_projection_cached(
-                &store,
-                &parsed,
-                &producer_ctx,
-                &self.serialized_outputs,
-                projection_cache_input.as_ref(),
-            )
+        Ok((
+            env,
+            PassStart {
+                pass_load,
+                lineage_root,
+            },
+        ))
+    }
+
+    /// One attempt of the transform against `pass_state`; the transform commits when the pass
+    /// writes.
+    fn run_transform(
+        &self,
+        env: &PassEnv,
+        pass_state: PassState<'_>,
+    ) -> Result<TransformWithProjection, crate::transform::TransformError> {
+        let PassEnv {
+            store,
+            parsed,
+            binding,
+            route_project_root,
+            project_path,
+            note_project_path,
+            project_memory,
+            projection_cache_input,
+            pass_now,
+            ..
+        } = env;
+        let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
+            || {
+                binding
+                    .config
+                    .resolve_cache_ttl_with_provenance(parsed.model_key.as_deref())
+            },
+            |value| config::ResolvedCacheTtl {
+                value,
+                provenance: config::CacheTtlProvenance::Default,
+            },
+        );
+        let producer_ctx = transform::ProducerContext {
+            project_memory: project_memory.clone(),
+            project_path,
+            note_project_path,
+            project_directory: route_project_root,
+            history_budget_tokens: parsed
+                .history_budget_tokens
+                .filter(|budget| budget.is_finite() && *budget >= 0.0)
+                .unwrap_or(binding.history_budget_tokens),
+            memory_enabled: binding.config.memory_enabled,
+            inject_docs: binding.config.inject_docs,
+            temporal_awareness: binding.config.temporal_awareness,
+            user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
+            now_ms: *pass_now,
+            execute_threshold_percentage: parsed
+                .execute_threshold_or(binding.config.execute_threshold_percentage),
+            compaction_enabled: binding.config.compaction_enabled,
+            smart_drops: binding.config.smart_drops,
+            // Claude Code omits the value, so the host resolves the request model and records whether lookup matched.
+            cache_ttl: resolved_cache_ttl.value,
+            cache_ttl_provenance: resolved_cache_ttl.provenance,
+            model_key: binding.model_key.clone(),
+            observed_last_response_at_ms: self.observed_last_response_at_ms(
+                store,
+                &parsed.session_id,
+                pass_state,
+            ),
+            guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, *pass_now)),
+            historian_active: self.historian_active(store, &parsed.session_id, pass_state),
+            wrapup_active: self.wrapup_active(&parsed.session_id),
+            #[cfg(test)]
+            injected_reductions: self
+                .reduction_injection
+                .lock()
+                .expect("reduction injection mutex")
+                .remove(&parsed.session_id)
+                .unwrap_or_default(),
         };
-        let reject_transform = |e: crate::transform::TransformError| {
-            let message = e.to_string();
-            let _ = store.trace_pass_rejected(&parsed.session_id, &message, now_ms());
-            PreparedOutcome::Error {
-                code: "transform_failed".to_string(),
-                message,
-            }
-        };
-        let mut result = match run_transform(pass_state) {
-            Ok(result) => result,
-            Err(e) => return reject_transform(e),
-        };
+        transform_with_projection_cached(
+            store,
+            parsed,
+            &producer_ctx,
+            &self.serialized_outputs,
+            projection_cache_input.as_ref(),
+        )
+    }
+
+    fn reject_transform(env: &PassEnv, error: crate::transform::TransformError) -> PreparedOutcome {
+        let message = error.to_string();
+        let _ = env
+            .store
+            .trace_pass_rejected(&env.parsed.session_id, &message, now_ms());
+        PreparedOutcome::Error {
+            code: "transform_failed".to_string(),
+            message,
+        }
+    }
+
+    /// Runs the transform again after a commit moved the row, so it reads the store afresh.
+    fn rerun_transform(
+        &self,
+        env: &PassEnv,
+        pass: &mut TransformedPass,
+    ) -> Result<(), PreparedOutcome> {
+        pass.result = self
+            .run_transform(env, PassState::Reload)
+            .map_err(|error| Self::reject_transform(env, error))?;
+        Ok(())
+    }
+
+    /// Reruns after a historian firing landed, then reads the publication floor the same way
+    /// the first transform did after its commit.
+    fn rerun_transform_and_read_floor(
+        &self,
+        env: &PassEnv,
+        pass: &mut TransformedPass,
+    ) -> Result<(), PreparedOutcome> {
+        self.rerun_transform(env, pass)?;
+        pass.emergency_pre_floor = Self::read_publication_floor(env);
+        Ok(())
+    }
+
+    fn read_publication_floor(env: &PassEnv) -> Option<u64> {
+        env.store
+            .load_publication_floor_ordinal(&env.parsed.session_id)
+            .unwrap_or(None)
+    }
+
+    /// The first transform of the pass consumes the pass load and records the lineage.
+    fn first_transform(
+        &self,
+        env: &PassEnv,
+        start: PassStart,
+    ) -> Result<TransformedPass, PreparedOutcome> {
+        let PassStart {
+            pass_load,
+            lineage_root,
+        } = start;
+        let result = self
+            .run_transform(env, PassState::from(&pass_load))
+            .map_err(|error| Self::reject_transform(env, error))?;
         // Dropping the load makes `Reload` the only state a rerun can name and frees the
         // core payload before the post-transform work.
         drop(pass_load);
@@ -8341,15 +8534,14 @@ impl HandlerCore {
         self.transform_session_roots
             .lock()
             .expect("transform session roots mutex")
-            .entry(binding.session.clone())
+            .entry(env.binding.session.clone())
             .or_default()
             .insert(lineage_root);
-        let mut emergency_pre_floor =
-            if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
-                read_floor()
-            } else {
-                None
-            };
+        let emergency_pre_floor = if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
+            Self::read_publication_floor(env)
+        } else {
+            None
+        };
         #[cfg(test)]
         if let Some(hook) = self
             .between_transform_and_prepare
@@ -8359,9 +8551,43 @@ impl HandlerCore {
         {
             hook();
         }
-        let mut trigger_timings = HistorianTriggerTimings::default();
-        let diagnostics = if parsed.is_subagent {
-            HistorianDiagnostics {
+        Ok(TransformedPass {
+            result,
+            emergency_pre_floor,
+            trigger_timings: HistorianTriggerTimings::default(),
+        })
+    }
+
+    fn prepare_historian(
+        &self,
+        env: &PassEnv,
+        pass: &mut TransformedPass,
+    ) -> PreparedHistorianAction {
+        self.prepare_historian_fire(
+            Arc::clone(&env.store),
+            &env.parsed,
+            &env.binding,
+            &env.project_path,
+            &pass.result.projection,
+            HistorianPrepareContext {
+                now: env.pass_now,
+                snapshot_generation: env.snapshot_generation,
+                timings: &mut pass.trigger_timings,
+                project_memory: env.project_memory.as_ref(),
+            },
+        )
+    }
+
+    /// Decides the historian diagnostics for the pass. A subagent pass prepares nothing; an
+    /// Emergency95 pass waits for a live firing or drives one inline and reruns the transform
+    /// after it; every other pass prepares once and spawns the firing when one is ready.
+    async fn resolve_historian(
+        &self,
+        env: &PassEnv,
+        pass: &mut TransformedPass,
+    ) -> Result<HistorianDiagnostics, PreparedOutcome> {
+        if env.parsed.is_subagent {
+            return Ok(HistorianDiagnostics {
                 fired: false,
                 reason: Some("subagent_session".to_string()),
                 no_fire: Some("subagent_session".to_string()),
@@ -8369,103 +8595,10 @@ impl HandlerCore {
                 progress: None,
                 last_failure: None,
                 project_memory: None,
-            }
-        } else if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
-            match self.prepare_historian_fire(
-                Arc::clone(&store),
-                &parsed,
-                &binding,
-                &project_path,
-                &result.projection,
-                HistorianPrepareContext {
-                    now: pass_now,
-                    snapshot_generation,
-                    timings: &mut trigger_timings,
-                    project_memory: project_memory.as_ref(),
-                },
-            ) {
-                PreparedHistorianAction::Complete(diagnostics) => diagnostics,
-                PreparedHistorianAction::Busy {
-                    diagnostics,
-                    completion,
-                } => {
-                    if self.await_live_historian_completion(completion).await {
-                        result = match run_transform(PassState::Reload) {
-                            Ok(result) => result,
-                            Err(e) => return reject_transform(e),
-                        };
-                        emergency_pre_floor = read_floor();
-                        match self.prepare_historian_fire(
-                            Arc::clone(&store),
-                            &parsed,
-                            &binding,
-                            &project_path,
-                            &result.projection,
-                            HistorianPrepareContext {
-                                now: pass_now,
-                                snapshot_generation,
-                                timings: &mut trigger_timings,
-                                project_memory: project_memory.as_ref(),
-                            },
-                        ) {
-                            PreparedHistorianAction::Complete(diagnostics) => diagnostics,
-                            PreparedHistorianAction::Busy { diagnostics, .. } => diagnostics,
-                            PreparedHistorianAction::FireReady(prepared) => {
-                                let diagnostics = prepared.diagnostics.clone();
-                                match self.run_historian_firing_inline(prepared.task).await {
-                                    Ok(_) => {
-                                        result = match run_transform(PassState::Reload) {
-                                            Ok(result) => result,
-                                            Err(e) => return reject_transform(e),
-                                        };
-                                        emergency_pre_floor = read_floor();
-                                        diagnostics
-                                    }
-                                    Err(_) => self.refresh_historian_diagnostics(
-                                        &store,
-                                        &parsed.session_id,
-                                        diagnostics,
-                                    ),
-                                }
-                            }
-                        }
-                    } else {
-                        diagnostics
-                    }
-                }
-                PreparedHistorianAction::FireReady(prepared) => {
-                    let diagnostics = prepared.diagnostics.clone();
-                    match self.run_historian_firing_inline(prepared.task).await {
-                        Ok(_) => {
-                            result = match run_transform(PassState::Reload) {
-                                Ok(result) => result,
-                                Err(e) => return reject_transform(e),
-                            };
-                            emergency_pre_floor = read_floor();
-                            diagnostics
-                        }
-                        Err(_) => self.refresh_historian_diagnostics(
-                            &store,
-                            &parsed.session_id,
-                            diagnostics,
-                        ),
-                    }
-                }
-            }
-        } else {
-            match self.prepare_historian_fire(
-                Arc::clone(&store),
-                &parsed,
-                &binding,
-                &project_path,
-                &result.projection,
-                HistorianPrepareContext {
-                    now: pass_now,
-                    snapshot_generation,
-                    timings: &mut trigger_timings,
-                    project_memory: project_memory.as_ref(),
-                },
-            ) {
+            });
+        }
+        if pass.result.scheduler_pass != scheduler::PassDecision::Emergency95 {
+            return Ok(match self.prepare_historian(env, pass) {
                 PreparedHistorianAction::Complete(diagnostics) => diagnostics,
                 PreparedHistorianAction::Busy { diagnostics, .. } => diagnostics,
                 PreparedHistorianAction::FireReady(prepared) => {
@@ -8473,8 +8606,65 @@ impl HandlerCore {
                     self.spawn_historian_firing(prepared.task);
                     diagnostics
                 }
+            });
+        }
+        Ok(match self.prepare_historian(env, pass) {
+            PreparedHistorianAction::Complete(diagnostics) => diagnostics,
+            PreparedHistorianAction::Busy {
+                diagnostics,
+                completion,
+            } => {
+                if self.await_live_historian_completion(completion).await {
+                    self.rerun_transform_and_read_floor(env, pass)?;
+                    match self.prepare_historian(env, pass) {
+                        PreparedHistorianAction::Complete(diagnostics) => diagnostics,
+                        PreparedHistorianAction::Busy { diagnostics, .. } => diagnostics,
+                        PreparedHistorianAction::FireReady(prepared) => {
+                            self.fire_inline_and_rerun(env, pass, prepared).await?
+                        }
+                    }
+                } else {
+                    diagnostics
+                }
             }
-        };
+            PreparedHistorianAction::FireReady(prepared) => {
+                self.fire_inline_and_rerun(env, pass, prepared).await?
+            }
+        })
+    }
+
+    /// Drives a prepared firing inline and reruns the transform when it lands.
+    async fn fire_inline_and_rerun(
+        &self,
+        env: &PassEnv,
+        pass: &mut TransformedPass,
+        prepared: Box<PreparedHistorianFiring>,
+    ) -> Result<HistorianDiagnostics, PreparedOutcome> {
+        let diagnostics = prepared.diagnostics.clone();
+        match self.run_historian_firing_inline(prepared.task).await {
+            Ok(_) => {
+                self.rerun_transform_and_read_floor(env, pass)?;
+                Ok(diagnostics)
+            }
+            Err(_) => Ok(self.refresh_historian_diagnostics(
+                &env.store,
+                &env.parsed.session_id,
+                diagnostics,
+            )),
+        }
+    }
+
+    /// Applies the committed pass's derived state, builds the response, and records the
+    /// timings. An Emergency95 pass that is not a subagent's first checks the publication
+    /// floor once more and reruns when a publication landed after its last transform.
+    fn settle_transform_pass(
+        &self,
+        env: &PassEnv,
+        mut pass: TransformedPass,
+        diagnostics: HistorianDiagnostics,
+    ) -> PreparedOutcome {
+        let parsed = &env.parsed;
+        let store = &env.store;
         // Emergency passes return the freshest fold obtainable during the request.
         // An active run can publish after this request transforms.
         // A final check catches publications that occur after the earlier fallback paths.
@@ -8482,19 +8672,22 @@ impl HandlerCore {
         // Row advancement alone would rerun spuriously after a failed inline drive because abandon also bumps the row version.
         // The handler reruns once when the publication floor differs from the value observed by this request's transform.
         // The retry returns the published fold rather than pre-fold bytes.
-        // bytes.
-        if !parsed.is_subagent && result.scheduler_pass == scheduler::PassDecision::Emergency95 {
+        if !parsed.is_subagent && pass.result.scheduler_pass == scheduler::PassDecision::Emergency95
+        {
             let floor_advanced = store
                 .load_publication_floor_ordinal(&parsed.session_id)
-                .map(|floor| floor != emergency_pre_floor)
+                .map(|floor| floor != pass.emergency_pre_floor)
                 .unwrap_or(false);
-            if floor_advanced {
-                result = match run_transform(PassState::Reload) {
-                    Ok(result) => result,
-                    Err(e) => return reject_transform(e),
-                };
+            if floor_advanced && let Err(outcome) = self.rerun_transform(env, &mut pass) {
+                return outcome;
             }
         }
+        let TransformedPass {
+            result,
+            trigger_timings,
+            ..
+        } = pass;
+        let timings = &env.timings;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
         let reasoning_watermark = result.reasoning_watermark;
@@ -8505,10 +8698,10 @@ impl HandlerCore {
         let projection = Arc::new(result.projection);
         let projection_cache_store_started_at = Instant::now();
         let request_message_charge = self.store_projection_cache(
-            &parsed,
+            parsed,
             revert_epoch,
             Arc::clone(&projection),
-            native_delta_frontier
+            env.native_delta_frontier
                 .as_ref()
                 .and_then(|frontier| frontier.projection_cache.as_ref()),
         );
@@ -8526,13 +8719,13 @@ impl HandlerCore {
         let native_cache_stats = if parsed.serve_native {
             attach_native_messages_incremental(
                 &mut response,
-                &parsed,
+                parsed,
                 reasoning_watermark,
                 &tag_numbers,
                 mutation_exempt_mid.as_deref(),
                 lineage_anchor_mid.as_deref(),
                 transition_consumed,
-                native_delta_frontier.as_ref(),
+                env.native_delta_frontier.as_ref(),
                 revert_epoch,
                 &self.native_attachments,
                 NativeCacheKeyMode::Normal,
@@ -8542,13 +8735,13 @@ impl HandlerCore {
         };
         finalize_native_messages_response(
             &mut response,
-            &parsed,
+            parsed,
             reasoning_watermark,
             &tag_numbers,
             mutation_exempt_mid.as_deref(),
             lineage_anchor_mid.as_deref(),
             transition_consumed,
-            native_delta_frontier.as_ref(),
+            env.native_delta_frontier.as_ref(),
             native_cache_stats,
         );
         let native_attach_ms = native_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -8574,39 +8767,41 @@ impl HandlerCore {
             .expect("transform snapshots mutex")
             .finish_ready(
                 &parsed.session_id,
-                snapshot_generation,
-                Arc::clone(&parsed),
+                env.snapshot_generation,
+                Arc::clone(parsed),
                 revert_epoch,
                 retained_bytes,
             );
         let snapshot_store_ms = snapshot_store_started_at.elapsed().as_secs_f64() * 1_000.0;
-        if let Some(timings) = response.timings.as_mut() {
-            timings.handler_total = handler_started_at.elapsed().as_secs_f64() * 1_000.0;
-            timings.request_observed_to_handler = request_observed_to_handler;
-            timings.delta_expand = delta_expand_ms;
-            timings.side_channel_drain = side_channel_drain_ms;
-            timings.trace_received = trace_received_ms;
-            timings.projection_cache_lookup = projection_cache_lookup_ms;
-            timings.projection_cache_store = projection_cache_store_ms;
-            timings.native_attach = native_attach_ms;
-            timings.trace_complete = trace_complete_ms;
-            timings.response_observation = response_observation_ms;
-            timings.retained_size = retained_size_ms;
-            timings.snapshot_store = snapshot_store_ms;
-            timings.trigger_ms = trigger_timings.elapsed_ms;
-            timings.trigger_boundary_build = trigger_timings.boundary_build_ms;
-            timings.trigger_eval = trigger_timings.trigger_eval_ms;
-            timings.trigger_cache_store = trigger_timings.cache_store_ms;
-            timings.trigger_token_cache_hits = trigger_timings.token_cache_hits;
-            timings.trigger_tokenized_blocks = trigger_timings.tokenized_blocks;
-            timings.native_cache_reused_messages = native_cache_stats.reused_messages;
-            timings.native_cache_encoded_messages = native_cache_stats.encoded_messages;
-            timings.native_cache_refused_store = native_cache_stats.refused_store;
-            timings.native_cache_degraded_store = native_cache_stats.degraded_store;
-            timings.native_cache_evicted = native_cache_stats.evicted;
-            timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
+        if let Some(response_timings) = response.timings.as_mut() {
+            response_timings.handler_total =
+                timings.entry.handler_started_at.elapsed().as_secs_f64() * 1_000.0;
+            response_timings.request_observed_to_handler =
+                timings.entry.request_observed_to_handler;
+            response_timings.delta_expand = timings.entry.delta_expand_ms;
+            response_timings.side_channel_drain = timings.side_channel_drain_ms;
+            response_timings.trace_received = timings.trace_received_ms;
+            response_timings.projection_cache_lookup = timings.projection_cache_lookup_ms;
+            response_timings.projection_cache_store = projection_cache_store_ms;
+            response_timings.native_attach = native_attach_ms;
+            response_timings.trace_complete = trace_complete_ms;
+            response_timings.response_observation = response_observation_ms;
+            response_timings.retained_size = retained_size_ms;
+            response_timings.snapshot_store = snapshot_store_ms;
+            response_timings.trigger_ms = trigger_timings.elapsed_ms;
+            response_timings.trigger_boundary_build = trigger_timings.boundary_build_ms;
+            response_timings.trigger_eval = trigger_timings.trigger_eval_ms;
+            response_timings.trigger_cache_store = trigger_timings.cache_store_ms;
+            response_timings.trigger_token_cache_hits = trigger_timings.token_cache_hits;
+            response_timings.trigger_tokenized_blocks = trigger_timings.tokenized_blocks;
+            response_timings.native_cache_reused_messages = native_cache_stats.reused_messages;
+            response_timings.native_cache_encoded_messages = native_cache_stats.encoded_messages;
+            response_timings.native_cache_refused_store = native_cache_stats.refused_store;
+            response_timings.native_cache_degraded_store = native_cache_stats.degraded_store;
+            response_timings.native_cache_evicted = native_cache_stats.evicted;
+            response_timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
-        respond_transform(&parsed, response)
+        respond_transform(parsed, response)
     }
 
     fn collector_now(&self) -> Instant {
@@ -36918,10 +37113,20 @@ mod tests {
             }));
         }
 
+        store.start_statement_reuse_probe();
+        let scalar_runs_before = store.cache_state_scalar_runs();
         let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
         assert!(
             m0_text(&response).contains("autonomous summary"),
             "a fold published between the transform and the live-map check must land in this response"
+        );
+        // The pass reads `cache_state` scalars four times: the floor after its first commit,
+        // the historian phase and the floor after the rerun that follows the live completion,
+        // and the final floor check. A fifth read is a bracket that moved.
+        assert_eq!(
+            store.cache_state_scalar_runs() - scalar_runs_before,
+            4,
+            "the Emergency95 pass's scalar reads"
         );
         let (transform_committed, published) = witness
             .lock()
