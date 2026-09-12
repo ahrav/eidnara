@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use daemon::harness_sources::{Representation, SourcePublisher, SourceUnit};
 use daemon::message_cleanup::{CleanupBounds, CleanupStop, MessageCleanup};
-use daemon::search_projection::SearchProjection;
+use daemon::search_projection::{SearchProjection, SearchProjectionError};
+use daemon::search_writer::QuarantineKind;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
@@ -649,6 +650,44 @@ fn cleanup_removes_exactly_the_eligible_rows_and_replays_resurrect_nothing() {
     );
 }
 
+/// A page shorter than `page_rows` that the row bound did not cut proves the scan exhausted: the slice reports no cursor and no stop, so the next slice starts from the beginning instead of reading an empty page first.
+#[test]
+fn a_short_final_page_exhausts_the_scan_without_a_further_read() {
+    let fixture = Fixture::build();
+    let one_wide_page = CleanupBounds {
+        page_rows: NonZeroUsize::new(16).unwrap(),
+        max_pages: NonZeroUsize::new(1).unwrap(),
+        max_reclaimed: NonZeroUsize::new(16).unwrap(),
+    };
+    let mut cleanup = fixture.cleanup(fixture.acknowledged);
+    let report = cleanup.run_slice(one_wide_page, &unbounded()).unwrap();
+    assert_eq!(report.reclaimed.occurrences, fixture.eligible.len());
+    assert!(report.inspected < 16, "{report:?}");
+    assert_eq!(
+        (report.cursor.as_deref(), report.stop.as_ref()),
+        (None, None),
+        "{report:?}"
+    );
+    assert_eq!(cleanup.cursor(), None);
+}
+
+/// A quarantined projection refuses a slice before any read, as it refuses every other writer; a scan with nothing to reclaim does not report success instead.
+#[test]
+fn a_quarantined_projection_refuses_a_slice_before_it_reads() {
+    let fixture = Fixture::build();
+    let quarantine = fixture
+        .projection()
+        .enter_quarantine_for_test(QuarantineKind::Storage, &"disk full");
+    let error = fixture
+        .cleanup(0)
+        .run_slice(bounds(), &unbounded())
+        .unwrap_err();
+    assert!(
+        matches!(&error, SearchProjectionError::Quarantined(found) if *found == quarantine),
+        "{error:?}"
+    );
+}
+
 /// The budget's deadline bounds the wait for the projection connection before selection as it bounds the wait before the write: a slice that starts while another operation holds the connection returns `Cancelled` at its deadline, before the holder releases, and removes nothing.
 #[test]
 fn a_slice_stops_at_its_deadline_while_another_operation_holds_the_connection() {
@@ -727,21 +766,24 @@ fn bounds_and_the_original_budget_stop_admission_without_partial_pages() {
     );
     assert_eq!(fixture.present().len(), 10);
 
-    // One row per slice: each slice reclaims exactly one and hands the cursor on.
+    // One row per slice: each slice reclaims exactly one and hands the cursor on, until a short final page proves the scan exhausted.
     let one = CleanupBounds {
         max_reclaimed: NonZeroUsize::new(1).unwrap(),
         ..bounds()
     };
     let mut removed = BTreeSet::new();
     let mut cursor = None;
-    for _ in 0..fixture.eligible.len() {
+    for remaining in (1..=fixture.eligible.len()).rev() {
         let mut slice = fixture
             .cleanup(fixture.acknowledged)
             .resuming(cursor.clone());
         let report = slice.run_slice(one, &unbounded()).unwrap();
         assert_eq!(report.reclaimed.occurrences, 1, "{report:?}");
-        assert_eq!(report.stop, Some(CleanupStop::BoundReached));
-        assert!(report.cursor.is_some());
+        if report.cursor.is_some() {
+            assert_eq!(report.stop, Some(CleanupStop::BoundReached));
+        } else {
+            assert_eq!((remaining, report.stop.as_ref()), (1, None), "{report:?}");
+        }
         cursor = report.cursor;
         let now = fixture.present();
         let gone: BTreeSet<String> = fixture.eligible.difference(&now).cloned().collect();

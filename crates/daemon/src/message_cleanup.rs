@@ -80,12 +80,15 @@ impl<'a> MessageCleanup<'a> {
     ///
     /// # Errors
     ///
-    /// Returns the projection's error when a read fails, a statement fails, or the store is quarantined, so the caller can quarantine as every other projection writer does; a write whose reply the store lost ends the slice in the report as [`CleanupStop::Unresolved`], with the page reconciled from its rows.
+    /// Returns the projection's error when a read fails, a statement fails, or the projection is quarantined, before any read when the quarantine is already in force, so the caller can quarantine as every other projection writer does; a write whose reply the store lost ends the slice in the report as [`CleanupStop::Unresolved`], with the page reconciled from its rows.
     pub fn run_slice(
         &mut self,
         bounds: CleanupBounds,
         budget: &EvalBudget,
     ) -> Result<CleanupReport, SearchProjectionError> {
+        if let Some(quarantine) = self.projection.quarantine() {
+            return Err(SearchProjectionError::Quarantined(quarantine));
+        }
         let mut report = CleanupReport {
             inspected: 0,
             reclaimed: Reclaimed::default(),
@@ -171,6 +174,12 @@ impl<'a> MessageCleanup<'a> {
                     }
                     Err(error) => return Err(error),
                 }
+            }
+            // A page shorter than the bound that the row bound did not cut proves the scan exhausted.
+            if !truncated && page.inspected < bounds.page_rows.get() {
+                report.cursor = None;
+                self.cursor = None;
+                return Ok(report);
             }
             // A page cut by the row bound resumes at the last row it reclaimed; a whole page advances past its last inspected row.
             let cursor = if truncated {
