@@ -146,7 +146,7 @@ Checks added with the mode-gated authorizer (implementation base
 | [Baseline escapes on the store connection][baseline-gate-test] | A pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or format-marker delete in baseline text is refused by the store connection's gate; the pristine file then opens with benign text. | unaudited |
 | [Store statements stay uncached][surface-guard-test] | No fence or durability-pin statement is found in the statement cache after an open. | unaudited |
 | [Maintenance flush survives a panic][flush-unwind-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a maintenance callback creates main `late` and panics before returning; no temp `late` is created. Failed with `Ok(())` before the flush moved into a drop guard. | unaudited |
-| [Unrestricted statements do not reach guarded callbacks][gate-tests] | A fence upsert prepared unrestricted is reused without re-authorization until the cache is flushed, then refused; every `deny_baseline_escapes` denial is reachable; nested mode entry is a debug assertion. | unaudited |
+| [Unrestricted statements do not reach guarded callbacks][gate-tests] | A fence upsert prepared unrestricted is reused without re-authorization until the cache is flushed, then refused; every `deny_baseline_escapes` denial is reachable; nested mode entry is an assertion in every build. | unaudited |
 
 [reuse-probe]: ../../../crates/storage/src/lib.rs#L4472-L4549
 [read-witness]: ../../../crates/storage/src/lib.rs#L4551-L4585

@@ -76,7 +76,7 @@ map onto three policies: a read-only callback and a fenced write share the
 statement runs. A callback [enters its mode][scope-install] after the
 temp-shadow scan, which stays uncached, and a [drop guard][mode-hold] returns
 the connection to `Unrestricted` on release and on unwind; entering a mode
-while one is held is a debug assertion. The [read path][read] still toggles
+while one is held is an assertion in every build. The [read path][read] still toggles
 `query_only` around the mode; the [fenced path][write] still prechecks the
 fence, pins durability, and claims inside the immediate transaction. The
 [baseline DDL][apply] on a pristine file runs under `Baseline`; the marker and

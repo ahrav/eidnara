@@ -757,7 +757,7 @@ mod sqlite_backend {
         /// enters a mode only from the rest state.
         fn enter(&self, mode: ConnectionMode) -> ModeHold<'_> {
             let mut current = self.mode.lock().unwrap_or_else(|p| p.into_inner());
-            debug_assert!(
+            assert!(
                 matches!(*current, ConnectionMode::Unrestricted),
                 "a mode was entered while another mode was held"
             );
