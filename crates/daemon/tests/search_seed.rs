@@ -613,6 +613,31 @@ async fn cancellation_after_the_close_ends_verification_and_releases_the_lease()
     assert_eq!(count, 2);
 }
 
+/// A gate closed after the seed's admission revokes the grant: quiescing ends as `Cancelled` at its next poll rather than certifying a seed the gate no longer admits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_grant_revoked_after_admission_cancels_the_quiesce() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = embedded_fixture(dir.path()).await;
+    let gate = open_gate();
+    let refused = quiesce_with_barrier_for_test(
+        fixture.projection,
+        &gate,
+        0,
+        &fixture.expected,
+        seed_bounds(),
+        &unbounded(),
+        &mut |barrier| {
+            if barrier == SeedBarrier::AfterClose {
+                gate.close();
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refused.refusal, SeedRefusal::Cancelled);
+    assert!(refused.projection.is_none(), "the file is closed");
+    SearchProjection::open(dir.path()).unwrap();
+}
+
 /// AC5: another handle, a running worker, or a closed gate refuses the seed before the checkpoint, and the projection is returned untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn active_handles_workers_and_a_closed_gate_refuse_the_seed() {
@@ -718,7 +743,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 9] = [
+    let cases: [(&str, &str, SeedRefusal); 10] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -759,6 +784,12 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
             "admitted work",
             "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
             SeedRefusal::AdmittedWork(1),
+        ),
+        // The projection's own writers refuse a completed job without its vector as a corrupt row; the certifier refuses the same shape.
+        (
+            "completed job without its vector",
+            "DELETE FROM occurrence_vectors",
+            SeedRefusal::VectorlessJobs(1),
         ),
         (
             "orphan vector",

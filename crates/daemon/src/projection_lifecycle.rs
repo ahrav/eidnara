@@ -465,7 +465,11 @@ impl ProjectionLifecycle {
         let _lock = self.lock().map_err(io_refusal)?;
         let mut intent = self.admitted_intent(gate)?;
         match intent.staged_seed_digest.as_deref() {
-            Some(pinned) if pinned == digest => return Ok(intent),
+            // A prior pin may have renamed the record and failed its directory sync; the replay syncs before reporting the pin durable, as `record` does.
+            Some(pinned) if pinned == digest => {
+                self.sync_directory()?;
+                return Ok(intent);
+            }
             Some(_) => {
                 return Err(IntentRefusal::Conflict {
                     attempt_id: intent.attempt_id,
