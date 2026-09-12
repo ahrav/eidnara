@@ -38,7 +38,7 @@ credit the CAS oracle with testing embedding completion.
 ### Coverage balance
 
 B1/B2 require a central choice of enabled acceptance scope and enforceable
-situation coverage. Nine `always` records alone can pass without reaching
+situation coverage. The original nine `always` records alone can pass without reaching
 inference, recovery, or the distinct identity-change dimensions. Optional
 inference and one marker firing for only one dimension are insufficient.
 
@@ -47,8 +47,9 @@ Disposition: consume
 It owns the obligation to witness every declared enabled marker/scenario
 dimension across the three maps. The central owner must declare applicability
 before the campaign; missing required dimensions cannot be excused afterward.
-Embedding adds no duplicate reachability record. The 16 marker names remain
-constant; applicable same-revision remediation extends an existing dimension.
+Embedding adds no duplicate reachability record. The original 16 marker names
+remain constant; two bounded-dispatch markers extend the map. Applicable
+same-revision remediation extends an existing dimension.
 
 G2 belongs to export/recovery's
 [catchup-and-authorized-recovery-converge](../export-recovery/catalog.md#catchup-and-authorized-recovery-converge).
@@ -140,20 +141,15 @@ must identify its own evidence; these dispositions are not that review.
 
 ## Mechanical verification receipt
 
-The embedding directory contains 17 Markdown files: the catalog, inventory,
-fault map, this evaluation, nine evidence files, and four retained lens files.
-Nine records match nine index rows and nine evidence files. There are seven
-safety and two bounded-liveness records, all using `always`, plus 16 unique
-constant precondition marker names. The shared acceptance record supplies the
-cross-catalog reachability obligation without changing these local counts.
+The original receipt covered 17 Markdown files and nine records. The bounded
+dispatch update adds two evidence files and two records, producing eleven index
+rows and eleven evidence files. There are eight safety and three
+bounded-liveness records, all using `always`; the map contains 18 constant
+precondition marker names.
 
-Read-only verification confirms METHOD field order and the six-column index.
-All 108 local links and anchors resolve, including the three shared records.
-The 174 fully qualified citation occurrences are within their source ranges;
-all 21 cited repository source files are byte-identical to the pinned HEAD.
-The inventory's 45 named check/helper declarations and 10 scheduler test
-declarations resolve. Evidence files contain 76-102 lines. No stale
-evaluation-pending statement remains in this directory.
+The original link, source-range, and declaration counts remain historical
+evidence for the first nine records. The two additions use the same METHOD field
+order and six-column index.
 
 These are artifact checks, not test, build, benchmark, or independent re-review
 results. Existing checks retain their unaudited status.

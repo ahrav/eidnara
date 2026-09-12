@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild.
+rebuild. The schema version is 3.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -165,7 +165,7 @@ Indexes:
 
 ## `embedding_jobs`
 
-Durable embedding work and retry accounting. A pending row is the crash source for the process-local job table.
+Durable embedding work and retry accounting. A pending row is the crash source for the process-local job table. An episode is one finite grant of attempts under one deadline; only an explicit authorization reference opens another, and a stop reason holds the row until one arrives. An admitted row names the host incarnation holding it; work held by any other incarnation returns to pending.
 
 | Column | Type | Not null | Primary key | Column constraints |
 | --- | --- | --- | --- | --- |
@@ -177,6 +177,13 @@ Durable embedding work and retry accounting. A pending row is the crash source f
 | `last_failure_kind` | TEXT | no | no |  |
 | `next_attempt_at` | INTEGER | no | no |  |
 | `admitted_epoch` | INTEGER | no | no |  |
+| `episode_id` | TEXT | no | no |  |
+| `episode_allowance` | INTEGER | yes | no | `DEFAULT 0 CHECK(episode_allowance>=0)` |
+| `episode_deadline` | INTEGER | no | no |  |
+| `host_job_id` | TEXT | no | no |  |
+| `host_incarnation` | TEXT | no | no |  |
+| `stop_reason` | TEXT | no | no |  |
+| `authorization_ref` | TEXT | no | no |  |
 | `created_at` | INTEGER | yes | no |  |
 | `updated_at` | INTEGER | yes | no |  |
 
@@ -188,6 +195,33 @@ Indexes:
 
 - `idx_embedding_jobs_dispatch` on `(state,next_attempt_at,job_id)`
 - `idx_embedding_jobs_generation` on `(generation_id,job_id)`
+- `idx_embedding_jobs_open_order` on `(created_at,job_id) WHERE state IN ('pending','admitted') AND stop_reason IS NULL`
+
+Dispatch reads open jobs in creation order, breaking ties by job identity. The
+partial index avoids sorting the due backlog before applying the row limit.
+Deferred or WrongScope rows can still form a long prefix, so the daemon keeps a
+process-local keyset cursor across successful passes. One pass reads at most two
+pages of at most 1,024 candidates and wraps to the beginning at the ordered tail.
+The index supplies order; the dispatcher supplies the scan and action budgets.
+
+## `embedding_recovery_authorizations`
+
+Each row records a consumed authorization for one embedding job. Inserting the
+receipt and opening its episode share the caller's transaction. Receipts have no
+expiry: replaying any consumed reference grants no new attempts, even after
+another reference opens an episode. The job's `authorization_ref` column records
+the most recent grant; this table determines whether a reference is a replay.
+These receipts record local consumption, not external authority to recover or
+rebuild the projection.
+
+| Column | Type | Not null | Primary key | Column constraints |
+| --- | --- | --- | --- | --- |
+| `job_id` | TEXT | yes | yes | `REFERENCES embedding_jobs(job_id) ON DELETE RESTRICT` |
+| `authorization_ref` | TEXT | yes | yes |  |
+
+Table constraints:
+
+- `PRIMARY KEY(job_id,authorization_ref)`
 
 ## `retirement_receipts`
 
