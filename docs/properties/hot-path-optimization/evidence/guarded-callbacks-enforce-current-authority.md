@@ -170,8 +170,13 @@ The connection-open path owns the resource pragmas. The memory store's
 [connection profile][profile] reads `PRAGMA page_size` and the
 `MAX_MMAP_SIZE` compile option, derives `cache_size` in pages from a byte
 budget and the measured page size, caps `mmap_size` at the compile-time
-maximum, keeps `temp_store` in memory, and reads back what took effect; the
-[profile test][profile-test] checks each derivation. The
+maximum, and reads back what took effect; the [profile test][profile-test]
+checks each derivation. `temp_store` stays at its default: SQLite bounds a
+sorter's in-memory list at `cache_size` and spills the rest only to a
+file-backed temp store, so a temp store held in memory removes the bound and
+keeps every sorted row in the heap. The [sort-spill test][sort-spill] sorts
+four page-cache budgets of rows through a read callback and shows the library
+retaining about one budget. The
 [resource-pragma test][resource-pragmas] shows read and fenced callbacks denied
 `cache_size`, `temp_store`, and `mmap_size` writes while the maintenance-set
 values stand. The memory store sets an explicit
@@ -223,39 +228,40 @@ steady-pass eviction test.
 [facade]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5563-L5586
 [notes]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5999-L6025
 [scope-owners]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4772-L4823
-[mode]: ../../../../crates/storage/src/lib.rs#L625-L637
-[gate-install]: ../../../../crates/storage/src/lib.rs#L1422
+[mode]: ../../../../crates/storage/src/lib.rs#L633-L645
+[gate-install]: ../../../../crates/storage/src/lib.rs#L1430
 [flush]: ../../../../crates/storage/src/lib.rs#L299-L309
-[scope-install]: ../../../../crates/storage/src/lib.rs#L972-L1074
-[mode-hold]: ../../../../crates/storage/src/lib.rs#L875-L877
-[apply]: ../../../../crates/storage/src/lib.rs#L1922-L1960
-[gate-tests]: ../../../../crates/storage/src/lib.rs#L2075-L2414
-[probe]: ../../../../crates/storage/src/lib.rs#L4548-L4632
-[read-witness]: ../../../../crates/storage/src/lib.rs#L4795-L4824
-[temp-write]: ../../../../crates/storage/src/lib.rs#L4831-L4854
-[restore-test]: ../../../../crates/storage/src/lib.rs#L4860-L4912
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L4918-L4948
-[surface-test]: ../../../../crates/storage/src/lib.rs#L4955-L4975
-[cached-test]: ../../../../crates/storage/src/lib.rs#L4501
-[snapshot]: ../../../../crates/storage/src/lib.rs#L645-L655
-[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L805-L816
-[infra-check]: ../../../../crates/storage/src/lib.rs#L1047-L1062
-[forget]: ../../../../crates/storage/src/lib.rs#L867-L871
-[bound]: ../../../../crates/storage/src/lib.rs#L679
-[rename-test]: ../../../../crates/storage/src/lib.rs#L4639-L4679
-[pin-test]: ../../../../crates/storage/src/lib.rs#L2313-L2351
-[bound-test]: ../../../../crates/storage/src/lib.rs#L2262-L2283
-[durability-test]: ../../../../crates/storage/src/lib.rs#L4042-L4107
-[forge-test]: ../../../../crates/storage/src/lib.rs#L2226-L2256
-[defensive]: ../../../../crates/storage/src/lib.rs#L754
-[defensive-test]: ../../../../crates/storage/src/lib.rs#L2200-L2220
-[release-test]: ../../../../crates/storage/src/lib.rs#L2289-L2305
-[pin]: ../../../../crates/storage/src/lib.rs#L822-L829
+[scope-install]: ../../../../crates/storage/src/lib.rs#L980-L1082
+[mode-hold]: ../../../../crates/storage/src/lib.rs#L883-L885
+[apply]: ../../../../crates/storage/src/lib.rs#L1930-L1968
+[gate-tests]: ../../../../crates/storage/src/lib.rs#L2083-L2422
+[probe]: ../../../../crates/storage/src/lib.rs#L4558-L4642
+[read-witness]: ../../../../crates/storage/src/lib.rs#L4805-L4834
+[temp-write]: ../../../../crates/storage/src/lib.rs#L4841-L4864
+[restore-test]: ../../../../crates/storage/src/lib.rs#L4870-L4922
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L4928-L4958
+[surface-test]: ../../../../crates/storage/src/lib.rs#L4965-L4985
+[cached-test]: ../../../../crates/storage/src/lib.rs#L4511
+[snapshot]: ../../../../crates/storage/src/lib.rs#L653-L663
+[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L813-L824
+[infra-check]: ../../../../crates/storage/src/lib.rs#L1055-L1070
+[forget]: ../../../../crates/storage/src/lib.rs#L875-L879
+[bound]: ../../../../crates/storage/src/lib.rs#L687
+[rename-test]: ../../../../crates/storage/src/lib.rs#L4649-L4689
+[pin-test]: ../../../../crates/storage/src/lib.rs#L2321-L2359
+[bound-test]: ../../../../crates/storage/src/lib.rs#L2270-L2291
+[durability-test]: ../../../../crates/storage/src/lib.rs#L4052-L4117
+[forge-test]: ../../../../crates/storage/src/lib.rs#L2234-L2264
+[defensive]: ../../../../crates/storage/src/lib.rs#L762
+[defensive-test]: ../../../../crates/storage/src/lib.rs#L2208-L2228
+[release-test]: ../../../../crates/storage/src/lib.rs#L2297-L2313
+[pin]: ../../../../crates/storage/src/lib.rs#L830-L837
 [maintenance-exit]: ../../../../crates/storage/src/lib.rs#L388-L391
-[unwind-test]: ../../../../crates/storage/src/lib.rs#L2356-L2405
-[profile]: ../../../../crates/memory-store/src/lib.rs#L502-L544
-[profile-test]: ../../../../crates/memory-store/src/lib.rs#L15120-L15149
+[unwind-test]: ../../../../crates/storage/src/lib.rs#L2364-L2413
+[profile]: ../../../../crates/memory-store/src/lib.rs#L496-L538
+[profile-test]: ../../../../crates/memory-store/src/lib.rs#L15111-L15138
+[sort-spill]: ../../../../crates/memory-store/src/lib.rs#L15145-L15170
 [capacity]: ../../../../crates/memory-store/src/lib.rs#L478
-[resource-pragmas]: ../../../../crates/storage/src/lib.rs#L4685-L4723
-[eviction-probe]: ../../../../crates/storage/src/lib.rs#L4729-L4788
+[resource-pragmas]: ../../../../crates/storage/src/lib.rs#L4695-L4733
+[eviction-probe]: ../../../../crates/storage/src/lib.rs#L4739-L4798
 [pass-probe]: ../../../../crates/daemon/src/lib.rs#L24573-L24603

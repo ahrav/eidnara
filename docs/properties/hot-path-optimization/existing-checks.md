@@ -150,17 +150,18 @@ Checks added with the mode-gated authorizer (implementation base
 | [Durability pin once per connection][pin-test] | A fenced write does not re-run the pin; the first fenced write after maintenance re-pins `synchronous=FULL`; a panicking maintenance callback still re-arms the pin and discards the snapshot. | unaudited |
 | [Resource pragmas belong to the open path][resource-pragma-test] | Read and fenced callbacks are denied `cache_size`, `temp_store`, and `mmap_size` writes; maintenance-set values stand. | unaudited |
 | [Statement evictions per text][eviction-probe] | A handle with no runs after its text had run counts as an eviction; an undersized cache shows one, a fitted cache none. | unaudited |
-| [Memory-store connection profile][profile-test] | `cache_size` pages times the measured page size equals the budget; `mmap_size` is the budget capped by `MAX_MMAP_SIZE`; `temp_store` is memory. | unaudited |
+| [Memory-store connection profile][profile-test] | `cache_size` pages times the measured page size equals the budget; `mmap_size` is the budget capped by `MAX_MMAP_SIZE`. | unaudited |
+| [Transient sorts spill at the page-cache budget][sort-spill] | A read callback sorting four page-cache budgets of rows retains about one budget; `temp_store` stays file-backed so SQLite's `cache_size` spill bound applies. | unaudited |
 | [Steady passes evict nothing][pass-probe] | A warm pass and four steady passes on one session prepare more distinct texts than the default capacity, fewer than the configured capacity with headroom, and re-create no cached statement. | unaudited |
 | [Foreign rename observed][rename-test] | After an `ALTER TABLE ... RENAME` on a second connection, the next callback denies a temp shadow of the new name, allows the old one, and still refuses a maintenance-left shadow. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4548-L4632
-[read-witness]: ../../../crates/storage/src/lib.rs#L4795-L4824
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L4831-L4854
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4860-L4912
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4918-L4948
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4955-L4975
-[gate-tests]: ../../../crates/storage/src/lib.rs#L2075-L2414
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4558-L4642
+[read-witness]: ../../../crates/storage/src/lib.rs#L4805-L4834
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L4841-L4864
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4870-L4922
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4928-L4958
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4965-L4985
+[gate-tests]: ../../../crates/storage/src/lib.rs#L2083-L2422
 
 ## History render
 
@@ -292,21 +293,21 @@ that no related check exists anywhere in the repository.
 [upload-cap-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L910
 [upload-finish-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L965
 [upload-keep-test]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1103
-[scope-install]: ../../../crates/storage/src/lib.rs#L972-L1074
+[scope-install]: ../../../crates/storage/src/lib.rs#L980-L1082
 [scope-restore]: ../../../crates/storage/src/lib.rs#L652-L705
 [facade-scope]: ../../../crates/memory-store/src/lib.rs#L5563-L5586
 [shadow-create-test]: ../../../crates/storage/src/lib.rs#L2506
 [shadow-test]: ../../../crates/storage/src/lib.rs#L2552
 [lower-test]: ../../../crates/storage/src/lib.rs#L2597
 [schema-test]: ../../../crates/storage/src/lib.rs#L2672
-[unwind-test]: ../../../crates/storage/src/lib.rs#L2356-L2405
-[durability-test]: ../../../crates/storage/src/lib.rs#L4042-L4107
+[unwind-test]: ../../../crates/storage/src/lib.rs#L2364-L2413
+[durability-test]: ../../../crates/storage/src/lib.rs#L4052-L4117
 [read-escape-test]: ../../../crates/storage/src/lib.rs#L3498
 [tx-escape-test]: ../../../crates/storage/src/lib.rs#L3548
 [fence-row-test]: ../../../crates/storage/src/lib.rs#L3595
 [format-test]: ../../../crates/storage/src/lib.rs#L3700
 [reentry-test]: ../../../crates/storage/src/lib.rs#L3832
-[cached-test]: ../../../crates/storage/src/lib.rs#L4501
+[cached-test]: ../../../crates/storage/src/lib.rs#L4511
 [snapshot-test]: ../../../crates/storage/src/lib.rs#L3946-L3981
 [read-tx-test]: ../../../crates/storage/src/lib.rs#L3986
 [attach-test]: ../../../crates/storage/src/lib.rs#L4019
@@ -415,10 +416,11 @@ that no related check exists anywhere in the repository.
 [shared-catalog]: ../shared-primitives/catalog.md
 [transform-catalog]: ../daemon/transform/catalog.md
 [memory-catalog]: ../memory-store/catalog.md
-[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2171-L2305
-[pin-test]: ../../../crates/storage/src/lib.rs#L2313-L2405
-[rename-test]: ../../../crates/storage/src/lib.rs#L4639-L4679
-[resource-pragma-test]: ../../../crates/storage/src/lib.rs#L4685-L4723
-[eviction-probe]: ../../../crates/storage/src/lib.rs#L4729-L4788
-[profile-test]: ../../../crates/memory-store/src/lib.rs#L15120-L15149
+[snapshot-key-test]: ../../../crates/storage/src/lib.rs#L2179-L2313
+[pin-test]: ../../../crates/storage/src/lib.rs#L2321-L2413
+[rename-test]: ../../../crates/storage/src/lib.rs#L4649-L4689
+[resource-pragma-test]: ../../../crates/storage/src/lib.rs#L4695-L4733
+[eviction-probe]: ../../../crates/storage/src/lib.rs#L4739-L4798
+[profile-test]: ../../../crates/memory-store/src/lib.rs#L15111-L15138
+[sort-spill]: ../../../crates/memory-store/src/lib.rs#L15145-L15170
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L24573-L24603

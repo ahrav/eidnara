@@ -476,9 +476,6 @@ pub const MMAP_BUDGET_BYTES: i64 = 64 * 1024 * 1024;
 /// so the population is sampled by the daemon's steady-pass probe rather than counted.
 /// The kernel store uses 128 for a comparable set.
 pub const STATEMENT_CACHE_CAPACITY: usize = 128;
-/// `PRAGMA temp_store` value keeping transient sort and index storage in memory, where
-/// the page-cache bound applies, rather than in unowned temp files.
-const TEMP_STORE_MEMORY: i64 = 2;
 
 /// What the connection-open path measured and set. Sizing is derived from these values,
 /// not from assumed defaults.
@@ -494,15 +491,14 @@ pub struct ConnectionProfile {
     /// `MAX_MMAP_SIZE` from `PRAGMA compile_options`; zero when the library was compiled
     /// without memory-mapped I/O.
     pub compile_max_mmap_bytes: i64,
-    /// `PRAGMA temp_store` as the library reports it; the `TEMP_STORE` compile option can
-    /// pin it to files.
-    pub temp_store: i64,
 }
 
 impl ConnectionProfile {
     /// Reads the file's page size and the library's compile options, applies the budgets
     /// derived from them, and reads back what took effect. A library without the
-    /// `MAX_MMAP_SIZE` option is refused rather than silently left unmapped.
+    /// `MAX_MMAP_SIZE` option is refused rather than silently left unmapped. `temp_store`
+    /// stays at its default: SQLite spills a sorter past `cache_size` only to a file-backed
+    /// temp store.
     fn apply(conn: &storage::MaintenanceConn<'_>) -> rusqlite::Result<Self> {
         let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         if !(512..=65_536).contains(&page_size) || page_size.count_ones() != 1 {
@@ -527,7 +523,6 @@ impl ConnectionProfile {
                 )
             })?;
         conn.pragma_update(None, "cache_size", PAGE_CACHE_BUDGET_BYTES / page_size)?;
-        conn.pragma_update(None, "temp_store", TEMP_STORE_MEMORY)?;
         conn.pragma_update(
             None,
             "mmap_size",
@@ -538,7 +533,6 @@ impl ConnectionProfile {
             cache_pages: conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
             mmap_bytes: conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
             compile_max_mmap_bytes,
-            temp_store: conn.query_row("PRAGMA temp_store", [], |row| row.get(0))?,
         })
     }
 }
@@ -15113,9 +15107,6 @@ mod tests {
         MemoryStore::test_descriptor(dir, "eidnara-test")
     }
 
-    /// The connection-open path sizes the page cache from the file's measured page size,
-    /// caps the memory map at the library's compile-time maximum, keeps temporary storage
-    /// in memory, and reads back what took effect.
     #[test]
     fn the_connection_profile_is_derived_from_the_page_size_and_compile_options() {
         let dir = tempfile::tempdir().unwrap();
@@ -15131,20 +15122,50 @@ mod tests {
             MMAP_BUDGET_BYTES.min(profile.compile_max_mmap_bytes),
             "the map is the budget capped by the compile-time maximum, got {profile:?}"
         );
-        assert_eq!(profile.temp_store, TEMP_STORE_MEMORY, "{profile:?}");
-        let (cache_size, mmap_size, temp_store): (i64, i64, i64) = store
+        let (cache_size, mmap_size): (i64, i64) = store
             .inner
             .with_conn(|conn| {
                 Ok((
                     conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
                     conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
-                    conn.query_row("PRAGMA temp_store", [], |row| row.get(0))?,
                 ))
             })
             .unwrap();
         assert_eq!(
-            (cache_size, mmap_size, temp_store),
-            (profile.cache_pages, profile.mmap_bytes, profile.temp_store)
+            (cache_size, mmap_size),
+            (profile.cache_pages, profile.mmap_bytes)
+        );
+    }
+
+    /// SQLite bounds a sorter's in-memory list at `cache_size` pages and spills excess rows
+    /// to the temp store only when the temp store uses files; with the temp store in memory
+    /// every sorted row stays in the heap. A read callback sorting four budgets of rows
+    /// retains about one budget when the bound applies.
+    #[test]
+    fn a_transient_sort_past_the_page_cache_budget_spills_instead_of_growing_the_heap() {
+        const PAYLOAD_BYTES: i64 = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rows = 4 * PAGE_CACHE_BUDGET_BYTES / PAYLOAD_BYTES;
+        let retained = store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?1)
+                     SELECT payload FROM (SELECT n, randomblob(?2) AS payload FROM seq)
+                      ORDER BY (n * 7919) % 10007, n",
+                )?;
+                let before = storage::library_memory_used();
+                let mut sorted = statement.query(params![rows, PAYLOAD_BYTES])?;
+                sorted.next()?.expect("the sort yields its first row");
+                Ok(storage::library_memory_used() - before)
+            })
+            .unwrap();
+        assert!(
+            retained <= 2 * PAGE_CACHE_BUDGET_BYTES,
+            "sorting {} bytes retained {retained} bytes; the sorter did not spill at the {} byte page-cache budget",
+            rows * PAYLOAD_BYTES,
+            PAGE_CACHE_BUDGET_BYTES
         );
     }
 

@@ -90,5 +90,5 @@ existing checks and remain unaudited.
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
 [live-read]: ../../../../crates/storage/src/lib.rs#L269-L286
 [live-write]: ../../../../crates/storage/src/lib.rs#L335-L361
-[live-test]: ../../../../crates/storage/src/lib.rs#L4978-L5015
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L5148-L5174
+[live-test]: ../../../../crates/storage/src/lib.rs#L4988-L5025
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L5158-L5184
