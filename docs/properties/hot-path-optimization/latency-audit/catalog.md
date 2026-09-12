@@ -2606,14 +2606,14 @@ evaluation of this area and its disposition are recorded in
 [store-pc]: ../../../../crates/daemon/src/lib.rs#L4336-L4378
 [historian-fire]: ../../../../crates/daemon/src/lib.rs#L5006
 [assemble]: ../../../../crates/daemon/src/lib.rs#L5246-L5250
-[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13104
+[ingress-chunks]: ../../../../crates/daemon/src/lib.rs#L13162-L13214
 [gate-native]: ../../../../crates/daemon/src/lib.rs#L13160-L13165
-[native-attach]: ../../../../crates/daemon/src/lib.rs#L13168-L13188
+[native-attach]: ../../../../crates/daemon/src/lib.rs#L13225-L13515
 [native-diff]: ../../../../crates/daemon/src/lib.rs#L13401-L13418
 [segments-take]: ../../../../crates/daemon/src/lib.rs#L14507-L14522
 [segments]: ../../../../crates/daemon/src/lib.rs#L14527-L14534
-[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16913
-[sel-kind]: ../../../../crates/daemon/src/lib.rs#L16975
+[cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16971-L17031
+[sel-kind]: ../../../../crates/daemon/src/lib.rs#L17033-L17051
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2038-L2060
 [served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L224
 [ser-served]: ../../../../crates/daemon/src/transform.rs#L301-L308
@@ -2668,11 +2668,11 @@ evaluation of this area and its disposition are recorded in
 [serde-features]: ../../../../Cargo.toml#L45
 [load]: ../../../../crates/memory-store/src/lib.rs#L6640-L6667
 [full-select]: ../../../../crates/memory-store/src/lib.rs#L4905-L4906
-[epoch-read]: ../../../../crates/daemon/src/lib.rs#L4281-L4299
+[epoch-read]: ../../../../crates/daemon/src/lib.rs#L4319-L4333
 [epoch-read-delta]: ../../../../crates/daemon/src/lib.rs#L4161-L4190
-[active]: ../../../../crates/daemon/src/lib.rs#L4577-L4590
+[active]: ../../../../crates/daemon/src/lib.rs#L4611-L4634
 [prepare]: ../../../../crates/daemon/src/lib.rs#L5005-L5078
-[no-fire]: ../../../../crates/daemon/src/lib.rs#L5461-L5474
+[no-fire]: ../../../../crates/daemon/src/lib.rs#L5512-L5526
 [handler]: ../../../../crates/daemon/src/lib.rs#L8205-L8468
 [received-call]: ../../../../crates/daemon/src/lib.rs#L8175
 [rejected-call]: ../../../../crates/daemon/src/lib.rs#L8238-L8245
@@ -2780,7 +2780,7 @@ evaluation of this area and its disposition are recorded in
 [process-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L96-L125
 [idle-select]: ../../../../crates/host-runtime/src/ring_transport.rs#L582-L617
 [publish-fail]: ../../../../crates/host-runtime/src/ring_transport.rs#L622-L646
-[receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L731-L736
+[receive-to-vec]: ../../../../crates/host-runtime/src/ring_transport.rs#L663-L747
 [publish-one]: ../../../../crates/host-runtime/src/ring_transport.rs#L749-L786
 [publish-direct]: ../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
 [commit-before]: ../../../../crates/host-runtime/src/ring_transport.rs#L814-L825
@@ -2792,7 +2792,7 @@ evaluation of this area and its disposition are recorded in
 [reserve-direct]: ../../../../crates/host-runtime/src/dispatch.rs#L517-L554
 [direct-frame]: ../../../../crates/host-runtime/src/frame_channel.rs#L166-L200
 [native-reserve]: ../../../../packages/shm-native/src/lib.rs#L1024
-[settle-with]: ../../../../crates/daemon/src/lib.rs#L12059-L12115
+[settle-with]: ../../../../crates/daemon/src/lib.rs#L12119-L12174
 [fixture-arm]: ../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
@@ -2812,8 +2812,8 @@ evaluation of this area and its disposition are recorded in
 [startup-unreachable]: ../../../../crates/kernel/src/cas/gc.rs#L109-L136
 [reclaim-cand]: ../../../../crates/kernel/src/cas/gc.rs#L212-L289
 [recovery]: ../../../../crates/kernel/src/cas/gc.rs#L300-L341
-[unlink-artifact]: ../../../../crates/kernel/src/cas/gc.rs#L403-L419
-[scan-objects]: ../../../../crates/kernel/src/cas/gc.rs#L579
+[unlink-artifact]: ../../../../crates/kernel/src/cas/gc.rs#L442-L459
+[scan-objects]: ../../../../crates/kernel/src/cas/gc.rs#L655-L682
 [purge-unlink]: ../../../../crates/kernel/src/cas/deletion.rs#L532-L556
 [delete]: ../../../../crates/kernel/src/cas/deletion.rs#L237
 [cap-default]: ../../../../crates/kernel/src/cas/mod.rs#L24
@@ -2845,7 +2845,7 @@ evaluation of this area and its disposition are recorded in
 [fx-2500]: ../../../../crates/daemon/src/transform.rs#L28085-L28090
 [h-pre]: ../../../../crates/daemon/src/lib.rs#L8159-L8176
 [h-timings]: ../../../../crates/daemon/src/lib.rs#L8506-L8531
-[respond]: ../../../../crates/daemon/src/lib.rs#L14484
+[respond]: ../../../../crates/daemon/src/lib.rs#L14542-L14621
 [tt]: ../../../../crates/daemon/src/transform.rs#L1026-L1207
 [rtcd]: ../../../../crates/daemon/src/transform.rs#L1209-L1220
 [fmt]: ../../../../crates/daemon/src/transform.rs#L1226-L1360
@@ -2916,7 +2916,7 @@ evaluation of this area and its disposition are recorded in
 [sched-due]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L412-L416
 [sched-default]: ../../../../crates/daemon/src/config.rs#L127
 [sched-accept]: ../../../../crates/daemon/src/config.rs#L881-L895
-[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4589-L4598
+[eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4600-L4609
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L231-L232
 [call-reattach]: ../../../../crates/daemon/src/lib.rs#L4801
 [call-fire]: ../../../../crates/daemon/src/lib.rs#L5059
@@ -2932,7 +2932,7 @@ evaluation of this area and its disposition are recorded in
 [raise-only]: ../../../../crates/daemon/src/config.rs#L740
 [knows]: ../../../../crates/daemon/src/lib.rs#L4499-L4546
 [roots-doc]: ../../../../crates/daemon/src/lib.rs#L2956-L2959
-[guidance-fn]: ../../../../crates/daemon/src/lib.rs#L4700-L4707
+[guidance-fn]: ../../../../crates/daemon/src/lib.rs#L4711-L4718
 [guidance-use]: ../../../../crates/daemon/src/lib.rs#L8219
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
@@ -2976,6 +2976,6 @@ evaluation of this area and its disposition are recorded in
 [sched-fixture]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L586-L593
 [sched-clock]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L418-L427
 [t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L680
-[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14056-L14108
+[sched-projects]: ../../../../crates/daemon/src/lib.rs#L14114-L14166
 [sched-authority]: ../../../../crates/daemon/src/lib.rs#L14078-L14083
 [sched-filter]: ../../../../crates/daemon/src/lib.rs#L14103
