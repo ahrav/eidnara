@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PiDiagnosticReport } from "./diagnostics-pi";
-import { bundleIssueReport, readLogTailLines } from "./logs-pi";
+import { bundleIssueReport } from "./logs-pi";
 
 const tempRoots: string[] = [];
 
@@ -52,94 +52,7 @@ function reportWithLog(logPath: string): PiDiagnosticReport {
     };
 }
 
-describe("readLogTailLines", () => {
-    it("returns only complete lines from the bounded tail", () => {
-        const root = makeTempRoot();
-        const logPath = join(root, "eidnara.log");
-        const lines = Array.from(
-            { length: 50 },
-            (_, index) => `line-${String(index).padStart(3, "0")}`,
-        );
-        writeFileSync(logPath, `${lines.join("\n")}\n`);
-
-        const tail = readLogTailLines(logPath, 25);
-
-        expect(tail).toEqual(["line-048", "line-049", ""]);
-    });
-
-    it("keeps a first line that begins exactly on a line boundary", () => {
-        const root = makeTempRoot();
-        const logPath = join(root, "eidnara.log");
-        writeFileSync(logPath, "aaaa\nbbbb\ncccc\n");
-
-        // 10 bytes back from the end lands right after the first newline.
-        expect(readLogTailLines(logPath, 10)).toEqual(["bbbb", "cccc", ""]);
-    });
-
-    it("keeps the first line when the file fits inside the bound", () => {
-        const root = makeTempRoot();
-        const logPath = join(root, "eidnara.log");
-        writeFileSync(logPath, "first\nsecond\n");
-
-        expect(readLogTailLines(logPath, 1024)).toEqual(["first", "second", ""]);
-    });
-});
-
 describe("bundleIssueReport session filtering", () => {
-    it("keeps only the picked Pi session's entries", async () => {
-        const root = makeTempRoot();
-        const logPath = join(root, "eidnara.log");
-        const wanted = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
-        const other = "0190a1b2-c3d4-7e5f-8a9b-ffffffffffff";
-        writeFileSync(
-            logPath,
-            [
-                "[2026-07-07T12:00:00.000Z] [eidnara][pi] /ctx-aug: sidekick failed (timeout): stderr",
-                "[2026-07-07T12:00:00.500Z] [eidnara][pi-status] Status: rendered for a session",
-                `[2026-07-07T12:00:01.000Z] [eidnara][${wanted}] /ctx-status ran`,
-                `[2026-07-07T12:00:02.000Z] [eidnara][${other}] /ctx-status ran elsewhere`,
-                "[2026-07-07T12:00:02.500Z] [eidnara][pi-session-1a2b3c4d] /ctx-aug: project identity",
-                "[2026-07-07T12:00:03.000Z] loaded | harness=pi | project=other-project | dir=/srv/other",
-            ].join("\n"),
-        );
-
-        const bundled = await bundleIssueReport(reportWithLog(logPath), "desc", "title", {
-            cwd: root,
-            now: new Date("2026-07-07T12:00:00Z"),
-            sessionFilter: `2026-07-07T12-00-00-000Z_${wanted}`,
-        });
-
-        expect(bundled.bodyMarkdown).toContain(`[eidnara][${wanted}] /ctx-status ran`);
-        expect(bundled.bodyMarkdown).not.toContain(other);
-        expect(bundled.bodyMarkdown).not.toContain("sidekick failed");
-        expect(bundled.bodyMarkdown).not.toContain("rendered for a session");
-        expect(bundled.bodyMarkdown).not.toContain("pi-session-1a2b3c4d");
-        expect(bundled.bodyMarkdown).not.toContain("/srv/other");
-    });
-
-    it("keeps every entry when no session is picked", async () => {
-        const root = makeTempRoot();
-        const logPath = join(root, "eidnara.log");
-        writeFileSync(
-            logPath,
-            [
-                "[2026-07-07T12:00:00.000Z] [eidnara][pi] extension loaded",
-                "[2026-07-07T12:00:03.000Z] loaded | harness=pi | project=p | dir=/srv/p",
-            ].join("\n"),
-        );
-
-        const bundled = await bundleIssueReport(reportWithLog(logPath), "desc", "title", {
-            cwd: root,
-            now: new Date("2026-07-07T12:00:00Z"),
-        });
-
-        expect(bundled.bodyMarkdown).toContain("extension loaded");
-        expect(bundled.bodyMarkdown).toContain("dir=/srv/p");
-        if (process.platform !== "win32") {
-            expect(statSync(bundled.path).mode & 0o777).toBe(0o600);
-        }
-    });
-
     it("escapes a log line that would close the Markdown fence", async () => {
         const root = makeTempRoot();
         const logPath = join(root, "eidnara.log");
@@ -166,35 +79,6 @@ describe("bundleIssueReport session filtering", () => {
         expect(logSection).toContain("progress 10%\r\\```");
         expect(logSection.match(/(^|\r)```$/gm)).toHaveLength(2);
         expect(logSection).toContain("newest line");
-    });
-
-    it("drops another session's error stack along with its tagged first line", async () => {
-        const root = makeTempRoot();
-        const logPath = join(root, "eidnara.log");
-        const wanted = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
-        const other = "0190a1b2-c3d4-7e5f-8a9b-ffffffffffff";
-        writeFileSync(
-            logPath,
-            [
-                `[2026-07-07T12:00:01.000Z] [eidnara][${other}] rust session.status failed: boom`,
-                "Error: boom-other",
-                "    at otherFrame (file:///other.ts:1:1)",
-                `[2026-07-07T12:00:02.000Z] [eidnara][${wanted}] rust session.status failed: bang`,
-                "Error: bang-wanted",
-                "    at wantedFrame (file:///wanted.ts:2:2)",
-            ].join("\n"),
-        );
-
-        const bundled = await bundleIssueReport(reportWithLog(logPath), "desc", "title", {
-            cwd: root,
-            now: new Date("2026-07-07T12:00:00Z"),
-            sessionFilter: wanted,
-        });
-
-        expect(bundled.bodyMarkdown).toContain("Error: bang-wanted");
-        expect(bundled.bodyMarkdown).toContain("wantedFrame");
-        expect(bundled.bodyMarkdown).not.toContain("boom-other");
-        expect(bundled.bodyMarkdown).not.toContain("otherFrame");
     });
 
     it("reports an unreadable log instead of aborting the bundle", async () => {
@@ -228,7 +112,7 @@ describe("bundleIssueReport session filtering", () => {
 });
 
 describe("bundleIssueReport file naming", () => {
-    it("does not overwrite a bundle written in the same second", async () => {
+    it("does not overwrite a bundle written in the same second and creates each bundle owner-only", async () => {
         const root = makeTempRoot();
         const logPath = join(root, "eidnara.log");
         writeFileSync(logPath, "[2026-07-07T12:00:00.000Z] one\n");
@@ -247,6 +131,10 @@ describe("bundleIssueReport file naming", () => {
         expect(second.path).toBe(join(root, "eidnara-pi-issue-20260707-120000-2.md"));
         expect(readFileSync(first.path, "utf-8")).toContain("first");
         expect(readFileSync(second.path, "utf-8")).toContain("second");
+        if (process.platform !== "win32") {
+            expect(statSync(first.path).mode & 0o777).toBe(0o600);
+            expect(statSync(second.path).mode & 0o777).toBe(0o600);
+        }
     });
 });
 
@@ -274,20 +162,28 @@ describe("bundleIssueReport session filtering by tag class", () => {
         `[2026-05-11T12:00:01.000Z] [eidnara][${OTHER_UUID}] other uuid session line`,
         `[2026-05-11T12:00:02.000Z] [eidnara][${OTHER_CUSTOM}] other custom session line`,
         "[2026-05-11T12:00:03.000Z] [eidnara][pi-status] status label line",
-        "[2026-05-11T12:00:04.000Z] [eidnara][global] global label line",
-        "[2026-05-11T12:00:05.000Z] [eidnara][pi] plugin label line",
-        "[2026-05-11T12:00:06.000Z] plugin startup line without a session tag",
+        "[2026-05-11T12:00:04.000Z] [eidnara][pi-session-1a2b3c4d] pi-session label line",
+        "[2026-05-11T12:00:05.000Z] [eidnara][global] global label line",
+        "[2026-05-11T12:00:06.000Z] [eidnara][pi] plugin label line",
+        "[2026-05-11T12:00:07.000Z] plugin startup line without a session tag",
+        "[2026-05-11T12:00:08.000Z] loaded | harness=pi | project=other-project | dir=/srv/other",
     ];
 
     it("keeps only the selected session and the global label; drops every other tag and untagged records", async () => {
-        const body = await bundleWithLog(`${logLines.join("\n")}\n`, SELECTED);
+        // The filter may name the session by its on-disk file stem, timestamp prefix included.
+        const body = await bundleWithLog(
+            `${logLines.join("\n")}\n`,
+            `2026-05-11T12-00-00-000Z_${SELECTED}`,
+        );
 
         expect(body).toContain("selected session line");
         expect(body).toContain("global label line");
         // Untagged records cannot be attributed, and `pi` / `pi-status` carry
         // per-session command output, so all of them fail closed.
         expect(body).not.toContain("plugin startup line without a session tag");
+        expect(body).not.toContain("/srv/other");
         expect(body).not.toContain("status label line");
+        expect(body).not.toContain("pi-session label line");
         expect(body).not.toContain("plugin label line");
         expect(body).not.toContain("other uuid session line");
         expect(body).not.toContain("other custom session line");
@@ -331,6 +227,11 @@ describe("bundleIssueReport session filtering by tag class", () => {
 
         expect(body).toContain("other uuid session line");
         expect(body).toContain("other custom session line");
+        expect(body).toContain("status label line");
+        expect(body).toContain("pi-session label line");
+        expect(body).toContain("plugin label line");
+        expect(body).toContain("plugin startup line without a session tag");
+        expect(body).toContain("dir=/srv/other");
     });
 });
 

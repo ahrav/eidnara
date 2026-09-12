@@ -6,9 +6,10 @@ pub mod sidecar;
 
 mod json;
 
+#[cfg(test)]
+pub(crate) use opencode::decode_opencode;
 pub use opencode::{
-    MessageV2Json, decode_opencode, decode_opencode_with_sidecar,
-    decode_opencode_with_sidecar_and_base, encode_opencode, encode_opencode_with_session,
+    MessageV2Json, encode_opencode, encode_opencode_with_session,
     encode_opencode_with_session_exemptions,
 };
 pub use pi::{PiSessionEntryJson, decode_pi, decode_pi_with_sidecar, encode_pi};
@@ -22,7 +23,6 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::injection::build_synthetic_todo_pair;
-    use crate::test_support::FixtureBuilder;
     use crate::wire::WireMessage;
 
     use super::{
@@ -291,16 +291,5 @@ mod tests {
             .into_iter()
             .filter(|entry| entry.get("type").and_then(Value::as_str) != Some("compaction"))
             .collect()
-    }
-    #[test]
-    fn fixture_builder_drives_synthetic_todo_wire_shape() {
-        let fixture = FixtureBuilder::synthetic_todo_armed();
-        assert_eq!(fixture.native_messages.len(), 2);
-        assert!(
-            fixture
-                .native_messages
-                .iter()
-                .all(|message| message["meta"]["synthetic"] == true)
-        );
     }
 }

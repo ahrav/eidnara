@@ -207,39 +207,32 @@ describe("doctor OpenCode conflict repair", () => {
         }
     });
 
-    it("counts a project-only plugin registration and lets --force repair the conflict", async () => {
+    it.each([
+        {
+            label: "a project-only config file",
+            register: (cwd: string) => {
+                mkdirSync(join(cwd, ".opencode"), { recursive: true });
+                writeJsonc(join(cwd, ".opencode", "opencode.json"), {
+                    plugin: ["@eidnara/opencode"],
+                });
+            },
+        },
+        {
+            label: "OPENCODE_CONFIG_CONTENT",
+            register: () => {
+                process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+                    plugin: ["@eidnara/opencode"],
+                });
+            },
+        },
+    ])("counts a plugin registration supplied through $label and lets --force repair the conflict", async ({
+        register,
+    }) => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: true } });
         writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
         const cwd = makeTempDir("eidnara-doctor-project-");
-        mkdirSync(join(cwd, ".opencode"), { recursive: true });
-        writeJsonc(join(cwd, ".opencode", "opencode.json"), { plugin: ["@eidnara/opencode"] });
-        const { errors, successes, restore } = captureDoctorLog();
-
-        try {
-            const code = await runDoctor({ force: true, cwd });
-
-            expect(code).toBe(0);
-            expect(
-                successes.some((message) =>
-                    message.startsWith("Plugin registered in another loaded OpenCode config layer"),
-                ),
-            ).toBe(true);
-            expect(successes).toContain("Fixed: Disabled auto-compaction");
-            expect(
-                errors.some((message) => message.startsWith("Leaving conflicts in place:")),
-            ).toBe(false);
-        } finally {
-            restore();
-        }
-    });
-
-    it("counts a registration supplied through OPENCODE_CONFIG_CONTENT", async () => {
-        const { configDir, opencodeConfigPath } = installIsolatedHome();
-        writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: true } });
-        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
-        process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ plugin: ["@eidnara/opencode"] });
-        const cwd = makeTempDir("eidnara-doctor-project-");
+        register(cwd);
         const { errors, successes, restore } = captureDoctorLog();
 
         try {
@@ -565,12 +558,40 @@ describe("doctor OpenCode read-only checks", () => {
         }
     });
 
-    it("leaves conflicts in place under --force when only OpenCode Desktop is installed", async () => {
+    it.each([
+        {
+            label: "only OpenCode Desktop is installed",
+            prepare: (configDir: string) => {
+                rmSync(join(configDir, "..", "..", "bin", "opencode"));
+                const desktopDir = join(configDir, "..", "ai.opencode.desktop");
+                mkdirSync(desktopDir, { recursive: true });
+                writeFileSync(join(desktopDir, "opencode.settings"), "{}\n");
+            },
+            reason: "Leaving conflicts in place: OpenCode Desktop reports no version",
+        },
+        {
+            label: "the OpenCode version cannot be read",
+            prepare: (configDir: string) => {
+                writeFileSync(
+                    join(configDir, "..", "..", "bin", "opencode"),
+                    "#!/bin/sh\nexit 1\n",
+                );
+            },
+            reason: "Leaving conflicts in place: the OpenCode CLI version could not be read",
+        },
+        {
+            label: "OpenCode is below the minimum",
+            prepare: (configDir: string) => {
+                writeFileSync(
+                    join(configDir, "..", "..", "bin", "opencode"),
+                    "#!/bin/sh\necho 1.14.9\n",
+                );
+            },
+            reason: "Leaving conflicts in place: this OpenCode is older than",
+        },
+    ])("leaves conflicts in place under --force when $label", async ({ prepare, reason }) => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
-        rmSync(join(configDir, "..", "..", "bin", "opencode"));
-        const desktopDir = join(configDir, "..", "ai.opencode.desktop");
-        mkdirSync(desktopDir, { recursive: true });
-        writeFileSync(join(desktopDir, "opencode.settings"), "{}\n");
+        prepare(configDir);
         writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
         writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
         const { errors, successes, restore } = captureDoctorLog();
@@ -580,67 +601,7 @@ describe("doctor OpenCode read-only checks", () => {
 
             expect(code).toBe(1);
             expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
-            expect(
-                errors.some((message) =>
-                    message.startsWith(
-                        "Leaving conflicts in place: OpenCode Desktop reports no version",
-                    ),
-                ),
-            ).toBe(true);
-            const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
-                compaction?: { auto?: boolean };
-            };
-            expect(untouched.compaction?.auto).toBe(true);
-        } finally {
-            restore();
-        }
-    });
-
-    it("leaves conflicts in place under --force when the OpenCode version cannot be read", async () => {
-        const { configDir, opencodeConfigPath } = installIsolatedHome();
-        writeFileSync(join(configDir, "..", "..", "bin", "opencode"), "#!/bin/sh\nexit 1\n");
-        writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
-        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
-        const { errors, successes, restore } = captureDoctorLog();
-
-        try {
-            const code = await runDoctor({ force: true });
-
-            expect(code).toBe(1);
-            expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
-            expect(
-                errors.some((message) =>
-                    message.startsWith(
-                        "Leaving conflicts in place: the OpenCode CLI version could not be read",
-                    ),
-                ),
-            ).toBe(true);
-            const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
-                compaction?: { auto?: boolean };
-            };
-            expect(untouched.compaction?.auto).toBe(true);
-        } finally {
-            restore();
-        }
-    });
-
-    it("leaves conflicts in place under --force when OpenCode is below the minimum", async () => {
-        const { configDir, opencodeConfigPath } = installIsolatedHome();
-        writeFileSync(join(configDir, "..", "..", "bin", "opencode"), "#!/bin/sh\necho 1.14.9\n");
-        writeJsonc(opencodeConfigPath, CONFLICTING_PLUGIN);
-        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
-        const { errors, successes, restore } = captureDoctorLog();
-
-        try {
-            const code = await runDoctor({ force: true });
-
-            expect(code).toBe(1);
-            expect(successes.some((message) => message.startsWith("Fixed:"))).toBe(false);
-            expect(
-                errors.some((message) =>
-                    message.startsWith("Leaving conflicts in place: this OpenCode is older than"),
-                ),
-            ).toBe(true);
+            expect(errors.some((message) => message.startsWith(reason))).toBe(true);
             const untouched = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
                 compaction?: { auto?: boolean };
             };

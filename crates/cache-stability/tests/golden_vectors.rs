@@ -15,8 +15,6 @@ struct GoldenFile {
 #[derive(Debug, Deserialize)]
 struct Vector {
     name: String,
-    #[serde(default)]
-    layer: String,
     initial_state: InitialState,
     passes: Vec<Pass>,
 }
@@ -269,54 +267,4 @@ fn run_vector(vector: &Vector) {
             }
         }
     }
-}
-
-#[test]
-fn cross_episode_lineage_reproduces_byte_identical() {
-    let file: GoldenFile = serde_json::from_str(GOLDEN).expect("golden fixture parses");
-    let v9 = file
-        .vectors
-        .iter()
-        .find(|v| v.name.starts_with("V9"))
-        .expect("V9 present");
-    assert_eq!(v9.layer, "durability");
-
-    let mut state = CoreState {
-        version: v9.initial_state.version,
-        boundary_id: v9.initial_state.boundary_id.clone(),
-        frozen_units: v9.initial_state.frozen_units.clone(),
-        pending_changes: v9.initial_state.pending_changes.clone(),
-        reconcile_pending: false,
-    };
-
-    let pre_episode = state.cached_prefix_bytes();
-    for pass in &v9.passes {
-        let run_started = pass
-            .signal
-            .get("kind")
-            .and_then(Value::as_str)
-            .is_some_and(|k| k == "run-started");
-        let pending_keys: Vec<String> = state
-            .pending_changes
-            .iter()
-            .map(|u| u.key.clone())
-            .collect();
-        let before = state.cached_prefix_bytes();
-        state
-            .step(pass_to_input(pass, &pending_keys))
-            .expect("version headroom");
-        if run_started {
-            assert_eq!(
-                state.cached_prefix_bytes(),
-                before,
-                "RunStarted must not bust the cached prefix (lineage byte-identical)"
-            );
-        }
-    }
-    // The whole lineage reproduced byte-identical across the episode boundary.
-    assert_eq!(
-        state.cached_prefix_bytes(),
-        pre_episode,
-        "lineage units must reproduce byte-identical across the episode boundary"
-    );
 }

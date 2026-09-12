@@ -357,37 +357,68 @@ async fn wrong_role_pairings_reject_without_any_bind() {
 }
 
 #[tokio::test]
-async fn disabled_secondary_rejects_its_bind_and_leaves_primary_available() {
+async fn disabled_children_reject_binds_with_one_route_gone_each_and_keep_primary_routable() {
     let (primary, secondary, tertiary) = fake_trio();
     secondary.disable();
-    let composite =
-        StaticComposite::new(primary.clone(), secondary.clone(), tertiary).expect("distinct ids");
+    tertiary.disable();
+    let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
+        .expect("distinct ids");
     let host = support::CompositeTestHost::start(composite, |_config| {}).await;
     let mut client = host.client().await;
 
-    let err = client
-        .route_open_target("management_surface", "synapse", ROOT, "opencode", "s1")
-        .await
-        .expect_err("disabled synapse rejects bind");
-    assert_eq!(err, "artifact_invalid");
+    for (module, child) in [("synapse", &secondary), ("broca", &tertiary)] {
+        let err = client
+            .route_open_target("management_surface", module, ROOT, "opencode", "s1")
+            .await
+            .expect_err("a disabled child rejects its bind");
+        assert_eq!(err, "artifact_invalid", "{module}");
 
-    // The rejected bind still owes exactly one route-gone to the same child.
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    loop {
-        let gones = secondary
+        // The rejected bind still owes exactly one route-gone to the same child.
+        let deadline = tokio::time::Instant::now() + BUDGET;
+        loop {
+            let gones = child
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Ev::RouteGone(_)))
+                .count();
+            if gones == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "route-gone did not reach the rejecting {module} child"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    let mut rejected_handles = Vec::new();
+    for child in [&secondary, &tertiary] {
+        let events = child.events();
+        let [Ev::Initialized, Ev::Bind(bound), Ev::RouteGone(gone)] = events.as_slice() else {
+            panic!(
+                "{} must see exactly one bind and one route-gone: {events:?}",
+                child.id
+            );
+        };
+        assert_eq!(
+            bound, gone,
+            "{}: route-gone carries the rejected handle",
+            child.id
+        );
+        rejected_handles.push(*bound);
+    }
+    assert_ne!(
+        rejected_handles[0], rejected_handles[1],
+        "each rejected bind has its own handle"
+    );
+    assert!(
+        primary
             .events()
             .iter()
-            .filter(|event| matches!(event, Ev::RouteGone(_)))
-            .count();
-        if gones == 1 {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "route-gone did not reach the rejecting component"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+            .all(|event| *event == Ev::Initialized),
+        "the primary must not observe a rejected handle"
+    );
 
     let (channel, epoch) = client
         .route_open_target("tool_provider", "context", ROOT, "opencode", "s1")
@@ -397,52 +428,6 @@ async fn disabled_secondary_rejects_its_bind_and_leaves_primary_available() {
         request_served_by(&mut client, channel, epoch).await,
         "context"
     );
-
-    host.shutdown().await.expect("graceful shutdown");
-}
-
-#[tokio::test]
-async fn rejected_broca_bind_gets_exactly_one_broca_route_gone() {
-    let (primary, secondary, tertiary) = fake_trio();
-    tertiary.disable();
-    let composite = StaticComposite::new(primary.clone(), secondary.clone(), tertiary.clone())
-        .expect("distinct ids");
-    let host = support::CompositeTestHost::start(composite, |_config| {}).await;
-    let mut client = host.client().await;
-
-    let err = client
-        .route_open_target("management_surface", "broca", ROOT, "opencode", "s1")
-        .await
-        .expect_err("disabled broca rejects bind");
-    assert_eq!(err, "artifact_invalid");
-
-    let deadline = tokio::time::Instant::now() + BUDGET;
-    loop {
-        let gones = tertiary
-            .events()
-            .iter()
-            .filter(|event| matches!(event, Ev::RouteGone(_)))
-            .count();
-        if gones == 1 {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "route-gone did not reach the rejecting broca child"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    // The rejected bind is isolated to Broca; no sibling receives a bind or route-gone for its handle.
-    for component in [&primary, &secondary] {
-        assert!(
-            component
-                .events()
-                .iter()
-                .all(|event| *event == Ev::Initialized),
-            "{} must not observe the rejected broca handle",
-            component.id
-        );
-    }
 
     host.shutdown().await.expect("graceful shutdown");
 }
@@ -900,7 +885,7 @@ impl SecondaryComponent for PanickingHealthChild {
 }
 
 #[tokio::test]
-async fn a_panicking_broca_health_reports_failing_without_skipping_other_children() {
+async fn a_panicking_optional_child_health_reports_failing_without_skipping_other_children() {
     let (primary, secondary, _tertiary) = fake_trio();
     let health_entered = Arc::new(AtomicBool::new(false));
     let composite = StaticComposite::new(
@@ -938,10 +923,8 @@ async fn a_panicking_broca_health_reports_failing_without_skipping_other_childre
         Some("primary failing"),
         "the mandatory component still wins severity ties"
     );
-}
 
-#[tokio::test]
-async fn a_panicking_synapse_health_reports_failing_without_unwinding() {
+    // The secondary slot runs its own probe boundary, so a panic there must be caught the same way.
     let (primary, _secondary, tertiary) = fake_trio();
     let health_entered = Arc::new(AtomicBool::new(false));
     let composite = StaticComposite::new(

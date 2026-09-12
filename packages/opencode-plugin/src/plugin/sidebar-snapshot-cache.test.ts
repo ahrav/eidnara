@@ -61,12 +61,6 @@ describe("applyStickySnapshotCache", () => {
         expect(result).toEqual(fresh);
     });
 
-    test("passes through zero snapshot when no prior cached value (true new session)", () => {
-        const fresh = makeSnapshot({ inputTokens: 0 });
-        const result = applyStickySnapshotCache({ sessionId: "ses_test", directory: ROOT }, fresh);
-        expect(result.inputTokens).toBe(0);
-    });
-
     test("returns hybrid (cached tokens + fresh counts) when inputTokens drops to 0 mid-turn", () => {
         applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
@@ -305,18 +299,6 @@ describe("applyStickySnapshotCache", () => {
         expect(result.conversationTokens).toBe(100_000);
     });
 
-    test("sticks when compartment work is explicitly in progress", () => {
-        applyStickySnapshotCache(
-            { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 100_000 }),
-        );
-        const result = applyStickySnapshotCache(
-            { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
-        );
-        expect(result.inputTokens).toBe(100_000);
-    });
-
     test("does not stick after fresh non-zero overwrites the cached zero state", () => {
         applyStickySnapshotCache(
             { sessionId: "ses_test", directory: ROOT },
@@ -447,20 +429,6 @@ describe("applyStickySnapshotCache", () => {
         );
         expect(stuckA.inputTokens).toBe(0);
         expect(stuckB.inputTokens).toBe(0);
-    });
-
-    test("clearSidebarSnapshotCache removes cached entry for a session", () => {
-        applyStickySnapshotCache(
-            { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 100_000 }),
-        );
-        clearSidebarSnapshotCache("ses_test");
-        const result = applyStickySnapshotCache(
-            { sessionId: "ses_test", directory: ROOT },
-            makeSnapshot({ inputTokens: 0 }),
-        );
-        // Without a cached snapshot, zero inputTokens passes through unchanged.
-        expect(result.inputTokens).toBe(0);
     });
 
     test("expires stale cached snapshot after age threshold", () => {

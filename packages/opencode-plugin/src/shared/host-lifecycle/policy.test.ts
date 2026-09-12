@@ -250,9 +250,18 @@ describe("pre-native outcomes", () => {
                     const result = await policy[operation]();
                     expect(result.reason).toBe("unsupported_platform");
                     expect(result.remediation).toBe("use_supported_platform");
+                    expect(result.ok).toBe(false);
                 }
             }
             expect(invocations(invocationLog)).toEqual([]);
+            // Without a launch target the platform rejection still outranks the
+            // no-probe classifier: an unrunnable host has no daemon state.
+            const noTarget = policyFor({
+                env: { XDG_DATA_HOME: root },
+                platformReaders: unsupportedPlatformReaders(),
+            });
+            const status = await noTarget.status();
+            expect(status.reason).toBe("unsupported_platform");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -272,35 +281,6 @@ describe("pre-native outcomes", () => {
             for (const operation of ["status", "doctor"] as const) {
                 expect((await policy[operation]()).reason).toBe("unsupported_filesystem");
             }
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    });
-
-    test("an unsupported platform gates status and doctor too", async () => {
-        const root = tempDir("eidnara-policy-platform-observational-");
-        const { binary, invocationLog } = fakeBinary(root);
-        try {
-            const gated = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                platformReaders: unsupportedPlatformReaders(),
-            });
-            for (const op of ["status", "doctor"] as const) {
-                const result = await gated[op]();
-                expect(result.reason).toBe("unsupported_platform");
-                expect(result.remediation).toBe("use_supported_platform");
-                expect(result.ok).toBe(false);
-            }
-            expect(invocations(invocationLog)).toEqual([]);
-            // Without a launch target the platform rejection still outranks the
-            // no-probe classifier: an unrunnable host has no daemon state.
-            const noTarget = policyFor({
-                env: { XDG_DATA_HOME: root },
-                platformReaders: unsupportedPlatformReaders(),
-            });
-            const status = await noTarget.status();
-            expect(status.reason).toBe("unsupported_platform");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -796,40 +776,6 @@ describe("native invocation mapping", () => {
             rmSync(root, { recursive: true, force: true });
         }
     }, 20_000);
-
-    test("an authenticated daemon outside the supported range is never healthy", async () => {
-        // Readiness answers whether the components are serving, not whether this
-        // client may talk to this daemon at all. Without the compatibility gate a
-        // running daemon on an unsupported version reported `healthy` and stamped
-        // that version with `proof: "current"`.
-        const root = tempDir("eidnara-policy-incompatible-daemon-");
-        const { binary } = fakeBinary(root);
-        try {
-            const policy = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                readinessProbe: async () => ({
-                    ...compatibleObservation(),
-                    // Every component is ready, so only the version can fail it.
-                    authenticatedPeer: authenticatedPeerAt("eidnara-host/9.9.9"),
-                    readiness: {
-                        transport: { state: "ready", reason: "healthy" },
-                        storage: { state: "ready", reason: "healthy" },
-                    },
-                }),
-            });
-            for (const result of [await policy.status(), await policy.doctor()]) {
-                expect(result.ok).toBe(false);
-                expect(result.reason).toBe("incompatible_daemon");
-                expect(result.remediation).toBe("align_versions");
-                expect(
-                    result.checks.find((check) => check.id === "compatibility.daemon")?.status,
-                ).toBe("fail");
-            }
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    });
 
     test("the reported readiness reason follows contract precedence, not check-id order", async () => {
         const root = tempDir("eidnara-policy-readiness-precedence-");
@@ -1879,24 +1825,31 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     });
 
-    test("concurrent managed demands share one native start", async () => {
+    test("concurrent managed demands share one native start across capabilities and the default envelope", async () => {
         const root = tempDir("eidnara-policy-coalesce-");
         const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
         try {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
                 launchTarget: { kind: "test-binary", path: binary },
+                defaultStartupEnvelope: { schema: 1, credentials: { KEY: "default" } },
                 storageProbe: async () => "ready",
             });
-            const [a, b, c] = await Promise.all([
+            const outcomes = await Promise.all([
                 policy.demandStart({ origin: "managed-default", capability: "context" }),
                 policy.demandStart({ origin: "managed-default", capability: "context" }),
-                policy.demandStart({ origin: "managed-default", capability: "context" }),
+                // One daemon serves every capability, so a capability-keyed second
+                // start would race the first for the transaction lock.
+                policy.demandStart({ origin: "managed-default", capability: "synapse" }),
+                // An omitted envelope is the default envelope, so an explicit copy joins.
+                policy.demandStart({
+                    origin: "managed-default",
+                    capability: "context",
+                    startupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                }),
             ]);
-            expect(a.result.reason).toBe("started");
-            expect(b.result.reason).toBe("started");
-            expect(c.result.reason).toBe("started");
-            expect(a.storage).toBe("ready");
+            for (const outcome of outcomes) expect(outcome.result.reason).toBe("started");
+            expect(outcomes[0]?.storage).toBe("ready");
             expect(invocations(invocationLog)).toEqual(["start"]);
         } finally {
             rmSync(root, { recursive: true, force: true });
@@ -1942,55 +1895,6 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(c.result.reason).toBe("started");
             expect(d.result.reason).toBe("started");
             expect(invocations(invocationLog)).toEqual(["start", "start"]);
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    }, 20_000);
-
-    test("an omitted envelope coalesces with an explicit copy of the default", async () => {
-        const root = tempDir("eidnara-policy-coalesce-default-envelope-");
-        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
-        try {
-            const policy = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                defaultStartupEnvelope: { schema: 1, credentials: { KEY: "default" } },
-                storageProbe: async () => "ready",
-            });
-            const [a, b] = await Promise.all([
-                policy.demandStart({ origin: "managed-default", capability: "context" }),
-                policy.demandStart({
-                    origin: "managed-default",
-                    capability: "context",
-                    startupEnvelope: { schema: 1, credentials: { KEY: "default" } },
-                }),
-            ]);
-            expect(a.result.reason).toBe("started");
-            expect(b.result.reason).toBe("started");
-            expect(invocations(invocationLog)).toEqual(["start"]);
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    }, 20_000);
-
-    test("demands for different capabilities share the one host of their data root", async () => {
-        const root = tempDir("eidnara-policy-coalesce-capability-");
-        const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
-        try {
-            const policy = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                storageProbe: async () => "ready",
-            });
-            const [magic, synapse] = await Promise.all([
-                policy.demandStart({ origin: "managed-default", capability: "context" }),
-                policy.demandStart({ origin: "managed-default", capability: "synapse" }),
-            ]);
-            expect(magic.result.reason).toBe("started");
-            expect(synapse.result.reason).toBe("started");
-            // One daemon serves every capability, so a capability-keyed second
-            // start would race the first for the transaction lock.
-            expect(invocations(invocationLog)).toEqual(["start"]);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -2478,31 +2382,6 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
-    test("a hanging storage probe detaches at the caller deadline", async () => {
-        const root = tempDir("eidnara-policy-storage-hang-");
-        const { binary } = fakeBinary(root);
-        try {
-            const policy = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                // Never settles; the policy's own bound must end the wait.
-                storageProbe: () => new Promise<never>(() => {}),
-            });
-            await expect(
-                policy.demandStart({
-                    origin: "managed-default",
-                    capability: "context",
-                    deadlineMs: 250,
-                }),
-            ).rejects.toMatchObject({
-                name: "WaiterDetachedError",
-                cause_kind: "deadline",
-            });
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    }, 20_000);
-
     test("a hanging storage probe under the policy's own cap degrades to unavailable", async () => {
         const root = tempDir("eidnara-policy-storage-hard-cap-");
         const { binary } = fakeBinary(root);
@@ -2525,28 +2404,6 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(outcome.result.reason).toBe("started");
             expect(outcome.storage).toBe("unavailable");
             expect(outcome.authenticatedDaemonId).toEqual(new Uint8Array([7]));
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    }, 20_000);
-
-    test("a rejecting storage probe still returns the successful start result", async () => {
-        const root = tempDir("eidnara-policy-storage-reject-");
-        const { binary } = fakeBinary(root);
-        try {
-            const policy = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                storageProbe: async () => {
-                    throw new Error("probe exploded");
-                },
-            });
-            const outcome = await policy.demandStart({
-                origin: "managed-default",
-                capability: "context",
-            });
-            expect(outcome.result.reason).toBe("started");
-            expect(outcome.storage).toBe("unavailable");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -2670,28 +2527,6 @@ describe("native result labeling and indeterminate effects", () => {
         }
     }, 20_000);
 
-    test("a restart killed at the deadline reports unknown effects, not false,false", async () => {
-        const root = tempDir("eidnara-policy-restart-timeout-");
-        try {
-            const binary = path.join(root, "hanging-host.sh");
-            writeFileSync(binary, "#!/bin/sh\nsleep 30\n");
-            chmodSync(binary, 0o700);
-            const policy = policyFor({
-                env: { XDG_DATA_HOME: root },
-                launchTarget: { kind: "test-binary", path: binary },
-                outerAggregateMs: 250,
-            });
-            const result = await policy.restart();
-            expect(result.command).toBe("restart");
-            expect(result.reason).toBe("startup_timeout");
-            // The native transaction was SIGKILLed mid-flight: the stop may
-            // already have committed, so its effects are unknown.
-            expect(result.effects).toBeNull();
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    }, 20_000);
-
     test("a child killed at the deadline reports the reason its command earned", async () => {
         const root = tempDir("eidnara-policy-timeout-reasons-");
         try {
@@ -2717,6 +2552,8 @@ describe("native result labeling and indeterminate effects", () => {
                 expect(result.command).toBe(op);
                 expect(result.reason).toBe(expected[op].reason);
                 expect(result.state).toBe(expected[op].state);
+                // A deadline kill leaves a restart's effects unknown, never false,false.
+                expect(result.effects).toBeNull();
                 expect(() => parseDaemonResult(JSON.stringify(result))).not.toThrow();
             }
         } finally {

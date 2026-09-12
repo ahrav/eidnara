@@ -1319,15 +1319,11 @@ mod tests {
     }
 
     #[test]
-    fn default_threshold_matches_typescript_schema() {
+    fn default_threshold_and_memory_budget_match_typescript_schema() {
         let cfg = merge_tiers(None, None);
         assert_eq!(cfg.execute_threshold_percentage, 65.0);
-    }
-
-    #[test]
-    fn default_memory_budget_matches_typescript_schema() {
         assert_eq!(DEFAULT_MEMORY_BUDGET_TOKENS, 4_000.0);
-        assert_eq!(merge_tiers(None, None).memory_budget_tokens, 4_000.0);
+        assert_eq!(cfg.memory_budget_tokens, 4_000.0);
     }
 
     #[test]
@@ -2003,128 +1999,85 @@ mod tests {
         assert_eq!(warnings.len(), 2, "{warnings:?}");
     }
 
+    /// `historian.module_model` replaces the plugin chain only when non-blank;
+    /// otherwise plugin keys apply and module fallbacks are ignored.
     #[test]
-    fn module_model_replaces_plugin_chain_entirely() {
-        let user = serde_json::json!({
-            "historian": {
-                "model": "google/antigravity-gemini-3.5-flash",
-                "fallback_models": ["google/antigravity-claude-opus-4-6-thinking"],
-                "module_model": "google/gemini-3.5-flash",
-                "module_fallback_models": ["ollama-cloud/kimi-k2.7-code"]
-            }
-        });
-        let cfg = merge_tiers(Some(&user), None);
-        assert_eq!(
-            cfg.model_chain,
-            vec!["google/gemini-3.5-flash", "ollama-cloud/kimi-k2.7-code"]
-        );
-    }
-
-    #[test]
-    fn module_model_absent_falls_back_to_plugin_keys() {
-        let user = serde_json::json!({
-            "historian": {
-                "model": "deepseek/deepseek-v4-flash",
-                "fallback_models": ["ollama-cloud/kimi-k2.7-code"],
-                "module_fallback_models": ["ignored/without-module-model"]
-            }
-        });
-        let cfg = merge_tiers(Some(&user), None);
-        assert_eq!(
-            cfg.model_chain,
-            vec!["deepseek/deepseek-v4-flash", "ollama-cloud/kimi-k2.7-code"]
-        );
-    }
-
-    #[test]
-    fn module_model_blank_is_treated_as_absent() {
-        let user = serde_json::json!({
-            "historian": {
-                "model": "deepseek/deepseek-v4-flash",
-                "module_model": "   "
-            }
-        });
-        let cfg = merge_tiers(Some(&user), None);
-        assert_eq!(cfg.model_chain, vec!["deepseek/deepseek-v4-flash"]);
-    }
-
-    #[test]
-    fn module_model_is_user_tier_only() {
-        let user = serde_json::json!({
-            "historian": { "module_model": "google/gemini-3.5-flash" }
-        });
-        let project = serde_json::json!({
-            "historian": {
-                "module_model": "evil/expensive-model",
-                "module_fallback_models": ["evil/other"]
-            }
-        });
-        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
-        assert_eq!(cfg.model_chain, vec!["google/gemini-3.5-flash"]);
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(
-            warnings
-                .iter()
-                .all(|warning| warning.contains("user-tier only"))
-        );
-    }
-
-    #[test]
-    fn jsonc_strip_preserves_comment_like_strings() {
-        let parsed: Value = serde_json::from_str(&strip_jsonc(
-            r#"{ "url": "http://x/y", "a": [1,], /* c */ }"#,
-        ))
-        .unwrap();
-        assert_eq!(parsed["url"], "http://x/y");
-        assert_eq!(parsed["a"], serde_json::json!([1]));
-    }
-
-    /// A block comment separates tokens; removing it must not fuse `1` and `2` into `12`.
-    #[test]
-    fn jsonc_strip_keeps_tokens_around_block_comments_separate() {
-        assert!(serde_json::from_str::<Value>(&strip_jsonc(r#"{"a": 1/*c*/2}"#)).is_err());
-        assert!(serde_json::from_str::<Value>(&strip_jsonc(r#"{"a": tru/*c*/e}"#)).is_err());
-        let parsed: Value =
-            serde_json::from_str(&strip_jsonc(r#"{"a": 1/*c*/, "b"/*d*/: 2}"#)).unwrap();
-        assert_eq!(parsed, serde_json::json!({"a": 1, "b": 2}));
-    }
-
-    #[test]
-    fn jsonc_strip_rejects_unterminated_block_comment() {
-        assert!(serde_json::from_str::<Value>(&strip_jsonc(r#"{"a":1} /* oops"#)).is_err());
-    }
-
-    #[test]
-    fn jsonc_strip_removes_a_leading_byte_order_mark() {
-        let parsed: Value = serde_json::from_str(&strip_jsonc("\u{feff}{\"a\":1}")).unwrap();
-        assert_eq!(parsed, serde_json::json!({"a": 1}));
-    }
-
-    /// Line comments end at `\r` as well as `\n`, matching `jsonc-parser`.
-    #[test]
-    fn jsonc_strip_ends_line_comments_at_carriage_return() {
-        let parsed: Value =
-            serde_json::from_str(&strip_jsonc("{\r// comment\r\"permission\": \"deny\"\r}"))
-                .unwrap();
-        assert_eq!(parsed, serde_json::json!({"permission": "deny"}));
-    }
-
-    /// A comma with no value before it is not a trailing comma; `jsonc-parser` rejects it.
-    #[test]
-    fn jsonc_strip_keeps_a_comma_that_directly_follows_an_opener() {
-        for input in [
-            r#"{"a":[,]}"#,
-            r#"{"a":{,}}"#,
-            r#"{"a":[ /* c */ ,]}"#,
-            r#"{"a":[,,]}"#,
+    fn module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set() {
+        for (historian, expected) in [
+            (
+                serde_json::json!({
+                    "model": "google/antigravity-gemini-3.5-flash",
+                    "fallback_models": ["google/antigravity-claude-opus-4-6-thinking"],
+                    "module_model": "google/gemini-3.5-flash",
+                    "module_fallback_models": ["ollama-cloud/kimi-k2.7-code"]
+                }),
+                vec!["google/gemini-3.5-flash", "ollama-cloud/kimi-k2.7-code"],
+            ),
+            (
+                serde_json::json!({
+                    "model": "deepseek/deepseek-v4-flash",
+                    "fallback_models": ["ollama-cloud/kimi-k2.7-code"],
+                    "module_fallback_models": ["ignored/without-module-model"]
+                }),
+                vec!["deepseek/deepseek-v4-flash", "ollama-cloud/kimi-k2.7-code"],
+            ),
+            (
+                serde_json::json!({
+                    "model": "deepseek/deepseek-v4-flash",
+                    "module_model": "   "
+                }),
+                vec!["deepseek/deepseek-v4-flash"],
+            ),
         ] {
-            assert!(
-                serde_json::from_str::<Value>(&strip_jsonc(input)).is_err(),
-                "{input} must not parse"
+            let user = serde_json::json!({ "historian": historian });
+            assert_eq!(
+                merge_tiers(Some(&user), None).model_chain,
+                expected,
+                "{user}"
             );
         }
-        let parsed: Value = serde_json::from_str(&strip_jsonc(r#"{"a":[1 /* c */ ,],}"#)).unwrap();
-        assert_eq!(parsed, serde_json::json!({"a": [1]}));
+    }
+
+    /// `strip_jsonc` follows `jsonc-parser`: comment-like text inside strings
+    /// survives, a block comment separates the tokens around it, line comments
+    /// end at `\r` as well as `\n`, a leading byte order mark is dropped, an
+    /// unterminated block comment and a comma with no value before it do not
+    /// parse, and only a comma that follows a value is a trailing comma.
+    #[test]
+    fn jsonc_strip_matches_jsonc_parser_on_comments_commas_and_bom() {
+        let cases: [(&str, Option<Value>); 12] = [
+            (
+                r#"{ "url": "http://x/y", "a": [1,], /* c */ }"#,
+                Some(serde_json::json!({"url": "http://x/y", "a": [1]})),
+            ),
+            (r#"{"a": 1/*c*/2}"#, None),
+            (r#"{"a": tru/*c*/e}"#, None),
+            (
+                r#"{"a": 1/*c*/, "b"/*d*/: 2}"#,
+                Some(serde_json::json!({"a": 1, "b": 2})),
+            ),
+            (r#"{"a":1} /* oops"#, None),
+            ("\u{feff}{\"a\":1}", Some(serde_json::json!({"a": 1}))),
+            (
+                "{\r// comment\r\"permission\": \"deny\"\r}",
+                Some(serde_json::json!({"permission": "deny"})),
+            ),
+            (r#"{"a":[,]}"#, None),
+            (r#"{"a":{,}}"#, None),
+            (r#"{"a":[ /* c */ ,]}"#, None),
+            (r#"{"a":[,,]}"#, None),
+            (
+                r#"{"a":[1 /* c */ ,],}"#,
+                Some(serde_json::json!({"a": [1]})),
+            ),
+        ];
+        for (input, expected) in cases {
+            let parsed = serde_json::from_str::<Value>(&strip_jsonc(input));
+            match expected {
+                Some(expected) => assert_eq!(parsed.unwrap(), expected, "{input}"),
+                None => assert!(parsed.is_err(), "{input} must not parse"),
+            }
+        }
     }
 
     /// The project tier is read from `.eidnara/eidnara.jsonc` under the project root;

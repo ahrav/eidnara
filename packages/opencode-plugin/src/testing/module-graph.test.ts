@@ -80,7 +80,11 @@ const PRODUCT_STORE_FILE =
 
 type ReportedGraph = Omit<ModuleGraph, "text">;
 
+let reportedGraphs: Record<string, ReportedGraph> | null = null;
+
+/** One bundler run serves every test; the roots and the tree do not change between them. */
 function moduleGraphReport(): Record<string, ReportedGraph> {
+    if (reportedGraphs !== null) return reportedGraphs;
     const report = Bun.spawnSync({
         cmd: ["bun", join(import.meta.dir, "module-graph-report.ts"), ...ROOTS],
         cwd: SRC,
@@ -90,7 +94,8 @@ function moduleGraphReport(): Record<string, ReportedGraph> {
     if (report.exitCode !== 0) {
         throw new Error(`module graph report failed: ${report.stderr.toString()}`);
     }
-    return JSON.parse(report.stdout.toString());
+    reportedGraphs = JSON.parse(report.stdout.toString()) as Record<string, ReportedGraph>;
+    return reportedGraphs;
 }
 
 describe("module graph over the landed tree", () => {
@@ -183,26 +188,21 @@ const graph: ModuleGraph = {
 };
 
 describe("reachableModules", () => {
-    test("returns every input and external matching the pattern", () => {
+    test("returns every input and external matching the pattern, and an empty list when nothing matches", () => {
         expect(reachableModules(graph, /forbidden/)).toEqual([
             "src/a/forbidden.ts",
             "src/b/forbidden.ts",
             "@scope/forbidden-external",
         ]);
-    });
-
-    test("returns an empty list when nothing matches", () => {
         expect(reachableModules(graph, /never-present/)).toEqual([]);
     });
 
     // `RegExp.prototype.test` advances `lastIndex` on `g` and `y` patterns, so a
     // silent under-count would make a reachable module look unreachable.
-    test("rejects a global pattern instead of under-counting", () => {
-        expect(() => reachableModules(graph, /forbidden/g)).toThrow(TypeError);
-    });
-
-    test("rejects a sticky pattern instead of under-counting", () => {
-        expect(() => reachableModules(graph, /forbidden/y)).toThrow(TypeError);
+    test("rejects a global or sticky pattern instead of under-counting", () => {
+        for (const pattern of [/forbidden/g, /forbidden/y]) {
+            expect(() => reachableModules(graph, pattern)).toThrow(TypeError);
+        }
     });
 });
 

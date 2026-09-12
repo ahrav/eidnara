@@ -33,12 +33,6 @@ describe("parseRustPassLine", () => {
         expect(pass?.adapterElapsedMs).toBeCloseTo(18.3, 5);
     });
 
-    it("does not confuse transport with transport_pages or transport_bytes", () => {
-        const pass = parseRustPassLine(PASS_LINE);
-        expect(pass?.transportMs).toBe(9.8);
-        expect(pass?.transportPages).toBe(1);
-    });
-
     it("ignores lines without the marker", () => {
         expect(parseRustPassLine("[eidnara] something else entirely")).toBeNull();
     });

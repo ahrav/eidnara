@@ -110,7 +110,8 @@ accounting](shared-selection-and-pressure-accounting.md).
 The owner authorizes removal of the dead update-count arm, not changes to
 0.20, 0.15, 500, or their comparisons. The original predicate is frozen in a
 test-only reference before production edits and evaluated with count zero.
-The real composition's zero count is asserted in all 48 full-pass cases.
+All 48 full-pass cases pass `0` to the reference; the composition no longer
+carries the count, so no test asserts a composed value for it.
 Thus removal preserves every production-reachable classification, while the
 reference remains independent of the implementation.
 

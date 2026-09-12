@@ -446,67 +446,6 @@ fn patch_id_is_stable_across_parents_and_whitespace_and_absent_for_merges() {
 }
 
 #[test]
-fn nested_path_commits_have_a_patch_identity_and_resolve_after_rebase() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    let base = commit_snapshot(
-        repo,
-        "main",
-        &[],
-        &[("src/lib.rs", "pub fn a() {}\n")],
-        "base",
-        1,
-    );
-    // A tree diff reports the enclosing `src` directory alongside the file.
-    let anchored = commit_snapshot(
-        repo,
-        "topic",
-        &[base],
-        &[("src/lib.rs", "pub fn a() {}\npub fn b() {}\n")],
-        "anchored",
-        2,
-    );
-    let budget = EvalBudget::unbounded();
-    assert!(
-        compute_patch_id(repo, anchored, &budget).unwrap().is_some(),
-        "a commit below the repository root has a patch identity"
-    );
-    let captures = captures_for(repo, &[anchored]);
-    assert_eq!(
-        captures[&anchored.to_string()].changed_paths,
-        vec!["src/lib.rs".to_string()],
-        "changed paths hold files, not enclosing directories"
-    );
-
-    let advanced = commit_snapshot(
-        repo,
-        "main",
-        &[base],
-        &[("src/lib.rs", "pub fn a() {}\n"), ("README.md", "readme\n")],
-        "advance",
-        3,
-    );
-    let rebased = commit_snapshot(
-        repo,
-        "main",
-        &[advanced],
-        &[
-            ("src/lib.rs", "pub fn a() {}\npub fn b() {}\n"),
-            ("README.md", "readme\n"),
-        ],
-        "anchored",
-        4,
-    );
-    let snapshot = checkout(&fixture, rebased);
-    let ladder = ResolutionLadder::new(&snapshot, &budget);
-    assert_eq!(
-        ladder.evaluate(&reachable_from(anchored, captures)),
-        GitConditionOutcome::Holds
-    );
-}
-
-#[test]
 fn mode_only_change_resolves_through_the_patch_id_rung() {
     use gix::objs::tree::EntryKind;
 
@@ -562,12 +501,16 @@ fn mode_only_change_resolves_through_the_patch_id_rung() {
     );
 }
 
+/// Treating unreadable fallback data as readable would produce a rung miss and
+/// report the anchor as moved.
 #[test]
-fn capture_from_another_algorithm_version_is_uncertain() {
+fn unreadable_capture_fallbacks_are_uncertain_not_unreachable() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let repo = &fixture.repo;
     let base = commit_snapshot(repo, "main", &[], &[("f.txt", "one\n")], "base", 1);
+    // `anchored` is in the object database and unreachable from `HEAD`, so
+    // the fallback rungs decide the verdict.
     let anchored = commit_snapshot(
         repo,
         "topic",
@@ -576,21 +519,38 @@ fn capture_from_another_algorithm_version_is_uncertain() {
         "anchored",
         2,
     );
-    let mut captures = captures_for(repo, &[anchored]);
-    let capture = captures.get_mut(&anchored.to_string()).unwrap();
-    let patch_id = capture.patch_id.as_mut().expect("capture has a patch id");
-    patch_id.algorithm = "eidnara-patch-id-v0".to_string();
-    assert_ne!(patch_id.algorithm, PATCH_ID_ALGORITHM);
-
     let advanced = commit_snapshot(repo, "main", &[base], &[("f.txt", "two\n")], "advance", 3);
+    let intact = captures_for(repo, &[anchored]);
     let budget = EvalBudget::unbounded();
     let snapshot = checkout(&fixture, advanced);
-    let ladder = ResolutionLadder::new(&snapshot, &budget);
-    assert_eq!(
-        ladder.evaluate(&reachable_from(anchored, captures)),
-        GitConditionOutcome::Uncertain,
-        "an unreadable fallback is not evidence the anchor moved"
-    );
+
+    type Corruption = (&'static str, fn(&mut AnchorCapture));
+    let corruptions: [Corruption; 3] = [
+        ("older algorithm", |capture| {
+            let patch_id = capture.patch_id.as_mut().expect("capture has a patch id");
+            patch_id.algorithm = "eidnara-patch-id-v0".to_string();
+            assert_ne!(patch_id.algorithm, PATCH_ID_ALGORITHM);
+        }),
+        ("corrupt value under the current algorithm", |capture| {
+            let patch_id = capture.patch_id.as_mut().expect("capture has a patch id");
+            patch_id.value = "not-a-sha256-digest".to_string();
+            assert_eq!(patch_id.algorithm, PATCH_ID_ALGORITHM);
+        }),
+        ("unparsable tree id without a patch id", |capture| {
+            capture.tree_oid = Some("not-a-tree-oid".to_string());
+            capture.patch_id = None;
+        }),
+    ];
+    for (name, corrupt) in corruptions {
+        let mut captures = intact.clone();
+        corrupt(captures.get_mut(&anchored.to_string()).unwrap());
+        let ladder = ResolutionLadder::new(&snapshot, &budget);
+        assert_eq!(
+            ladder.evaluate(&reachable_from(anchored, captures)),
+            GitConditionOutcome::Uncertain,
+            "{name}: an unreadable fallback is not evidence the anchor moved"
+        );
+    }
 }
 
 #[test]
@@ -655,29 +615,62 @@ fn exhausted_budget_makes_ancestry_verdicts_uncertain() {
     );
 }
 
+/// The window is `start && !end`; `historical: true` means evaluation reached
+/// `end_oid`.
 #[test]
-fn unreachable_start_dominates_an_uncertain_end() {
+fn reachable_between_verdicts_for_unreachable_and_unresolvable_endpoints() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let repo = &fixture.repo;
-    let start = commit_snapshot(repo, "other", &[], &[("f.txt", "one\n")], "start", 1);
-    let head = commit_snapshot(repo, "main", &[], &[("g.txt", "g\n")], "head", 2);
-    // An end OID absent from the odb resolves as uncertain.
-    let missing_end = gix::ObjectId::from_hex("bb".repeat(20).as_bytes()).unwrap();
+    // `foreign` is in the object database and unreachable from `HEAD`.
+    let foreign = commit_snapshot(repo, "other", &[], &[("f.txt", "one\n")], "start", 1);
+    let base = commit_snapshot(repo, "main", &[], &[("a.txt", "a\n")], "base", 2);
+    let end = commit_snapshot(repo, "main", &[base], &[("a.txt", "b\n")], "end", 3);
+    let head = commit_snapshot(repo, "main", &[end], &[("a.txt", "c\n")], "head", 4);
+    // A 64-digit ID fails object parsing; an absent 40-digit ID resolves as
+    // uncertain.
+    let unresolvable = "ab".repeat(32);
+    let missing = "bb".repeat(20);
 
-    let condition = GitCondition::ReachableBetween {
-        start_oid: start.to_string(),
-        end_oid: missing_end.to_string(),
-        captures: BTreeMap::new(),
-    };
     let budget = EvalBudget::unbounded();
     let snapshot = checkout(&fixture, head);
-    let ladder = ResolutionLadder::new(&snapshot, &budget);
-    // The unreachable start already falsifies the window.
-    assert_eq!(
-        ladder.evaluate(&condition),
-        GitConditionOutcome::DoesNotHold { historical: false }
-    );
+    for (name, start_oid, end_oid, expected) in [
+        (
+            "unreachable start, reached end",
+            foreign.to_string(),
+            end.to_string(),
+            GitConditionOutcome::DoesNotHold { historical: true },
+        ),
+        (
+            "unresolvable start, reached end",
+            unresolvable.clone(),
+            end.to_string(),
+            GitConditionOutcome::DoesNotHold { historical: true },
+        ),
+        (
+            "unreachable start, missing end",
+            foreign.to_string(),
+            missing.clone(),
+            GitConditionOutcome::DoesNotHold { historical: false },
+        ),
+        (
+            "unresolvable start, missing end",
+            unresolvable,
+            missing,
+            GitConditionOutcome::Uncertain,
+        ),
+    ] {
+        let ladder = ResolutionLadder::new(&snapshot, &budget);
+        assert_eq!(
+            ladder.evaluate(&GitCondition::ReachableBetween {
+                start_oid,
+                end_oid,
+                captures: BTreeMap::new(),
+            }),
+            expected,
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -730,67 +723,6 @@ fn an_empty_commit_does_not_resolve_from_its_parent_tree() {
 }
 
 #[test]
-fn a_reached_end_is_historical_even_when_the_start_is_unreachable() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    // The ODB contains an `other` commit unreachable from `HEAD`; empty
-    // captures leave no fallback rung.
-    let start = commit_snapshot(repo, "other", &[], &[("f.txt", "one\n")], "start", 1);
-    let end = commit_snapshot(repo, "main", &[], &[("g.txt", "g\n")], "end", 2);
-    let head = commit_snapshot(repo, "main", &[end], &[("h.txt", "h\n")], "head", 3);
-
-    let condition = GitCondition::ReachableBetween {
-        start_oid: start.to_string(),
-        end_oid: end.to_string(),
-        captures: BTreeMap::new(),
-    };
-    let budget = EvalBudget::unbounded();
-    let snapshot = checkout(&fixture, head);
-    let ladder = ResolutionLadder::new(&snapshot, &budget);
-    // Reaching the end exits the validity window, which is what `historical`
-    // records; an unplaceable start must not downgrade that to a plain miss.
-    assert_eq!(
-        ladder.evaluate(&condition),
-        GitConditionOutcome::DoesNotHold { historical: true }
-    );
-}
-
-#[test]
-fn a_malformed_current_algorithm_patch_id_is_uncertain_not_unreachable() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    let base = commit_snapshot(repo, "main", &[], &[("f.txt", "one\n")], "base", 1);
-    let anchored = commit_snapshot(
-        repo,
-        "topic",
-        &[base],
-        &[("f.txt", "one\n"), ("g.txt", "change\n")],
-        "anchored",
-        2,
-    );
-    let mut captures = captures_for(repo, &[anchored]);
-    let capture = captures.get_mut(&anchored.to_string()).unwrap();
-    let patch_id = capture.patch_id.as_mut().expect("capture has a patch id");
-    // The capture's patch ID is corrupt, not an older algorithm's output.
-    patch_id.value = "not-a-sha256-digest".to_string();
-    assert_eq!(patch_id.algorithm, PATCH_ID_ALGORITHM);
-
-    let advanced = commit_snapshot(repo, "main", &[base], &[("f.txt", "two\n")], "advance", 3);
-    let budget = EvalBudget::unbounded();
-    let snapshot = checkout(&fixture, advanced);
-    let ladder = ResolutionLadder::new(&snapshot, &budget);
-    // Treating a corrupt patch ID as readable would produce a patch-rung miss
-    // and incorrectly report the anchor as moved.
-    assert_eq!(
-        ladder.evaluate(&reachable_from(anchored, captures)),
-        GitConditionOutcome::Uncertain,
-        "a corrupt fallback is not evidence the anchor moved"
-    );
-}
-
-#[test]
 fn opposite_mode_transitions_have_distinct_patch_ids() {
     use gix::objs::tree::EntryKind;
 
@@ -839,21 +771,71 @@ fn opposite_mode_transitions_have_distinct_patch_ids() {
     );
 }
 
+/// Binary blobs are hashed as raw bytes, so a NUL changing blob boundaries and
+/// whitespace within binary content must change the patch identity.
 #[test]
-fn nul_bytes_do_not_alias_patch_identities() {
+fn binary_contents_are_framed_unambiguously_and_keep_whitespace_in_patch_identities() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = init_repo(dir.path());
     let repo = &fixture.repo;
     let budget = EvalBudget::unbounded();
 
-    let base_one = commit_snapshot(repo, "x", &[], &[("f.bin", "a")], "base", 1);
-    let mod_one = commit_snapshot(repo, "x", &[base_one], &[("f.bin", "\u{0}b")], "edit", 2);
-    let base_two = commit_snapshot(repo, "y", &[], &[("f.bin", "a\u{0}")], "base", 3);
-    let mod_two = commit_snapshot(repo, "y", &[base_two], &[("f.bin", "b")], "edit", 4);
-
-    let one = compute_patch_id(repo, mod_one, &budget).unwrap().unwrap();
-    let two = compute_patch_id(repo, mod_two, &budget).unwrap().unwrap();
-    assert_ne!(one, two, "binary contents must be framed unambiguously");
+    for (index, (name, one, two)) in [
+        (
+            "a NUL moving between blobs",
+            ("a", "\u{0}b"),
+            ("a\u{0}", "b"),
+        ),
+        (
+            "whitespace inside binary content",
+            ("old", "\u{0}a b"),
+            ("old", "\u{0}ab"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let time = i64::try_from(index).unwrap() * 4;
+        let branch_one = format!("x{index}");
+        let branch_two = format!("y{index}");
+        let base_one = commit_snapshot(
+            repo,
+            &branch_one,
+            &[],
+            &[("f.bin", one.0)],
+            "base",
+            time + 1,
+        );
+        let edit_one = commit_snapshot(
+            repo,
+            &branch_one,
+            &[base_one],
+            &[("f.bin", one.1)],
+            "edit",
+            time + 2,
+        );
+        let base_two = commit_snapshot(
+            repo,
+            &branch_two,
+            &[],
+            &[("f.bin", two.0)],
+            "base",
+            time + 3,
+        );
+        let edit_two = commit_snapshot(
+            repo,
+            &branch_two,
+            &[base_two],
+            &[("f.bin", two.1)],
+            "edit",
+            time + 4,
+        );
+        assert_ne!(
+            compute_patch_id(repo, edit_one, &budget).unwrap().unwrap(),
+            compute_patch_id(repo, edit_two, &budget).unwrap().unwrap(),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -1041,28 +1023,6 @@ fn unreadable_candidate_blobs_leave_resolution_uncertain() {
 }
 
 #[test]
-fn binary_contents_keep_whitespace_in_patch_identities() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    let budget = EvalBudget::unbounded();
-
-    // In binary content, whitespace bytes are data.
-    let base_one = commit_snapshot(repo, "x", &[], &[("f.bin", "old")], "base", 1);
-    let with_space = commit_snapshot(repo, "x", &[base_one], &[("f.bin", "\u{0}a b")], "edit", 2);
-    let base_two = commit_snapshot(repo, "y", &[], &[("f.bin", "old")], "base", 3);
-    let without_space = commit_snapshot(repo, "y", &[base_two], &[("f.bin", "\u{0}ab")], "edit", 4);
-
-    let one = compute_patch_id(repo, with_space, &budget)
-        .unwrap()
-        .unwrap();
-    let two = compute_patch_id(repo, without_space, &budget)
-        .unwrap()
-        .unwrap();
-    assert_ne!(one, two, "binary blobs are hashed without normalization");
-}
-
-#[test]
 fn patch_id_ignores_repository_diff_configuration() {
     use std::io::Write;
 
@@ -1183,7 +1143,8 @@ fn an_unreadable_captured_path_is_uncertain_not_unreachable() {
     let captures = captures_for(repo, &[anchored]);
     assert_eq!(
         captures[&anchored.to_string()].changed_paths,
-        vec!["src/lib.rs".to_string()]
+        vec!["src/lib.rs".to_string()],
+        "changed paths hold files, not enclosing directories"
     );
 
     let advanced = commit_snapshot(
@@ -1559,76 +1520,5 @@ fn an_unreadable_patch_rung_still_reaches_the_tree_rung() {
         ResolutionLadder::new(&snapshot, &budget).evaluate(&reachable_from(anchored, captures)),
         GitConditionOutcome::Holds,
         "an unreadable patch rung must not suppress a tree-rung match"
-    );
-}
-
-#[test]
-fn a_reached_end_closes_the_window_despite_an_unresolved_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    let base = commit_snapshot(repo, "main", &[], &[("a.txt", "a\n")], "base", 1);
-    let end = commit_snapshot(repo, "main", &[base], &[("a.txt", "b\n")], "end", 2);
-    let head = commit_snapshot(repo, "main", &[end], &[("a.txt", "c\n")], "head", 3);
-
-    let budget = EvalBudget::unbounded();
-    let snapshot = checkout(&fixture, head);
-    let ladder = ResolutionLadder::new(&snapshot, &budget);
-
-    // A start this build cannot resolve at all, paired with an end that is
-    // plainly reachable. `start && !end` is already false either way.
-    let unresolvable_start = "ab".repeat(32);
-    assert_eq!(
-        ladder.evaluate(&GitCondition::ReachableBetween {
-            start_oid: unresolvable_start,
-            end_oid: end.to_string(),
-            captures: BTreeMap::new(),
-        }),
-        GitConditionOutcome::DoesNotHold { historical: true },
-        "a reached end closes the window whatever the start resolves to"
-    );
-
-    // An unresolvable start with an unreached end stays genuinely unknown.
-    let unborn_end = "cd".repeat(20);
-    assert_eq!(
-        ladder.evaluate(&GitCondition::ReachableBetween {
-            start_oid: "ab".repeat(32),
-            end_oid: unborn_end,
-            captures: BTreeMap::new(),
-        }),
-        GitConditionOutcome::Uncertain
-    );
-}
-
-#[test]
-fn a_malformed_tree_capture_is_uncertain_not_unreachable() {
-    let dir = tempfile::tempdir().unwrap();
-    let fixture = init_repo(dir.path());
-    let repo = &fixture.repo;
-    let base = commit_snapshot(repo, "main", &[], &[("a.txt", "a\n")], "base", 1);
-    // Present in the odb but not reachable from HEAD, so the fallback rungs
-    // decide the verdict.
-    let anchored = commit_snapshot(
-        repo,
-        "topic",
-        &[base],
-        &[("a.txt", "a\nb\n")],
-        "anchored",
-        2,
-    );
-    let head = commit_snapshot(repo, "main", &[base], &[("z.txt", "z\n")], "head", 3);
-
-    let mut captures = captures_for(repo, &[anchored]);
-    let capture = captures.get_mut(&anchored.to_string()).unwrap();
-    // A stored tree id this build cannot parse, with no patch id to match.
-    capture.tree_oid = Some("not-a-tree-oid".to_string());
-    capture.patch_id = None;
-
-    let budget = EvalBudget::unbounded();
-    let snapshot = checkout(&fixture, head);
-    assert_eq!(
-        ResolutionLadder::new(&snapshot, &budget).evaluate(&reachable_from(anchored, captures)),
-        GitConditionOutcome::Uncertain,
-        "an uninterpretable tree capture cannot yield a definite verdict"
     );
 }

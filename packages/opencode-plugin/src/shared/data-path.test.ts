@@ -55,14 +55,16 @@ describe("data-path", () => {
         }
     });
 
-    test("getCacheDir falls back to <homedir>/.cache when XDG_CACHE_HOME is unset (all platforms)", () => {
+    test("getCacheDir and getOpenCodeCacheDir fall back to <homedir>/.cache when XDG_CACHE_HOME is unset (all platforms)", () => {
         // OpenCode's xdg-basedir uses this fallback on every platform.
         expect(getCacheDir()).toBe(path.join(os.homedir(), ".cache"));
+        expect(getOpenCodeCacheDir()).toBe(path.join(os.homedir(), ".cache", "opencode"));
     });
 
-    test("getCacheDir honors XDG_CACHE_HOME when set", () => {
+    test("getCacheDir and getOpenCodeCacheDir honor XDG_CACHE_HOME when set", () => {
         process.env.XDG_CACHE_HOME = "/tmp/custom-cache";
         expect(getCacheDir()).toBe("/tmp/custom-cache");
+        expect(getOpenCodeCacheDir()).toBe(path.join("/tmp/custom-cache", "opencode"));
     });
 
     test("getCacheDir treats an empty XDG_CACHE_HOME as unset like xdg-basedir", () => {
@@ -77,29 +79,16 @@ describe("data-path", () => {
         expect(getCacheDir()).toBe(path.join(os.homedir(), ".cache"));
     });
 
-    test("getOpenCodeCacheDir appends 'opencode' to the cache base", () => {
-        expect(getOpenCodeCacheDir()).toBe(path.join(os.homedir(), ".cache", "opencode"));
-    });
-
-    test("getOpenCodeCacheDir with XDG_CACHE_HOME set", () => {
-        process.env.XDG_CACHE_HOME = "/tmp/custom-cache";
-        expect(getOpenCodeCacheDir()).toBe(path.join("/tmp/custom-cache", "opencode"));
-    });
-
-    test("getDataDir falls back to <homedir>/.local/share when XDG_DATA_HOME is unset", () => {
-        expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
-    });
-
-    test("getDataDir ignores an empty XDG_DATA_HOME like the daemon does", () => {
-        // The daemon's `default_data_root` treats an empty value as absent; a
+    test("getDataDir falls back to <homedir>/.local/share for an unset, empty, or relative XDG_DATA_HOME like the daemon does", () => {
+        // The daemon's `default_data_root` treats an empty or relative value as absent; a
         // verbatim "" would join into a cwd-relative tree the daemon never writes.
-        process.env.XDG_DATA_HOME = "";
-        expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
-    });
-
-    test("getDataDir ignores a relative XDG_DATA_HOME like the daemon does", () => {
-        process.env.XDG_DATA_HOME = "relative/data";
-        expect(getDataDir()).toBe(path.join(os.homedir(), ".local", "share"));
+        for (const value of [undefined, "", "relative/data"]) {
+            if (value === undefined) delete process.env.XDG_DATA_HOME;
+            else process.env.XDG_DATA_HOME = value;
+            expect(getDataDir(), `XDG_DATA_HOME=${JSON.stringify(value)}`).toBe(
+                path.join(os.homedir(), ".local", "share"),
+            );
+        }
     });
 
     test("getDataDir keeps whitespace inside an absolute XDG_DATA_HOME like the daemon does", () => {
@@ -155,29 +144,23 @@ describe("data-path", () => {
         },
     );
 
-    test("getEidnaraStorageDir treats a relative XDG_DATA_HOME as unset for test isolation", () => {
+    test("getEidnaraStorageDir honors EIDNARA_TEST_DATA_DIR when XDG_DATA_HOME is unset or relative", () => {
+        // When XDG_DATA_HOME is unset, test fallbacks must not resolve to shared storage.
         // Both the guard and the fallback must classify XDG_DATA_HOME the same way,
-        // otherwise "" escapes the guard and produces the relative path "eidnara/context".
-        process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test-isolation";
-        process.env.XDG_DATA_HOME = "relative/data";
-        expect(getEidnaraStorageDir()).toBe(
-            path.join("/tmp/eidnara-test-isolation", "eidnara", "context"),
-        );
-    });
-
-    test("getEidnaraStorageDir never resolves a relative path from an empty XDG_DATA_HOME", () => {
-        const savedTestDir = process.env.EIDNARA_TEST_DATA_DIR;
-        const savedNodeEnv = process.env.NODE_ENV;
-        delete process.env.EIDNARA_TEST_DATA_DIR;
-        delete process.env.NODE_ENV;
-        process.env.XDG_DATA_HOME = "";
-        try {
-            const resolved = getEidnaraStorageDir();
-            expect(path.isAbsolute(resolved)).toBe(true);
-            expect(resolved).toBe(path.join(os.homedir(), ".local", "share", "eidnara", "context"));
-        } finally {
-            if (savedTestDir !== undefined) process.env.EIDNARA_TEST_DATA_DIR = savedTestDir;
-            if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
+        // otherwise a relative value escapes the guard and produces the relative path "eidnara/context".
+        // Whitespace inside a non-blank value is part of the path.
+        const cases: Array<[string | undefined, string]> = [
+            [undefined, "/tmp/eidnara-test-isolation"],
+            ["relative/data", "/tmp/eidnara-test-isolation"],
+            [undefined, "/tmp/eidnara-test "],
+        ];
+        for (const [xdgDataHome, testDataDir] of cases) {
+            if (xdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+            else process.env.XDG_DATA_HOME = xdgDataHome;
+            process.env.EIDNARA_TEST_DATA_DIR = testDataDir;
+            expect(getEidnaraStorageDir(), `XDG_DATA_HOME=${JSON.stringify(xdgDataHome)}`).toBe(
+                path.join(testDataDir, "eidnara", "context"),
+            );
         }
     });
 
@@ -193,16 +176,24 @@ describe("data-path", () => {
         expect(hostRelease.layout.storage_subdirectory).toBe("context");
     });
 
-    test("getEidnaraStorageDir uses eidnara/context layout", () => {
+    test("getEidnaraStorageDir resolves the production eidnara/context layout for an unset or empty XDG_DATA_HOME", () => {
         // Deleting EIDNARA_TEST_DATA_DIR and NODE_ENV makes this assertion exercise the production path.
         const savedTestDir = process.env.EIDNARA_TEST_DATA_DIR;
         const savedNodeEnv = process.env.NODE_ENV;
         delete process.env.EIDNARA_TEST_DATA_DIR;
         delete process.env.NODE_ENV;
         try {
-            expect(getEidnaraStorageDir()).toBe(
-                path.join(os.homedir(), ".local", "share", "eidnara", "context"),
-            );
+            for (const value of [undefined, ""]) {
+                if (value === undefined) delete process.env.XDG_DATA_HOME;
+                else process.env.XDG_DATA_HOME = value;
+                const resolved = getEidnaraStorageDir();
+                expect(path.isAbsolute(resolved), `XDG_DATA_HOME=${JSON.stringify(value)}`).toBe(
+                    true,
+                );
+                expect(resolved).toBe(
+                    path.join(os.homedir(), ".local", "share", "eidnara", "context"),
+                );
+            }
         } finally {
             if (savedTestDir !== undefined) process.env.EIDNARA_TEST_DATA_DIR = savedTestDir;
             if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
@@ -223,15 +214,6 @@ describe("data-path", () => {
         }
     });
 
-    test("getEidnaraStorageDir honors EIDNARA_TEST_DATA_DIR when XDG_DATA_HOME is unset", () => {
-        // When XDG_DATA_HOME is unset, test fallbacks must not resolve to shared storage.
-        // CLI doctors must not run integrity checks against production data.
-        process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test-isolation";
-        expect(getEidnaraStorageDir()).toBe(
-            path.join("/tmp/eidnara-test-isolation", "eidnara", "context"),
-        );
-    });
-
     test("getEidnaraStorageDir treats a blank EIDNARA_TEST_DATA_DIR as unset", () => {
         // A whitespace-only value must not select `"   "/eidnara/context`; `NODE_ENV=test` uses its unset-variable fallback.
         process.env.EIDNARA_TEST_DATA_DIR = "   ";
@@ -242,11 +224,6 @@ describe("data-path", () => {
         expect(resolved).not.toContain(path.join(os.homedir(), ".local", "share"));
     });
 
-    test("getEidnaraStorageDir keeps whitespace inside a non-blank EIDNARA_TEST_DATA_DIR", () => {
-        process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test ";
-        expect(getEidnaraStorageDir()).toBe(path.join("/tmp/eidnara-test ", "eidnara", "context"));
-    });
-
     test("getEidnaraStorageDir prefers XDG_DATA_HOME over EIDNARA_TEST_DATA_DIR", () => {
         // EIDNARA_TEST_DATA_DIR isolates the data homes required by several suites.
         process.env.EIDNARA_TEST_DATA_DIR = "/tmp/eidnara-test-isolation";
@@ -254,18 +231,14 @@ describe("data-path", () => {
         expect(getEidnaraStorageDir()).toBe(path.join("/tmp/custom-data", "eidnara", "context"));
     });
 
-    test("getEidnaraStorageDir honors XDG_DATA_HOME", () => {
-        process.env.XDG_DATA_HOME = "/tmp/custom-data";
-        expect(getEidnaraStorageDir()).toBe(path.join("/tmp/custom-data", "eidnara", "context"));
-    });
-
-    test("getProjectEidnaraDir composes <project>/.eidnara/context", () => {
+    test("getProjectEidnaraDir composes <project>/.eidnara/context regardless of XDG_DATA_HOME or a trailing slash", () => {
         // Project-local artifacts must remain inside the project so OpenCode's external_directory permission system permits access.
         // OpenCode treats artifacts under the project directory as project-internal, avoiding historian Read permission prompts.
-        // OpenCode prompts for historian Read access when artifacts are outside the project directory.
-        expect(getProjectEidnaraDir("/Users/me/Work/proj")).toBe(
-            path.join("/Users/me/Work/proj", ".eidnara", "context"),
-        );
+        // XDG_DATA_HOME affects shared storage only.
+        process.env.XDG_DATA_HOME = "/tmp/custom-data";
+        for (const project of ["/Users/me/Work/proj", "/some/project/"]) {
+            expect(getProjectEidnaraDir(project)).toBe(path.join(project, ".eidnara", "context"));
+        }
     });
 
     test("getProjectEidnaraHistorianDir appends historian/", () => {
@@ -274,50 +247,31 @@ describe("data-path", () => {
         );
     });
 
-    test("getProjectEidnaraDir is unaffected by XDG_DATA_HOME", () => {
-        // XDG_DATA_HOME affects shared storage only; project-local artifacts remain under the supplied project directory.
-        // XDG_DATA_HOME affects shared storage only; project-local artifacts remain under the supplied project directory.
-        // XDG_DATA_HOME affects shared storage only; project-local artifacts remain under the supplied project directory.
-        // XDG_DATA_HOME affects shared storage only; project-local artifacts remain under the supplied project directory.
-        process.env.XDG_DATA_HOME = "/tmp/custom-data";
-        expect(getProjectEidnaraDir("/some/project")).toBe(
-            path.join("/some/project", ".eidnara", "context"),
-        );
-    });
-
-    test("getProjectEidnaraDir handles trailing slashes via path.join", () => {
-        expect(getProjectEidnaraDir("/some/project/")).toBe(
-            path.join("/some/project/", ".eidnara", "context"),
-        );
-    });
-
-    test("getEidnaraLogPath falls back to a per-user harness temp dir when the env override is unset", () => {
+    test("getEidnaraLogPath falls back to a per-user harness temp dir when the env override is unset or blank", () => {
         const userRoot = `eidnara-${process.getuid?.() ?? os.userInfo().username}`;
-        expect(getEidnaraLogPath("opencode")).toBe(
-            path.join(os.tmpdir(), userRoot, "opencode", "eidnara.log"),
-        );
-        expect(getEidnaraLogPath("pi")).toBe(path.join(os.tmpdir(), userRoot, "pi", "eidnara.log"));
+        for (const override of [undefined, "   "]) {
+            if (override === undefined) delete process.env.EIDNARA_LOG_PATH;
+            else process.env.EIDNARA_LOG_PATH = override;
+            expect(
+                getEidnaraLogPath("opencode"),
+                `EIDNARA_LOG_PATH=${JSON.stringify(override)}`,
+            ).toBe(path.join(os.tmpdir(), userRoot, "opencode", "eidnara.log"));
+            expect(getEidnaraLogPath("pi")).toBe(
+                path.join(os.tmpdir(), userRoot, "pi", "eidnara.log"),
+            );
+        }
     });
 
-    test("getEidnaraLogPath honors EIDNARA_LOG_PATH", () => {
-        process.env.EIDNARA_LOG_PATH = "/tmp/custom/eidnara.log";
-        expect(getEidnaraLogPath("pi")).toBe("/tmp/custom/eidnara.log");
-    });
-
-    test("getEidnaraLogPath ignores a blank EIDNARA_LOG_PATH", () => {
-        process.env.EIDNARA_LOG_PATH = "   ";
-        const userRoot = `eidnara-${process.getuid?.() ?? os.userInfo().username}`;
-        expect(getEidnaraLogPath("pi")).toBe(path.join(os.tmpdir(), userRoot, "pi", "eidnara.log"));
-    });
-
-    test("getEidnaraLogPath keeps whitespace inside a non-blank EIDNARA_LOG_PATH", () => {
-        process.env.EIDNARA_LOG_PATH = "/var/log/eidnara.log ";
-        expect(getEidnaraLogPath("pi")).toBe("/var/log/eidnara.log ");
+    test("getEidnaraLogPath honors a non-blank EIDNARA_LOG_PATH verbatim, including inner whitespace", () => {
+        for (const override of ["/tmp/custom/eidnara.log", "/var/log/eidnara.log "]) {
+            process.env.EIDNARA_LOG_PATH = override;
+            expect(getEidnaraLogPath("pi")).toBe(override);
+        }
     });
 });
 
 describe("ensureEidnaraArtifactGitignore", () => {
-    test("creates .eidnara/.gitignore with a fenced context block", () => {
+    test("creates .eidnara/.gitignore with one fenced block that ignores only the artifact dir, even after a second call", () => {
         const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
         try {
             ensureEidnaraArtifactGitignore(dir);
@@ -325,19 +279,13 @@ describe("ensureEidnaraArtifactGitignore", () => {
             expect(gi).toContain("# >>> eidnara");
             expect(gi).toContain("context/");
             expect(gi).toContain("# <<< eidnara");
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
+            // `.eidnara/.gitignore` remains tracked; only `context/` is ignored.
+            expect(gi).not.toContain("eidnara.jsonc");
+            expect(gi).not.toContain("*.jsonc");
 
-    test("is idempotent — a second call does not duplicate the block", () => {
-        const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
-        try {
             ensureEidnaraArtifactGitignore(dir);
-            ensureEidnaraArtifactGitignore(dir);
-            const gi = readFileSync(path.join(dir, ".eidnara", ".gitignore"), "utf8");
-            const occurrences = gi.split("# >>> eidnara").length - 1;
-            expect(occurrences).toBe(1);
+            const again = readFileSync(path.join(dir, ".eidnara", ".gitignore"), "utf8");
+            expect(again.split("# >>> eidnara").length - 1).toBe(1);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -405,19 +353,6 @@ describe("ensureEidnaraArtifactGitignore", () => {
             }
         },
     );
-
-    test("does not ignore the project config — only the artifact dir", () => {
-        const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));
-        try {
-            ensureEidnaraArtifactGitignore(dir);
-            const gi = readFileSync(path.join(dir, ".eidnara", ".gitignore"), "utf8");
-            // `.eidnara/.gitignore` remains tracked; only `context/` is ignored.
-            expect(gi).not.toContain("eidnara.jsonc");
-            expect(gi).not.toContain("*.jsonc");
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
 
     test("a sibling guard sharing the prefix does not count as Eidnara's block", () => {
         const dir = mkdtempSync(path.join(os.tmpdir(), "eidnara-gi-"));

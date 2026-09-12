@@ -121,66 +121,63 @@ mod tests {
     }
 
     #[test]
-    fn reports_content_change() {
-        let old = vec![block("a", "one", 8), block("b", "two", 8)];
-        let new = vec![block("a", "changed", 12), block("b", "two", 8)];
-        let divergence = first_divergence(&old, &new).unwrap();
-        assert_eq!(divergence.index, 0);
-        assert_eq!(divergence.kind, DivergenceKind::ContentChanged);
-        assert_eq!(divergence.block_id_old.as_deref(), Some("a"));
-        assert_eq!(divergence.block_id_new.as_deref(), Some("a"));
-    }
-
-    #[test]
-    fn reports_insertion_in_the_middle() {
-        let old = vec![block("a", "a", 4), block("b", "b", 4), block("c", "c", 4)];
-        let new = vec![
-            block("a", "a", 4),
-            block("x", "x", 4),
-            block("b", "b", 4),
-            block("c", "c", 4),
+    fn first_divergence_classifies_each_boundary_kind_and_ignores_appends() {
+        let a = block("a", "a", 4);
+        let b = block("b", "b", 4);
+        let c = block("c", "c", 4);
+        let x = block("x", "x", 4);
+        // `None` means the old sequence is a reusable prefix of the new sequence.
+        type Expected<'a> = Option<(usize, DivergenceKind, &'a str, Option<&'a str>)>;
+        let cases: [(Vec<_>, Vec<_>, Expected<'_>); 8] = [
+            (
+                vec![block("a", "one", 8), block("b", "two", 8)],
+                vec![block("a", "changed", 12), block("b", "two", 8)],
+                Some((0, DivergenceKind::ContentChanged, "a", Some("a"))),
+            ),
+            (
+                vec![a.clone(), b.clone(), c.clone()],
+                vec![a.clone(), x.clone(), b.clone(), c.clone()],
+                Some((1, DivergenceKind::Inserted, "b", Some("x"))),
+            ),
+            (
+                vec![a.clone(), b.clone(), c.clone()],
+                vec![a.clone(), c.clone()],
+                Some((1, DivergenceKind::Removed, "b", Some("c"))),
+            ),
+            // The new sequence ends before the old one: the missing block has no new id.
+            (
+                vec![a.clone(), b.clone(), c.clone()],
+                vec![a.clone(), b.clone()],
+                Some((2, DivergenceKind::Removed, "c", None)),
+            ),
+            (
+                vec![a.clone(), b.clone(), c.clone()],
+                vec![b.clone(), a.clone(), c.clone()],
+                Some((0, DivergenceKind::Reordered, "a", Some("b"))),
+            ),
+            (
+                vec![a.clone(), b.clone()],
+                vec![a.clone(), b.clone(), c.clone()],
+                None,
+            ),
+            (vec![a.clone(), b.clone()], vec![a.clone(), b.clone()], None),
+            // An empty old sequence is a cold start.
+            (vec![], vec![a.clone()], None),
         ];
-        let divergence = first_divergence(&old, &new).unwrap();
-        assert_eq!(divergence.kind, DivergenceKind::Inserted);
-        assert_eq!(divergence.index, 1);
-    }
-
-    #[test]
-    fn reports_removal_in_the_middle() {
-        let old = vec![block("a", "a", 4), block("b", "b", 4), block("c", "c", 4)];
-        let new = vec![block("a", "a", 4), block("c", "c", 4)];
-        let divergence = first_divergence(&old, &new).unwrap();
-        assert_eq!(divergence.kind, DivergenceKind::Removed);
-        assert_eq!(divergence.index, 1);
-        assert_eq!(divergence.block_id_old.as_deref(), Some("b"));
-        assert_eq!(divergence.block_id_new.as_deref(), Some("c"));
-    }
-
-    #[test]
-    fn reports_reordering() {
-        let old = vec![block("a", "a", 4), block("b", "b", 4), block("c", "c", 4)];
-        let new = vec![block("b", "b", 4), block("a", "a", 4), block("c", "c", 4)];
-        let divergence = first_divergence(&old, &new).unwrap();
-        assert_eq!(divergence.kind, DivergenceKind::Reordered);
-        assert_eq!(divergence.index, 0);
-    }
-
-    #[test]
-    fn append_past_old_end_is_not_a_divergence() {
-        let old = vec![block("a", "a", 4), block("b", "b", 4)];
-        let new = vec![old[0].clone(), old[1].clone(), block("c", "c", 4)];
-        assert_eq!(first_divergence(&old, &new), None);
-    }
-
-    #[test]
-    fn identical_sequence_is_fast_path_none() {
-        let old = vec![block("a", "a", 4), block("b", "b", 4)];
-        assert_eq!(first_divergence(&old, &old), None);
-    }
-
-    #[test]
-    fn absent_fingerprint_is_a_cold_start() {
-        let new = vec![block("a", "a", 4)];
-        assert_eq!(first_divergence(&[], &new), None);
+        for (old, new, expected) in cases {
+            let divergence = first_divergence(&old, &new);
+            let observed = divergence.as_ref().map(|divergence| {
+                (
+                    divergence.index,
+                    divergence.kind,
+                    divergence
+                        .block_id_old
+                        .as_deref()
+                        .expect("a divergence names its old block"),
+                    divergence.block_id_new.as_deref(),
+                )
+            });
+            assert_eq!(observed, expected, "old={old:?} new={new:?}");
+        }
     }
 }

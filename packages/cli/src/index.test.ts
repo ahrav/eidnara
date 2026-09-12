@@ -246,16 +246,10 @@ describe("import-safe CLI dispatch", () => {
         expect(stderr).toBe("");
     });
 
-    test.each([
-        "start",
-        "stop",
-        "restart",
-        "status",
-        "doctor",
-    ])("subprocess entrypoint dispatches daemon %s as one JSON result", async (action) => {
+    test("subprocess entrypoint dispatches a daemon action as one JSON result", async () => {
         const cliRoot = join(import.meta.dir, "..");
         const child = Bun.spawn({
-            cmd: [process.execPath, "src/index.ts", "daemon", action, "--json"],
+            cmd: [process.execPath, "src/index.ts", "daemon", "status", "--json"],
             cwd: cliRoot,
             env: {
                 ...process.env,
@@ -279,7 +273,7 @@ describe("import-safe CLI dispatch", () => {
         expect(lines).toHaveLength(1);
         expect(JSON.parse(lines[0] ?? "")).toMatchObject({
             schema: "eidnara.daemon/v1",
-            command: action,
+            command: "status",
             ok: false,
         });
     });

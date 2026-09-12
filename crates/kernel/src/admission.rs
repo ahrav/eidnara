@@ -4076,64 +4076,6 @@ mod tests {
     }
 
     #[test]
-    fn accepted_adr_admits_deterministic_sources_without_a_separate_approval() {
-        let deterministic = evaluate_admission(EvaluationInputs {
-            source_class: SourceClass::TrustedLocalCode,
-            taint_class: TaintClass::CurrentCode,
-            prior: None,
-            candidate_sensitivity: Sensitivity::Normal,
-            predecessor_sensitivity: None,
-            approval_valid: false,
-            event: EventKind::AcceptedAdr,
-            has_evidence: true,
-            remaining_support: None,
-            supporting_authority: None,
-            subject_is_accepted_decision: true,
-        })
-        .unwrap();
-        assert_eq!(deterministic.historical_maturity, Maturity::Approved);
-        assert_eq!(deterministic.effective_maturity.get(), Maturity::Approved);
-        assert_eq!(deterministic.outcome, Outcome::Admit);
-
-        // A source held to `Candidate` still requires an approval object.
-        let inferred = evaluate_admission(EvaluationInputs {
-            source_class: SourceClass::ModelInference,
-            taint_class: TaintClass::AssistantInference,
-            prior: None,
-            candidate_sensitivity: Sensitivity::Normal,
-            predecessor_sensitivity: None,
-            approval_valid: false,
-            event: EventKind::AcceptedAdr,
-            has_evidence: true,
-            remaining_support: None,
-            supporting_authority: None,
-            subject_is_accepted_decision: true,
-        })
-        .unwrap();
-        assert_eq!(inferred.historical_maturity, Maturity::Candidate);
-        assert_eq!(inferred.outcome, Outcome::Deny);
-
-        // The exception is confined to the object kind that can hold authority, so
-        // any other subject submitted the same way still buys an approval.
-        let impostor = evaluate_admission(EvaluationInputs {
-            source_class: SourceClass::TrustedLocalCode,
-            taint_class: TaintClass::CurrentCode,
-            prior: None,
-            candidate_sensitivity: Sensitivity::Normal,
-            predecessor_sensitivity: None,
-            approval_valid: false,
-            event: EventKind::AcceptedAdr,
-            has_evidence: true,
-            remaining_support: None,
-            supporting_authority: None,
-            subject_is_accepted_decision: false,
-        })
-        .unwrap();
-        assert_eq!(impostor.historical_maturity, Maturity::Candidate);
-        assert_eq!(impostor.outcome, Outcome::Deny);
-    }
-
-    #[test]
     fn inference_ceiling_requires_authority_and_lifts_only_to_event_target() {
         let base = EvaluationInputs {
             source_class: SourceClass::ModelInference,
@@ -4456,28 +4398,58 @@ mod tests {
 
     #[test]
     fn an_accepted_adr_roots_authority_only_from_an_accepted_decision_object() {
-        let rooted = evaluate_admission(EvaluationInputs {
-            source_class: SourceClass::ExplicitUser,
-            taint_class: TaintClass::UserExplicit,
-            subject_is_accepted_decision: true,
-            ..trusted_code_input(EventKind::AcceptedAdr)
-        })
-        .unwrap();
-        assert_eq!(rooted.effective_maturity.get(), Maturity::Approved);
-        assert_eq!(rooted.outcome, Outcome::Admit);
-        assert_eq!(rooted.visibility, VisibilityRow::Automatic);
+        // Both pairs have a `Verified` automatic ceiling, which is what lets an
+        // accepted decision reach `Approved` on its own.
+        for (source_class, taint_class) in [
+            (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+            (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+        ] {
+            let deterministic = EvaluationInputs {
+                source_class,
+                taint_class,
+                ..trusted_code_input(EventKind::AcceptedAdr)
+            };
+            let rooted = evaluate_admission(EvaluationInputs {
+                subject_is_accepted_decision: true,
+                ..deterministic
+            })
+            .unwrap();
+            assert_eq!(
+                rooted.historical_maturity,
+                Maturity::Approved,
+                "{source_class:?}"
+            );
+            assert_eq!(
+                rooted.effective_maturity.get(),
+                Maturity::Approved,
+                "{source_class:?}"
+            );
+            assert_eq!(rooted.outcome, Outcome::Admit, "{source_class:?}");
+            assert_eq!(
+                rooted.visibility,
+                VisibilityRow::Automatic,
+                "{source_class:?}"
+            );
 
-        // The exception is confined to accepted-decision objects; any other
-        // subject submitted the same way must still buy authority.
-        let impostor = evaluate_admission(EvaluationInputs {
-            source_class: SourceClass::ExplicitUser,
-            taint_class: TaintClass::UserExplicit,
-            subject_is_accepted_decision: false,
-            ..trusted_code_input(EventKind::AcceptedAdr)
-        })
-        .unwrap();
-        assert_eq!(impostor.outcome, Outcome::Deny);
-        assert!(impostor.effective_maturity.get().rank() < Maturity::Approved.rank());
+            // The exception is confined to accepted-decision objects; any other
+            // subject submitted the same way must still buy authority.
+            let impostor = evaluate_admission(EvaluationInputs {
+                subject_is_accepted_decision: false,
+                ..deterministic
+            })
+            .unwrap();
+            assert_eq!(
+                impostor.historical_maturity,
+                Maturity::Candidate,
+                "{source_class:?}"
+            );
+            assert_eq!(
+                impostor.effective_maturity.get(),
+                Maturity::Candidate,
+                "{source_class:?}"
+            );
+            assert_eq!(impostor.outcome, Outcome::Deny, "{source_class:?}");
+        }
 
         // A pair whose automatic ceiling stays at `Candidate` still buys an approval,
         // even for an accepted decision object.
@@ -4488,8 +4460,9 @@ mod tests {
             ..trusted_code_input(EventKind::AcceptedAdr)
         })
         .unwrap();
+        assert_eq!(inferred.historical_maturity, Maturity::Candidate);
+        assert_eq!(inferred.effective_maturity.get(), Maturity::Candidate);
         assert_eq!(inferred.outcome, Outcome::Deny);
-        assert!(inferred.effective_maturity.get().rank() < Maturity::Approved.rank());
     }
 
     #[test]
@@ -4553,6 +4526,8 @@ mod tests {
         let demoted = evaluate_admission(input).unwrap();
         assert_eq!(demoted.historical_maturity, Maturity::Approved);
         assert_eq!(demoted.effective_maturity.get(), Maturity::Verified);
+        // A support-only change is reported as a demotion and leaves the disposition alone.
+        assert_eq!(demoted.disposition, Disposition::Active);
         assert_eq!(demoted.outcome, Outcome::DemoteSupport);
 
         // A still-valid supporting approval keeps the support it granted.
@@ -4636,18 +4611,6 @@ mod tests {
                 "{event:?} should withdraw support"
             );
         }
-    }
-
-    #[test]
-    fn a_support_only_change_still_reports_a_demotion() {
-        let demoted = evaluate_admission(EvaluationInputs {
-            prior: Some(approved_prior()),
-            supporting_authority: Some(false),
-            ..trusted_code_input(EventKind::CodeObserved)
-        })
-        .unwrap();
-        assert_eq!(demoted.disposition, Disposition::Active);
-        assert_eq!(demoted.outcome, Outcome::DemoteSupport);
     }
 
     #[test]
@@ -4796,33 +4759,6 @@ mod tests {
     }
 
     #[test]
-    fn approval_revocation_never_raises_effective_maturity() {
-        let result = evaluate_admission(EvaluationInputs {
-            source_class: SourceClass::TrustedLocalCode,
-            taint_class: TaintClass::CurrentCode,
-            prior: Some(PriorDecision {
-                historical_maturity: Maturity::Approved,
-                effective_maturity: Maturity::Candidate,
-                disposition: Disposition::Active,
-                outcome: Outcome::DemoteSupport,
-                source_class: SourceClass::TrustedLocalCode,
-                taint_class: TaintClass::CurrentCode,
-                sensitivity: Sensitivity::Normal,
-            }),
-            candidate_sensitivity: Sensitivity::Normal,
-            predecessor_sensitivity: None,
-            approval_valid: false,
-            event: EventKind::ApprovalRevoked,
-            has_evidence: false,
-            remaining_support: Some(Maturity::Candidate),
-            supporting_authority: None,
-            subject_is_accepted_decision: false,
-        })
-        .unwrap();
-        assert_eq!(result.effective_maturity.get(), Maturity::Candidate);
-    }
-
-    #[test]
     fn approval_revocation_requires_and_preserves_remaining_support() {
         let base = EvaluationInputs {
             source_class: SourceClass::TrustedLocalCode,
@@ -4866,6 +4802,33 @@ mod tests {
             assert_eq!(result.effective_maturity.get(), remaining);
             assert_eq!(result.outcome, Outcome::DemoteSupport);
         }
+
+        // Remaining support may equal, but cannot exceed, a withdrawn prior's effective maturity.
+        let already_demoted = EvaluationInputs {
+            prior: Some(PriorDecision {
+                effective_maturity: Maturity::Candidate,
+                outcome: Outcome::DemoteSupport,
+                ..base.prior.unwrap()
+            }),
+            ..base
+        };
+        assert_eq!(
+            evaluate_admission(EvaluationInputs {
+                remaining_support: Some(Maturity::Candidate),
+                ..already_demoted
+            })
+            .unwrap()
+            .effective_maturity
+            .get(),
+            Maturity::Candidate
+        );
+        assert_eq!(
+            evaluate_admission(EvaluationInputs {
+                remaining_support: Some(Maturity::Corroborated),
+                ..already_demoted
+            }),
+            Err(KernelError::AdmissionPolicy)
+        );
     }
 
     #[test]

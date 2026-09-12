@@ -9,65 +9,50 @@ import {
 
 describe("harness-provider-map", () => {
     describe("resolveModelRefForPi (canonical -> Pi, used when spawning)", () => {
-        it("maps the diverging auth-plugin providers, preserving the model id", () => {
-            expect(resolveModelRefForPi("openai/gpt-5.5")).toBe("openai-codex/gpt-5.5");
-            expect(resolveModelRefForPi("google/antigravity-gemini-3.5-flash")).toBe(
-                "google-antigravity/antigravity-gemini-3.5-flash",
-            );
-        });
-
-        it("leaves anthropic and every other provider unchanged", () => {
-            expect(resolveModelRefForPi("anthropic/claude-opus-4-8")).toBe(
-                "anthropic/claude-opus-4-8",
-            );
-            expect(resolveModelRefForPi("cerebras/gpt-oss-120b")).toBe("cerebras/gpt-oss-120b");
-            expect(resolveModelRefForPi("openrouter/openai/gpt-5.5")).toBe(
-                "openrouter/openai/gpt-5.5",
-            );
-        });
-
-        it("is idempotent: a config already in Pi form still resolves to Pi form", () => {
-            expect(resolveModelRefForPi("openai-codex/gpt-5.5")).toBe("openai-codex/gpt-5.5");
-            expect(resolveModelRefForPi("google-antigravity/antigravity-gemini-3.1-pro")).toBe(
-                "google-antigravity/antigravity-gemini-3.1-pro",
-            );
-        });
-
-        it("preserves model ids that themselves contain slashes", () => {
-            expect(resolveModelRefForPi("openai/some/nested/id")).toBe(
-                "openai-codex/some/nested/id",
-            );
-        });
-
-        it("passes through malformed refs (no slash, empty provider) unchanged", () => {
-            expect(resolveModelRefForPi("gpt-5.5")).toBe("gpt-5.5");
-            expect(resolveModelRefForPi("/gpt-5.5")).toBe("/gpt-5.5");
-            expect(resolveModelRefForPi("")).toBe("");
+        it("maps the diverging auth-plugin providers and passes every other ref through unchanged", () => {
+            const cases: Array<[string, string]> = [
+                ["openai/gpt-5.5", "openai-codex/gpt-5.5"],
+                [
+                    "google/antigravity-gemini-3.5-flash",
+                    "google-antigravity/antigravity-gemini-3.5-flash",
+                ],
+                ["openai/some/nested/id", "openai-codex/some/nested/id"],
+                ["anthropic/claude-opus-4-8", "anthropic/claude-opus-4-8"],
+                ["cerebras/gpt-oss-120b", "cerebras/gpt-oss-120b"],
+                ["openrouter/openai/gpt-5.5", "openrouter/openai/gpt-5.5"],
+                ["openai-codex/gpt-5.5", "openai-codex/gpt-5.5"],
+                [
+                    "google-antigravity/antigravity-gemini-3.1-pro",
+                    "google-antigravity/antigravity-gemini-3.1-pro",
+                ],
+                ["gpt-5.5", "gpt-5.5"],
+                ["/gpt-5.5", "/gpt-5.5"],
+                ["", ""],
+            ];
+            for (const [canonical, pi] of cases) {
+                expect(resolveModelRefForPi(canonical), canonical).toBe(pi);
+            }
         });
     });
 
     describe("piModelRefToCanonical (Pi -> canonical, used by Pi setup write)", () => {
-        it("normalizes Pi-native provider ids to the OpenCode form", () => {
-            expect(piModelRefToCanonical("openai-codex/gpt-5.5")).toBe("openai/gpt-5.5");
-            expect(piModelRefToCanonical("google-antigravity/antigravity-gemini-3.5-flash")).toBe(
-                "google/antigravity-gemini-3.5-flash",
-            );
-        });
-
-        it("leaves already-canonical and unmapped providers unchanged", () => {
-            expect(piModelRefToCanonical("anthropic/claude-opus-4-8")).toBe(
-                "anthropic/claude-opus-4-8",
-            );
-            expect(piModelRefToCanonical("openai/gpt-5.5")).toBe("openai/gpt-5.5");
-        });
-
-        it("round-trips with resolveModelRefForPi", () => {
-            const piForm = "openai-codex/gpt-5.5";
-            expect(resolveModelRefForPi(piModelRefToCanonical(piForm))).toBe(piForm);
+        it("normalizes Pi-native provider ids to the OpenCode form and leaves other refs unchanged", () => {
+            const cases: Array<[string, string]> = [
+                ["openai-codex/gpt-5.5", "openai/gpt-5.5"],
+                [
+                    "google-antigravity/antigravity-gemini-3.5-flash",
+                    "google/antigravity-gemini-3.5-flash",
+                ],
+                ["anthropic/claude-opus-4-8", "anthropic/claude-opus-4-8"],
+                ["openai/gpt-5.5", "openai/gpt-5.5"],
+            ];
+            for (const [pi, canonical] of cases) {
+                expect(piModelRefToCanonical(pi), pi).toBe(canonical);
+            }
         });
 
         describe("modelRefLookupOrder (config read edge)", () => {
-            it("tries canonical before the Pi-native spelling", () => {
+            it("tries canonical before the Pi-native spelling and keeps unknown prefixes as one key", () => {
                 expect(modelRefLookupOrder("openai-codex/gpt-5.6-sol")).toEqual([
                     "openai/gpt-5.6-sol",
                     "openai-codex/gpt-5.6-sol",
@@ -76,9 +61,6 @@ describe("harness-provider-map", () => {
                     "openai/gpt-5.6-sol",
                     "openai-codex/gpt-5.6-sol",
                 ]);
-            });
-
-            it("keeps unknown provider prefixes as a single passthrough key", () => {
                 expect(modelRefLookupOrder("custom-provider/model")).toEqual([
                     "custom-provider/model",
                 ]);

@@ -15406,6 +15406,20 @@ impl RequestMethodProbe {
 /// The estimate doubles counted node storage for `Vec` and map growth.
 const VALUE_NODE_SLACK: usize = 2;
 
+/// The decoded `Value` tree and the typed request coexist during `serde_json::from_value`.
+const RETAINED_NODE_COPIES: usize = 2;
+
+const VALUE_NODE_CHARGE_BYTES: usize = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
+
+/// `native_messages` stores `Arc<Value>` handles; their slack charge plus the `Arc` allocation
+/// must not exceed the typed-request node charge.
+const _: () = assert!(
+    std::mem::size_of::<Arc<Value>>() * VALUE_NODE_SLACK
+        + retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+        + std::mem::size_of::<Value>()
+        <= VALUE_NODE_CHARGE_BYTES
+);
+
 /// The fixed headroom covers allocations that do not scale with the body.
 const VALUE_ENVELOPE_BYTES: usize = 4096;
 
@@ -15446,10 +15460,15 @@ fn value_footprint_bound(body: &[u8]) -> Option<usize> {
         }
     }
     nodes
-        .checked_mul(std::mem::size_of::<Value>())?
-        .checked_mul(VALUE_NODE_SLACK)?
+        .checked_mul(VALUE_NODE_CHARGE_BYTES)?
+        .checked_mul(RETAINED_NODE_COPIES)?
         .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
         .checked_add(VALUE_ENVELOPE_BYTES)
+}
+
+#[cfg(feature = "test-support")]
+pub fn value_footprint_bound_for_test(body: &[u8]) -> Option<usize> {
+    value_footprint_bound(body)
 }
 
 /// The failure is permanent when the tree cannot fit the host's resident ceiling at any load.
@@ -18442,21 +18461,7 @@ mod tests {
     }
 
     #[test]
-    fn route_binding_bind_resolve_unbind() {
-        let h = Handler::new();
-        h.bind_route(test_route(7), binding("/repo/proj", "ses_a"));
-
-        assert_eq!(
-            resolved_root(&h, 7, "ses_a").unwrap(),
-            PathBuf::from("/repo/proj")
-        );
-
-        h.unbind_route(test_route(7));
-        assert_eq!(resolved_root(&h, 7, "ses_a"), Err(BindingError::Unbound));
-    }
-
-    #[test]
-    fn resolve_fails_loud_unbound_and_on_session_mismatch() {
+    fn route_binding_resolves_rejects_mismatch_rebinds_and_unbinds() {
         let h = Handler::new();
         assert_eq!(resolved_root(&h, 3, "ses_x"), Err(BindingError::Unbound));
 
@@ -18469,18 +18474,20 @@ mod tests {
             resolved_root(&h, 3, "ses_own").unwrap(),
             PathBuf::from("/repo/own")
         );
-    }
 
-    #[test]
-    fn rebind_overwrites_stale_channel_entry() {
-        let h = Handler::new();
-        h.bind_route(test_route(5), binding("/a", "s1"));
-        h.bind_route(test_route(5), binding("/b", "s2"));
-        assert_eq!(resolved_root(&h, 5, "s2").unwrap(), PathBuf::from("/b"));
+        // Rebinding a channel replaces its previous binding.
+        h.bind_route(test_route(3), binding("/repo/next", "ses_next"));
         assert_eq!(
-            resolved_root(&h, 5, "s1"),
+            resolved_root(&h, 3, "ses_next").unwrap(),
+            PathBuf::from("/repo/next")
+        );
+        assert_eq!(
+            resolved_root(&h, 3, "ses_own"),
             Err(BindingError::SessionMismatch)
         );
+
+        h.unbind_route(test_route(3));
+        assert_eq!(resolved_root(&h, 3, "ses_next"), Err(BindingError::Unbound));
     }
 
     #[tokio::test]
@@ -18642,7 +18649,7 @@ mod tests {
 
         // An escaped quote does not end the string, so the rest stays inside it.
         let escaped = br#"{"a":"he said \"x,y,z\" ok"}"#;
-        let node_cost = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
+        let node_cost = VALUE_NODE_CHARGE_BYTES * RETAINED_NODE_COPIES;
         assert!(
             value_footprint_bound(escaped).unwrap()
                 < VALUE_ENVELOPE_BYTES + RETAINED_STRING_COPIES * escaped.len() + 4 * node_cost,
@@ -19886,42 +19893,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn claude_code_response_resolves_per_pass_model_cache_ttl_from_module_config() {
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        config
-            .cache_ttl_by_model
-            .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
-        let route_config = config.clone();
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), config);
-        let mut route = binding(project.to_str().unwrap(), "ses");
-        route.config = route_config;
-        handler.bind_route(test_route(7), route);
-        let mut transform_request = request(vec![ck("a", 1, "alpha")]);
-        transform_request["serializer_profile"] = json!("claude-code-anthropic");
-        transform_request["model_key"] = json!("anthropic/claude-opus-4-1");
+    async fn claude_code_response_cache_ttl_follows_model_config_and_is_omitted_without_one() {
+        type Case<'a> = (fn(&mut DaemonConfig), Option<&'a str>, Option<&'a str>);
+        let cases: [Case<'_>; 2] = [
+            (
+                |config| {
+                    config
+                        .cache_ttl_by_model
+                        .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
+                },
+                Some("anthropic/claude-opus-4-1"),
+                Some("1h"),
+            ),
+            (|config| config.cache_ttl = "90m".to_string(), None, None),
+        ];
+        for (configure, model_key, expected_cache_ttl) in cases {
+            let mut config = default_test_config();
+            config.model_chain.clear();
+            configure(&mut config);
+            let route_config = config.clone();
+            let (handler, _store, _dir, project) =
+                handler_with_store(Arc::new(ProducerState::default()), config);
+            let mut route = binding(project.to_str().unwrap(), "ses");
+            route.config = route_config;
+            handler.bind_route(test_route(7), route);
+            let mut transform_request = request(vec![ck("a", 1, "alpha")]);
+            transform_request["serializer_profile"] = json!("claude-code-anthropic");
+            if let Some(model_key) = model_key {
+                transform_request["model_key"] = json!(model_key);
+            }
 
-        let response = call_transform_request(&handler, transform_request).await;
-        assert_eq!(response["cache_ttl"], "1h");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn claude_code_response_without_model_cache_ttl_inherits_harness_markers() {
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        config.cache_ttl = "90m".to_string();
-        let route_config = config.clone();
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), config);
-        let mut route = binding(project.to_str().unwrap(), "ses");
-        route.config = route_config;
-        handler.bind_route(test_route(7), route);
-        let mut transform_request = request(vec![ck("a", 1, "alpha")]);
-        transform_request["serializer_profile"] = json!("claude-code-anthropic");
-
-        let response = call_transform_request(&handler, transform_request).await;
-        assert!(response.get("cache_ttl").is_none());
+            let response = call_transform_request(&handler, transform_request).await;
+            match expected_cache_ttl {
+                Some(expected) => assert_eq!(response["cache_ttl"], expected, "{model_key:?}"),
+                None => assert!(response.get("cache_ttl").is_none(), "{response}"),
+            }
+        }
     }
 
     #[test]
@@ -20073,18 +20080,14 @@ mod tests {
     }
 
     #[test]
-    fn transform_health_idle_is_ok_and_empty_queue_is_explicit_null() {
+    fn transform_health_idle_is_ok_and_queue_age_is_null_until_something_is_queued() {
         let health = DispatchHealth::new();
         let report = health.report(10_000);
         assert_eq!(report.status, HealthStatus::Ok);
         let metrics = report.metrics.unwrap();
         assert_eq!(metrics["in_flight_count"], json!(0));
         assert_eq!(metrics["oldest_queued_age_ms"], Value::Null);
-    }
 
-    #[test]
-    fn transform_health_reports_oldest_queue_age_as_a_structured_metric() {
-        let health = DispatchHealth::new();
         health.oldest_queued_at_ms.store(100, Ordering::Relaxed);
         let report = health.report(250);
         let metrics = report.metrics.unwrap();
@@ -24110,36 +24113,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn transform_reject_records_trace_without_advancing_row_version() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let loaded = store.load("ses").unwrap();
-        let seeded_row_version = store
-            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-
-        let (code, message) = error_frame(
-            call_transform_outcome(
-                &handler,
-                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
-            )
-            .await,
-        );
-        assert_eq!(code, "transform_failed");
-        assert_eq!(message, "live-source ordinals not strictly increasing");
-
-        let after = store.load("ses").unwrap();
-        assert_eq!(after.row_version, Some(seeded_row_version));
-        let trace = store.load_pass_trace("ses").unwrap().unwrap();
-        assert_eq!(trace.receive_count, 1);
-        assert_eq!(trace.reject_count, 1);
-        assert_eq!(trace.last_reject_error.as_deref(), Some(message.as_str()));
-        assert_eq!(trace.last_completed_at_ms, 0);
-        assert!(trace.last_received_at_ms > 0);
-        assert!(trace.last_reject_at_ms.is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn transform_success_records_received_and_completed_trace() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -24192,7 +24165,7 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
 
-        for _ in 0..4 {
+        for pass in 1..=4u64 {
             let (code, message) = error_frame(
                 call_transform_outcome(
                     &handler,
@@ -24202,6 +24175,13 @@ mod tests {
             );
             assert_eq!(code, "transform_failed");
             assert_eq!(message, "live-source ordinals not strictly increasing");
+
+            let trace = store.load_pass_trace("ses").unwrap().unwrap();
+            assert_eq!(trace.receive_count, pass);
+            assert_eq!(trace.reject_count, pass);
+            assert_eq!(trace.last_reject_error.as_deref(), Some(message.as_str()));
+            assert!(trace.last_received_at_ms > 0);
+            assert!(trace.last_reject_at_ms.is_some());
         }
 
         let after = store.load("ses").unwrap();
@@ -26442,86 +26422,51 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn opencode_facade_lineage_matches_transform_across_symlink_spellings() {
+    async fn opencode_facade_lineage_matches_transform_in_both_symlink_directions() {
         use std::os::unix::fs::symlink;
 
-        let (handler, _store, dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            Arc::new(MissingSessionResolver),
-        );
-        let link = dir.path().join("project-link");
-        symlink(&project, &link).unwrap();
-        let target_text = project.to_str().unwrap();
-        let link_text = link.to_str().unwrap();
+        for transform_binds_link in [true, false] {
+            let (handler, _store, dir, project) = handler_with_store_and_resolver(
+                Arc::new(ProducerState::default()),
+                default_test_config(),
+                Arc::new(MissingSessionResolver),
+            );
+            let link = dir.path().join("project-link");
+            symlink(&project, &link).unwrap();
+            let target_text = project.to_str().unwrap();
+            let link_text = link.to_str().unwrap();
+            let (transform_root, facade_root) = if transform_binds_link {
+                (link_text, target_text)
+            } else {
+                (target_text, link_text)
+            };
 
-        // The transform lane binds through the symlink spelling.
-        // The facade lane binds to the canonical target; both bindings identify the same filesystem lineage.
-        handler.bind_route(
-            test_route(7),
-            binding_with_harness(link_text, OPENCODE_HARNESS, "ses"),
-        );
-        let transformed =
-            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
-        assert_eq!(transformed["action"], "HARD");
-        handler.bind_route(
-            test_route(8),
-            binding_with_harness(target_text, OPENCODE_HARNESS, "ses"),
-        );
+            handler.bind_route(
+                test_route(7),
+                binding_with_harness(transform_root, OPENCODE_HARNESS, "ses"),
+            );
+            let transformed =
+                call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")]))
+                    .await;
+            assert_eq!(transformed["action"], "HARD", "{transform_binds_link}");
+            handler.bind_route(
+                test_route(8),
+                binding_with_harness(facade_root, OPENCODE_HARNESS, "ses"),
+            );
 
-        let outcome = call_facade_on_channel(
-            &handler,
-            8,
-            "ctx_note",
-            json!({
-                "action": "write",
-                "content": "symlink lineage resolves",
-                "memory_project": target_text,
-            }),
-        )
-        .await;
-        assert!(!tool_is_error(outcome));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn opencode_facade_lineage_matches_transform_in_reverse_symlink_direction() {
-        use std::os::unix::fs::symlink;
-
-        let (handler, _store, dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            Arc::new(MissingSessionResolver),
-        );
-        let link = dir.path().join("project-link");
-        symlink(&project, &link).unwrap();
-        let target_text = project.to_str().unwrap();
-        let link_text = link.to_str().unwrap();
-
-        handler.bind_route(
-            test_route(7),
-            binding_with_harness(target_text, OPENCODE_HARNESS, "ses"),
-        );
-        let transformed =
-            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
-        assert_eq!(transformed["action"], "HARD");
-        handler.bind_route(
-            test_route(8),
-            binding_with_harness(link_text, OPENCODE_HARNESS, "ses"),
-        );
-
-        let outcome = call_facade_on_channel(
-            &handler,
-            8,
-            "ctx_note",
-            json!({
-                "action": "write",
-                "content": "reverse symlink lineage resolves",
-                "memory_project": link_text,
-            }),
-        )
-        .await;
-        assert!(!tool_is_error(outcome));
+            let outcome = call_facade_on_channel(
+                &handler,
+                8,
+                "ctx_note",
+                json!({
+                    "action": "write",
+                    "content": "symlink lineage resolves",
+                    "memory_project": facade_root,
+                }),
+            )
+            .await;
+            assert!(!tool_is_error(outcome), "{transform_binds_link}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32812,32 +32757,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_full_autonomous_cycle_fires_publishes_and_next_pass_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = big_messages();
+    async fn handler_autonomous_cycle_fires_publishes_and_next_pass_folds_across_start_ordinals() {
+        // A system lead at ordinal zero is skipped: the chunk starts at the first user message.
+        let cases: [(&str, Vec<IngressMessage>, u64); 3] = [
+            ("one_based", big_messages(), 1),
+            ("zero_based", big_messages_from(0), 0),
+            (
+                "zero_based_system_lead",
+                zero_based_messages_with_system_lead(),
+                1,
+            ),
+        ];
+        for (case, messages, expected_start) in cases {
+            let producer = Arc::new(ProducerState::default());
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
 
-        let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
-        wait_for_count(&producer.starts, 1).await;
-        let prompt = producer.prompts.lock().unwrap()[0].clone();
-        assert_eq!(prompt_ordinal_range(&prompt).unwrap().0, 1);
-        wait_for_idle(&store).await;
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].start_message, 1);
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+            let first = call_transform(&handler, messages.clone()).await;
+            assert_eq!(first["historian"]["fired"], true, "{case}");
+            wait_for_count(&producer.starts, 1).await;
+            let prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert_eq!(
+                prompt_ordinal_range(&prompt).unwrap().0,
+                expected_start,
+                "{case}"
+            );
+            wait_for_idle(&store).await;
+            let compartments = store.load_compartments("ses").unwrap();
+            assert_eq!(compartments.len(), 1, "{case}");
+            assert_eq!(
+                compartments[0].start_message,
+                i64::try_from(expected_start).unwrap(),
+                "{case}"
+            );
+            assert_eq!(producer.starts.load(Ordering::SeqCst), 1, "{case}");
 
-        let second = call_transform(&handler, messages).await;
-        assert_eq!(second["action"], "HARD");
-        assert!(
-            second["boundary_id"]
-                .as_str()
-                .unwrap_or_default()
-                .contains('#')
-        );
-        assert!(m0_text(&second).contains("autonomous summary"));
+            let second = call_transform(&handler, messages).await;
+            assert_eq!(second["action"], "HARD", "{case}");
+            assert!(
+                second["boundary_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains('#'),
+                "{case}: {second}"
+            );
+            assert!(m0_text(&second).contains("autonomous summary"), "{case}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -33028,56 +32993,6 @@ mod tests {
         wait_for_count(&producer.starts, 1).await;
         let prompt = producer.prompts.lock().unwrap()[0].clone();
         assert!(!prompt.contains("<project-memory>"), "{prompt}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_zero_based_autonomous_cycle_covers_ordinal_zero_and_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = big_messages_from(0);
-
-        let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
-        wait_for_count(&producer.starts, 1).await;
-        let prompt = producer.prompts.lock().unwrap()[0].clone();
-        assert_eq!(prompt_ordinal_range(&prompt).unwrap().0, 0);
-        wait_for_idle(&store).await;
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].start_message, 0);
-
-        let second = call_transform(&handler, messages).await;
-        assert_eq!(second["action"], "HARD");
-        assert!(
-            second["boundary_id"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("#")
-        );
-        assert!(m0_text(&second).contains("autonomous summary"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_zero_based_system_lead_starts_chunk_at_first_user_and_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = zero_based_messages_with_system_lead();
-
-        let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
-        wait_for_count(&producer.starts, 1).await;
-        let prompt = producer.prompts.lock().unwrap()[0].clone();
-        assert_eq!(prompt_ordinal_range(&prompt).unwrap().0, 1);
-        wait_for_idle(&store).await;
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].start_message, 1);
-
-        let second = call_transform(&handler, messages).await;
-        assert_eq!(second["action"], "HARD");
-        assert!(m0_text(&second).contains("autonomous summary"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -33544,20 +33459,37 @@ mod tests {
     }
 
     #[test]
-    fn agent_drops_append_rejects_missing_command_id() {
+    fn agent_drops_append_rejects_malformed_command_ids_and_raw_drops() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        // A minted tag makes the field under test the only reason to refuse.
         mint_drop_tag(&store, "a#0");
 
-        let outcome = handler.handle_agent_drops_value(
-            test_route(7),
-            json!({
+        let mut bodies = vec![json!({
+            "method": "agent_drops.append",
+            "session_id": "ses",
+            "drop": "1",
+        })];
+        for command_id in [json!(""), json!(" \t "), json!("x".repeat(129))] {
+            bodies.push(json!({
                 "method": "agent_drops.append",
                 "session_id": "ses",
                 "drop": "1",
-            }),
-        );
-        assert_eq!(error_code(outcome), "bad_request");
+                "command_id": command_id,
+            }));
+        }
+        for drop in [Value::Null, json!(""), json!("  "), json!(["1"])] {
+            bodies.push(json!({
+                "method": "agent_drops.append",
+                "session_id": "ses",
+                "drop": drop,
+                "command_id": "command",
+            }));
+        }
+        for body in bodies {
+            let outcome = handler.handle_agent_drops_value(test_route(7), body.clone());
+            assert_eq!(error_code(outcome), "bad_request", "{body}");
+        }
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
@@ -33759,45 +33691,6 @@ mod tests {
             json!({ "ok": true, "queued": 1, "accepted": [1] })
         );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
-    }
-
-    #[test]
-    fn ctx_reduce_command_rejects_empty_and_oversized_command_ids() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        for command_id in [json!(""), json!(" \t "), json!("x".repeat(129))] {
-            let outcome = handler.handle_agent_drops_value(
-                test_route(7),
-                json!({
-                    "method": "agent_drops.append",
-                    "session_id": "ses",
-                    "drop": "1",
-                    "command_id": command_id,
-                }),
-            );
-            assert_eq!(error_code(outcome), "bad_request");
-        }
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-    }
-
-    #[test]
-    fn agent_drops_append_rejects_missing_or_empty_raw_drop() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        for drop in [Value::Null, json!(""), json!("  "), json!(["1"])] {
-            let outcome = handler.handle_agent_drops_value(
-                test_route(7),
-                json!({
-                    "method": "agent_drops.append",
-                    "session_id": "ses",
-                    "drop": drop,
-                    "command_id": "command"
-                }),
-            );
-            assert_eq!(error_code(outcome), "bad_request");
-        }
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -34176,39 +34069,6 @@ mod tests {
                 .contains("nothing to compact")
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), starts);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn session_wrapup_drains_beyond_five_rounds_to_the_keep_watermark() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
-
-        let body = tool_body(
-            handler
-                .dispatch_value(
-                    test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
-                )
-                .await,
-        );
-
-        assert_eq!(body["ok"], json!(true), "{body}");
-        assert_eq!(body["disposition"], json!("completed"), "{body}");
-        let starts = producer.starts.load(Ordering::SeqCst);
-        assert!(
-            starts >= 6,
-            "the backlog requires more than five producer rounds: {starts}"
-        );
-        let final_end = store
-            .load_compartments("ses")
-            .unwrap()
-            .iter()
-            .map(|compartment| compartment.end_message)
-            .max()
-            .unwrap();
-        assert_eq!(final_end, 300, "the drain must reach the keep watermark");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -35952,39 +35812,42 @@ mod tests {
         seed_historian_phase(&store, phase.clone());
 
         let recovering = call_transform(&handler, messages.clone()).await;
-        assert_eq!(recovering["historian"]["state"], phase.as_str());
-        assert_eq!(recovering["historian"]["no_fire"], "recovering");
+        assert_eq!(
+            recovering["historian"]["state"],
+            phase.as_str(),
+            "{phase:?}"
+        );
+        assert_eq!(
+            recovering["historian"]["no_fire"], "recovering",
+            "{phase:?}"
+        );
         wait_for_idle(&store).await;
-        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-        assert_eq!(producer.binds.load(Ordering::SeqCst), 0);
-        assert_eq!(producer.statuses.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0, "{phase:?}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{phase:?}");
+        assert_eq!(producer.binds.load(Ordering::SeqCst), 0, "{phase:?}");
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 0, "{phase:?}");
 
         let backed_off = call_transform(&handler, messages.clone()).await;
-        assert_eq!(backed_off["historian"]["fired"], false);
-        assert_eq!(backed_off["historian"]["no_fire"], "backoff");
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(backed_off["historian"]["fired"], false, "{phase:?}");
+        assert_eq!(backed_off["historian"]["no_fire"], "backoff", "{phase:?}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{phase:?}");
 
         expire_historian_backoff(&store);
         let fresh = call_transform(&handler, messages).await;
-        assert_eq!(fresh["historian"]["fired"], true);
+        assert_eq!(fresh["historian"]["fired"], true, "{phase:?}");
         wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_seeded_publishing_recovers_then_refires_after_backoff() {
-        assert_seeded_phase_recovers_then_refires_after_backoff(HistorianPhase::Publishing).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_seeded_firing_recovers_then_refires_after_backoff() {
-        assert_seeded_phase_recovers_then_refires_after_backoff(HistorianPhase::Firing).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_seeded_validating_recovers_then_refires_after_backoff() {
-        assert_seeded_phase_recovers_then_refires_after_backoff(HistorianPhase::Validating).await;
+    async fn handler_seeded_non_idle_phases_recover_then_refire_after_backoff() {
+        for phase in [
+            HistorianPhase::Publishing,
+            HistorianPhase::Firing,
+            HistorianPhase::Validating,
+        ] {
+            assert_seeded_phase_recovers_then_refires_after_backoff(phase).await;
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

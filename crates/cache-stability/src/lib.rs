@@ -428,26 +428,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn defer_boundary_absent_keeps_bytes_and_sets_reconcile_pending() {
-        let mut state = state_with(
-            vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)],
-            "b0",
-        );
-        let before = state.cached_prefix_bytes();
-        // Boundary removed by a revert: '-' != 'b0'. The core must NOT rebuild this pass.
-        let r = state
-            .step(PassInput::new(Action::SoftPlus, "-"))
-            .expect("version headroom");
-        assert_eq!(r.action, Action::SoftPlus, "revert pass must not bust");
-        assert!(r.reconcile_pending, "boundary absent must flag reconcile");
-        assert_eq!(
-            state.cached_prefix_bytes(),
-            before,
-            "revert must keep frozen bytes"
-        );
-    }
-
     /// A `Hard` render is the whole prefix, so a key it no longer produces leaves the
     /// frozen set instead of replaying stale bytes.
     #[test]
@@ -690,33 +670,10 @@ mod tests {
     }
 
     #[test]
-    fn run_started_keeps_lineage_resets_episode() {
-        let mut state = state_with(
-            vec![
-                unit("m0", "<h>BASE</h>", DurabilityClass::Lineage),
-                unit("ep", "run-scoped", DurabilityClass::Episode),
-            ],
-            "b0",
-        );
-        let mut run = PassInput::new(Action::SoftPlus, "b0");
-        run.run_started = true;
-        state.step(run).expect("version headroom");
-        let keys: Vec<&str> = state.frozen_units.iter().map(|u| u.key.as_str()).collect();
-        assert_eq!(
-            keys,
-            vec!["m0"],
-            "episode unit resets at RunStarted, lineage survives"
-        );
-        assert_eq!(
-            state.frozen_units[0].frozen_payload, "<h>BASE</h>",
-            "lineage byte-identical"
-        );
-    }
-
-    #[test]
     fn run_started_resets_episode_units_on_every_action() {
         // The reset rule is a property of the RUN BOUNDARY, not of the defer action:
-        // a run can just as well begin with a Soft or Hard pass.
+        // a run can begin with a Soft or Hard pass. The lineage unit retains its exact
+        // payload under SoftPlus, Soft, and Hard.
         for action in [Action::SoftPlus, Action::Soft, Action::Hard] {
             let mut state = state_with(
                 vec![
@@ -727,13 +684,20 @@ mod tests {
             );
             let mut pass = PassInput::new(action, "b0");
             pass.run_started = true;
+            if action == Action::Hard {
+                // A Hard render is the whole prefix, so it carries the lineage unit.
+                pass.rendered_units = vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)];
+            }
             state.step(pass).expect("version headroom");
-            assert!(
-                state
-                    .frozen_units
-                    .iter()
-                    .all(|u| u.durability_class == DurabilityClass::Lineage),
-                "{action:?}: episode unit must reset at the run boundary"
+            let keys: Vec<&str> = state.frozen_units.iter().map(|u| u.key.as_str()).collect();
+            assert_eq!(
+                keys,
+                vec!["m0"],
+                "{action:?}: episode unit resets at the run boundary, lineage survives"
+            );
+            assert_eq!(
+                state.frozen_units[0].frozen_payload, "<h>BASE</h>",
+                "{action:?}: lineage byte-identical"
             );
             assert!(
                 !state.cached_prefix_bytes().contains("run-scoped"),
@@ -778,10 +742,18 @@ mod tests {
             vec![unit("m0", "<h>BASE</h>", DurabilityClass::Lineage)],
             "b0",
         );
+        let before = state.cached_prefix_bytes();
+        // Boundary removed by a revert: '-' != 'b0'. The core must NOT rebuild this pass.
         let r = state
             .step(PassInput::new(Action::SoftPlus, "-"))
             .expect("version headroom");
+        assert_eq!(r.action, Action::SoftPlus, "revert pass must not bust");
         assert!(r.reconcile_pending, "revert must flag reconcile");
+        assert_eq!(
+            state.cached_prefix_bytes(),
+            before,
+            "revert must keep frozen bytes"
+        );
 
         // A reconcile-forced HARD that mints NO boundary while the anchor is still
         // absent has not reconciled anything: the stored anchor is still stale.

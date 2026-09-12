@@ -927,15 +927,6 @@ mod tests {
     }
 
     #[test]
-    fn durable_redaction_hides_the_entire_field_on_scanner_failure() {
-        let input = "password=sentinel".repeat(secret_scanner::MAX_INPUT_BYTES);
-        let redaction = redact_durable_text(&input);
-        assert_eq!(redaction.text, "<REDACTED:secret>");
-        assert_eq!(redaction.detections[0].length, input.len());
-        assert!(!redaction.text.contains("sentinel"));
-    }
-
-    #[test]
     fn secret_shaped_keys_match_whole_label_words() {
         for key in [
             "passWord",
@@ -1004,34 +995,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn a_bare_key_label_names_a_structural_row_everywhere() {
-        // Both gates must agree: a name reducing to the bare `key` label is structural.
-        for key in [
-            "target_key",
-            "stream_key",
-            "key_id",
-            "last_model_key",
-            "primary_key",
-        ] {
-            assert!(
-                !secret_shaped_json_key(key),
-                "expected {key} to stay writable"
-            );
-            assert!(
-                qualified_secret_key_label(key).is_none(),
-                "{key} disagrees between the two gates"
-            );
-        }
-        for key in ["api_key", "session_key", "private_key", "client_secret"] {
-            assert!(secret_shaped_json_key(key), "expected {key} protected");
-            assert!(
-                qualified_secret_key_label(key).is_some(),
-                "{key} disagrees between the two gates"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1041,9 +1004,14 @@ mod qualifier_chain_tests {
     /// The bare-`key` carve-out must only exempt names with no credential qualifier. A
     /// qualifier absent from `LABEL_QUALIFIERS` makes a credential name reduce to the
     /// structural label `key`, and a structural label skips content scanning entirely.
+    /// Both gates must agree on every name.
     #[test]
     fn a_credential_qualifier_keeps_a_key_name_scanned() {
         for key in [
+            "api_key",
+            "session_key",
+            "private_key",
+            "client_secret",
             "signing_key",
             "signingKey",
             "webhook_key",

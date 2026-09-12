@@ -421,96 +421,13 @@ async fn parked_general_task_bound_must_leave_one_free_slot() {
     host.shutdown().await.expect("graceful shutdown");
 }
 
-/// The configured cap must cover ingress, scratch, egress, catalog, and declared retention.
-#[tokio::test]
-async fn retained_declaration_raises_the_resident_floor_exactly() {
-    const RETAINED: u64 = 64 * 1024 * 1024;
-    let try_resident = |bytes: u64| async move {
-        CompositeTestHost::try_start(
-            three_child_composite(broca_declaration(RETAINED)),
-            move |config| {
-                config.limits.max_resident_bytes = bytes;
-            },
-        )
-        .await
-    };
-
-    // The resident floor is MIN_RESIDENT_BYTES plus retained bytes and the serialized catalog's resident length.
-    // A resident cap one byte below the floor fails because the catalog is nonempty; the exact floor passes.
-    let mut lo = host_runtime::config::MIN_RESIDENT_BYTES + RETAINED;
-    let mut hi = lo + 64 * 1024;
-    assert!(
-        matches!(try_resident(lo).await, Err(HostError::InitFailed(_))),
-        "the floor without catalog headroom must fail"
-    );
-    match try_resident(hi).await {
-        Ok(host) => host.shutdown().await.expect("graceful shutdown"),
-        Err(err) => panic!("64 KiB of catalog headroom must start: {err}"),
-    }
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        match try_resident(mid).await {
-            Ok(host) => {
-                host.shutdown().await.expect("graceful shutdown");
-                hi = mid;
-            }
-            Err(HostError::InitFailed(_)) => lo = mid,
-            Err(err) => panic!("unexpected startup failure: {err}"),
-        }
-    }
-    let floor = hi;
-
-    assert!(
-        matches!(try_resident(floor - 1).await, Err(HostError::InitFailed(_))),
-        "one byte below the handler-dependent floor must be rejected"
-    );
-
-    let host = match try_resident(floor).await {
-        Ok(host) => host,
-        Err(err) => panic!("the exact floor must be accepted: {err}"),
-    };
-    let mut client = host.client().await;
-    let (channel, epoch) = client
-        .route_open_target(
-            "tool_provider",
-            "context",
-            "/workspace/project",
-            "opencode",
-            "big",
-        )
-        .await
-        .expect("route");
-    let prefix = br#"{"mode":"echo","pad":""#;
-    let suffix = br#""}"#;
-    let max_body = 64 * 1024 * 1024usize;
-    let mut body = Vec::with_capacity(max_body);
-    body.extend_from_slice(prefix);
-    body.extend(std::iter::repeat_n(
-        b'a',
-        max_body - prefix.len() - suffix.len(),
-    ));
-    body.extend_from_slice(suffix);
-    let corr = client.next_corr();
-    client
-        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, channel, epoch, corr, &body)
-        .await
-        .expect("send maximum-size frame");
-    let frame = client
-        .frame_within(Duration::from_secs(60))
-        .await
-        .expect("maximum-size frame answered at the exact floor");
-    assert_eq!(frame.corr, corr);
-    assert_eq!(frame.ty, TY_RESPONSE);
-    host.shutdown().await.expect("graceful shutdown");
-}
-
 /// The default resident cap is the no-retention ingress floor.
 /// Composites must include linked components' retained-memory declarations in the resident cap.
 ///
 /// The default resident cap excludes external components' declarations.
 /// Composites that link external components must include their declarations in the resident cap.
 /// The composition site must calculate the resident cap because it knows the linked components.
-/// ingress.
+/// A host started at the exact floor still serves one maximum-size ingress frame.
 #[tokio::test]
 async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
     const RETAINED: u64 = 64 * 1024 * 1024
@@ -603,6 +520,40 @@ async fn a_composite_sizes_the_resident_cap_from_its_own_declarations() {
         },
     )
     .await;
+
+    // At the exact floor, the ingress pool retains one maximum-size body, so the largest legal frame is answered.
+    let mut client = host.client().await;
+    let (channel, epoch) = client
+        .route_open_target(
+            "tool_provider",
+            "context",
+            "/workspace/project",
+            "opencode",
+            "big",
+        )
+        .await
+        .expect("route");
+    let prefix = br#"{"mode":"echo","pad":""#;
+    let suffix = br#""}"#;
+    let max_body = host_runtime::MAX_FRAME_BODY_LEN as usize;
+    let mut body = Vec::with_capacity(max_body);
+    body.extend_from_slice(prefix);
+    body.extend(std::iter::repeat_n(
+        b'a',
+        max_body - prefix.len() - suffix.len(),
+    ));
+    body.extend_from_slice(suffix);
+    let corr = client.next_corr();
+    client
+        .send_frame(TY_REQUEST, FLAGS_INTERACTIVE, channel, epoch, corr, &body)
+        .await
+        .expect("send maximum-size frame");
+    let frame = client
+        .frame_within(Duration::from_secs(60))
+        .await
+        .expect("maximum-size frame answered at the exact floor");
+    assert_eq!(frame.corr, corr);
+    assert_eq!(frame.ty, TY_RESPONSE);
     host.shutdown().await.expect("graceful shutdown");
 }
 

@@ -796,67 +796,50 @@ describe("transform page digest canonical JSON", () => {
 });
 
 describe("resolveOrdinalsForModule message identity", () => {
-    it("resolves a message whose id is only at the top level", async () => {
-        const sessionId = "module-wire-top-level-id";
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => [],
-            readMessageOrdinalPage: () => [],
-            getStoredMessageCount: () => 1,
-        });
-        try {
-            const resolved = await resolveOrdinalsForModule({
-                sessionId,
-                messages: [
-                    { info: { role: "user", sessionID: sessionId }, id: "m-1", parts: [] },
-                ] as unknown as MessageLike[],
-                memo: {
-                    generation: 1,
-                    memoGeneration: 1,
-                    entries: new Map([["m-1", 1]]),
-                    anchor: { timeCreated: 1, id: "m-1" },
-                    storedCount: 1,
-                    canonicalCount: 1,
+    it("resolves a top-level-only id and an explicitly empty id as identities, as the encoder and daemon do", async () => {
+        for (const [sessionId, message, mid] of [
+            [
+                "module-wire-top-level-id",
+                {
+                    info: { role: "user", sessionID: "module-wire-top-level-id" },
+                    id: "m-1",
+                    parts: [],
                 },
+                "m-1",
+            ],
+            [
+                "module-wire-empty-id",
+                { info: { id: "", role: "user", sessionID: "module-wire-empty-id" }, parts: [] },
+                "",
+            ],
+        ] as const) {
+            const unregister = setRawMessageProvider(sessionId, {
+                readMessages: () => [],
+                readMessageOrdinalPage: () => [],
+                getStoredMessageCount: () => 1,
             });
-            expect(resolved.ok).toBe(true);
-            if (!resolved.ok) throw new Error(resolved.reason);
-            expect(encodeOpenCodeMessagesToCk(resolved.annotatedInput)[0]).toMatchObject({
-                mid: "m-1",
-                ordinal: 1,
-            });
-        } finally {
-            unregister();
-        }
-    });
-
-    it("treats an explicitly empty id as an identity, as the encoder and daemon do", async () => {
-        const sessionId = "module-wire-empty-id";
-        const unregister = setRawMessageProvider(sessionId, {
-            readMessages: () => [],
-            readMessageOrdinalPage: () => [],
-            getStoredMessageCount: () => 1,
-        });
-        try {
-            const resolved = await resolveOrdinalsForModule({
-                sessionId,
-                messages: [{ info: { id: "", role: "user", sessionID: sessionId }, parts: [] }],
-                memo: {
-                    generation: 1,
-                    memoGeneration: 1,
-                    entries: new Map([["", 1]]),
-                    anchor: { timeCreated: 1, id: "" },
-                    storedCount: 1,
-                    canonicalCount: 1,
-                },
-            });
-            expect(resolved.ok).toBe(true);
-            if (!resolved.ok) throw new Error(resolved.reason);
-            expect(encodeOpenCodeMessagesToCk(resolved.annotatedInput)[0]).toMatchObject({
-                mid: "",
-                ordinal: 1,
-            });
-        } finally {
-            unregister();
+            try {
+                const resolved = await resolveOrdinalsForModule({
+                    sessionId,
+                    messages: [message] as unknown as MessageLike[],
+                    memo: {
+                        generation: 1,
+                        memoGeneration: 1,
+                        entries: new Map([[mid, 1]]),
+                        anchor: { timeCreated: 1, id: mid },
+                        storedCount: 1,
+                        canonicalCount: 1,
+                    },
+                });
+                expect(resolved.ok, sessionId).toBe(true);
+                if (!resolved.ok) throw new Error(resolved.reason);
+                expect(
+                    encodeOpenCodeMessagesToCk(resolved.annotatedInput)[0],
+                    sessionId,
+                ).toMatchObject({ mid, ordinal: 1 });
+            } finally {
+                unregister();
+            }
         }
     });
 });
@@ -1238,21 +1221,6 @@ describe("resolveOrdinalsForModule provisional tails", () => {
             ).toEqual([98, 99]);
         } finally {
             unregister();
-        }
-    });
-
-    it("assigns one unpersisted append the next absolute ordinal", async () => {
-        const result = await resolveTail(1);
-        try {
-            expect(result.first.annotatedInput).toEqual([
-                expect.objectContaining({ absolute_ordinal: 501 }),
-            ]);
-            expect(
-                encodeOpenCodeMessagesToCk(result.first.annotatedInput as MessageLike[])[0]?.ck
-                    .meta,
-            ).toEqual(expect.objectContaining({ ordinal: 501 }));
-        } finally {
-            result.unregister();
         }
     });
 

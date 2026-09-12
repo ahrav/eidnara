@@ -7,62 +7,45 @@ import {
 } from "./todo-view";
 
 describe("normalizeTodoStateJson", () => {
-    it("returns null for non-array input", () => {
-        expect(normalizeTodoStateJson(null)).toBeNull();
-        expect(normalizeTodoStateJson(undefined)).toBeNull();
-        expect(normalizeTodoStateJson("not an array")).toBeNull();
-        expect(normalizeTodoStateJson({ todos: [] })).toBeNull();
+    it("returns null for non-array input and for any malformed todo item", () => {
+        for (const input of [
+            null,
+            undefined,
+            "not an array",
+            { todos: [] },
+            [{ content: "Interop", status: "done" }],
+            [{ content: "Urgent", status: "pending", priority: "urgent" }],
+            [{ content: "Valid", status: "pending", priority: "high" }, { content: "No status" }],
+        ]) {
+            expect(normalizeTodoStateJson(input)).toBeNull();
+        }
     });
 
-    it("returns empty array JSON for empty input", () => {
-        expect(normalizeTodoStateJson([])).toBe("[]");
-    });
-
-    it("preserves todos with all required fields and order", () => {
-        const todos = [
-            { content: "First", status: "in_progress", priority: "high" },
-            { content: "Second", status: "pending", priority: "medium" },
+    it("keeps order, strips extra fields, and defaults a missing priority to medium", () => {
+        const cases: Array<[unknown, unknown[]]> = [
+            [[], []],
+            [
+                [
+                    { content: "First", status: "in_progress", priority: "high" },
+                    { content: "Second", status: "pending", priority: "medium" },
+                ],
+                [
+                    { content: "First", status: "in_progress", priority: "high" },
+                    { content: "Second", status: "pending", priority: "medium" },
+                ],
+            ],
+            [
+                [{ id: "1", content: "Task", status: "pending", priority: "high" }],
+                [{ content: "Task", status: "pending", priority: "high" }],
+            ],
+            [
+                [{ content: "Task", status: "pending" }],
+                [{ content: "Task", status: "pending", priority: "medium" }],
+            ],
         ];
-        const json = normalizeTodoStateJson(todos);
-        expect(JSON.parse(json ?? "null")).toEqual(todos);
-    });
-
-    it("strips extra fields like id", () => {
-        const todos = [{ id: "1", content: "Task", status: "pending", priority: "high" }];
-        const json = normalizeTodoStateJson(todos);
-        const parsed = JSON.parse(json ?? "null");
-        expect(parsed).toEqual([{ content: "Task", status: "pending", priority: "high" }]);
-        expect(parsed[0].id).toBeUndefined();
-    });
-
-    it("defaults missing priority to medium", () => {
-        const json = normalizeTodoStateJson([{ content: "Task", status: "pending" }]);
-        expect(JSON.parse(json ?? "null")).toEqual([
-            { content: "Task", status: "pending", priority: "medium" },
-        ]);
-    });
-
-    it("rejects foreign status values", () => {
-        expect(normalizeTodoStateJson([{ content: "Interop", status: "done" }])).toBeNull();
-    });
-
-    it("rejects unknown priority values", () => {
-        expect(
-            normalizeTodoStateJson([{ content: "Urgent", status: "pending", priority: "urgent" }]),
-        ).toBeNull();
-    });
-
-    it("rejects whole array if any item is malformed", () => {
-        const todos = [
-            { content: "Valid", status: "pending", priority: "high" },
-            { content: "No status" },
-        ];
-        expect(normalizeTodoStateJson(todos)).toBeNull();
-    });
-
-    it("produces stable output for same input", () => {
-        const todos = [{ content: "X", status: "pending", priority: "low" }];
-        expect(normalizeTodoStateJson(todos)).toBe(normalizeTodoStateJson(todos));
+        for (const [input, expected] of cases) {
+            expect(JSON.parse(normalizeTodoStateJson(input) ?? "null")).toEqual(expected);
+        }
     });
 });
 
@@ -72,24 +55,18 @@ describe("buildSyntheticTodoPart", () => {
         { content: "Done task", status: "completed", priority: "medium" },
     ]);
 
-    it("returns null for empty state JSON", () => {
-        expect(buildSyntheticTodoPart("")).toBeNull();
-    });
-
-    it("returns null for invalid JSON", () => {
-        expect(buildSyntheticTodoPart("not json")).toBeNull();
-    });
-
-    it("returns null when all todos are terminal", () => {
-        const state = JSON.stringify([
-            { content: "A", status: "completed", priority: "high" },
-            { content: "B", status: "cancelled", priority: "low" },
-        ]);
-        expect(buildSyntheticTodoPart(state)).toBeNull();
-    });
-
-    it("returns null for empty array", () => {
-        expect(buildSyntheticTodoPart("[]")).toBeNull();
+    it("returns null for empty, invalid, or all-terminal state", () => {
+        for (const state of [
+            "",
+            "not json",
+            "[]",
+            JSON.stringify([
+                { content: "A", status: "completed", priority: "high" },
+                { content: "B", status: "cancelled", priority: "low" },
+            ]),
+        ]) {
+            expect(buildSyntheticTodoPart(state)).toBeNull();
+        }
     });
 
     it("produces a valid OpenCode tool part shape", () => {
@@ -126,19 +103,15 @@ describe("buildSyntheticTodoPart", () => {
         expect(part.state.time.start).toBe(part.state.time.end);
     });
 
-    it("produces deterministic callID for same state (cache stability)", () => {
-        const a = buildSyntheticTodoPart(validState);
-        const b = buildSyntheticTodoPart(validState);
-        expect(a?.callID).toBe(b?.callID);
-    });
-
-    it("produces different callID for different state", () => {
+    it("derives callID from the state: same state repeats it, different state changes it", () => {
         const otherState = JSON.stringify([
             { content: "Different", status: "pending", priority: "low" },
         ]);
         const a = buildSyntheticTodoPart(validState);
-        const b = buildSyntheticTodoPart(otherState);
-        expect(a?.callID).not.toBe(b?.callID);
+        const b = buildSyntheticTodoPart(validState);
+        const c = buildSyntheticTodoPart(otherState);
+        expect(a?.callID).toBe(b?.callID);
+        expect(a?.callID).not.toBe(c?.callID);
     });
 });
 
@@ -148,18 +121,9 @@ describe("computeSyntheticCallId", () => {
         expect(id).toMatch(/^synthetic_todo_[0-9a-f]{16}$/);
     });
 
-    it("is deterministic for same input", () => {
+    it("is a pure function of the input: same input repeats, different input differs", () => {
         expect(computeSyntheticCallId("foo")).toBe(computeSyntheticCallId("foo"));
-    });
-
-    it("differs for different input", () => {
         expect(computeSyntheticCallId("foo")).not.toBe(computeSyntheticCallId("bar"));
-    });
-
-    it("produces an id format that does not collide with provider formats", () => {
-        const id = computeSyntheticCallId("any");
-        expect(id.startsWith("toolu_")).toBe(false);
-        expect(id.startsWith("call_")).toBe(false);
     });
 });
 

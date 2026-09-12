@@ -82,19 +82,13 @@ describe("prepareExplicitQuery", () => {
     });
 
     it("admits exactly the atom cap and rejects one atom over", () => {
+        // Every atom is the same word, so a counter that deduplicated atoms would admit the over-cap query.
         const atCap = Array.from({ length: MAX_QUERY_ATOMS }, () => "w").join(" ");
         expect(prepareExplicitQuery(atCap)).toEqual({ ok: true, query: atCap });
         const overCap = `${atCap} extra`;
         const outcome = rejection(overCap);
         expect(outcome.violation).toBe("atoms");
         expect(outcome.actual).toBe(MAX_QUERY_ATOMS + 1);
-    });
-
-    it("counts duplicate atoms toward the cap", () => {
-        const outcome = rejection(
-            Array.from({ length: MAX_QUERY_ATOMS + 1 }, () => "dup").join(" "),
-        );
-        expect(outcome.violation).toBe("atoms");
     });
 
     it("rejects a token-cap overflow for a query under the byte and atom caps", () => {

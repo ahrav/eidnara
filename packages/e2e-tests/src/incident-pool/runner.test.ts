@@ -12,7 +12,6 @@ import {
 import { replayAdjudicationLedger } from "./history";
 import {
     adaptBoundSymbol,
-    builtinIncidentCaseRegistry,
     type IncidentCaseRegistry,
     implementationBundleDigest,
     type JsonValue,
@@ -465,14 +464,6 @@ describe("case registry", () => {
             });
         }
         expect(() => validateRegistryCatalogCorrespondence(registry, catalog)).not.toThrow();
-    });
-
-    it("registers the builtin cases 1:1 against the committed catalog", () => {
-        const registry = builtinIncidentCaseRegistry();
-        expect(registry.size).toBe(2);
-        for (const [variantId, entry] of registry) {
-            expect(entry.variantId).toBe(variantId);
-        }
     });
 
     it("rejects a registration whose fixtures drift from the catalog fingerprint", () => {

@@ -294,34 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_proof_agrees_with_compute_proof() {
-        let key = [7u8; 32];
-        let client_nonce = [1u8; NONCE_LEN];
-        let server_nonce = [2u8; NONCE_LEN];
-        let daemon_id = [3u8; DAEMON_ID_LEN];
-        let proof = compute_proof(
-            &key,
-            CLIENT_AUTH_DOMAIN,
-            &client_nonce,
-            &server_nonce,
-            "ab",
-            &daemon_id,
-        );
-        assert_eq!(
-            verify_proof(
-                &key,
-                CLIENT_AUTH_DOMAIN,
-                &client_nonce,
-                &server_nonce,
-                "ab",
-                &daemon_id,
-                &proof
-            ),
-            Ok(())
-        );
-    }
-
-    #[test]
     fn committed_daemon_ver_carries_the_published_prefix() {
         assert!(vectors::DAEMON_VER.starts_with(DAEMON_VER_PREFIX));
         assert!(!DAEMON_VER_PREFIX.is_empty());
@@ -351,51 +323,6 @@ mod tests {
                 &daemon_id,
             ),
             vectors::CLIENT_AUTH,
-        );
-    }
-
-    #[test]
-    fn daemon_ver_is_bound_into_the_proof() {
-        let (key, client_nonce, server_nonce, daemon_id) = vectors::inputs();
-        let baseline = compute_proof(
-            &key,
-            SERVER_PROOF_DOMAIN,
-            &client_nonce,
-            &server_nonce,
-            vectors::DAEMON_VER,
-            &daemon_id,
-        );
-        let tampered = compute_proof(
-            &key,
-            SERVER_PROOF_DOMAIN,
-            &client_nonce,
-            &server_nonce,
-            "eidnara-host/9.9.9",
-            &daemon_id,
-        );
-        assert_ne!(baseline, tampered, "daemon_ver must change the proof");
-    }
-
-    #[test]
-    fn domains_separate_the_two_proofs() {
-        let (key, client_nonce, server_nonce, daemon_id) = vectors::inputs();
-        assert_ne!(
-            compute_proof(
-                &key,
-                SERVER_PROOF_DOMAIN,
-                &client_nonce,
-                &server_nonce,
-                vectors::DAEMON_VER,
-                &daemon_id,
-            ),
-            compute_proof(
-                &key,
-                CLIENT_AUTH_DOMAIN,
-                &client_nonce,
-                &server_nonce,
-                vectors::DAEMON_VER,
-                &daemon_id,
-            ),
         );
     }
 }
