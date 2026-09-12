@@ -209,7 +209,7 @@ impl StoredDescriptorRow {
         })
     }
 
-    fn into_descriptor(
+    fn into_validated_descriptor(
         self,
         expected: &CurrentInputExpectation,
     ) -> Result<CurrentInputDescriptor, KernelError> {
@@ -222,10 +222,8 @@ impl StoredDescriptorRow {
             || self.source_revision.to_string() != detail.revision
             || self.registry_created != self.observation_created
             || self.registry_invalidated != self.observation_invalidated
-            || self.registry_invalidated.is_some()
             || self.registry_sensitivity != self.observation_sensitivity
             || descriptor_object_id(&detail.lineage_id, &detail.revision) != expected.object_id
-            || detail.revision != expected.source_revision.to_string()
             || self.evidence_id.as_deref() != Some(detail.evidence_id.as_str())
             || (detail.span.is_none() && detail.payload_id != detail.artifact_digest)
             || detail.source_policy.validate_for(encoded.class).is_err()
@@ -286,14 +284,7 @@ fn revalidate(
             }
             verdict => (None, Some(StaleInput::Ineligible(*verdict))),
         };
-    if let Some(stale) = early_stale {
-        return Ok(RevalidatedInput {
-            tip,
-            database_incarnation_id,
-            outcome: Err(stale),
-        });
-    }
-    let descriptor = tx
+    let stored = tx
         .query_row_cached(
             "SELECT r.object_kind,r.domain_id,r.source_kind,r.source_id,r.source_revision,
                     r.created_commit_seq,r.invalidated_commit_seq,r.sensitivity_class,
@@ -305,9 +296,25 @@ fn revalidate(
             StoredDescriptorRow::from_row,
         )
         .optional()
-        .map_err(map_sqlite)?
-        .ok_or(KernelError::CorruptCanonicalRow)?
-        .into_descriptor(expected)?;
+        .map_err(map_sqlite)?;
+    let Some(stored) = stored else {
+        if let Some(stale) = early_stale {
+            return Ok(RevalidatedInput {
+                tip,
+                database_incarnation_id,
+                outcome: Err(stale),
+            });
+        }
+        return Err(KernelError::CorruptCanonicalRow);
+    };
+    let descriptor = stored.into_validated_descriptor(expected)?;
+    if let Some(stale) = early_stale {
+        return Ok(RevalidatedInput {
+            tip,
+            database_incarnation_id,
+            outcome: Err(stale),
+        });
+    }
     let evidence: Option<(String, Option<i64>)> = tx
         .query_row_cached(
             "SELECT artifact_digest,invalidated_commit_seq

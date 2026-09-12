@@ -100,6 +100,39 @@ fn a_damaged_projection_fence_quarantines_the_completion() {
 }
 
 #[test]
+fn negative_time_is_refused_before_requesting_the_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("negative-time", "msg-time", "1", "first message");
+    let generation = generation(8);
+    let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+    let project = ProjectScope::new(PROJECT).unwrap();
+    let row = row_for(&rows, &object);
+    let vector = unit(8);
+    let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+    let mut events = Vec::new();
+
+    let result = publisher.publish(
+        &publication(row, &generation, &vector),
+        eligibility(&project),
+        deadline(),
+        -1,
+        &mut |event| events.push(event),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PublicationError::NegativeTime { now: -1 })
+    ));
+    assert!(events.is_empty());
+    assert_eq!(
+        durable(dir.path(), &row.detail.occurrence_id),
+        (Some("pending".to_string()), None),
+    );
+}
+
+#[test]
 fn a_superseded_projection_writer_is_rejected_without_reconciliation_or_quarantine() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
@@ -1312,7 +1345,13 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
     // The durable rows are consulted only after the guard has dropped.
     let (guarded, reconciled) = events.split_at(7);
     assert_guarded_order(guarded);
-    assert_eq!(reconciled, [PublicationEvent::Reconciling]);
+    assert_eq!(
+        reconciled,
+        [
+            PublicationEvent::Reconciling,
+            PublicationEvent::ReconciliationRead,
+        ]
+    );
     assert_kernel_writable(&corpus, "after-lost");
 
     // Duplicate delivery of the same result is a replay; a different vector for the same job is a conflict that stops automatic dispatch.
@@ -1358,10 +1397,11 @@ fn uncertain_and_duplicate_outcomes_retain_ownership_and_release_the_guard() {
         "a rolled-back commit whose reply is lost is unresolved: {result:?}"
     );
     assert_eq!(
-        &events[events.len() - 2..],
+        &events[events.len() - 3..],
         [
             PublicationEvent::GuardReleased,
-            PublicationEvent::Reconciling
+            PublicationEvent::Reconciling,
+            PublicationEvent::ReconciliationRead,
         ],
         "the guard is released before the durable rows are consulted"
     );
@@ -1820,7 +1860,7 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
     );
     assert_kernel_writable(&corpus, "after-tombstone");
 
-    // A tombstone recorded after the job completed reports what the redelivered vector is, not a transition that did not happen: the completed job keeps its state and its vector.
+    // A tombstoned terminal job reports `Tombstoned` before replay while retaining its state and vector.
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
     let row = row_for(&rows, &completed);
     let (result, _) = publish_once(
@@ -1837,28 +1877,25 @@ fn the_projection_itself_obsoletes_tombstoned_or_replaced_inputs() {
         )
         .unwrap();
     let embedded = (Some("embedded".to_string()), Some(encode(&vector)));
-    let (result, _) = publish_once(
-        &mut publisher,
-        &publication(row, &generation, &vector),
-        &project,
-    );
+    let descriptor = descriptor_for(row);
+    let result = projection.write(|conn| {
+        complete_embedding_observed(
+            conn,
+            &VectorCompletion {
+                input: &descriptor,
+                generation: &generation,
+                vector: &vector,
+                input_bytes: 1,
+                input_tokens: 1,
+            },
+            5,
+            &mut |_| {},
+        )
+    });
     assert_eq!(
         result.unwrap(),
-        Publication::Replayed,
-        "the same vector for a completed job is a replay, tombstone or not"
-    );
-    assert_eq!(durable(dir.path(), &row.detail.occurrence_id), embedded);
-    let mut other = unit(8);
-    other[0] = 0.0;
-    other[2] = 1.0;
-    let (result, _) = publish_once(
-        &mut publisher,
-        &publication(row, &generation, &other),
-        &project,
-    );
-    assert!(
-        matches!(result, Err(PublicationError::IdempotencyConflict)),
-        "a different vector for a completed job is a conflict, tombstone or not: {result:?}"
+        CompletionOutcome::Obsolete(ObsoleteReason::Tombstoned),
+        "the tombstone is reported before the durable vector is replayed"
     );
     assert_eq!(durable(dir.path(), &row.detail.occurrence_id), embedded);
     assert!(publisher.quarantine().is_none());
@@ -2037,9 +2074,56 @@ fn stale_writer_is_released_before_obsoletion_reconciliation() {
             PublicationEvent::GuardRequested,
             PublicationEvent::StaleWriterReleased,
             PublicationEvent::Reconciling,
+            PublicationEvent::ReconciliationRead,
         ]
     );
     assert!(publisher.quarantine().is_none());
+}
+
+#[test]
+fn quarantine_during_reconciliation_refuses_a_durable_completion() {
+    for quarantine_at in [
+        PublicationEvent::Reconciling,
+        PublicationEvent::ReconciliationRead,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let publication = publication(row, &generation, &vector);
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+
+        let result = publisher.publish_with_fault_for_test(
+            &publication,
+            eligibility(&project),
+            deadline(),
+            3,
+            &mut |event| {
+                if event == quarantine_at {
+                    projection.enter_quarantine_for_test(
+                        QuarantineKind::Integrity,
+                        "reconciliation test",
+                    );
+                }
+            },
+            PublicationFault::LoseLocalCommitReply,
+        );
+
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("reconciliation must refuse a quarantined projection: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        assert_eq!(quarantine.detail, "reconciliation test");
+        assert_eq!(
+            durable(dir.path(), &row.detail.occurrence_id),
+            (Some("embedded".to_string()), Some(encode(&vector))),
+        );
+    }
 }
 
 #[test]
@@ -2077,48 +2161,98 @@ fn a_projection_tombstone_that_contradicts_the_guard_quarantines() {
 }
 
 #[test]
-fn guarded_payload_disagreement_publishes_quarantine_before_releasing_the_guard() {
+fn a_projection_tombstone_on_a_terminal_job_quarantines() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     let object = corpus.publish("a", "msg-a", "1", "first message");
-    let other = corpus.publish("b", "msg-b", "1", "second message");
     let generation = generation(8);
     let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
     let project = ProjectScope::new(PROJECT).unwrap();
     let row = row_for(&rows, &object);
-    let other_payload = &row_for(&rows, &other).detail.payload_id;
-    mutate(&search_path(dir.path()))
-        .execute(
-            "UPDATE occurrences SET payload_id=?2 WHERE occurrence_id=?1",
-            rusqlite::params![&row.detail.occurrence_id, other_payload],
-        )
-        .unwrap();
     let vector = unit(8);
     let publication = publication(row, &generation, &vector);
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
-    let mut intent_visible = false;
-
-    let result = publisher.publish(
-        &publication,
-        eligibility(&project),
-        deadline(),
-        3,
-        &mut |event| {
-            if event == PublicationEvent::GuardReleased {
-                intent_visible = projection.quarantine().is_some();
-            }
-        },
+    assert_eq!(
+        publish_once(&mut publisher, &publication, &project)
+            .0
+            .unwrap(),
+        Publication::Embedded,
     );
+    mutate(&search_path(dir.path()))
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id,invalidated_commit_seq,reason,recorded_at)
+             VALUES (?1, 99, 'retired', 4)",
+            [&row.detail.occurrence_id],
+        )
+        .unwrap();
+
+    let result = publish_once(&mut publisher, &publication, &project).0;
     let Err(PublicationError::Quarantined(quarantine)) = result else {
-        panic!("guarded payload disagreement must quarantine: {result:?}");
+        panic!("a terminal tombstone must quarantine: {result:?}");
     };
     assert_eq!(quarantine.kind, QuarantineKind::Integrity);
-    assert!(intent_visible, "guard release preceded quarantine intent");
     assert_eq!(
         durable(dir.path(), &row.detail.occurrence_id),
-        (Some("pending".to_string()), None),
+        (Some("embedded".to_string()), Some(encode(&vector))),
     );
+}
+
+#[test]
+fn guarded_payload_disagreement_publishes_quarantine_before_releasing_the_guard() {
+    for terminal in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let other = corpus.publish("b", "msg-b", "1", "second message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let publication = publication(row, &generation, &vector);
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+        if terminal {
+            assert_eq!(
+                publish_once(&mut publisher, &publication, &project)
+                    .0
+                    .unwrap(),
+                Publication::Embedded,
+            );
+        }
+        let other_payload = &row_for(&rows, &other).detail.payload_id;
+        mutate(&search_path(dir.path()))
+            .execute(
+                "UPDATE occurrences SET payload_id=?2 WHERE occurrence_id=?1",
+                rusqlite::params![&row.detail.occurrence_id, other_payload],
+            )
+            .unwrap();
+        let mut intent_visible = false;
+
+        let result = publisher.publish(
+            &publication,
+            eligibility(&project),
+            deadline(),
+            3,
+            &mut |event| {
+                if event == PublicationEvent::GuardReleased {
+                    intent_visible = projection.quarantine().is_some();
+                }
+            },
+        );
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("guarded payload disagreement must quarantine: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        assert!(intent_visible, "guard release preceded quarantine intent");
+        let expected = if terminal {
+            (Some("embedded".to_string()), Some(encode(&vector)))
+        } else {
+            (Some("pending".to_string()), None)
+        };
+        assert_eq!(durable(dir.path(), &row.detail.occurrence_id), expected);
+    }
 }
 
 #[test]
@@ -2265,6 +2399,58 @@ fn corrupted_projection_provenance_quarantines_guarded_publication() {
         durable(dir.path(), &row.detail.occurrence_id),
         (Some("pending".to_string()), None),
     );
+}
+
+#[test]
+fn corrupted_payload_bytes_quarantine_open_and_terminal_jobs() {
+    for terminal in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let object = corpus.publish("a", "msg-a", "1", "first message");
+        let generation = generation(8);
+        let (projection, rows) = corpus.bootstrap(dir.path(), &generation);
+        let project = ProjectScope::new(PROJECT).unwrap();
+        let row = row_for(&rows, &object);
+        let vector = unit(8);
+        let publication = publication(row, &generation, &vector);
+        let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
+        if terminal {
+            assert_eq!(
+                publish_once(&mut publisher, &publication, &project)
+                    .0
+                    .unwrap(),
+                Publication::Embedded,
+            );
+        }
+        let replacement = b"other message";
+        assert_eq!(
+            row.text.as_deref().unwrap().len(),
+            replacement.len(),
+            "the corruption must preserve the schema's byte length"
+        );
+        assert_eq!(
+            mutate(&search_path(dir.path()))
+                .execute(
+                    "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
+                    rusqlite::params![&row.detail.payload_id, replacement.as_slice()],
+                )
+                .unwrap(),
+            1,
+        );
+
+        let result = publish_once(&mut publisher, &publication, &project).0;
+        let Err(PublicationError::Quarantined(quarantine)) = result else {
+            panic!("corrupted payload bytes must quarantine: {result:?}");
+        };
+        assert_eq!(quarantine.kind, QuarantineKind::Integrity);
+        let expected = if terminal {
+            (Some("embedded".to_string()), Some(encode(&vector)))
+        } else {
+            (Some("pending".to_string()), None)
+        };
+        assert_eq!(durable(dir.path(), &row.detail.occurrence_id), expected);
+    }
 }
 
 #[test]

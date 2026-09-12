@@ -1,8 +1,8 @@
 //! Publishes one validated vector into the search projection while the kernel's current-input guard excludes every canonical mutation of its source.
 //!
 //! The vector is validated before the guard is taken, the guard is taken without a search transaction, the descriptor is revalidated under it, and the vector and its completion commit in one bounded search transaction.
-//! The transaction ends and its connection is released before the guard drops; nothing under the guard runs inference, decodes source, waits on the network, or sleeps.
-//! Stale descriptors obsolete their jobs instead of completing them. Lost transaction replies reconcile from durable vector and job rows. Conflicting vectors and invalid shapes return errors without writing.
+//! The transaction validates and hashes one bounded stored payload, then ends and releases its connection before the guard drops; nothing under the guard runs inference, decodes source, waits on the network, or sleeps.
+//! Stale descriptors obsolete their jobs instead of completing them. Lost transaction replies reconcile from durable vector and job rows unless shared quarantine refuses the result. Conflicting vectors and invalid shapes return errors without writing.
 
 use std::time::Instant;
 
@@ -52,6 +52,8 @@ pub enum PublicationEvent {
     StaleWriterReleased,
     /// The local transaction's reply was lost and durable rows are being read after the kernel writer was released.
     Reconciling,
+    /// Quarantine at this boundary overrides an otherwise successful reconciliation.
+    ReconciliationRead,
 }
 
 /// Why the job was made obsolete instead of completed.
@@ -75,6 +77,9 @@ pub enum Publication {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PublicationError {
+    /// The timestamp is outside the Unix-epoch-millisecond domain; nothing was written and the result lease is retained.
+    #[error("publication time must be nonnegative: {now}")]
+    NegativeTime { now: i64 },
     /// The vector fails the served-vector contract; dispatch for this job stops until an operator repairs the engine.
     #[error("the vector fails the served contract: {0}")]
     InvalidVector(String),
@@ -99,6 +104,7 @@ pub enum PublicationError {
     /// The projection refused the completion before writing: no job, no occurrence, or another generation.
     #[error(transparent)]
     Refused(ProjectionError),
+    /// A quarantine raised during lost-reply reconciliation leaves the publication result unusable and the result lease retained.
     #[error("the search projection is quarantined: {}", .0.detail)]
     Quarantined(Quarantine),
     #[error(transparent)]
@@ -124,7 +130,7 @@ enum Settled {
 /// The caller must hold the daemon's process-lifetime instance fence while this publisher can run. The current-input guard excludes mutations through its `KernelStore`; the instance fence excludes a successor store that could otherwise advance the durable writer fence through a replaced lease namespace.
 ///
 /// `publish` blocks on the kernel writer and the search connection, so it belongs on a blocking thread.
-/// The observer runs on that thread. Callbacks before a release event must call neither the kernel nor the projection. `GuardReleased` and `StaleWriterReleased` are alternative branch events; their callbacks and `Reconciling` run after the kernel writer is released and may call either dependency. An early error may return without a release event, so observers must not wait for one without a bound.
+/// Callbacks before a release event must call neither the kernel nor the projection. `GuardReleased` and `StaleWriterReleased` are alternative branch events; their callbacks and both reconciliation events run after the kernel writer is released and may call either dependency. An early error may return without a release event, so observers must not wait for one without a bound.
 pub struct EmbeddingPublisher<'a> {
     kernel: &'a KernelStore,
     projection: &'a SearchProjection,
@@ -196,9 +202,10 @@ impl<'a> EmbeddingPublisher<'a> {
         now: i64,
         observer: &mut dyn FnMut(PublicationEvent),
     ) -> Result<Publication, PublicationError> {
-        if let Some(quarantine) = self.projection.quarantine() {
-            return Err(PublicationError::Quarantined(quarantine));
+        if now < 0 {
+            return Err(PublicationError::NegativeTime { now });
         }
+        self.refuse_quarantine()?;
         validate_unit_vector(
             publication.generation.vector_dimension as usize,
             publication.vector,
@@ -277,6 +284,7 @@ impl<'a> EmbeddingPublisher<'a> {
             // The store failed between BEGIN and COMMIT; the durable vector, not the error, says whether COMMIT took effect, and reading it needs no guard.
             Ok(Settled::CompletionUnresolved) => {
                 observer(PublicationEvent::Reconciling);
+                self.refuse_quarantine()?;
                 let status = self.projection.read(|conn| {
                     completion_status(
                         conn,
@@ -284,6 +292,8 @@ impl<'a> EmbeddingPublisher<'a> {
                         &publication.generation.generation_id,
                     )
                 });
+                observer(PublicationEvent::ReconciliationRead);
+                self.refuse_quarantine()?;
                 match status {
                     Ok(status) if status.has_durable_vector(publication.vector) => {
                         Ok(Publication::Embedded)
@@ -297,6 +307,7 @@ impl<'a> EmbeddingPublisher<'a> {
             }
             Ok(Settled::ObsoletionUnresolved(stale)) => {
                 observer(PublicationEvent::Reconciling);
+                self.refuse_quarantine()?;
                 let status = self.projection.read(|conn| {
                     completion_status(
                         conn,
@@ -304,6 +315,8 @@ impl<'a> EmbeddingPublisher<'a> {
                         &publication.generation.generation_id,
                     )
                 });
+                observer(PublicationEvent::ReconciliationRead);
+                self.refuse_quarantine()?;
                 match status {
                     Ok(status) if status.job_state.as_deref() == Some("obsolete") => {
                         Ok(Publication::Obsolete(ObsoleteCause::Canonical(stale)))
@@ -473,6 +486,13 @@ impl<'a> EmbeddingPublisher<'a> {
         error: &dyn std::fmt::Display,
     ) -> PublicationError {
         PublicationError::Quarantined(self.projection.enter_quarantine(kind, error))
+    }
+
+    fn refuse_quarantine(&self) -> Result<(), PublicationError> {
+        match self.projection.quarantine() {
+            Some(quarantine) => Err(PublicationError::Quarantined(quarantine)),
+            None => Ok(()),
+        }
     }
 
     fn inject_lost_reply<T>(&self, outcome: &mut Result<T, SearchProjectionError>) {

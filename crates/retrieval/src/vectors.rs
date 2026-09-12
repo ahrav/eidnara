@@ -7,8 +7,8 @@
 use rusqlite::{OptionalExtension, params};
 use storage::GuardedConn;
 
-use crate::ProjectionError;
 use crate::batch::{VectorGeneration, registered_generation};
+use crate::{ProjectionError, StoredOccurrence, read_occurrence};
 use kernel::CurrentInputDescriptor;
 
 /// One vector for one occurrence, with the identity it was produced under.
@@ -65,12 +65,8 @@ pub enum CompletionPhase {
 }
 
 /// Completes the job for `completion.occurrence_id` under `completion.generation` inside the caller's transaction, reporting each mutation to `observer` as it lands while the transaction is still open.
-/// Only a `pending` or `admitted` job accepts a vector or becomes obsolete; a job already `embedded` or `published` is judged by its stored vector alone (a replay or a conflict), and a job in any other state is closed to completion.
+/// Only a `pending` or `admitted` job accepts a vector or changes to `obsolete`; every job reports a tombstoned or replaced occurrence before replaying its stored vector, and a job in any other state is closed to completion.
 /// A caller holding a current-input guard treats an obsolete outcome as projection corruption and rolls the transaction back, because the guard has already ruled out ordinary staleness.
-///
-/// # Errors
-///
-/// In the order checked: [`ProjectionError::InvalidVector`] when the vector is not `vector_dimension` finite values, [`ProjectionError::UnknownGeneration`], [`ProjectionError::IdentityMismatch`], or [`ProjectionError::RetiredGeneration`] when the generation is missing, registered under another identity, or retired, [`ProjectionError::UnknownOccurrence`] when the occurrence is not stored, [`ProjectionError::NoPendingWork`] when no job is open for the pair, [`ProjectionError::VectorConflict`] when a different vector is already durable for the pair, and [`ProjectionError::CorruptRow`] when a completed job has no durable vector.
 pub fn complete_embedding_observed(
     conn: &GuardedConn<'_>,
     completion: &VectorCompletion<'_>,
@@ -90,21 +86,12 @@ pub fn complete_embedding_observed(
     }
     check_generation(conn, generation)?;
     let occurrence_id = &completion.input.detail.occurrence_id;
-    let Some((payload_id, tombstoned)) = conn
-        .query_row(
-            "SELECT o.payload_id,
-                    EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)
-             FROM occurrences o WHERE o.occurrence_id=?1",
-            [occurrence_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
-        )
-        .optional()?
-    else {
+    let Some(stored_occurrence) = read_occurrence(conn, occurrence_id)? else {
         return Err(ProjectionError::UnknownOccurrence {
             occurrence_id: occurrence_id.clone(),
         });
     };
-    if occurrence_matches(conn, completion.input)? != Some(true) {
+    if !occurrence_matches(&stored_occurrence, completion.input) {
         return Err(ProjectionError::CorruptRow);
     }
     let job_state: Option<String> = conn
@@ -123,22 +110,21 @@ pub fn complete_embedding_observed(
             });
         }
     };
-    let obsolete = if tombstoned {
+    let obsolete = if stored_occurrence.tombstone.is_some() {
         Some(ObsoleteReason::Tombstoned)
-    } else if payload_id != completion.input.detail.payload_id {
+    } else if stored_occurrence.payload_id != completion.input.detail.payload_id {
         Some(ObsoleteReason::PayloadChanged)
     } else {
         None
     };
-    // A completed job is closed to obsoletion as it is to completion; the stored vector alone judges a redelivery to it.
-    if let Some(reason) = obsolete
-        && open
-    {
-        conn.execute(
-            "UPDATE embedding_jobs SET state='obsolete',updated_at=?3
-             WHERE occurrence_id=?1 AND generation_id=?2 AND state IN ('pending','admitted')",
-            params![occurrence_id, generation.generation_id, now],
-        )?;
+    if let Some(reason) = obsolete {
+        if open {
+            conn.execute(
+                "UPDATE embedding_jobs SET state='obsolete',updated_at=?3
+                 WHERE occurrence_id=?1 AND generation_id=?2 AND state IN ('pending','admitted')",
+                params![occurrence_id, generation.generation_id, now],
+            )?;
+        }
         return Ok(CompletionOutcome::Obsolete(reason));
     }
     let encoded = encode(completion.vector);
@@ -270,7 +256,10 @@ pub fn obsolete_embedding(
     {
         return Err(ProjectionError::IdentityMismatch);
     }
-    if occurrence_matches(conn, input)? != Some(true) {
+    let Some(stored_occurrence) = read_occurrence(conn, occurrence_id)? else {
+        return Err(ProjectionError::CorruptRow);
+    };
+    if !occurrence_matches(&stored_occurrence, input) {
         return Err(ProjectionError::CorruptRow);
     }
     if matches!(job_state.as_str(), "embedded" | "published") {
@@ -299,44 +288,21 @@ pub fn obsolete_embedding(
     Ok(Obsoletion::AlreadyTerminal)
 }
 
-fn occurrence_matches(
-    conn: &GuardedConn<'_>,
-    input: &CurrentInputDescriptor,
-) -> Result<Option<bool>, ProjectionError> {
+fn occurrence_matches(stored: &StoredOccurrence, input: &CurrentInputDescriptor) -> bool {
     let detail = &input.detail;
-    conn.query_row(
-        "SELECT tuple,lineage_id,class,revision,representation,span_start,span_end,
-                domain_id,sensitivity,source_object_id,source_evidence_id,
-                source_artifact_digest,created_commit_seq
-         FROM occurrences WHERE occurrence_id=?1",
-        [&detail.occurrence_id],
-        |row| {
-            let span_start: Option<i64> = row.get(5)?;
-            let span_end: Option<i64> = row.get(6)?;
-            let span_matches = match (span_start, span_end, detail.span) {
-                (None, None, None) => true,
-                (Some(start), Some(end), Some((expected_start, expected_end))) => {
-                    u64::try_from(start).ok() == Some(expected_start)
-                        && u64::try_from(end).ok() == Some(expected_end)
-                }
-                _ => false,
-            };
-            Ok(row.get_ref(0)?.as_blob()? == detail.occurrence_tuple
-                && row.get_ref(1)?.as_str()? == detail.lineage_id
-                && row.get_ref(2)?.as_str()? == detail.class
-                && row.get::<_, i64>(3)? == input.source_revision
-                && row.get_ref(4)?.as_str()? == detail.representation
-                && span_matches
-                && row.get_ref(7)?.as_str()? == input.domain_id
-                && row.get_ref(8)?.as_str()? == input.sensitivity.as_str()
-                && row.get_ref(9)?.as_str()? == input.object_id
-                && row.get_ref(10)?.as_str()? == detail.evidence_id
-                && row.get_ref(11)?.as_str()? == detail.artifact_digest
-                && row.get::<_, i64>(12)? == input.created_commit_seq)
-        },
-    )
-    .optional()
-    .map_err(Into::into)
+    stored.occurrence_id == detail.occurrence_id
+        && stored.tuple == detail.occurrence_tuple
+        && stored.lineage_id == detail.lineage_id
+        && stored.class == detail.class
+        && stored.revision == input.source_revision
+        && stored.representation == detail.representation
+        && stored.span == detail.span
+        && stored.domain_id == input.domain_id
+        && stored.sensitivity == input.sensitivity
+        && stored.source_object_id == input.object_id
+        && stored.source_evidence_id == detail.evidence_id
+        && stored.source_artifact_digest == detail.artifact_digest
+        && stored.created_commit_seq == input.created_commit_seq
 }
 
 /// A retired generation's files may already be reclaimed, so it accepts no completion; the same rule keeps `apply_batch` from queuing new work for it.

@@ -555,6 +555,11 @@ fn registry_and_observation_metadata_must_agree_with_the_descriptor() {
             "UPDATE object_registry SET source_kind='messages' WHERE object_id=?1",
         ),
         (
+            "source revision",
+            "UPDATE object_registry SET source_revision=2 WHERE object_id=?1",
+            "UPDATE object_registry SET source_revision=1 WHERE object_id=?1",
+        ),
+        (
             "object kind",
             "UPDATE object_registry SET object_kind='decision' WHERE object_id=?1",
             "UPDATE object_registry SET object_kind='observation' WHERE object_id=?1",
@@ -568,6 +573,11 @@ fn registry_and_observation_metadata_must_agree_with_the_descriptor() {
             "observation liveness",
             "UPDATE observations SET invalidated_commit_seq=(SELECT MAX(commit_seq) FROM commit_log) WHERE object_id=?1",
             "UPDATE observations SET invalidated_commit_seq=NULL WHERE object_id=?1",
+        ),
+        (
+            "registry/observation liveness disagreement",
+            "UPDATE object_registry SET invalidated_commit_seq=(SELECT MAX(commit_seq) FROM commit_log) WHERE object_id=?1",
+            "UPDATE object_registry SET invalidated_commit_seq=NULL WHERE object_id=?1",
         ),
         (
             "sensitivity",
