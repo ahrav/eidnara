@@ -40,12 +40,12 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   `cache_state` so a rejected pass leaves a trail without advancing
   `row_version`.
 - Readers: [session status][status-read] and [health][health-read] JSON, the
-  `newest_pass_at` age at [`:6238`][age], and the plugin's
+  `newest_pass_at` age at [`:6300-6311`][age], and the plugin's
   [`Passes: N received, M rejected`][plugin] line.
   [`load_pass_scheduler_history`][sched-history] has one non-store caller,
   a [test][sched-test].
-- An Emergency95 pass can rerun `run_transform` at [`:8264-8267`][rerun-a] and
-  [`:8372-8375`][rerun-b] after one receive breadcrumb.
+- An Emergency95 pass can rerun `run_transform` at [`:8349-8352`][rerun-a] and
+  [`:8448-8451`][rerun-b] after one receive breadcrumb.
 
 ## Failure scenario
 
@@ -120,21 +120,21 @@ channel, the authority route read, and dreamer tasks only.
 - Conclusion: unresolved, needs R3's owner-relationship normalization.
 
 [r3]: ../../catalog.md#redaction-audit-does-not-depend-on-retained-payload
-[received-call]: ../../../../../crates/daemon/src/lib.rs#L8187
-[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8261-L8268
-[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8330-L8333
-[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8429-L8432
-[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8493
-[status-read]: ../../../../../crates/daemon/src/lib.rs#L6246-L6296
-[age]: ../../../../../crates/daemon/src/lib.rs#L6287
-[health-read]: ../../../../../crates/daemon/src/lib.rs#L7875-L7923
-[t-success]: ../../../../../crates/daemon/src/lib.rs#L23887
-[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23903
-[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23935
-[t-status]: ../../../../../crates/daemon/src/lib.rs#L23967
-[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1830-L1854
-[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13535
-[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13578
+[received-call]: ../../../../../crates/daemon/src/lib.rs#L8206
+[rejected-call]: ../../../../../crates/daemon/src/lib.rs#L8280-L8287
+[rerun-a]: ../../../../../crates/daemon/src/lib.rs#L8349-L8352
+[rerun-b]: ../../../../../crates/daemon/src/lib.rs#L8448-L8451
+[completed-call]: ../../../../../crates/daemon/src/lib.rs#L8512
+[status-read]: ../../../../../crates/daemon/src/lib.rs#L6246-L6300
+[age]: ../../../../../crates/daemon/src/lib.rs#L6300-L6311
+[health-read]: ../../../../../crates/daemon/src/lib.rs#L7903-L7942
+[t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
+[t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
+[t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24606
+[t-status]: ../../../../../crates/daemon/src/lib.rs#L24809
+[stable-call]: ../../../../../crates/daemon/src/transform.rs#L1823-L1847
+[t-sched]: ../../../../../crates/daemon/src/transform.rs#L13548
+[sched-test]: ../../../../../crates/daemon/src/transform.rs#L13592
 [passtrace-doc]: ../../../../../crates/memory-store/src/lib.rs#L852-L869
 [received-doc]: ../../../../../crates/memory-store/src/lib.rs#L6794-L6796
 [received]: ../../../../../crates/memory-store/src/lib.rs#L6797-L6847
