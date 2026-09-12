@@ -36,8 +36,8 @@ can shrink a number without making anything faster.
 - [`record_token_cache_delta`][rtcd] subtracts two reads of
   [`local_stats`][tc-local], a `thread_local!` counter whose doc says the
   counters exclude other threads and only differences are meaningful. The
-  start read sits at [`apply_additive_only:2373`][snap-add] and
-  [`apply_once:2852`][snap-once]; both functions are synchronous today.
+  start read sits at [`apply_additive_only:2384`][snap-add] and
+  [`apply_once:2863`][snap-once]; both functions are synchronous today.
 - [`respond_transform`][respond] hands `pass_timings` to
   [`emit_pass_timing`][emit], which sets the three response fields and prints
   the line for every response that carries `timings`.
@@ -93,8 +93,8 @@ not a runtime assertion.
 
 ### Q: Are the stage fields a contract with the plugin or free to change?
 
-- Sources examined: [`rust-mode-transform.ts:999-1042`][ts-stages], the
-  plugin test at [`test.ts:248`][ts-test], `docs/host-wire-protocol.md` for
+- Sources examined: [`rust-mode-transform.ts:1013-1042`][ts-stages], the
+  plugin test at [`test.ts:249`][ts-test], `docs/host-wire-protocol.md` for
   `timings`.
 - Findings: The plugin reads `handler_total`, `total`, and 22 stage keys,
   and the test asserts only that the `rust module stages:` line appears for

@@ -79,7 +79,7 @@ Clone sites in scope, what reads the copy, and whether the copy is mutated:
 | [`reattach`][reattach] | `WireBlock` per prefix block, new shell | none | `parsed.messages` prefix, then everything above; served bytes of a rebuilt shell use typed fields |
 | [`native-deep`][native-deep] | `Value` per native prefix message | none | sidecar decode (which [copies each raw message again][raw-clone] into [`HarnessMessageMeta.raw`][decode-sidecar]), `native_ingress_chunks` equality, retained-bytes accounting |
 | [`prefix-copy`][prefix-copy] | `FlatBlock` per cached prefix block | none | the incremental `FlatProjection` |
-| [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323][sel-consume], [boundary.rs:1729][boundary-consume], [injection.rs:403][injection-consume]) | reductions, historian tool summaries, todo capture |
+| [`sel-item`][sel-item], [`sel-kind`][sel-kind], [`tail-clone`][tail-clone] | [`SelKind::ToolCall.input: Value`][sel-kind-enum] per tool call | none (read at [selection.rs:323-331][sel-consume], [boundary.rs:1727-1746][boundary-consume], [injection.rs:400-403][injection-consume]) | reductions, historian tool summaries, todo capture |
 | [`mint-input`][mint-input] | text bytes per taggable block | none after mint | `TagRow.source_bytes`, active-tag match at [`:7364`][active-match], caveman source at [`:5702-5705`][caveman-source] |
 | [`make-mut`][make-mut] | whole `Vec<TagRow>` | append mint rows | `tag_rows` for overlay, hygiene, commit inputs at [`:4935-4945`][commit-inputs] |
 | [`part-measure`][part-measure] | content `String` per part | none | hygiene `content_hash`, token cache key, `T`/`U` |
@@ -440,7 +440,7 @@ both sides and neither resolved here:
 [tc-tagnum]: ../../../daemon/transform/catalog.md#speculative-tag-numbering-has-two-authorities
 [r1]: ../../catalog.md#prepared-field-output-and-audit-policy-agree
 [arc-parsed]: ../../../../../crates/daemon/src/lib.rs#L8190
-[expand]: ../../../../../crates/daemon/src/lib.rs#L4187-L4279
+[expand]: ../../../../../crates/daemon/src/lib.rs#L4204-L4291
 [native-deep]: ../../../../../crates/daemon/src/lib.rs#L4262-L4265
 [store-pc]: ../../../../../crates/daemon/src/lib.rs#L4332-L4375
 [historian-fire]: ../../../../../crates/daemon/src/lib.rs#L5043

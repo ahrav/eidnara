@@ -16,10 +16,10 @@ a pass lands in while every H record still passes.
 
 ## Evidence trail
 
-- The SOFT arm at [`PassPlan::Soft`][soft-arm] calls [`compose_m1`][m1-compose]
+- The SOFT arm at [`PassPlan::Soft`][soft-arm] calls [`compose_m160-237`][m1-compose]
   with [`cached_estimate_tokens`][soft-m1-compose] as its estimator; that
   estimator is used only for user-profile trimming
-  ([`m1_compose.rs:196-202`][m1-trim]).
+  ([`m1_compose.rs:194-208`][m1-trim]).
 - The predicate at [`:4309-4327`][soft-predicate]: `m0_tokens` is
   `tokenizer::estimate_tokens(&unit.frozen_payload)` for the frozen unit with
   key `m0`, or `0` when none exists; `m1_has_content` is `m1.body !=
@@ -34,7 +34,7 @@ a pass lands in while every H record still passes.
   [`compose_m0_for_context`][refold-branch] with the injected estimator; the
   parent's [H2][h2] names that as the "pressure refold" boundary distinct from
   an ordinary SOFT.
-- [`M1_PLACEHOLDER`][placeholder] is the string [`assemble_m1`][assemble]
+- [`M1_PLACEHOLDER`][placeholder] is the string [`assemble_m206-231`][assemble]
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
   compartment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
@@ -42,10 +42,10 @@ a pass lands in while every H record still passes.
   finite values `>= 0.0` from the request and falls back to the bound
   budget; a zero budget disables the second disjunct through the
   `> 0.0` guard.
-- [`compose_m1`][m1-compose] returns `memory_update_count: 0`
+- [`compose_m160-237`][m1-compose] returns `memory_update_count: 0`
   unconditionally at [`:231`][m1-count-zero]; the field has no other writer
   in the workspace.
-- The comment at [`transform.rs:1865-1867`][hard-only-doc] says the injected
+- The comment at [`transform.rs:1868-1870`][hard-only-doc] says the injected
   estimator is HARD-only; it does not describe these two direct calls.
 
 ## Failure scenario

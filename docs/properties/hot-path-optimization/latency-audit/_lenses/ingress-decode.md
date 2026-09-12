@@ -310,13 +310,13 @@ bodies opaque and states only the `invalid_params` cap codes
 ## Anchors
 
 [e2]: ../../catalog.md#request-work-accounting-covers-retained-resources
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11874-L11896
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11882-L11904
 [composite]: ../../../../../crates/host-runtime/src/composite.rs#L40-L58
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15566-L15582
-[footprint]: ../../../../../crates/daemon/src/lib.rs#L15516-L15544
-[copies]: ../../../../../crates/daemon/src/lib.rs#L15503-L15506
-[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15552-L15557
-[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15559-L15564
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15574-L15590
+[footprint]: ../../../../../crates/daemon/src/lib.rs#L15516-L15552
+[copies]: ../../../../../crates/daemon/src/lib.rs#L15511-L15514
+[toolarge]: ../../../../../crates/daemon/src/lib.rs#L15559-L15565
+[queuefull]: ../../../../../crates/daemon/src/lib.rs#L15567-L15572
 [probe]: ../../../../../crates/daemon/src/lib.rs#L15390-L15398
 [probestr]: ../../../../../crates/daemon/src/lib.rs#L15416-L15468
 [class]: ../../../../../crates/daemon/src/lib.rs#L15470-L15481
@@ -331,9 +331,9 @@ bodies opaque and states only the `invalid_params` cap codes
 [routechan]: ../../../../../crates/daemon/src/lib.rs#L8113-L8116
 [accept]: ../../../../../crates/daemon/src/lib.rs#L8141
 [ticket]: ../../../../../crates/daemon/src/lib.rs#L591-L648
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9487-L9502
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9487-L9510
 [settle]: ../../../../../crates/daemon/src/lib.rs#L12142-L12157
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12552-L12569
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12568-L12577
 [wirestruct]: ../../../../../crates/daemon/src/transform.rs#L809-L980
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143
 [wireblock]: ../../../../../crates/memory-store/src/lib.rs#L250-L264

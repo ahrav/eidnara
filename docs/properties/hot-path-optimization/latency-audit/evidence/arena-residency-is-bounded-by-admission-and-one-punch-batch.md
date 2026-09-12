@@ -20,7 +20,7 @@ bound before either moves.
   divides it by one connection's `arena_bytes` charge;
   [`process_limits`][process-limits] refuses `requested > affordable` with
   `ExceedsResidentBytes`. The host calls it at
-  [runtime.rs:792-793][runtime-limits]; [`HostLimits::default`][config-default]
+  [runtime.rs:792-796][runtime-limits]; [`HostLimits::default`][config-default]
   and [`validate`][config-validate] use the same quotient. Nothing reads
   residency; [`resident_arena_pages`][resident-api] is a `mincore` probe
   documented for tests.
@@ -46,7 +46,7 @@ bound before either moves.
   `punch_range`, again rounded inward, so a page shared with live bytes stays.
 - [`trim`][trim] punches every dead page including the partial one; its
   comment at [`:2244-2266`][trim] names the idle-ring role. Only tests call it
-  ([ring.rs:3086][t-syscall] and siblings); the client crate has no caller and
+  ([ring.rs:3086-3087][t-syscall] and siblings); the client crate has no caller and
   runs the same [`reserve_until`][native-reserve] path.
 - [§7.7][wire77] states no timed ring poll or prefault exists; [§7.5.1][wire751]
   calls the Synapse cap an accounting boundary, not an RSS claim.

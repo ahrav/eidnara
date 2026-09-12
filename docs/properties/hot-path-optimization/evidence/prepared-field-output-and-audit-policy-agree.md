@@ -10,13 +10,13 @@ the metadata used to describe that result in durable audit rows.
 
 ## Evidence trail
 
-- [memory-store/lib.rs:2204-2243][prepare] selects the scanner by layer, refuses
+- [memory-store/lib.rs:2289-2328][prepare] selects the scanner by layer, refuses
   detected NewIdentity input, chooses output, checks its bound, then appends.
-- [2350-2424][audit] writes detector provenance, detection count/labels, field
+- [2435-2509][audit] writes detector provenance, detection count/labels, field
   owners, and the policy action without reading retained redacted text.
-- [3428-3494][units] applies durable and transaction preparation to core units.
-  Production callers include [8306][durable-call] and [8921-8931][transaction-call].
-- [18171-18212][test] compares preserved identity output with substituted content
+- [3513-3579][units] applies durable and transaction preparation to core units.
+  Production callers include [8581][durable-call] and [9196-9206][transaction-call].
+- [18773-18814][test] compares preserved identity output with substituted content
   and their persisted actions. It remains unaudited.
 
 ## Failure scenario

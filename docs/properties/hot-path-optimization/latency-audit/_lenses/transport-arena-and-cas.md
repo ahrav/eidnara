@@ -251,9 +251,9 @@ Open questions:
 Type: safety
 Check: `always` - a Direct [`OutputBuffer`][outbuf] holds an egress
 `ByteCharge` of exactly `exact_len + HEADER_LEN`
-([`reserve_direct:528`][reserve-direct]), [`into_parts`][into-parts] passes it
+([`reserve_direct:517-554`][reserve-direct]), [`into_parts`][into-parts] passes it
 through unshrunk, the charge is dropped only after `commit` in
-[`publish_one:784`][publish-one], and any request-owned bytes the serializer
+[`publish_one:749-786`][publish-one], and any request-owned bytes the serializer
 closure captures (the transform segments, their scratch charge) are counted as
 retained until that same point. `always` because [E2][e2] requires each charge
 to cover its resource's lifetime and the closure extends the resource's
@@ -288,7 +288,7 @@ Open questions:
 Type: safety
 Check: `always` - for every ingest, `check_budget` runs under the exclusive
 [writer lock][lock-writer] before the reservation row, the shard creation, and
-the publish rename ([`ingest.rs:477-490`][ingest-lock]); it refuses with
+the publish rename ([`ingest.rs:407-416`][ingest-lock]); it refuses with
 `Capacity` carrying `usage` and `cap` when `usage + byte_length >
 artifact_cap`, adds zero for a digest already present
 ([`object_is_present`][present]), and counts invalidated-but-retained objects
@@ -503,7 +503,7 @@ the kernel. Five adjacent observations, not disagreements:
   [`commit`][commit-underfill] refuses unless `cursor == body_len`, so every
   published byte was written, and the memfd is private to one connection. The
   test pins a side effect of eager punching that deferral would change.
-- The comment at [`trim:2254-2255`][trim] describes an idle-ring role that no
+- The comment at [`trim:2244-2266`][trim] describes an idle-ring role that no
   shipped code performs; [`trim-removes-only-dead-pages-below-the-write-cursor`][shm-trim]
   already records the absence of a caller.
 - The owned path classifies a serializer failure as a request-scoped
@@ -578,8 +578,8 @@ the kernel. Five adjacent observations, not disagreements:
 [native-reserve]: ../../../../../packages/shm-native/src/lib.rs#L1024
 [measure]: ../../../../../crates/daemon/src/dispatch.rs#L129-L148
 [write-to]: ../../../../../crates/daemon/src/dispatch.rs#L236-L262
-[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12072-L12128
-[settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12130-L12145
+[settle-with]: ../../../../../crates/daemon/src/lib.rs#L12093-L12148
+[settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12150-L12165
 [ingest]: ../../../../../crates/kernel/src/cas/ingest.rs#L361-L663
 [ingest-temp]: ../../../../../crates/kernel/src/cas/ingest.rs#L379-L405
 [ingest-lock]: ../../../../../crates/kernel/src/cas/ingest.rs#L407-L416
