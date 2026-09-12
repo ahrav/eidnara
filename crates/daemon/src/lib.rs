@@ -6,26 +6,37 @@ pub mod boundary;
 pub mod canonical_memory;
 pub mod caveman;
 pub(crate) mod chunk_text;
+pub mod claim_sources;
 pub mod classify;
 pub mod codec;
+mod commit_stream;
 pub(crate) mod compartment_coverage;
 pub(crate) mod config;
+pub mod coverage;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
 pub(crate) mod dreamer_scheduler;
+pub mod embedding_dispatch;
+pub mod embedding_publication;
+pub mod embedding_supervisor;
+pub mod git_reconcile;
+pub mod git_sources;
+pub mod harness_sources;
 pub mod healing;
 pub mod historian;
 pub mod historian_chunk;
 pub mod historian_producer;
 pub(crate) mod historian_prompt;
 pub(crate) mod historian_validate;
+pub mod identity_sweep;
 pub mod injection;
 pub mod kernel_routes;
 pub mod m0_compose;
 pub(crate) mod m1_compose;
 pub(crate) mod memory_render;
 pub mod memory_tool;
+pub mod message_cleanup;
 pub mod metered_decode;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
@@ -33,8 +44,9 @@ mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
 pub mod search_projection;
+pub mod search_writer;
 pub mod selection;
-mod served_json;
+pub mod served_json;
 pub mod session_resolver;
 pub(crate) mod smart_note_evaluation;
 mod tail_hygiene;
@@ -49,7 +61,6 @@ pub mod release_contract;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -80,8 +91,8 @@ use memory_store::dreamer_ledger::{
     DreamerReceiptState, DreamerTerminalKind, DreamerTransition, dreamer_request_digest,
 };
 use memory_store::{
-    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, LoadedState,
-    MemoryStore, MemoryStoreError, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
+    AuthoritySeedRow, DeferredExecuteState, FacadeMutationOutcome, HistorianPhase, MemoryStore,
+    MemoryStoreError, ModuleDropSeedRow, ModuleMeta, ModuleStateSyncError, ModuleStateSyncRequest,
     ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow, NoteCasOutcome,
     NoteConditionCompile, NoteEvalAbandonOutcome, NoteEvalAcquireOutcome, NoteEvalCandidate,
     NoteEvalClaim, NoteEvalCompleteOutcome, NoteEvalReducedState, NoteEvalRenewOutcome,
@@ -99,7 +110,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 use crate::metered_decode::{
-    DecodeFailure, Refusal, ResidentMeter, SkippedValue, decode_metered, footprint_of,
+    DecodeFailure, RAW_VALUE_TOKEN, Refusal, ResidentMeter, decode_metered, footprint_exceeds,
+    footprint_floor_exceeds,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -2262,6 +2274,7 @@ pub const STORAGE_CONNECTIONS: u64 = 2;
 /// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
 /// The search projection's connection holds `search_projection::CACHE_KIB` of page cache.
+/// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -3501,27 +3514,24 @@ impl HistorianProducerFactory for MissingProducerFactory {
     }
 }
 
-/// Where a pre-transform consumer takes its `cache_state` from. The pass loads the row once;
-/// a consumer that runs again after a commit reads the store, and a pass whose load failed
-/// gives every consumer its conservative branch without a second read.
 #[derive(Clone, Copy)]
 enum PassState<'a> {
-    Loaded(&'a LoadedState),
+    Loaded(&'a ModuleMeta),
     Unavailable,
     Reload,
 }
 
 impl<'a> PassState<'a> {
-    fn from(load: &'a Result<LoadedState, MemoryStoreError>) -> Self {
+    fn from(load: &'a Result<ModuleMeta, MemoryStoreError>) -> Self {
         match load {
-            Ok(state) => Self::Loaded(state),
+            Ok(meta) => Self::Loaded(meta),
             Err(_) => Self::Unavailable,
         }
     }
 
-    fn loaded(self) -> Option<&'a LoadedState> {
+    fn loaded(self) -> Option<&'a ModuleMeta> {
         match self {
-            Self::Loaded(state) => Some(state),
+            Self::Loaded(meta) => Some(meta),
             Self::Unavailable | Self::Reload => None,
         }
     }
@@ -4224,7 +4234,7 @@ impl Handler {
         // The persisted epoch is checked before the bounded projection and native cores so
         // stale request state cannot select an outdated entry after a store-side rewrite;
         // a pass without a loaded state takes the full-sync branch.
-        let current_revert_epoch = pass_state.loaded()?.meta.revert_epoch;
+        let current_revert_epoch = pass_state.loaded()?.revert_epoch;
         let projection_cache = self.lookup_projection_cache(
             parsed,
             current_revert_epoch,
@@ -4321,7 +4331,7 @@ impl Handler {
         pass_state: PassState<'_>,
     ) -> Option<ProjectionCacheInput> {
         let after = request.full_array_fingerprint.as_deref()?;
-        let revert_epoch = pass_state.loaded()?.meta.revert_epoch;
+        let revert_epoch = pass_state.loaded()?.revert_epoch;
         self.lookup_projection_cache(
             request,
             revert_epoch,
@@ -4622,9 +4632,10 @@ impl Handler {
             return true;
         }
         match pass_state {
-            PassState::Loaded(state) => state.meta.historian.state != HistorianPhase::Idle,
+            // A loaded non-idle phase without a live run may have completed since the pass load.
+            PassState::Loaded(meta) if meta.historian.state == HistorianPhase::Idle => false,
             PassState::Unavailable => false,
-            PassState::Reload => store
+            PassState::Loaded(_) | PassState::Reload => store
                 .load_historian_phase(session_id)
                 .map(|phase| phase != HistorianPhase::Idle)
                 .unwrap_or(false),
@@ -4654,12 +4665,12 @@ impl Handler {
                 .then_some(observation.last_response_at_ms);
         }
         let anchor = match pass_state {
-            PassState::Loaded(state) => state.meta.last_committed_pass_at_ms,
+            PassState::Loaded(meta) => meta.last_committed_pass_at_ms,
             PassState::Unavailable => 0,
             PassState::Reload => store
-                .load(session_id)
+                .load_meta(session_id)
                 .ok()
-                .map(|state| state.meta.last_committed_pass_at_ms)
+                .map(|meta| meta.last_committed_pass_at_ms)
                 .unwrap_or(0),
         };
         observations.insert(
@@ -7786,6 +7797,7 @@ impl Handler {
                 .expect("boundary token cache mutex");
             (cache.retained_bytes, cache.sessions.len())
         };
+        let hygiene_memo = tail_hygiene::hygiene_memos().metrics();
         let (
             page_bytes,
             page_count,
@@ -7841,6 +7853,11 @@ impl Handler {
             "boundary_token": {
                 "charged_bytes": boundary_bytes,
                 "entry_count": boundary_count,
+            },
+            "tail_hygiene_memo": {
+                "charged_bytes": hygiene_memo.charged_bytes,
+                "entry_count": hygiene_memo.session_count,
+                "rejected_inserts": hygiene_memo.rejected_inserts,
             },
             "page_coordinator": {
                 "charged_bytes": page_bytes,
@@ -8006,6 +8023,8 @@ impl Handler {
     /// The transform handler proper. `decode_started_at` is taken before the typed decode
     /// on both lanes, so `handler_total` covers it; on the direct lane that decode reads
     /// the body bytes, on the tree lane the bytes were parsed into a `Value` before it.
+    /// `request_observed_to_handler` ends at that same instant, so the decode is counted
+    /// once, in `handler_total`.
     async fn handle_transform_typed(
         &self,
         channel: RouteHandle,
@@ -8016,10 +8035,12 @@ impl Handler {
     ) -> PreparedOutcome {
         let handler_started_at = decode_started_at;
         let mut delta_expand_ms = 0.0;
+        let decode_started_at_ms =
+            now_ms().saturating_sub(decode_started_at.elapsed().as_millis() as i64);
         let request_observed_to_handler = parsed
             .request_observed_at_ms
             .and_then(|observed| i64::try_from(observed).ok())
-            .map(|observed| now_ms().saturating_sub(observed) as f64)
+            .map(|observed| decode_started_at_ms.saturating_sub(observed) as f64)
             .unwrap_or(0.0);
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
         if serializer_profile.is_none() {
@@ -8131,7 +8152,9 @@ impl Handler {
         // One `cache_state` load serves every pre-transform consumer of this pass. The
         // transform takes its own snapshot as its linearization point, and consumers that
         // run after a commit read the store again.
-        let pass_load = store.load(&parsed.session_id);
+        let pass_state_load_started_at = Instant::now();
+        let pass_load = store.load_meta(&parsed.session_id);
+        let pass_state_load_ms = pass_state_load_started_at.elapsed().as_secs_f64() * 1_000.0;
         let pass_state = PassState::from(&pass_load);
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
@@ -8301,8 +8324,7 @@ impl Handler {
             Ok(result) => result,
             Err(e) => return reject_transform(e),
         };
-        // Dropping the load makes `Reload` the only state a rerun can name and frees the
-        // core payload before the post-transform work.
+        // Dropping the load makes `Reload` the only state a rerun can name.
         drop(pass_load);
         // Lineage is proof that this root produced accepted session state, so it is recorded
         // only after the transform succeeds; a rejected attempt must not authorize facade
@@ -8552,6 +8574,7 @@ impl Handler {
         if let Some(timings) = response.timings.as_mut() {
             timings.handler_total = handler_started_at.elapsed().as_secs_f64() * 1_000.0;
             timings.request_observed_to_handler = request_observed_to_handler;
+            timings.pass_state_load = pass_state_load_ms;
             timings.delta_expand = delta_expand_ms;
             timings.side_channel_drain = side_channel_drain_ms;
             timings.trace_received = trace_received_ms;
@@ -8598,7 +8621,7 @@ impl Handler {
         let pool = tests::TestPool::unbounded();
         let meter = ResidentMeter::new(&pool);
         let (_, outcome) = self
-            .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
+            .dispatch_body(route, &body, lane_probe(&body).as_ref(), &meter)
             .await;
         outcome
     }
@@ -11897,15 +11920,15 @@ impl CompositeComponent for Handler {
 
     async fn handle(&self, ctx: RequestCtx) -> RequestOutcome {
         let body = ctx.body.as_slice();
-        // One typed pass over the body reads the discriminator and the page envelope for
-        // both the byte cap and the lane choice below.
-        let probe = probe_request(body);
-        if let Err(outcome) = enforce_request_byte_cap(body, probe.as_ref()) {
-            return settle_prepared(&ctx, outcome).await;
-        }
+        let cap_probe = match enforce_request_byte_cap(body) {
+            Ok(probe) => probe,
+            Err(outcome) => return settle_prepared(&ctx, outcome).await,
+        };
         // The decode charges the scratch pool as it builds values; the meter holds the charges
-        // until the response has settled.
+        // until the response has settled. A body the cap admitted by its length alone is
+        // probed here, so the probe is the first read of a sub-cap body.
         let meter = ResidentMeter::new(&ctx);
+        let probe = cap_probe.or_else(|| lane_probe(body));
         let (_, outcome) = self
             .dispatch_body(ctx.route, body, probe.as_ref(), &meter)
             .await;
@@ -12646,10 +12669,10 @@ impl Handler {
     /// is charged against `meter`, and a refused charge ends the request in the lane that saw
     /// it, before any dispatch runs, so a refusal has no dispatch-side effect; both lanes count
     /// the same footprint for the same bytes, so they refuse the same bodies. An unpaged
-    /// transform body decodes typed straight from its bytes. Every other body, and a transform
-    /// body the typed decode cannot decode, decodes through the `Value` tree, so a decode
-    /// error is always the one the tree decode produces and the two lanes cannot disagree on
-    /// it.
+    /// transform body decodes typed straight from its bytes when [`tree_decode_parses`]
+    /// accepts it. Every other body, and a transform body the typed decode cannot decode,
+    /// decodes through the `Value` tree, so a decode error is always the one the tree decode
+    /// produces and the two lanes cannot disagree on it.
     async fn dispatch_body(
         &self,
         channel: RouteHandle,
@@ -12657,7 +12680,13 @@ impl Handler {
         probe: Option<&RequestEntryProbe>,
         meter: &ResidentMeter<'_>,
     ) -> (BodyLane, PreparedOutcome) {
-        if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
+        // Refusing from the bytes keeps a doomed body from holding pool bytes while it parses.
+        if footprint_floor_exceeds(body, meter.capacity()) {
+            return (BodyLane::Unread, request_too_large_error());
+        }
+        if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform)
+            && tree_decode_parses(body)
+        {
             let decode_started_at = Instant::now();
             match decode_metered::<TransformRequest>(body, meter) {
                 Ok(parsed) => {
@@ -14154,6 +14183,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                 |(project, (_, route_root, schedule, authority_generation))| {
                     Some(dreamer_scheduler::ScheduledProject {
                         project,
+                        task: dreamer_scheduler::ScheduledTask::ReviewUserMemories,
                         route_root,
                         authority_generation,
                         schedule: schedule?,
@@ -14169,6 +14199,15 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
         task: &str,
         command_id: &str,
     ) -> dreamer_scheduler::TaskRunOutcome {
+        // A host that never schedules cleanup still refuses to run it, so no configuration or flag can reach a reclamation through this daemon; every other kind has its Rust-owned inputs looked up below.
+        match project.task {
+            dreamer_scheduler::ScheduledTask::MessageIndexCleanup => {
+                return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+                    reason: "message-index cleanup has no production enable path".to_string(),
+                };
+            }
+            dreamer_scheduler::ScheduledTask::ReviewUserMemories => {}
+        }
         let Some(binding) = self.binding_for_root(&project.route_root) else {
             return dreamer_scheduler::TaskRunOutcome::NotRunnable {
                 reason: "no live route is bound to the project".to_string(),
@@ -15448,14 +15487,6 @@ const MAX_FACADE_FRAME_BYTES: usize = 1024 * 1024;
 /// The 64 MiB transport frame ceiling permits a 32 MiB body cap while reserving envelope overhead.
 const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
-/// The typed read of the fields the handler branches on before it decodes a body: the
-/// route discriminator and whether the transform page envelope is present. Every other
-/// field is skipped, so no `Value` tree is built for the decision and a multi-MiB array is
-/// never materialized. The read mirrors the tree dispatch: a repeated key keeps its last
-/// value, a page-envelope key counts when present whatever its value, and a body a `Value`
-/// parse refuses (non-object, malformed, nested past the depth limit, a number out of
-/// range, a bad escape or invalid UTF-8 anywhere) yields no probe and takes the tree-decode
-/// path, so a probe is proof that the tree decode parses the body.
 #[derive(Default)]
 struct RequestEntryProbe {
     method: RouteName,
@@ -15467,6 +15498,21 @@ fn probe_request(body: &[u8]) -> Option<RequestEntryProbe> {
     serde_json::from_slice(body).ok()
 }
 
+/// The probe that selects the lane for an admitted body. Only a discriminator the body
+/// spells literally selects the direct lane, so a body whose bytes never spell `transform`
+/// cannot reach it; the walk is skipped for such a body and a facade body pays only its
+/// `Value` parse, as before the direct lane.
+fn lane_probe(body: &[u8]) -> Option<RequestEntryProbe> {
+    memchr::memmem::find(body, b"transform")
+        .is_some()
+        .then(|| probe_request(body))?
+}
+
+/// The direct lane requires `true` so a body the tree refuses never decodes typed.
+fn tree_decode_parses(body: &[u8]) -> bool {
+    serde_json::from_slice::<SkippedValue>(body).is_ok()
+}
+
 /// Which decode a body went through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BodyLane {
@@ -15474,11 +15520,13 @@ enum BodyLane {
     Direct,
     /// Decoded through the `Value` tree.
     Tree,
+    /// Refused from its bytes alone; neither decode ran.
+    Unread,
 }
 
 impl<'de> Deserialize<'de> for RequestEntryProbe {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::{MapAccess, Visitor};
+        use serde::de::{IgnoredAny, MapAccess, Visitor};
 
         struct ProbeVisitor;
 
@@ -15496,11 +15544,11 @@ impl<'de> Deserialize<'de> for RequestEntryProbe {
                         ProbeKey::Method => probe.method = map.next_value()?,
                         ProbeKey::Kind => probe.kind = map.next_value()?,
                         ProbeKey::PageField => {
-                            map.next_value::<SkippedValue>()?;
+                            map.next_value::<IgnoredAny>()?;
                             probe.page_fields = true;
                         }
                         ProbeKey::Other => {
-                            map.next_value::<SkippedValue>()?;
+                            map.next_value::<IgnoredAny>()?;
                         }
                     }
                 }
@@ -15548,12 +15596,101 @@ impl<'de> Deserialize<'de> for ProbeKey {
     }
 }
 
+/// Skips one value through `deserialize_any`, so every check the deserializer applies to a
+/// `Value` parse applies here: the nesting limit, number range, string escapes, and UTF-8.
+/// An object holding [`RAW_VALUE_TOKEN`] as any key is refused: the tree lane reads it as a
+/// boxed raw document when the token is the first key it sees, and a retained `Value`
+/// re-read from the sorted tree sees it first wherever the body placed it.
+struct SkippedValue;
+
+impl<'de> Deserialize<'de> for SkippedValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{MapAccess, SeqAccess, Visitor};
+
+        struct SkipVisitor;
+
+        impl<'de> Visitor<'de> for SkipVisitor {
+            type Value = SkippedValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("any JSON value")
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(SkippedValue)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<SkippedValue>()?.is_some() {}
+                Ok(SkippedValue)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_key::<SkippedKey>()?.is_some() {
+                    map.next_value::<SkippedValue>()?;
+                }
+                Ok(SkippedValue)
+            }
+        }
+
+        deserializer.deserialize_any(SkipVisitor)
+    }
+}
+
+/// A key of a skipped object; [`RAW_VALUE_TOKEN`] in any position is an error.
+struct SkippedKey;
+
+impl<'de> Deserialize<'de> for SkippedKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Visitor;
+
+        struct KeyVisitor;
+
+        impl Visitor<'_> for KeyVisitor {
+            type Value = SkippedKey;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an object key other than the raw-value token")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                if value == RAW_VALUE_TOKEN {
+                    return Err(E::custom("raw-value token names an object key"));
+                }
+                Ok(SkippedKey)
+            }
+        }
+
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
 impl RequestEntryProbe {
     /// The discriminator dispatch resolves: `method` when it is a string, else `kind`.
     fn route(&self) -> &RouteName {
         match self.method {
             RouteName::Absent => &self.kind,
-            RouteName::Named(_) | RouteName::Overlong => &self.method,
+            RouteName::Named(_) | RouteName::Escaped(_) | RouteName::Overlong => &self.method,
         }
     }
 
@@ -15581,12 +15718,16 @@ impl RequestEntryProbe {
 /// The probe runs before the host's resident-byte reservation, so an array or object under
 /// `method` must be skipped, not built. Dispatch treats a missing or non-string
 /// discriminator as absent and any string, however long, as the route name; the variants
-/// keep that distinction without retaining a long string.
+/// keep that distinction without retaining a long string. A name spelled with an escape
+/// is kept apart: it widens the byte cap like any name, but only a name the body spells
+/// literally selects the direct lane, so the lane never depends on which bytes elsewhere
+/// in the body happen to spell it.
 #[derive(Default)]
 enum RouteName {
     #[default]
     Absent,
     Named(String),
+    Escaped(String),
     Overlong,
 }
 
@@ -15595,30 +15736,39 @@ impl RouteName {
 
     fn short(&self) -> Option<&str> {
         match self {
-            RouteName::Named(name) => Some(name),
+            RouteName::Named(name) | RouteName::Escaped(name) => Some(name),
             RouteName::Absent | RouteName::Overlong => None,
         }
     }
+}
 
-    /// `Skip` is the type nested values under the discriminator are skipped through:
-    /// `SkippedValue` applies the tree decode's checks, `IgnoredAny` applies none.
-    fn deserialize_skipping<'de, D, Skip>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-        Skip: Deserialize<'de>,
-    {
-        use serde::de::{MapAccess, SeqAccess, Visitor};
+impl<'de> Deserialize<'de> for RouteName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-        struct RouteNameVisitor<Skip>(PhantomData<Skip>);
+        struct RouteNameVisitor;
 
-        impl<'de, Skip: Deserialize<'de>> Visitor<'de> for RouteNameVisitor<Skip> {
+        impl<'de> Visitor<'de> for RouteNameVisitor {
             type Value = RouteName;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("a route discriminator")
             }
 
+            /// serde_json hands a string it had to unescape through this path and a string
+            /// borrowed from the body through `visit_borrowed_str`.
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(if value.len() <= RouteName::MAX_ROUTE_NAME_BYTES {
+                    RouteName::Escaped(value.to_owned())
+                } else {
+                    RouteName::Overlong
+                })
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                value: &'de str,
+            ) -> Result<Self::Value, E> {
                 Ok(if value.len() <= RouteName::MAX_ROUTE_NAME_BYTES {
                     RouteName::Named(value.to_owned())
                 } else {
@@ -15627,12 +15777,12 @@ impl RouteName {
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                while seq.next_element::<Skip>()?.is_some() {}
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
                 Ok(RouteName::Absent)
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                while map.next_entry::<Skip, Skip>()?.is_some() {}
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
                 Ok(RouteName::Absent)
             }
 
@@ -15657,62 +15807,24 @@ impl RouteName {
             }
         }
 
-        deserializer.deserialize_any(RouteNameVisitor::<Skip>(PhantomData))
+        deserializer.deserialize_any(RouteNameVisitor)
     }
 }
 
-impl<'de> Deserialize<'de> for RouteName {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        RouteName::deserialize_skipping::<D, SkippedValue>(deserializer)
-    }
-}
-
-/// The discriminator as the byte cap read it before the entry probe existed: nested values
-/// skipped without the tree decode's checks.
-#[derive(Default)]
-struct LenientRouteName(RouteName);
-
-impl<'de> Deserialize<'de> for LenientRouteName {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        RouteName::deserialize_skipping::<D, serde::de::IgnoredAny>(deserializer).map(Self)
-    }
-}
-
-/// The byte-cap class read for a body above the facade cap that yielded no entry probe.
-/// The entry probe refuses whatever a `Value` parse refuses; the cap admits such a body by
-/// its discriminator alone and dispatch then refuses it by shape, so this read skips every
-/// other field without checking it, as the derive does.
-#[derive(Default, Deserialize)]
-struct RequestClassProbe {
-    #[serde(default)]
-    method: LenientRouteName,
-    #[serde(default)]
-    kind: LenientRouteName,
-}
-
-impl RequestClassProbe {
-    fn is_transform_class(body: &[u8]) -> bool {
-        serde_json::from_slice::<RequestClassProbe>(body).is_ok_and(|probe| {
-            RequestEntryProbe {
-                method: probe.method.0,
-                kind: probe.kind.0,
-                page_fields: false,
-            }
-            .is_transform_class()
-        })
-    }
-}
-
-/// The outcome for a decode the meter refused. A footprint the pool can never hold is too
-/// large. A transient refusal is classed by the body's whole footprint, counted without
-/// charging: a body that would exceed the capacity anyway is too large, one that fits found
-/// the pool held by other requests.
 fn resident_refusal(refusal: Refusal, body: &[u8], meter: &ResidentMeter<'_>) -> PreparedOutcome {
     match refusal {
         Refusal::Permanent => request_too_large_error(),
-        Refusal::Transient if footprint_of(body) > meter.capacity() => request_too_large_error(),
+        Refusal::Transient if footprint_exceeds(body, meter.capacity()) => {
+            request_too_large_error()
+        }
         Refusal::Transient => resident_capacity_error(),
     }
+}
+
+/// Whether the byte cap admits `body`; the step of `Handler::handle` before the metered decode.
+#[cfg(feature = "test-support")]
+pub fn request_byte_cap_admits_for_test(body: &[u8]) -> bool {
+    enforce_request_byte_cap(body).is_ok()
 }
 
 fn request_too_large_error() -> PreparedOutcome {
@@ -15729,24 +15841,23 @@ fn resident_capacity_error() -> PreparedOutcome {
     }
 }
 
-/// `probe` is the body's entry probe, `None` when the body yielded none; a body above the
-/// facade cap with no probe is classed by the lenient read, so a discriminator the tree
-/// decode cannot parse past still widens the cap the way it always did.
-fn enforce_request_byte_cap(
-    body: &[u8],
-    probe: Option<&RequestEntryProbe>,
-) -> Result<(), PreparedOutcome> {
+/// A body larger than `MAX_FACADE_FRAME_BYTES` without a transform-class probe is refused.
+/// The probe read for the class is returned so dispatch does not read it again. A body at
+/// or under that cap is admitted by its length alone: the cap runs before the resident
+/// reservation, and the probe's unescape buffer for a long escaped key would otherwise be
+/// the first body-proportional allocation outside admission control.
+fn enforce_request_byte_cap(body: &[u8]) -> Result<Option<RequestEntryProbe>, PreparedOutcome> {
     let body_len = body.len();
     if body_len <= MAX_FACADE_FRAME_BYTES {
-        return Ok(());
+        return Ok(None);
     }
-    let transform_class = match probe {
-        Some(probe) => probe.is_transform_class(),
-        None => RequestClassProbe::is_transform_class(body),
-    };
+    let probe = probe_request(body);
+    let transform_class = probe
+        .as_ref()
+        .is_some_and(RequestEntryProbe::is_transform_class);
     if transform_class {
         if body_len <= MAX_TRANSFORM_FRAME_BYTES {
-            return Ok(());
+            return Ok(probe);
         }
         return Err(invalid_params_error(
             "request body exceeds the 32 MiB transform limit",
@@ -17317,7 +17428,7 @@ fn test_route(channel_id: u16) -> RouteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metered_decode::{ResidentReserve, shortfall_count};
+    use crate::metered_decode::{ResidentReserve, footprint_floor, footprint_of, shortfall_count};
     use std::collections::{HashMap, VecDeque};
 
     use std::sync::{
@@ -17333,8 +17444,8 @@ mod tests {
     use cache_stability::CoreState;
     use historian_producer::{ProducerOutput, RunHandle};
     use memory_store::{
-        HistorianChunkRange, HistorianDurableState, ModuleMeta, ModuleUsage, NoteEvaluationInput,
-        PendingAgentDrop, StoredCompartment, TagMintInput,
+        CacheStateSelect, HistorianChunkRange, HistorianDurableState, ModuleUsage,
+        NoteEvaluationInput, PendingAgentDrop, StoredCompartment, TagMintInput,
     };
     use tokio::sync::Notify;
 
@@ -19161,8 +19272,6 @@ mod tests {
 
     #[test]
     fn request_byte_cap_widens_for_transform_class_only() {
-        let enforce_request_byte_cap =
-            |body: &[u8]| enforce_request_byte_cap(body, probe_request(body).as_ref());
         let pad = |method: &str, key: &str, bytes: usize| {
             format!(
                 "{{\"{key}\":\"{method}\",\"pad\":\"{}\"}}",
@@ -19217,7 +19326,7 @@ mod tests {
             "]".repeat(200),
             "x".repeat(two_mib)
         );
-        assert!(probe_request(over_deep.as_bytes()).is_none());
+        assert!(!tree_decode_parses(over_deep.as_bytes()));
         assert!(enforce_request_byte_cap(over_deep.as_bytes()).is_ok());
         // A string longer than any route name is dropped, not retained.
         let long_method = format!(
@@ -19269,11 +19378,12 @@ mod tests {
         // A repeated key keeps its last value, as the tree does.
         assert!(unpaged(r#"{"method":"status","method":"transform"}"#));
         assert!(!unpaged(r#"{"method":"transform","method":"status"}"#));
-        // Non-object, malformed, and over-deep bodies yield no probe: the tree path decides them.
+        // Non-object and malformed bodies yield no probe: the tree path decides them.
         assert!(probe(r#"{"method":"transform""#).is_none());
         assert!(probe(r#"["transform"]"#).is_none());
         assert!(probe(r#""transform""#).is_none());
         assert!(probe("").is_none());
+        // Nesting beyond serde_json's limit requires the tree path.
         let nested = |depth: usize| {
             format!(
                 r#"{{"method":"transform","x":{}{}}}"#,
@@ -19286,7 +19396,71 @@ mod tests {
             .last()
             .unwrap();
         assert!(unpaged(&nested(deepest_tree)));
-        assert!(probe(&nested(deepest_tree + 1)).is_none());
+        assert!(unpaged(&nested(deepest_tree + 1)));
+        assert!(tree_decode_parses(nested(deepest_tree).as_bytes()));
+        assert!(!tree_decode_parses(nested(deepest_tree + 1).as_bytes()));
+        // A discriminator spelled with an escape widens the cap as dispatch reads it, but
+        // never selects the direct lane, so the lane cannot turn on other payload text.
+        let escaped = r#"{"kind":"tr\u0061nsform","x":"transform"}"#;
+        assert!(probe(escaped).unwrap().is_transform_class());
+        assert!(!unpaged(escaped));
+        assert!(lane_probe(escaped.as_bytes()).is_some());
+        assert!(
+            lane_probe(br#"{"kind":"tr\u0061nsform"}"#).is_none(),
+            "no literal `transform`, no walk"
+        );
+    }
+
+    /// The witness refuses exactly what a `Value` parse refuses, plus an object holding the
+    /// raw-value token as any key.
+    #[test]
+    fn tree_parse_witness_refuses_what_the_tree_refuses() {
+        let witness = |body: &str| tree_decode_parses(body.as_bytes());
+        let tree = |body: &str| serde_json::from_str::<Value>(body).is_ok();
+        for body in [
+            r#"{"a":1,"b":[true,null,"s",1.5,-2]}"#,
+            r#"[]"#,
+            r#""s""#,
+            r#"{"a":1e400}"#,
+            r#"{"a":"\ud83d"}"#,
+            r#"{"a":1} x"#,
+            r#"{"a":"#,
+            "",
+        ] {
+            assert_eq!(witness(body), tree(body), "{body}");
+        }
+        assert!(!witness(&format!(r#"{{"{RAW_VALUE_TOKEN}":1}}"#)));
+        assert!(!witness(&format!(
+            r#"{{"a":{{"{RAW_VALUE_TOKEN}":"1","y":2}}}}"#
+        )));
+        assert!(!witness(&format!(r#"{{"a":[{{"{RAW_VALUE_TOKEN}":1}}]}}"#)));
+        let document = format!(r#"{{"a":{{"{RAW_VALUE_TOKEN}":"[1]"}}}}"#);
+        assert!(tree(&document));
+        assert!(!witness(&document));
+        let later = format!(r#"{{"a":{{"b":1,"{RAW_VALUE_TOKEN}":1}}}}"#);
+        assert!(tree(&later));
+        assert!(!witness(&later));
+        // The tree re-reads a retained `Value` with its keys sorted, so the token it passed
+        // over in the body is the first key it sees there.
+        let retained: Value = serde_json::from_str(&later).unwrap();
+        assert!(serde_json::from_value::<Value>(retained["a"].clone()).is_err());
+    }
+
+    /// serde_json reads an object whose first key is the token as a boxed raw document,
+    /// refusing any other value or a following key; a later key is an ordinary key.
+    #[test]
+    fn raw_value_token_matches_serde_json() {
+        let parse = |body: String| serde_json::from_str::<Value>(&body);
+        assert_eq!(
+            parse(format!(r#"{{"{RAW_VALUE_TOKEN}":"[1]"}}"#)).unwrap(),
+            json!([1])
+        );
+        assert!(parse(format!(r#"{{"{RAW_VALUE_TOKEN}":1}}"#)).is_err());
+        assert!(parse(format!(r#"{{"{RAW_VALUE_TOKEN}":"1","y":2}}"#)).is_err());
+        assert_eq!(
+            parse(format!(r#"{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)).unwrap(),
+            json!({"a": 1, RAW_VALUE_TOKEN: 1})
+        );
     }
 
     /// Bodies that exercise every decode branch the two lanes must agree on.
@@ -19396,6 +19570,11 @@ mod tests {
                 "dense unknown field",
                 valid(&format!(r#","junk":[{}]"#, "0,".repeat(20_000) + "0")),
             ),
+            // serde accepts a unit variant as `{"light":null}` beside the string form.
+            (
+                "object-form preset",
+                valid(r#","prompt_surface_preset":{"light":null}"#),
+            ),
             // Shapes the derive skips without checking under an ignored field; the tree refuses each.
             (
                 "number out of range under an ignored field",
@@ -19410,6 +19589,67 @@ mod tests {
                 body.truncate(body.len() - 2);
                 body.extend_from_slice(b"\xff\"}");
                 body
+            }),
+            (
+                "raw-value token under an ignored field",
+                valid(&format!(r#","x":{{"{RAW_VALUE_TOKEN}":1}}"#)),
+            ),
+            (
+                "raw-value token with a sibling key",
+                valid(&format!(r#","x":{{"{RAW_VALUE_TOKEN}":"1","y":2}}"#)),
+            ),
+            (
+                "raw-value token inside an ignored array",
+                valid(&format!(r#","x":[{{"{RAW_VALUE_TOKEN}":1}}]"#)),
+            ),
+            ("raw-value token under the discriminator", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(
+                    r#""kind":"transform""#,
+                    &format!(r#""method":{{"{RAW_VALUE_TOKEN}":1}},"kind":"transform""#),
+                    1,
+                )
+                .into_bytes()
+            }),
+            (
+                "raw-value token holding a document",
+                valid(&format!(r#","x":{{"{RAW_VALUE_TOKEN}":"[1]"}}"#)),
+            ),
+            (
+                "raw-value token not in first position",
+                valid(&format!(r#","x":{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)),
+            ),
+            (
+                "raw-value token after a key under tail_delta",
+                valid(&format!(r#","tail_delta":{{"a":1,"{RAW_VALUE_TOKEN}":1}}"#)),
+            ),
+            (
+                "raw-value token after a key in a native message",
+                valid(&format!(
+                    r#","native_messages":[{{"a":1,"{RAW_VALUE_TOKEN}":1}}]"#
+                )),
+            ),
+            ("escaped discriminator", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(r#""kind":"transform""#, r#""kind":"tr\u0061nsform""#, 1)
+                    .into_bytes()
+            }),
+            ("escaped discriminator beside transform text", {
+                let body = String::from_utf8(valid(r#","x":"transform""#)).unwrap();
+                body.replacen(r#""kind":"transform""#, r#""kind":"tr\u0061nsform""#, 1)
+                    .into_bytes()
+            }),
+            ("raw-value token after a key inside a message", {
+                let body = String::from_utf8(valid("")).unwrap();
+                body.replacen(
+                    &format!("[{message}]"),
+                    &format!(
+                        r#"[{{"z":{{"a":1,"{RAW_VALUE_TOKEN}":1}},{}]"#,
+                        &message[1..]
+                    ),
+                    1,
+                )
+                .into_bytes()
             }),
         ];
         let nested = |depth: usize| {
@@ -19442,10 +19682,11 @@ mod tests {
     /// decodes differ in acceptance on exactly two shapes, and the handler keeps both off
     /// the direct lane: a repeated key in a derived struct, top-level or nested, which the
     /// derive refuses and the tree keeps last-wins (the direct lane falls back to the tree
-    /// decode), and nesting past
-    /// the tree's depth limit under an ignored field, which the derive skips without a
-    /// limit (the probe refuses it first). A body assembled from pages decodes to the same
-    /// request as the same body in one slice.
+    /// decode), and a shape under an ignored field that the derive skips without the tree's
+    /// checks (nesting past the depth limit, a number out of range, a lone surrogate, invalid
+    /// UTF-8, an object opened by the raw-value token), which `tree_decode_parses` refuses
+    /// first. A body assembled from pages decodes to the same request as the same body in
+    /// one slice.
     #[test]
     fn direct_and_tree_transform_decodes_agree_on_the_corpus() {
         let corpus = transform_decode_corpus();
@@ -19453,11 +19694,10 @@ mod tests {
         let mut tree_only = Vec::new();
         let mut direct_only = Vec::new();
         for (name, body) in &corpus {
-            // A probe is proof that the tree parses the body.
-            if probe_request(body).is_some() {
+            if tree_decode_parses(body) {
                 assert!(
                     serde_json::from_slice::<Value>(body).is_ok(),
-                    "{name}: probed, so the tree must parse it"
+                    "{name}: witnessed, so the tree must parse it"
                 );
             }
             match (direct_decode(body), tree_decode(body)) {
@@ -19497,6 +19737,12 @@ mod tests {
                 "overlong method beside kind",
                 "other route",
                 "dense unknown field",
+                "object-form preset",
+                "raw-value token holding a document",
+                "raw-value token not in first position",
+                "escaped discriminator",
+                "escaped discriminator beside transform text",
+                "raw-value token after a key inside a message",
                 "nesting at the tree limit",
             ],
             "the bodies both decodes accept"
@@ -19516,9 +19762,16 @@ mod tests {
                 "number out of range under an ignored field",
                 "lone surrogate under an ignored field",
                 "invalid UTF-8 under an ignored field",
+                "raw-value token under an ignored field",
+                "raw-value token with a sibling key",
+                "raw-value token inside an ignored array",
+                "raw-value token under the discriminator",
+                "raw-value token after a key under tail_delta",
+                "raw-value token after a key in a native message",
                 "nesting past the tree limit",
             ],
-            "the derive skips an ignored field without the tree's checks"
+            "the derive skips an ignored field without the tree's checks, and the tree's \
+             re-read of a retained value refuses a token the body placed after another key"
         );
         for name in direct_only {
             let (_, body) = corpus
@@ -19526,8 +19779,8 @@ mod tests {
                 .find(|(candidate, _)| candidate == &name)
                 .unwrap();
             assert!(
-                probe_request(body).is_none(),
-                "{name}: the probe refuses the body before the direct decode can see it"
+                !tree_decode_parses(body),
+                "{name}: the witness refuses the body before the direct decode can see it"
             );
         }
 
@@ -19599,7 +19852,7 @@ mod tests {
             let pool = TestPool::unbounded();
             let meter = ResidentMeter::new(&pool);
             let (lane, through_body) = direct
-                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+                .dispatch_body(test_route(7), &body, lane_probe(&body).as_ref(), &meter)
                 .await;
             let request = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let through_tree = tree
@@ -19626,6 +19879,7 @@ mod tests {
                 "unknown serializer profile",
                 "non-string discriminator with kind",
                 "dense unknown field",
+                "object-form preset",
                 "nesting at the tree limit",
             ],
             "the bodies that decode typed from their bytes; the rest take the tree lane"
@@ -19684,10 +19938,10 @@ mod tests {
         }
     }
 
-    /// A scratch pool for tests: a real byte budget with a known capacity.
     pub(crate) struct TestPool {
         budget: host_runtime::wire::ByteBudget,
         capacity: usize,
+        reserve_calls: AtomicUsize,
     }
 
     impl TestPool {
@@ -19695,7 +19949,13 @@ mod tests {
             Self {
                 budget: host_runtime::wire::ByteBudget::new(capacity as u64),
                 capacity,
+                reserve_calls: AtomicUsize::new(0),
             }
+        }
+
+        /// Reservation attempts so far, granted or not.
+        fn reserve_calls(&self) -> usize {
+            self.reserve_calls.load(Ordering::Relaxed)
         }
 
         /// Room for any body a test sends.
@@ -19713,6 +19973,7 @@ mod tests {
 
     impl ResidentReserve for TestPool {
         fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+            self.reserve_calls.fetch_add(1, Ordering::Relaxed);
             self.budget.try_charge(bytes)
         }
 
@@ -19797,6 +20058,60 @@ mod tests {
         assert_eq!(meter.charged(), held);
     }
 
+    /// A small body holds at most twice its footprint, not a full batch.
+    #[test]
+    fn a_small_body_holds_no_more_than_twice_its_footprint() {
+        for body in [
+            br#"{"kind":"status","session_id":"ses"}"#.to_vec(),
+            serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap(),
+        ] {
+            let footprint = footprint_of(&body);
+            assert!(footprint < 1024 * 1024, "the body is small: {footprint}");
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            let _: Value = decode_metered(&body, &meter).unwrap();
+            assert!(meter.charged() >= footprint);
+            assert!(
+                meter.charged() <= 2 * footprint,
+                "a body with footprint {footprint} holds {} bytes",
+                meter.charged()
+            );
+        }
+    }
+
+    /// When the free pool is smaller than a full step, reservations must not scale with the
+    /// parsed values.
+    #[test]
+    fn a_nearly_drained_pool_is_charged_in_a_bounded_number_of_acquisitions() {
+        let mut body = Vec::from(b"[0".as_slice());
+        for _ in 1..3_000 {
+            body.extend_from_slice(b",0");
+        }
+        body.push(b']');
+        let footprint = footprint_of(&body);
+        assert!(
+            footprint > 300 * 1024,
+            "the body needs several batches: {footprint}"
+        );
+
+        let pool = TestPool::with_capacity(10 * 1024 * 1024);
+        // Leave less than a full step free, and less than the body needs.
+        let holder = pool.hold(pool.capacity() - footprint * 3 / 4);
+        let meter = ResidentMeter::new(&pool);
+        let failure = decode_metered::<Value>(&body, &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Transient)
+        ));
+        let calls = pool.reserve_calls();
+        assert!(
+            calls < 100,
+            "{calls} reservation attempts to take {} bytes; one per value is a cliff",
+            footprint * 3 / 4
+        );
+        drop(holder);
+    }
+
     /// The pool-drain witness for the shortfall path: a body that fits the capacity finds the
     /// pool held by another request, is refused as transient, and is served once the holder
     /// releases.
@@ -19851,6 +20166,63 @@ mod tests {
         drop(holder);
     }
 
+    /// Bodies whose byte-derived footprint exceeds pool capacity are rejected before decoding
+    /// without reserving pool bytes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_doomed_body_is_refused_without_touching_the_pool() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let dense_values = || "0,".repeat(200_000) + "0";
+        // One body takes the tree lane, one is a complete unpaged transform request whose
+        // values sit under an ignored field, so the direct decode would refuse it.
+        let bodies = [
+            format!(
+                r#"{{"kind":"transform","transform_page_id":"p","x":[{}]}}"#,
+                dense_values()
+            ),
+            format!(
+                r#"{{"kind":"transform","v":2,"session_id":"ses","serializer_profile":"owned-llmrunner","render_config":"cfg","messages":[],"junk":[{}]}}"#,
+                dense_values()
+            ),
+        ];
+        for body in bodies {
+            let body = body.into_bytes();
+            let pool = TestPool::with_capacity(footprint_of(&body) / 2);
+            let meter = ResidentMeter::new(&pool);
+            let (lane, outcome) = handler
+                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+                .await;
+            assert_eq!(
+                pool.reserve_calls(),
+                0,
+                "a doomed body must not hold the pool while it is parsed"
+            );
+            assert_eq!(
+                comparable_outcome(outcome),
+                comparable_outcome(request_too_large_error())
+            );
+            assert_eq!(lane, BodyLane::Unread);
+            assert_eq!(meter.needed(), 0, "no value was built");
+        }
+    }
+
+    /// The byte-derived floor never exceeds the footprint the decode counts, so it refuses no
+    /// body the meter would admit.
+    #[test]
+    fn footprint_floor_never_exceeds_the_decoded_footprint() {
+        for (name, body) in transform_decode_corpus() {
+            if serde_json::from_slice::<Value>(&body).is_err() {
+                continue;
+            }
+            assert!(
+                footprint_floor(&body) <= footprint_of(&body),
+                "{name}: floor {} above footprint {}",
+                footprint_floor(&body),
+                footprint_of(&body)
+            );
+        }
+    }
+
     /// A refused decode ends the request with the prior code and touches nothing the dispatch
     /// would: no ticket, no route channel, no store row.
     #[tokio::test(flavor = "current_thread")]
@@ -19859,10 +20231,16 @@ mod tests {
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         let body = serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap();
         let footprint = footprint_of(&body);
-        let in_flight_before = DISPATCH_HEALTH.in_flight_count.load(Ordering::Relaxed);
-        let started_before = DISPATCH_HEALTH
-            .last_dispatch_started_at_ms
-            .load(Ordering::Relaxed);
+        let route = test_route(7);
+        // `DISPATCH_HEALTH` is process-wide and moves under other tests, so the witnesses are
+        // the handler's own route table and the store, which a ticket's accept would touch.
+        let route_channel_bound = |handler: &Handler| {
+            handler
+                .transform_route_channels
+                .lock()
+                .expect("route channels mutex")
+                .contains_key(&route)
+        };
 
         for (pool, expected) in [
             (
@@ -19877,34 +20255,25 @@ mod tests {
             let holder = pool.hold(pool.capacity() / 2);
             let meter = ResidentMeter::new(&pool);
             let (_, outcome) = handler
-                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+                .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
                 .await;
             assert_eq!(comparable_outcome(outcome), comparable_outcome(expected));
             drop(meter);
             drop(holder);
+            assert!(!route_channel_bound(&handler), "a refusal bound the route");
         }
-        assert_eq!(
-            DISPATCH_HEALTH.in_flight_count.load(Ordering::Relaxed),
-            in_flight_before
-        );
-        assert_eq!(
-            DISPATCH_HEALTH
-                .last_dispatch_started_at_ms
-                .load(Ordering::Relaxed),
-            started_before,
-            "no transform ticket was opened"
-        );
         assert!(!handler.module_knows_transform_session("ses", &project));
         assert!(store.load("ses").unwrap().row_version.is_none());
 
-        // The same body with room is served.
+        // The same body with room is served, and only then is the route bound.
         let pool = TestPool::unbounded();
         let meter = ResidentMeter::new(&pool);
         let (lane, outcome) = handler
-            .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+            .dispatch_body(route, &body, probe_request(&body).as_ref(), &meter)
             .await;
         assert_eq!(lane, BodyLane::Direct);
         assert_eq!(comparable_outcome(outcome).0, "response");
+        assert!(route_channel_bound(&handler));
     }
 
     #[test]
@@ -21217,6 +21586,8 @@ mod tests {
             );
         }
 
+        // Another handler's shutdown can clear shared memos before this status snapshot.
+        tail_hygiene::hygiene_memos().clear();
         let outcome = handler.handle_status_value(&json!({"method": "status"}));
         let PreparedOutcome::Response(bytes) = outcome else {
             panic!("module status did not respond: {outcome:?}");
@@ -21262,6 +21633,12 @@ mod tests {
         );
         assert_eq!(metrics["native_attach"]["charged_bytes"], 0);
         assert_eq!(metrics["native_attach"]["entry_count"], 0);
+        let hygiene_memo = &metrics["tail_hygiene_memo"];
+        assert!(hygiene_memo["entry_count"].is_u64());
+        let charged = hygiene_memo["charged_bytes"].as_u64().unwrap();
+        assert!(charged > std::mem::size_of::<OnceLock<tail_hygiene::HygieneMemos>>() as u64);
+        assert!(charged <= tail_hygiene::MEMO_RETAINED_BYTES_BOUND as u64);
+        assert!(hygiene_memo["rejected_inserts"].is_u64());
         assert_eq!(metrics["page_coordinator"]["charged_bytes"], 123);
         assert_eq!(metrics["page_coordinator"]["entry_count"], 1);
         assert_eq!(metrics["page_coordinator"]["completed_response_bytes"], 17);
@@ -21422,6 +21799,36 @@ mod tests {
                 "profile {profile} changed the legacy response when serve_native=false"
             );
         }
+    }
+
+    /// `request_observed_to_handler` ends where the typed decode starts, on both lanes: a
+    /// decode that began ten seconds ago does not add those seconds to the span.
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_observed_to_handler_ends_before_the_typed_decode() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let observed_at = now_ms() - 20_000;
+        let mut body = request(vec![ck("m1", 1, "hello")]);
+        body["request_observed_at_ms"] = json!(observed_at);
+        let parsed: TransformRequest = serde_json::from_value(body).unwrap();
+        let decode_started_at = Instant::now() - Duration::from_secs(10);
+        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let outcome = handler
+            .handle_transform_typed(test_route(7), parsed, false, decode_started_at, &ticket)
+            .await;
+        ticket.finish(false);
+        let PreparedOutcome::Response(bytes) = outcome else {
+            panic!("unexpected handler outcome: {outcome:?}");
+        };
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        let span = response["timings"]["request_observed_to_handler"]
+            .as_f64()
+            .unwrap();
+        assert!(
+            (9_000.0..11_000.0).contains(&span),
+            "request_observed_to_handler was {span} ms; the decode span of 10 s must not be \
+             counted in it"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -21950,7 +22357,7 @@ mod tests {
             "replace_from": 4,
             "native_replace_from": 2,
         }));
-        let pass_load = _store.load(&second_request.session_id);
+        let pass_load = _store.load_meta(&second_request.session_id);
         let pass_state = PassState::from(&pass_load);
         let frontier = handler
             .expand_transform_tail_delta(&mut second_request, pass_state)
@@ -22097,6 +22504,12 @@ mod tests {
             serde_json::to_vec(&fresh.native_messages).unwrap(),
         );
         assert_eq!(second.messages(), fresh.messages());
+        for (reattached, fresh_message) in second.messages().iter().zip(fresh.messages()) {
+            assert_eq!(
+                reattached.canonical_bytes(),
+                fresh_message.canonical_bytes()
+            );
+        }
         assert!(second_stats.reused_messages >= 5, "{second_stats:?}");
         assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
         let second_sidecar = Arc::clone(
@@ -22135,6 +22548,9 @@ mod tests {
             serde_json::to_vec(shared_replay.messages()).unwrap(),
             serde_json::to_vec(second.messages()).unwrap()
         );
+        for (shared, reattached) in shared_replay.messages().iter().zip(second.messages()) {
+            assert_eq!(shared.canonical_bytes(), reattached.canonical_bytes());
+        }
         let mut edited_output = shared_replay.native_messages.clone().unwrap();
         let original_output = serde_json::to_vec(&shared_replay.native_messages).unwrap();
         Arc::make_mut(&mut edited_output[0])["alias_mutation"] = json!(true);
@@ -22266,7 +22682,7 @@ mod tests {
             "replace_from": 3,
             "native_replace_from": 3,
         }));
-        let pass_load = _store.load(&delta.session_id);
+        let pass_load = _store.load_meta(&delta.session_id);
         let pass_state = PassState::from(&pass_load);
         let frontier = handler
             .expand_transform_tail_delta(&mut delta, pass_state)
@@ -22460,7 +22876,7 @@ mod tests {
             "native_replace_from": GIANT_MESSAGE_COUNT,
         }));
 
-        let pass_load = _store.load(&delta.session_id);
+        let pass_load = _store.load_meta(&delta.session_id);
         let pass_state = PassState::from(&pass_load);
         let frontier = handler
             .expand_transform_tail_delta(&mut delta, pass_state)
@@ -24594,7 +25010,7 @@ mod tests {
             reference.messages.extend(third.messages.iter().cloned());
             reference.tail_delta = None;
             let mut reattached = third.clone();
-            let pass_load = store.load(&reattached.session_id);
+            let pass_load = store.load_meta(&reattached.session_id);
             let pass_state = PassState::from(&pass_load);
             let frontier = handler
                 .expand_transform_tail_delta(&mut reattached, pass_state)
@@ -25457,23 +25873,27 @@ mod tests {
         );
     }
 
-    /// A steady pass loads the full `cache_state` row through the statement cache exactly
-    /// twice: once before the transform, shared by the tail-delta expansion, the
+    /// A steady pass reads `cache_state` through the statement cache exactly twice: the
+    /// `meta` projection once before the transform, shared by the tail-delta expansion, the
     /// projection-cache lookup, the last-response anchor, and the historian-active check;
-    /// and once after the commit in `prepare_historian_fire`, which needs the committed
-    /// `row_version` for its own write. The interleave hook splits the two: it runs after
-    /// the transform commit and before the post-commit load. The transform's own snapshot
-    /// read is uncached and stays its linearization point. The run count is read on one
-    /// handle, so the test also requires that handle was never evicted.
+    /// and the full row once after the commit in `prepare_historian_fire`. The interleave
+    /// hook runs after the transform commit and before the post-commit load. Each run count
+    /// is read on one handle, so the test also requires that neither handle was evicted.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_steady_pass_loads_the_full_cache_state_row_once_before_the_transform() {
+    async fn a_steady_pass_loads_meta_once_before_the_transform_and_the_full_row_once_after() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         store.start_statement_reuse_probe();
         let mut messages = vec![ck("m1", 1, "turn 1")];
         let response = call_transform(&handler, messages.clone()).await;
         assert_eq!(response["status"], "ok", "warm pass");
-        let after_warm = store.cache_state_full_load_runs();
+        let counts = |store: &MemoryStore| {
+            (
+                store.cache_state_load_runs(CacheStateSelect::Meta),
+                store.cache_state_load_runs(CacheStateSelect::Full),
+            )
+        };
+        let (meta_after_warm, full_after_warm) = counts(&store);
         let at_hook = Arc::new(Mutex::new(None));
         {
             let store = Arc::clone(&store);
@@ -25482,32 +25902,53 @@ mod tests {
                 .between_transform_and_prepare
                 .lock()
                 .expect("interleave hook mutex") = Some(Box::new(move || {
-                *at_hook.lock().expect("hook cell") = Some(store.cache_state_full_load_runs());
+                *at_hook.lock().expect("hook cell") = Some(counts(&store));
             }));
         }
         messages.push(ck("m2", 2, "turn 2"));
         let response = call_transform(&handler, messages.clone()).await;
         assert_eq!(response["status"], "ok", "steady pass");
-        let at_hook = at_hook.lock().expect("hook cell").expect("the hook ran");
+        let (meta_at_hook, full_at_hook) =
+            at_hook.lock().expect("hook cell").expect("the hook ran");
         assert_eq!(
-            at_hook - after_warm,
-            1,
-            "one full load before the transform"
+            (
+                meta_at_hook - meta_after_warm,
+                full_at_hook - full_after_warm
+            ),
+            (1, 0),
+            "one meta load and no full load before the transform"
+        );
+        let (meta_after, full_after) = counts(&store);
+        assert_eq!(
+            (meta_after - meta_at_hook, full_after - full_at_hook),
+            (0, 1),
+            "one full load and no meta load after the commit"
         );
         assert_eq!(
-            store.cache_state_full_load_runs() - at_hook,
-            1,
-            "one full load after the commit"
+            (
+                store.cache_state_load_evictions(CacheStateSelect::Meta),
+                store.cache_state_load_evictions(CacheStateSelect::Full),
+            ),
+            (0, 0),
+            "neither counted handle was re-created"
         );
-        let full_select_evictions: u32 = store
-            .statement_evictions()
-            .into_iter()
-            .filter(|(sql, _)| sql.contains("core_state, meta FROM cache_state"))
-            .map(|(_, evictions)| evictions)
-            .sum();
-        assert_eq!(
-            full_select_evictions, 0,
-            "the counted handle was never re-created"
+    }
+
+    /// The pass-state load runs before the tail-delta expansion, outside the `delta_expand`
+    /// and `projection_cache_lookup` windows, so it carries its own pass-trace bucket; the
+    /// phase timings otherwise shrink by the read's cost while `handler_total` does not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pass_state_load_has_its_own_timing_bucket() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let response = call_transform(&handler, vec![ck("m1", 1, "turn 1")]).await;
+        assert_eq!(response["status"], "ok");
+        let pass_state_load = response["timings"]["pass_state_load"]
+            .as_f64()
+            .expect("the pass-state load is timed");
+        assert!(
+            pass_state_load > 0.0,
+            "the bucket wraps the read: {pass_state_load}"
         );
     }
 
@@ -25523,8 +25964,8 @@ mod tests {
         store
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
-        let loaded = store.load("ses").unwrap();
-        assert!(handler.historian_active(&store, "ses", PassState::Loaded(&loaded)));
+        let meta = store.load_meta("ses").unwrap();
+        assert!(handler.historian_active(&store, "ses", PassState::Loaded(&meta)));
         assert!(handler.historian_active(&store, "ses", PassState::Reload));
         assert!(!handler.historian_active(&store, "ses", PassState::Unavailable));
         assert!(!handler.historian_active(&store, "never-seen", PassState::Reload));
@@ -25578,6 +26019,29 @@ mod tests {
         assert_eq!(
             trace.receive_count, 3,
             "the failed receive write recorded nothing and vetoed nothing"
+        );
+    }
+
+    /// A historian that completes after the pass load leaves the live map and commits
+    /// `Idle`; the pass load's `Firing` is stale and must not veto.
+    #[test]
+    fn historian_active_rereads_a_loaded_active_phase_when_no_run_is_live() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Firing;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let pass_meta = store.load_meta("ses").unwrap();
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.historian.state = HistorianPhase::Idle;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        assert!(
+            !handler.historian_active(&store, "ses", PassState::Loaded(&pass_meta)),
+            "the completed run committed Idle after the pass load"
         );
     }
 
@@ -36759,6 +37223,42 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
+    /// The wrapup's entry load reads the full row before any scalar `meta` read, so a row
+    /// whose core no longer deserializes is refused instead of answering `nothing_to_compact`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_refuses_a_row_whose_core_state_is_corrupt() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        store
+            .replace_compartments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
+            .unwrap();
+        cache_wrapup_messages(
+            &handler,
+            vec![ck("m1", 1, "one"), ck("m2", 2, "two"), ck("m3", 3, "three")],
+        );
+        store
+            .execute_tag_sql_for_test(
+                "UPDATE cache_state SET core_state = '{not json' WHERE session_id = 'ses'",
+            )
+            .unwrap();
+
+        let outcome = handler
+            .dispatch_value(
+                test_route(7),
+                json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+            )
+            .await;
+        assert!(
+            matches!(&outcome, PreparedOutcome::Error { code, .. } if code == "store_load_failed"),
+            "a corrupt core is refused, got {outcome:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_busy_dedups_while_firing_is_in_progress() {
         let producer = Arc::new(ProducerState::default());
@@ -36897,7 +37397,8 @@ mod tests {
         assert!(
             published > transform_committed,
             "the foreign publish committed row version {published} after the transform's \
-             {transform_committed}, before the pass's first post-commit cache_state read"
+             {transform_committed} and after the pass's pre-hook floor read, before \
+             prepare_historian_fire's load and the final floor check"
         );
         // A second producer start is valid because eligible content still crosses the trigger bar after the first fold.
         // Eligible content still crosses the trigger bar after the first fold publishes.
@@ -38097,7 +38598,7 @@ fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
     // Route-bound compaction settings can differ while the session and ingress stay the same.
     for (pass, compaction_enabled) in [false, true, true, false, true].into_iter().enumerate() {
         ctx.compaction_enabled = compaction_enabled;
-        let pass_load = store.load(&request.session_id);
+        let pass_load = store.load_meta(&request.session_id);
         let cached = handler.lookup_full_projection_cache(&request, PassState::from(&pass_load));
         assert_eq!(cached.is_some(), pass > 0);
         if let Some(cache) = &cached {

@@ -19,14 +19,13 @@ use super::cas::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
 use super::slice::ObservationPayload;
 use super::source_descriptor::{
     SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescriptorDetail, descriptor_object_id,
+    reencoded_identity,
 };
 use super::source_hold::{
     Descriptors, HeldCursor, Keyset, SourceHoldBinding, SourceHoldError, check_coverage,
     check_window, descriptor_rows_sql,
 };
-use super::source_identity::{
-    Occurrence, Span, encode_metadata, payload_id, select, validate_span,
-};
+use super::source_identity::{Span, normalize_span_for_length, payload_id, select, validate_span};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 
 #[cfg(feature = "test-support")]
@@ -502,27 +501,8 @@ fn preflight(
         return Err(malformed(&object_id));
     }
     let span = detail.span.map(|(start, end)| Span { start, end });
-    let identity: Vec<_> = detail
-        .identity
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
-    let encoded = encode_metadata(
-        &Occurrence {
-            class: &detail.class,
-            identity: &identity,
-            revision: &detail.revision,
-            representation: &detail.representation,
-            span,
-        },
-        byte_length,
-    )
-    .map_err(|_| malformed(&object_id))?;
-    if encoded.occurrence_id != detail.occurrence_id
-        || encoded.lineage_id != detail.lineage_id
-        || encoded.tuple != detail.occurrence_tuple
-        || encoded.span != span
-        || !is_artifact_digest(&detail.payload_id)
+    let encoded = reencoded_identity(&detail).ok_or_else(|| malformed(&object_id))?;
+    if encoded.span != normalize_span_for_length(span, byte_length)
         || (span.is_none() && detail.payload_id != raw.digest)
     {
         return Err(malformed(&object_id));

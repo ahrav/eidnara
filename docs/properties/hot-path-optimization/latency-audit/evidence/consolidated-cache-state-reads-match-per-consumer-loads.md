@@ -160,17 +160,22 @@ storage units that precede it on the branch.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/432)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
-The handler [loads `cache_state` once][pass-load] before the tail-delta
-expansion and hands the result to the pre-transform consumers as a
-[`PassState`][pass-state]: `Loaded` carries the row, `Unavailable` means the
-load failed, and `Reload` means the consumer runs after a commit. The
+The handler [loads `meta` once][pass-load] through [`load_meta`][meta-load]
+before the tail-delta expansion and hands the result to the pre-transform
+consumers as a [`PassState`][pass-state]: `Loaded` carries the metadata,
+`Unavailable` means the load failed, and `Reload` means the consumer runs after
+a commit. The load reads the [`meta` projection][meta-select-live] alone: no
+pre-transform consumer reads the core, and the full row's `core_state`
+deserialization is the largest cost of a full load. The
 [tail-delta expansion][delta] and the [projection-cache lookup][lookup] take
 `Loaded`'s epoch and return `None` otherwise, so a failed load still answers
 full-sync and misses the cache as it did on its own failed load. The
 [last-response anchor][last-response] takes `Loaded`'s timestamp, `0` on
-`Unavailable`, and a store read on `Reload`; the
-[historian-active check][active] takes `Loaded`'s phase, idle on `Unavailable`,
-and the phase alone from the store on `Reload`. The
+`Unavailable`, and a `load_meta` read on `Reload`; the
+[historian-active check][active-live] takes `Loaded`'s phase when it is idle, idle on
+`Unavailable`, and the phase alone from the store on `Reload` and on a `Loaded`
+non-idle phase with no live run, since a run that completes after the pass load
+leaves the live map and commits idle. The
 [transform closure][run-transform] receives the pass state on its first run
 and `Reload` on every rerun after an inline firing or a live completion, and
 the load is dropped after the first run so a rerun can name nothing else.
@@ -180,66 +185,96 @@ full load because its no-fire write needs the committed `row_version`. The
 compartment state-sync gate keeps its full load as well: it writes on the
 strength of that read and had no hot-path motive to narrow.
 
+The pass load is timed on its own as the [`pass_state_load`][pass-timing]
+pass-trace bucket. At the baseline the read sat inside the `delta_expand` and
+`projection_cache_lookup` windows; moving it ahead of both would otherwise
+shrink those buckets by the read's cost while `handler_total` kept it.
+
 The read point of the historian-active check and the last-response anchor
 moved earlier, from inside the transform closure to before the side-channel
 drain and the pass-trace write. Neither of those writes `cache_state`, so no
 in-process write is hidden; a concurrent publish landing inside that section is
-now read as the earlier phase. A stale active phase is the conservative
-direction, and a live run is reported active through the in-process live map
-before the durable phase is consulted.
+read as the earlier phase only while a run is live. A live run is reported
+active through the in-process live map before the durable phase is consulted;
+a loaded active phase with no live run is re-read, so a run that completed
+between the pass load and the check does not veto the pass.
 
 Post-commit scalar consumers read one `meta` field by
 [SQL JSON extraction][scalar-select]: `json_valid(meta, 1)` refuses text that
 is not strict JSON, since SQLite's parser accepts JSON5 that serde refuses;
-`json_type` tells an absent path, which takes the serde default, from a JSON
+`json_type(meta)` refuses strict JSON that is not an object (`null`, a number,
+an array), which deserializes to no `ModuleMeta` and would otherwise read every
+path as absent; `json_type(meta, path)` tells an absent path, which takes the
+serde default, from a JSON
 `null`; and `->>` yields the unquoted value, whose type is checked against the
-type text because `->>` renders a boolean as the integer `1` or `0`. The
+type text because `->>` renders a boolean as the integer `1` or `0`. The three
+functions share one parse of `meta`: the bundled SQLite keys its JSON parse
+cache on a negative auxdata slot, which every function in a statement sees. The
 Emergency95 [floor reads][floor-live] share one
 [`load_publication_floor_ordinal`][floor-accessor] closure; the wrapup epoch
-check uses [`load_revert_epoch`][epoch-accessor]; `historian_active` on
-`Reload` uses [`load_historian_phase`][phase-accessor].
+check uses [`load_revert_epoch`][epoch-accessor]; `historian_active` uses
+[`load_historian_phase`][phase-accessor] on `Reload` and on a loaded active
+phase with no live run.
 
 The [differential test][scalar-test] builds rows from a serialized default
 `meta` and shows each accessor equal to the full deserialization where that
 succeeds, and failing on its own field where the full load fails: a `null`,
 negative, textual, or boolean `revert_epoch`; a boolean floor; an unknown
-`historian.state`; JSON5; and malformed text. The recorded divergences are
-per-field versus per-row reading: a corrupt `core_state` and a sibling field's
-corruption fail only the full load; a `historian` that is not an object reads
-as an absent path, so the phase is idle where the full load refuses the row;
-and an integer above `i64::MAX`, which SQLite returns as a float, fails only the
-scalar read. Every scalar consumer runs after a full load of the same row
-succeeded in the same request or holds a value the transform already committed,
-so no consumer proceeds on a row the full load would have refused.
+`historian.state`; JSON5; malformed text; and strict JSON that is not an
+object. It also shows `load_meta` equal
+to the full load's `meta` on every row both accept, and failing on every row
+both refuse. The recorded divergences are per-column and per-field versus
+per-row reading: a corrupt `core_state` fails only the full load, so
+`load_meta` and every scalar accessor answer on such a row; a sibling field's
+corruption fails only the full load and `load_meta`; a `historian` that is not
+an object reads as an absent path, so the phase is idle where the full load
+refuses the row; and an integer above `i64::MAX`, which SQLite returns as a
+float, fails only the scalar read. A pre-transform consumer therefore proceeds
+on a row whose `core_state` is corrupt where its own full load once refused
+it; the transform's snapshot then fails that row and the pass is rejected
+before any commit, so the consumers' work on that pass is discarded. Every
+post-commit scalar consumer runs after a full load of the same row succeeded in
+the same request or holds a value the transform already committed.
 
 The [load-count test][load-count] arms the statement probe, runs a warm pass,
-then a steady pass with the interleave hook sampling the count between the
-transform commit and the post-commit load: one full load before the hook, one
-after, and no eviction of the counted handle. At the baseline the same pass ran
-the select three or four times. The [durable-phase test][phase-test] exercises
-`historian_active` on each `PassState`.
+then a steady pass with the interleave hook sampling both projections' counts
+between the transform commit and the post-commit load: one `meta` load and no
+full load before the hook, one full load and no `meta` load after, and no
+eviction of either counted handle. The counters key on the prepared statement
+text through [`CacheStateSelect`][select-probe]; the
+[counter test][counters-test] forces an eviction with a cache of one and shows
+the counter records it. At the baseline the same pass ran the full select three
+or four times. The [durable-phase test][phase-test] exercises `historian_active`
+on each `PassState`; the [timing test][timing-test] shows the bucket present and
+non-zero on a steady pass.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p memory-store --locked` passed with the differential test;
-`cargo test -p daemon --locked` passed 1012 tests with the load-count test, the
-durable-phase test, and the extended interleave test, the two
-`dreamer_run_task_bounds_*` tests failing under full-suite load on the base
+`cargo test -p memory-store --locked` passed with the differential test and the
+counter test; `cargo test -p daemon --locked` passed with the load-count test,
+the timing test, the durable-phase test, and the extended interleave test, the
+two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
 branch as well and passing in isolation.
 
-[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8109
-[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3503-L3507
-[delta]: ../../../../../crates/daemon/src/lib.rs#L4202
-[lookup]: ../../../../../crates/daemon/src/lib.rs#L4313
-[last-response]: ../../../../../crates/daemon/src/lib.rs#L4636-L4668
-[active]: ../../../../../crates/daemon/src/lib.rs#L4605-L4627
-[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8209
+[pass-load]: ../../../../../crates/daemon/src/lib.rs#L8130
+[meta-load]: ../../../../../crates/memory-store/src/lib.rs#L6672-L6684
+[meta-select]: ../../../../../crates/memory-store/src/lib.rs#L4903-L4904
+[pass-state]: ../../../../../crates/daemon/src/lib.rs#L3516-L3520
+[delta]: ../../../../../crates/daemon/src/lib.rs#L4215
+[lookup]: ../../../../../crates/daemon/src/lib.rs#L4326
+[last-response]: ../../../../../crates/daemon/src/lib.rs#L4650-L4682
+[active-live]: ../../../../../crates/daemon/src/lib.rs#L4618-L4641
+[run-transform]: ../../../../../crates/daemon/src/lib.rs#L8231
+[pass-timing]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [snapshot-live]: ../../../../../crates/daemon/src/transform.rs#L3041
-[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4679-L4680
-[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8204
-[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6434-L6449
-[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6396-L6408
-[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6414-L6428
-[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15238-L15441
-[load-count]: ../../../../../crates/daemon/src/lib.rs#L24667-L24710
-[phase-test]: ../../../../../crates/daemon/src/lib.rs#L24716-L24729
+[scalar-select]: ../../../../../crates/memory-store/src/lib.rs#L4933-L4934
+[floor-live]: ../../../../../crates/daemon/src/lib.rs#L8226-L8230
+[floor-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6772-L6787
+[epoch-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6734-L6746
+[phase-accessor]: ../../../../../crates/memory-store/src/lib.rs#L6752-L6766
+[select-probe]: ../../../../../crates/memory-store/src/lib.rs#L4908-L4924
+[scalar-test]: ../../../../../crates/memory-store/src/lib.rs#L15763-L15982
+[counters-test]: ../../../../../crates/memory-store/src/lib.rs#L15989-L16017
+[load-count]: ../../../../../crates/daemon/src/lib.rs#L24972-L25024
+[timing-test]: ../../../../../crates/daemon/src/lib.rs#L25030-L25042
+[phase-test]: ../../../../../crates/daemon/src/lib.rs#L25048-L25061

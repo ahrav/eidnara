@@ -10,7 +10,7 @@ use super::envelope::{
 use super::object_write;
 use super::redaction::{identity, record, redact};
 use super::scope::Dimension;
-use super::slice::{DecisionSpec, DecisionWriteOutcome};
+use super::slice::{APPROVAL_REVOKE_KIND, DecisionSpec, DecisionWriteOutcome};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 use crate::CachedSql;
 use crate::current_time_ms;
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "76b08f606bb595d679b2b7ec448abc71323bd63c9696379a19cdc27970392421";
+    "e37a7ed70222f80a9f3a71e74c2b77cd2320292b91197057084c998e2ffd36fb";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -1328,7 +1328,7 @@ impl Envelope<'_> {
         });
         self.changes.push(PendingChange {
             object: invalidated,
-            kind: "approval_revoke",
+            kind: APPROVAL_REVOKE_KIND,
             replaced_object_id: None,
             redactions: vec![("reason".to_string(), revocation_reason)],
             audit: Some(revocation_audit),
@@ -3119,34 +3119,39 @@ fn served_rows(
         .collect())
 }
 
-/// `served_rows` before a surface is applied.
-fn served_classes(
-    tx: &Transaction<'_>,
-    requested: i64,
-    ids: Option<&str>,
-    scope: Option<ScopeTermFilter<'_>>,
-) -> Result<Vec<ServedRow>, KernelError> {
-    // The query text embeds only constants, so it is identical on every call.
-    // A per-call `format!` would allocate a string only to hash it against the
-    // same `prepare_cached` entry every time.
-    static SQL: LazyLock<String> = LazyLock::new(|| {
-        let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
-        let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
-        let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
-        let own_history_inconsistent =
-            own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
-        // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`.
-        // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too.
-        let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
-        let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
-        // A redacted context value decodes to `Uncertain` against every exact or
-        // set term in the scope algebra, so the prefilter keeps every scope
-        // constrained on the dimension for the caller to judge.
-        let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
-        let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
-        let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
-        format!(
-            "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
+/// Whether a served-class query names its objects or covers every object at the snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdsPredicate {
+    /// `:ids` is a JSON string array and only those objects are returned.
+    Named,
+    /// Every object at the snapshot is returned.
+    All,
+}
+
+/// The served-class query text for one `ids` shape. It embeds only constants, so each shape is identical on every call.
+// policy-digest:serving-start
+fn served_classes_sql(ids: IdsPredicate) -> String {
+    let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
+    let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
+    let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
+    let own_history_inconsistent =
+        own_history_inconsistent_sql("d", "AND p.commit_seq<=:governing_as_of");
+    // A redacted exact or set value decodes to `MatchOutcome::Uncertain` in the scope algebra, so the filter keeps that row for the caller exactly as it keeps a row whose operator is not `exact` or `set`.
+    // A scope with no term on the requested dimension matches every value of it in `scope_matches`, so the filter keeps that row too.
+    let exact_redacted = crate::redaction::sql_contains_redaction_placeholder("t.exact_value");
+    let set_redacted = crate::redaction::sql_contains_redaction_placeholder("value");
+    // A redacted context value decodes to `Uncertain` against every exact or
+    // set term in the scope algebra, so the prefilter keeps every scope
+    // constrained on the dimension for the caller to judge.
+    let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
+    let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
+    let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
+    let ids_predicate = match ids {
+        IdsPredicate::Named => "AND o.object_id IN (SELECT value FROM json_each(:ids))",
+        IdsPredicate::All => "",
+    };
+    format!(
+        "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                     o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
                     d.maturity AS d_maturity,
                     d.effective_maturity AS d_effective_maturity,
@@ -3201,8 +3206,7 @@ fn served_classes(
              WHERE o.created_commit_seq<=:governing_as_of
                AND (o.invalidated_commit_seq IS NULL
                     OR :governing_as_of<o.invalidated_commit_seq)
-               AND (:ids IS NULL
-                    OR o.object_id IN (SELECT value FROM json_each(:ids)))
+               {ids_predicate}
                AND (:scope_dimension IS NULL
                     OR NOT EXISTS(
                         SELECT 1 FROM scope_term t
@@ -3219,78 +3223,102 @@ fn served_classes(
                                          WHERE value=:scope_value
                                             OR {set_redacted}))))
              ORDER BY o.object_id"
-        )
-    });
-    let mut statement = tx.prepare_cached(SQL.as_str()).map_err(map_sqlite)?;
+    )
+}
+// policy-digest:serving-end
+
+/// Returns served rows before a surface is applied.
+fn served_classes(
+    tx: &Transaction<'_>,
+    requested: i64,
+    ids: Option<&str>,
+    scope: Option<ScopeTermFilter<'_>>,
+) -> Result<Vec<ServedRow>, KernelError> {
+    // Each shape's text is identical on every call, so building it once lets `prepare_cached` hash a stable string instead of a per-call `format!`.
+    static NAMED_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::Named));
+    static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::All));
+    let sql = match ids {
+        Some(_) => NAMED_SQL.as_str(),
+        None => ALL_SQL.as_str(),
+    };
+    let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
     assert_served_columns(&statement);
+    let scope_dimension = scope.map(|scope| scope.dimension.as_str());
+    let scope_value = scope.map(|scope| scope.value);
+    // Binding a name the statement lacks is an error, and only the named shape has `:ids`.
+    let params: &[(&str, &dyn rusqlite::ToSql)] = match &ids {
+        Some(ids) => &[
+            (":governing_as_of", &requested),
+            (":ids", ids),
+            (":scope_dimension", &scope_dimension),
+            (":scope_value", &scope_value),
+        ],
+        None => &[
+            (":governing_as_of", &requested),
+            (":scope_dimension", &scope_dimension),
+            (":scope_value", &scope_value),
+        ],
+    };
     let rows = statement
-        .query_map(
-            rusqlite::named_params! {
-                ":governing_as_of": requested,
-                ":ids": ids,
-                ":scope_dimension": scope.map(|scope| scope.dimension.as_str()),
-                ":scope_value": scope.map(|scope| scope.value),
-            },
-            |row| {
-                let mut object = object_row_from(row)?;
-                let (mut own, own_sensitivity, interpretable) = decided_row(
-                    row,
-                    &OWN_DECISION_COLUMNS,
-                )?
-                .unwrap_or((VisibilityRow::AuditOnly, Sensitivity::Secret, false));
-                let mut shared = object.sensitivity;
-                // An uninterpretable or inconsistent own row forces `AuditOnly` and a `Secret` shared class: the history rows that make it so stay under any row that replaces it.
-                if !interpretable || row.get::<_, bool>(OWN_HISTORY_INCONSISTENT_COLUMN)? {
-                    own = VisibilityRow::AuditOnly;
-                    shared = Sensitivity::Secret;
+        .query_map(params, |row| {
+            let mut object = object_row_from(row)?;
+            let (mut own, own_sensitivity, interpretable) = decided_row(
+                row,
+                &OWN_DECISION_COLUMNS,
+            )?
+            .unwrap_or((VisibilityRow::AuditOnly, Sensitivity::Secret, false));
+            let mut shared = object.sensitivity;
+            // An uninterpretable or inconsistent own row forces `AuditOnly` and a `Secret` shared class: the history rows that make it so stay under any row that replaces it.
+            if !interpretable || row.get::<_, bool>(OWN_HISTORY_INCONSISTENT_COLUMN)? {
+                own = VisibilityRow::AuditOnly;
+                shared = Sensitivity::Secret;
+            }
+            // Neither scope may relax the other: a restriction on one
+            // outlives a later permissive decision on the other, so the
+            // served surface is the stricter of the two.
+            let mut lineage = None;
+            if let Some((lineage_row, lineage_sensitivity, _)) =
+                decided_row(row, &LINEAGE_DECISION_COLUMNS)?
+            {
+                lineage = Some(lineage_row);
+                shared = shared.restrictive(lineage_sensitivity);
+            }
+            shared = shared.restrictive(Sensitivity::from_stored(
+                text_column(row, HISTORY_SENSITIVITY_COLUMN)?.unwrap_or_default(),
+            ));
+            if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
+                shared = shared.restrictive(Sensitivity::from_stored(evidence_class));
+            }
+            // A decision or observation serves no lower than the evidence it
+            // cites reads today, however it was classified when written.
+            if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
+                shared = shared.restrictive(Sensitivity::from_stored(cited_class));
+            }
+            // Nor lower than the observation that admitted it and the evidence
+            // behind that observation read today.
+            let (own_trigger, lineage_trigger) = TRIGGER_SENSITIVITY_COLUMNS.split_at(2);
+            // The lineage trigger restricts every own row; the own trigger restricts only its own row.
+            for &column in lineage_trigger {
+                if let Some(trigger_class) = text_column(row, column)? {
+                    shared = shared.restrictive(Sensitivity::from_stored(trigger_class));
                 }
-                // Neither scope may relax the other: a restriction on one
-                // outlives a later permissive decision on the other, so the
-                // served surface is the stricter of the two.
-                let mut lineage = None;
-                if let Some((lineage_row, lineage_sensitivity, _)) =
-                    decided_row(row, &LINEAGE_DECISION_COLUMNS)?
-                {
-                    lineage = Some(lineage_row);
-                    shared = shared.restrictive(lineage_sensitivity);
+            }
+            let mut own_fold = own_sensitivity;
+            for &column in own_trigger {
+                if let Some(trigger_class) = text_column(row, column)? {
+                    own_fold = own_fold.restrictive(Sensitivity::from_stored(trigger_class));
                 }
-                shared = shared.restrictive(Sensitivity::from_stored(
-                    text_column(row, HISTORY_SENSITIVITY_COLUMN)?.unwrap_or_default(),
-                ));
-                if let Some(evidence_class) = text_column(row, EVIDENCE_SENSITIVITY_COLUMN)? {
-                    shared = shared.restrictive(Sensitivity::from_stored(evidence_class));
-                }
-                // A decision or observation serves no lower than the evidence it
-                // cites reads today, however it was classified when written.
-                if let Some(cited_class) = text_column(row, CITED_EVIDENCE_SENSITIVITY_COLUMN)? {
-                    shared = shared.restrictive(Sensitivity::from_stored(cited_class));
-                }
-                // Nor lower than the observation that admitted it and the evidence
-                // behind that observation read today.
-                let (own_trigger, lineage_trigger) = TRIGGER_SENSITIVITY_COLUMNS.split_at(2);
-                // The lineage trigger restricts every own row; the own trigger restricts only its own row.
-                for &column in lineage_trigger {
-                    if let Some(trigger_class) = text_column(row, column)? {
-                        shared = shared.restrictive(Sensitivity::from_stored(trigger_class));
-                    }
-                }
-                let mut own_fold = own_sensitivity;
-                for &column in own_trigger {
-                    if let Some(trigger_class) = text_column(row, column)? {
-                        own_fold = own_fold.restrictive(Sensitivity::from_stored(trigger_class));
-                    }
-                }
-                object.sensitivity = shared.restrictive(own_fold);
-                let scope_id = row.get::<_, Option<String>>(SCOPE_ID_COLUMN)?;
-                Ok(ServedRow {
-                    object,
-                    scope_id,
-                    own,
-                    lineage,
-                    shared_sensitivity: shared,
-                })
-            },
-        )
+            }
+            object.sensitivity = shared.restrictive(own_fold);
+            let scope_id = row.get::<_, Option<String>>(SCOPE_ID_COLUMN)?;
+            Ok(ServedRow {
+                object,
+                scope_id,
+                own,
+                lineage,
+                shared_sensitivity: shared,
+            })
+        })
         .map_err(map_sqlite)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(map_sqlite)?;
@@ -5117,5 +5145,44 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(policy));
         assert_eq!(POLICY_REVISION, 1);
         assert_eq!(digest, REVISION_1_SOURCE_DIGEST);
+    }
+
+    /// Named object lookups must seek the append-only registry; a scan grows with every registered object.
+    #[test]
+    fn served_classes_for_named_ids_seek_the_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        KernelStore::open(directory.path()).unwrap();
+        let connection = rusqlite::Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                served_classes_sql(IdsPredicate::Named)
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::named_params! {
+                    ":governing_as_of": 1_i64,
+                    ":ids": r#"["object"]"#,
+                    ":scope_dimension": Option::<&str>::None,
+                    ":scope_value": Option::<&str>::None,
+                },
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let registry = plan
+            .iter()
+            .find(|step| step.contains(" o ") || step.ends_with(" o"))
+            .unwrap_or_else(|| panic!("no plan step for object_registry o in {plan:?}"));
+        assert!(
+            registry.starts_with("SEARCH o USING") && registry.contains("object_id=?"),
+            "expected an object_id seek on object_registry, planner chose: {registry}"
+        );
     }
 }

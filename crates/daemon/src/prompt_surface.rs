@@ -78,7 +78,7 @@ pub const PROMPT_SURFACE_TOOL_IDS: [&str; 5] = [
 ];
 
 /// Authored prompt and description set selected for a session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptSurfacePreset {
     #[default]
@@ -92,6 +92,73 @@ impl PromptSurfacePreset {
             Self::Full => "full",
             Self::Light => "light",
         }
+    }
+
+    const NAMES: [&'static str; 2] = ["full", "light"];
+
+    fn from_name<E: serde::de::Error>(name: &str) -> Result<Self, E> {
+        match name {
+            "full" => Ok(Self::Full),
+            "light" => Ok(Self::Light),
+            other => Err(E::unknown_variant(other, &Self::NAMES)),
+        }
+    }
+}
+
+/// The custom deserializer preserves serde's `"light"` and `{"light":null}` forms.
+impl<'de> Deserialize<'de> for PromptSurfacePreset {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, MapAccess, Visitor};
+
+        struct Name(PromptSurfacePreset);
+
+        impl<'de> Deserialize<'de> for Name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct NameVisitor;
+
+                impl Visitor<'_> for NameVisitor {
+                    type Value = Name;
+
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        formatter.write_str("`full` or `light`")
+                    }
+
+                    fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+                        PromptSurfacePreset::from_name(value).map(Name)
+                    }
+                }
+
+                deserializer.deserialize_str(NameVisitor)
+            }
+        }
+
+        struct PresetVisitor;
+
+        impl<'de> Visitor<'de> for PresetVisitor {
+            type Value = PromptSurfacePreset;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter
+                    .write_str("`full` or `light`, as a string or as an object with a null value")
+            }
+
+            fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+                PromptSurfacePreset::from_name(value)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let Some(Name(preset)) = map.next_key()? else {
+                    return Err(A::Error::invalid_length(0, &self));
+                };
+                map.next_value::<()>()?;
+                if map.next_key::<IgnoredAny>()?.is_some() {
+                    return Err(A::Error::invalid_length(2, &self));
+                }
+                Ok(preset)
+            }
+        }
+
+        deserializer.deserialize_any(PresetVisitor)
     }
 }
 
@@ -338,6 +405,33 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hand-written decode accepts exactly what the derive accepted: a variant name as a
+    /// string or as the only key of an object whose value is `null`.
+    #[test]
+    fn preset_decodes_the_string_and_object_forms_and_refuses_the_rest() {
+        let parse = |body: &str| serde_json::from_str::<PromptSurfacePreset>(body);
+        assert_eq!(parse(r#""full""#).unwrap(), PromptSurfacePreset::Full);
+        assert_eq!(
+            parse(r#"{"light":null}"#).unwrap(),
+            PromptSurfacePreset::Light
+        );
+        for refused in [
+            r#""dark""#,
+            r#"{"dark":null}"#,
+            r#"{"light":1}"#,
+            r#"{"light":null,"full":null}"#,
+            r#"{}"#,
+            "1",
+            "null",
+        ] {
+            assert!(parse(refused).is_err(), "{refused}");
+        }
+        assert_eq!(
+            serde_json::to_string(&PromptSurfacePreset::Light).unwrap(),
+            r#""light""#
+        );
+    }
 
     /// `module_tools` and `TOOL_LIGHT_DESCRIPTIONS` re-spell the tool names
     /// that `PROMPT_SURFACE_TOOL_IDS` declares; a mismatch would silently drop

@@ -119,15 +119,15 @@ arrives needs a barrier inside the handler that the fixture does not expose.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p daemon --locked` passed 1018 tests including the two above.
+`cargo test -p daemon --locked` passed 1024 tests including the two above.
 
-[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L131-L138
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L269
-[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L110-L117
-[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L180-L185
-[count]: ../../../../../crates/daemon/src/metered_decode.rs#L124-L126
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19804-L19852
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19857-L19908
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L134-L142
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L227-L287
+[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L113-L120
+[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L185-L190
+[count]: ../../../../../crates/daemon/src/metered_decode.rs#L127-L129
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20119-L20167
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20229-L20277
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [footprint]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15427-L15455

@@ -16,11 +16,11 @@ a pass lands in while every H record still passes.
 
 ## Evidence trail
 
-- The SOFT arm at [`PassPlan::Soft`][soft-arm] calls [`compose_m1`][m1-compose]
+- The SOFT arm at [`PassPlan::Soft`][soft-arm] calls [`compose_m160-237`][m1-compose]
   with [`cached_estimate_tokens`][soft-m1-compose] as its estimator; that
   estimator is used only for user-profile trimming
-  ([`m1_compose.rs:196-202`][m1-trim]).
-- The predicate at [`:4298-4316`][soft-predicate]: `m0_tokens` is
+  ([`m1_compose.rs:194-208`][m1-trim]).
+- The predicate at [`:4309-4327`][soft-predicate]: `m0_tokens` is
   `tokenizer::estimate_tokens(&unit.frozen_payload)` for the frozen unit with
   key `m0`, or `0` when none exists; `m1_has_content` is `m1.body !=
   M1_PLACEHOLDER`; `m1_tokens` is `tokenizer::estimate_tokens(&m1.body)`
@@ -34,18 +34,18 @@ a pass lands in while every H record still passes.
   [`compose_m0_for_context`][refold-branch] with the injected estimator; the
   parent's [H2][h2] names that as the "pressure refold" boundary distinct from
   an ordinary SOFT.
-- [`M1_PLACEHOLDER`][placeholder] is the string [`assemble_m1`][assemble]
+- [`M1_PLACEHOLDER`][placeholder] is the string [`assemble_m206-231`][assemble]
   returns when every m1 piece is empty, so `m1_has_content` is exactly "some
   compartment, profile, or note block rendered".
 - `history_budget_tokens` reaches the predicate from the handler's
-  `ProducerContext` at [`lib.rs:8156-8159`][budget-filter], which admits only
+  `ProducerContext` at [`lib.rs:8239-8242`][budget-filter], which admits only
   finite values `>= 0.0` from the request and falls back to the bound
   budget; a zero budget disables the second disjunct through the
   `> 0.0` guard.
-- [`compose_m1`][m1-compose] returns `memory_update_count: 0`
+- [`compose_m160-237`][m1-compose] returns `memory_update_count: 0`
   unconditionally at [`:231`][m1-count-zero]; the field has no other writer
   in the workspace.
-- The comment at [`transform.rs:1857-1859`][hard-only-doc] says the injected
+- The comment at [`transform.rs:1868-1870`][hard-only-doc] says the injected
   estimator is HARD-only; it does not describe these two direct calls.
 
 ## Failure scenario
@@ -81,7 +81,7 @@ constructed `M1Composition` until a writer for `memory_update_count` exists.
 
 ### Q: Are the constants 40, 0.20, 0.15, and 500 a contract or tuning?
 
-- Sources examined: [`:4310-4316`][soft-predicate], the transform catalog's
+- Sources examined: [`:4309-4327`][soft-predicate], the transform catalog's
   history records ([H1][h1], [H2][h2]), `docs/` for the constants.
 - Findings: The constants appear only in the predicate; no document names
   them. A frozen reference pins them either way.
@@ -122,18 +122,18 @@ tests cover an absent m0, a placeholder, empty content, and warm cache hits.
 The update-count source question is resolved by retirement, not by inventing
 a writer or treating an unreachable condition as covered.
 
-[soft-arm]: ../../../../../crates/daemon/src/transform.rs#L4284-L4297
-[soft-m1-compose]: ../../../../../crates/daemon/src/transform.rs#L4295
-[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
-[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4298-L4316
-[refold-branch]: ../../../../../crates/daemon/src/transform.rs#L4317-L4344
-[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1857-L1859
+[soft-arm]: ../../../../../crates/daemon/src/transform.rs#L4295-L4308
+[soft-m1-compose]: ../../../../../crates/daemon/src/transform.rs#L4306
+[soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4309-L4320
+[soft-predicate]: ../../../../../crates/daemon/src/transform.rs#L4309-L4327
+[refold-branch]: ../../../../../crates/daemon/src/transform.rs#L4328-L4355
+[hard-only-doc]: ../../../../../crates/daemon/src/transform.rs#L1868-L1870
 [m1-struct]: ../../../../../crates/daemon/src/m1_compose.rs#L92-L101
 [m1-compose]: ../../../../../crates/daemon/src/m1_compose.rs#L160-L237
 [m1-trim]: ../../../../../crates/daemon/src/m1_compose.rs#L194-L208
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
 [assemble]: ../../../../../crates/daemon/src/memory_render.rs#L206-L231
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8156-L8159
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8248-L8251
 [h1]: ../../catalog.md#history-budget-selection-preserves-reference-bytes
 [h2]: ../../catalog.md#history-budget-boundaries-remain-distinct

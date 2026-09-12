@@ -110,7 +110,7 @@ because the decoded type exposes no copy count.
 
 - Sources examined: the [page apply][pageapply] call into
   `handle_transform_unpaged_value`, the [512 KiB page cap][hostpagecheck], and
-  the staging constants at [`:735-736`][hostpage] (128 MiB staged maximum).
+  the staging constants at [`:742-743`][hostpage] (128 MiB staged maximum).
 - Findings: The assembled `Value` reaches the typed decode with the per-page
   reservation history only; no `value_footprint_bound` runs on the whole.
 - Missing evidence: A statement of which budget covers the assembled tree.
@@ -134,10 +134,17 @@ that precede it on the branch.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/436)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
-The byte pre-scan is gone. [`Handler::handle`][handle-live] runs the byte cap,
-then creates a [`ResidentMeter`][meter] over the request's scratch reserve and
-hands it to [`dispatch_body`][dispatch-body], where every decode of the body,
-typed or tree, runs through [`decode_metered`][decode]. The meter's
+The byte pre-scan no longer reserves. [`Handler::handle`][handle-live] runs the
+byte cap, then creates a [`ResidentMeter`][meter] over the request's scratch
+reserve and hands it to [`dispatch_body`][dispatch-body]. There a
+[byte-derived floor][floor] refuses, before either decode and with no charge
+taken, every body whose value count alone proves its footprint exceeds the
+capacity: the scan counts one value per opening quote, `[`, `{`, number start,
+or literal start outside a string, which for well-formed JSON is the count the
+meter visits, and leaves string bytes out, so the floor never exceeds the
+decoded footprint and refuses no body the meter would admit; a body too short
+to reach the capacity is not scanned. Every decode of the body, typed or tree,
+then runs through [`decode_metered`][decode]. The meter's
 [visitor][visitor] wraps the one the decode supplies: each value the
 deserializer hands to a visitor, object keys included, adds one node charge,
 each string adds its length times the retained-copy count, and the fixed
@@ -147,10 +154,12 @@ separators. A value a derived struct ignores is [skipped through the
 meter][ignored] rather than through serde_json's own skip, so its contents are
 counted and depth-checked; the two lanes therefore count one footprint for the
 same bytes and refuse the same bodies. The meter [charges the reserve][need]
-as the footprint grows, in steps of [at least one mebibyte][step], or the whole
-shortfall when that is larger, trimmed to the capacity, and retries the exact
-shortfall when a whole step is not free, so the admission decision is the exact
-amount and the step is only batching. A
+as the footprint grows, in batches: a batch is the footprint reached so far
+until that reaches [one mebibyte][step], then one mebibyte, trimmed to the
+capacity, so a small body holds at most twice its footprint and a large one
+pays one acquisition per mebibyte; a batch the pool cannot grant is halved
+toward the exact shortfall, which is the admission decision, so a nearly
+drained pool is taken in a few acquisitions rather than one per value. A
 footprint above the capacity is refused without asking the pool for more; a
 footprint that fits but finds the pool held is refused as transient. The decode
 stops at that visit, and a refused decode [releases][release] every held byte at
@@ -162,18 +171,23 @@ the single charge was.
 Two costs follow from charging inside the decode rather than before it, and
 the module documents both. A body whose footprint exceeds the capacity holds
 pool bytes for the values it built until the footprint crosses the capacity,
-so a doomed decode occupies the pool for the length of its failing parse, where
-the pre-scan refused it before decoding; the byte cap bounds that parse to one
-transform body. And serde_json unescapes a string into its scratch buffer
-before the visitor sees it, so an escaped string is allocated once, up to the
-body's length, before its charge is taken; the buffer is reused across strings.
+so a doomed decode that reaches the pool occupies it for the length of its
+failing parse, where the pre-scan refused it before decoding. The floor
+refuses every such body whose value count proves the excess, so a doomed
+decode that reaches the pool owes its excess to string bytes, which the byte
+cap bounds to three copies of one transform body; a body of scalars cannot
+reach it. And serde_json unescapes a string into its scratch buffer before the
+visitor sees it, so an escaped string is allocated once, up to the body's
+length, before its charge is taken; the buffer is reused across strings.
 
 The refusal codes are the ones the pre-scan produced.
 [`resident_refusal`][refusal-live] maps a permanent refusal to
-[`request_too_large_error`][toolarge-live] and classes a transient one by the
-body's whole footprint [counted without charging][footprint-of], after the
-refused decode released its bytes: above the capacity it is too large,
-otherwise [`resident_capacity_error`][queuefull-live]. The refusal returns from
+[`request_too_large_error`][toolarge-live] and classes a transient one by
+[counting the body against the capacity][exceeds] without charging, after the
+refused decode released its bytes; the count stops at the value that crosses
+the capacity, so a body far above it is not parsed to its end. Above the
+capacity it is too large, otherwise
+[`resident_capacity_error`][queuefull-live]. The refusal returns from
 `dispatch_body` in the lane that saw it, before any dispatch: no
 `TransformDispatchTicket`, no `transform_route_channels` entry, no prompt
 freeze, page staging, or store row. A transform body the typed decode cannot
@@ -181,12 +195,22 @@ decode falls to the tree decode with the meter restarted, so the bytes the
 failed decode held cover the tree decode before it charges more; a refusal
 does not fall through.
 
-The one behavior that moves: the pre-scan bounded a body before it was parsed,
-so a malformed body with enough separators was refused as too large; the meter
-counts parsed values, so a malformed body is refused by the tree decode as
-`unrecognized_request_shape` unless the footprint of its well-formed prefix
-crosses the capacity first. Every body over 1 MiB is still gated by the byte
-cap before either applies.
+Two behaviors move; the error literals stay. The pre-scan bounded a body
+before it was parsed, so a malformed body with enough separators was refused
+as too large. The floor keeps that outcome for a malformed body whose value
+count alone exceeds the capacity; a malformed body under the floor is refused
+by the tree decode as `unrecognized_request_shape` unless the footprint of its
+well-formed prefix crosses the capacity first. And the admitted set of
+well-formed bodies changes at the capacity boundary: the pre-scan counted
+`1 + commas + colons` nodes, while the meter and the floor count every value,
+container openings included, so a body dense in nested containers is charged
+more than the scan estimated. A 4 MB body holding 800,000 `[[]]` elements
+under an ignored field estimated about 102 MB of nodes under the scan and
+counts about 205 MB under the meter, so against a free default scratch pool
+of about 185 MB the scan admitted it and the meter refuses it as too large.
+The scan under-counted such a body's `Value` tree; the meter's count is the
+one the [peak test][t-peak] holds against the allocator. Every body over
+1 MiB is still gated by the byte cap before either applies.
 
 The [footprint test][t-footprint] shows separators inside strings not counted
 as values, a large text block charged for three copies, a scalar-dense body
@@ -194,57 +218,122 @@ far above its wire size with string bytes not charged as values, and a cut
 body counting its decoded part. The [meter test][t-meter] shows a fitting
 decode holding at least its footprint and less than two steps more, a
 footprint above the capacity refused as permanent with every byte released,
-and a restarted meter reusing held bytes. The [lane test][t-lanes] runs every
+and a restarted meter reusing held bytes. The [small-body test][t-small] shows
+a body under one mebibyte holding at most twice its footprint, and the
+[acquisition test][t-acquire] shows a body decoded against a pool with less
+than a batch free refused as transient in under a hundred reservation attempts.
+The [count test][t-count] shows the capacity-bound count stopping within one
+node of the capacity and agreeing with the footprint on either side of it. The
+[floor test][t-floor] shows the floor equal to the footprint on string-free
+bodies, including nesting to the depth limit, equal to the footprint less the
+retained string copies on a body with strings, and the floor refusal agreeing
+with the footprint on either side of the capacity; the [corpus floor
+test][t-floor-corpus] shows the floor at most the footprint for every
+well-formed corpus body. The [doomed body test][t-doomed] runs a paged and an
+unpaged body of two hundred thousand values through `dispatch_body` against a
+pool of half their footprint and shows the too-large refusal with the pool
+never asked and no value counted. The [lane test][t-lanes] runs every
 corpus body, one with twenty thousand values under an ignored field among
 them, through both lanes with a pool one byte short of its footprint and with
 a pool that just fits, and shows one outcome, one counted footprint, and the
 too-large refusal on the short pool. The [drained-pool test][t-drain] is the
 A3 witness. The [effect test][t-effect] runs a permanent and a transient
-refusal through `dispatch_body` and shows the dispatch health counters, the
-route channel, and the store row untouched, then the same body served with
-room. The [ring test][t-ring] sends, through the direct-host fixture to
+refusal through `dispatch_body` and shows the handler's route table without the
+tested route and the store row absent, checked directly rather than through
+the process-wide dispatch counters other tests move or a session helper that
+returns before it reads the route table, then the same body served with room
+and only then the route bound. The direct lane's [object-form preset][t-lanes]
+corpus body, `{"light":null}` for a unit variant, is decoded through a
+[hand-written visitor][preset] so the meter sees the object and its `null`;
+the derive's `deserialize_enum` path handed serde_json the `null` unmetered and
+the direct lane counted two nodes fewer than the tree for it. The [ring test][t-ring] sends, through the direct-host fixture to
 `Handler::handle`, a body over the facade cap, one over the transform cap, and
 two under both caps whose two million values exceed the scratch pool, one
-carrying a page key so the tree decode refuses it and one complete unpaged
-request refused by the direct decode; each ends in one `host.invalid_params`
-terminal, the session's `status` then shows no `pass_trace` and no
-`row_version`, and a transform on the same route is served and counted once.
+carrying a page key and one a complete unpaged request, both refused from
+their bytes before either decode, so neither metered decode's refusal or
+charge release runs at ring level; each request ends in a
+`host.invalid_params` error at the managed client, which settles on the first
+terminal it correlates and drops a later one, so the test observes one error,
+not that exactly one terminal was published; the session's `status` then shows
+no `pass_trace` and no `row_version`, and a transform on the same route is
+served and counted once.
 The [peak test][t-peak] shows the footprint covering the tree decode's heap
 peak on the dense native corpus, the direct decode's peak at or below it, and
 the direct lane's own metered count covering its peak with the values under an
 ignored field.
 
+### Merge with the typed-transform-decode base, 2026-09-12
+
+The base branch closed two review findings against the pre-scan after this
+branch replaced it, and the merge carries both into the meter. The direct
+decode keeps serde_json's unescape scratch buffer beside the retained copies
+until it returns, so a body holding one escaped 4 MiB text block peaked at four
+copies against a three-copy charge; the meter now charges that buffer's
+growth, [`UNESCAPE_SCRATCH_SLACK`][scratch] times the longest escaped string,
+in the [`visit_str` path][escaped] serde_json takes for a string it unescaped,
+so the [escaped peak test][t-peak-escaped] passes against `footprint_of`
+(before the term it failed at `4194304 text bytes (escaped: true) peaked at
+16782827 bytes during the direct decode but the parse charge reserved only
+12590737`). The byte cap now [probes only the bodies it must classify][bytecap-live]
+and returns that probe; a body at or under 1 MiB is probed after the cap, so
+the [allocation test][t-cap-alloc] holds with no reservation to order against.
+The base also gates the direct lane on a [tree-parse walk][witness] that
+refuses the raw-value token at every key; the merged
+[`dispatch_body`][dispatch-body] runs it after the byte-derived floor and
+before the metered typed decode, unmetered, so its scratch buffer is bounded by
+the byte cap like the probe's. The count-only [`SkippedValue`][skipped-live]
+behind `footprint_of` reads a leading token as the `Value` parse does (one
+string, then the object must end) so the oracle stops where the tree decode
+stops; the [oracle test][t-footprint-oracle] pins that on seven shapes, and the
+lane test holds over the nine raw-value corpus bodies.
+
 ### Focused execution, 2026-09-12
 
-`cargo test -p daemon --locked` passed 1018 tests including the five above, the
-two `dreamer_run_task_bounds_*` tests failing under full-suite load on the base
-branch as well and passing in isolation;
+`cargo test -p daemon --locked` passed 1024 tests including the eleven above,
+the two `dreamer_run_task_bounds_*` tests failing under full-suite load on the
+base branch as well and passing in isolation;
 `cargo test -p daemon --locked --features direct-host-fixture --test direct_host`
 passed 7 including the ring test;
 `cargo test -p daemon --locked --features test-support --test parse_charge_covers_typed_decode`
 passed.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11898-L11913
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12653-L12687
-[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15710-L15716
-[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15718-L15723
-[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15725-L15730
-[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L131-L138
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L269
-[release]: ../../../../../crates/daemon/src/metered_decode.rs#L196-L202
-[decode]: ../../../../../crates/daemon/src/metered_decode.rs#L292-L312
-[footprint-of]: ../../../../../crates/daemon/src/metered_decode.rs#L316-L320
-[visitor]: ../../../../../crates/daemon/src/metered_decode.rs#L561-L666
-[ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L440-L446
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11921-L11936
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12676-L12716
+[refusal-live]: ../../../../../crates/daemon/src/lib.rs#L15814-L15822
+[toolarge-live]: ../../../../../crates/daemon/src/lib.rs#L15830-L15835
+[queuefull-live]: ../../../../../crates/daemon/src/lib.rs#L15837-L15842
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L134-L142
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L227-L287
+[release]: ../../../../../crates/daemon/src/metered_decode.rs#L202-L208
+[decode]: ../../../../../crates/daemon/src/metered_decode.rs#L310-L330
+[exceeds]: ../../../../../crates/daemon/src/metered_decode.rs#L343-L353
+[floor]: ../../../../../crates/daemon/src/metered_decode.rs#L355-L416
+[visitor]: ../../../../../crates/daemon/src/metered_decode.rs#L729-L838
+[ignored]: ../../../../../crates/daemon/src/metered_decode.rs#L608-L614
 [constants]: ../../../../../crates/daemon/src/metered_decode.rs#L57
 [step]: ../../../../../crates/daemon/src/metered_decode.rs#L65
-[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19725-L19759
-[t-meter]: ../../../../../crates/daemon/src/lib.rs#L19765-L19798
-[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19639-L19685
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19804-L19852
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19857-L19908
-[t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L563
-[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
+[t-footprint]: ../../../../../crates/daemon/src/lib.rs#L19985-L20020
+[t-meter]: ../../../../../crates/daemon/src/lib.rs#L20026-L20059
+[t-small]: ../../../../../crates/daemon/src/lib.rs#L20063-L20080
+[t-acquire]: ../../../../../crates/daemon/src/lib.rs#L20085-L20113
+[t-count]: ../../../../../crates/daemon/src/metered_decode.rs#L1001-L1029
+[t-floor]: ../../../../../crates/daemon/src/metered_decode.rs#L1054-L1092
+[t-floor-corpus]: ../../../../../crates/daemon/src/lib.rs#L20212-L20224
+[t-doomed]: ../../../../../crates/daemon/src/lib.rs#L20172-L20207
+[t-lanes]: ../../../../../crates/daemon/src/lib.rs#L19892-L19938
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20119-L20167
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20229-L20277
+[t-ring]: ../../../../../crates/daemon/tests/direct_host.rs#L437-L558
+[t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
+[preset]: ../../../../../crates/daemon/src/prompt_surface.rs#L108-L163
+[t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
+[t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222
+[t-footprint-oracle]: ../../../../../crates/daemon/src/metered_decode.rs#L1031-L1052
+[scratch]: ../../../../../crates/daemon/src/metered_decode.rs#L59-L60
+[escaped]: ../../../../../crates/daemon/src/metered_decode.rs#L753-L760
+[skipped-live]: ../../../../../crates/daemon/src/metered_decode.rs#L418-L547
+[bytecap-live]: ../../../../../crates/daemon/src/lib.rs#L15844-L15867
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15511-L15514
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [bytecap]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15472-L15488
