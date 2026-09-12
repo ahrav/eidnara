@@ -4812,6 +4812,24 @@ const CACHE_STATE_META_SELECT: &str =
     "SELECT row_version, meta FROM cache_state WHERE session_id = ?1";
 const CACHE_STATE_FULL_SELECT: &str =
     "SELECT row_version, core_state, meta FROM cache_state WHERE session_id = ?1";
+
+/// Which `cache_state` row projection a statement-probe counter names.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheStateSelect {
+    Meta,
+    Full,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl CacheStateSelect {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Meta => CACHE_STATE_META_SELECT,
+            Self::Full => CACHE_STATE_FULL_SELECT,
+        }
+    }
+}
 /// One `meta` field by SQL JSON extraction. `json_valid(meta, 1)` is the strict RFC 8259
 /// check: SQLite's parser accepts JSON5 that serde refuses, so a lenient parse must not
 /// stand in for the full load's failure. `json_type` distinguishes an absent path (SQL NULL,
@@ -5567,13 +5585,23 @@ impl MemoryStore {
         self.inner.statement_evictions()
     }
 
-    /// How many times the connection has run the full `cache_state` row select through the
-    /// statement cache on the handle the probe observed; a pass's full loads add to it.
+    /// How many times the connection has run `select` through the statement cache.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn cache_state_full_load_runs(&self) -> i32 {
+    pub fn cache_state_load_runs(&self, select: CacheStateSelect) -> i32 {
         self.inner
             .statement_runs()
-            .get(CACHE_STATE_FULL_SELECT.trim())
+            .get(select.sql().trim())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many times the statement cache re-created the `select` handle after it had run;
+    /// zero means [`Self::cache_state_load_runs`] counted one handle.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cache_state_load_evictions(&self, select: CacheStateSelect) -> u32 {
+        self.inner
+            .statement_evictions()
+            .get(select.sql().trim())
             .copied()
             .unwrap_or(0)
     }
@@ -6540,6 +6568,23 @@ impl MemoryStore {
                     .map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
                 row_version: Some(rv),
             }),
+        }
+    }
+
+    /// Returns default metadata for an absent row; invalid `meta` JSON returns
+    /// [`MemoryStoreError::Serde`]. `core_state` is neither read nor validated, so a row
+    /// whose core is corrupt still answers here where [`Self::load`] fails.
+    pub fn load_meta(&self, session_id: &str) -> Result<ModuleMeta, MemoryStoreError> {
+        let meta_json = self.inner.with_conn(|conn| {
+            conn.prepare_cached(CACHE_STATE_META_SELECT)?
+                .query_row(params![session_id], |r| r.get::<_, String>(1))
+                .optional()
+        })?;
+        match meta_json {
+            None => Ok(ModuleMeta::default()),
+            Some(meta_json) => {
+                serde_json::from_str(&meta_json).map_err(|e| MemoryStoreError::Serde(e.to_string()))
+            }
         }
     }
 
@@ -15643,9 +15688,23 @@ mod tests {
         for (session, _, _) in &rows {
             let session = *session;
             let full = store.load(session);
+            let meta = store.load_meta(session);
             let epoch = store.load_revert_epoch(session);
             let phase = store.load_historian_phase(session);
             let floor = store.load_publication_floor_ordinal(session);
+            // The meta-only load succeeds for `core-malformed` because it does not
+            // deserialize `core_state`; every other row decides both loads alike.
+            match (&full, &meta) {
+                (Ok(loaded), Ok(meta)) => assert_eq!(*meta, loaded.meta, "{session}"),
+                (Err(_), Err(_)) => {}
+                (Err(_), Ok(meta)) if session == "core-malformed" => {
+                    assert_eq!(
+                        meta.revert_epoch, 3,
+                        "{session}: meta does not touch core_state"
+                    );
+                }
+                (full, meta) => panic!("{session}: full {full:?} vs meta {meta:?}"),
+            }
             if session == "epoch-above-i64" {
                 // SQLite returns the integer as a float, so only the scalar read refuses it.
                 assert!(full.is_ok() && epoch.is_err(), "{session}: {epoch:?}");
@@ -15707,6 +15766,41 @@ mod tests {
         assert_eq!(
             store.load_publication_floor_ordinal("never-seen").unwrap(),
             never_seen.meta.publication_floor_ordinal
+        );
+    }
+
+    /// A cache that fits its working set re-creates no full-select handle; a cache of one,
+    /// alternating the full select with another cached statement, re-creates it before its
+    /// second run. The resize precedes the probe because leaving the maintenance path
+    /// flushes the cache.
+    #[test]
+    fn cache_state_full_load_counters_key_on_the_prepared_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .inner
+            .with_conn_unfenced(|conn| {
+                conn.set_prepared_statement_cache_capacity(1);
+                Ok(())
+            })
+            .unwrap();
+        store.start_statement_reuse_probe();
+        store.load("ses").unwrap();
+        store.load("ses").unwrap();
+        assert_eq!(store.cache_state_load_runs(CacheStateSelect::Full), 2);
+        assert_eq!(
+            store.cache_state_load_evictions(CacheStateSelect::Full),
+            0,
+            "one statement fits a cache of one"
+        );
+
+        store.load_meta("ses").unwrap();
+        store.load("ses").unwrap();
+        assert_eq!(store.cache_state_load_runs(CacheStateSelect::Meta), 1);
+        assert_eq!(
+            store.cache_state_load_evictions(CacheStateSelect::Full),
+            1,
+            "the cache of one re-created the full select between its runs"
         );
     }
 

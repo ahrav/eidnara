@@ -691,19 +691,23 @@ Exercised: partial - The no-fire CAS test and the emergency interleave test
 exercise the post-commit load. The
 [memory-store differential test](evidence/consolidated-cache-state-reads-match-per-consumer-loads.md#single-load-evidence)
 compares the `revert_epoch`, `historian.state`, and
-`publication_floor_ordinal` scalar reads with `MemoryStore::load` over absent
-keys, JSON `null`, booleans, unknown variants, negative and textual epochs, a
-non-object `historian`, JSON5, and malformed `meta`; the daemon load-count test
-shows one pre-transform full load and one post-commit full load per steady
-pass, split by the interleave hook; the durable-phase test exercises
-`historian_active` on every `PassState`.
+`publication_floor_ordinal` scalar reads and the `meta`-only load with
+`MemoryStore::load` over absent keys, JSON `null`, booleans, unknown variants,
+negative and textual epochs, a non-object `historian`, JSON5, malformed `meta`,
+and malformed `core_state`; the daemon load-count test shows one pre-transform
+`meta` load, no pre-transform full load, and one post-commit full load per
+steady pass, split by the interleave hook, on handles the probe shows were
+never re-created; the durable-phase test exercises `historian_active` on every
+`PassState`.
 Guarantee: Consolidating or narrowing `cache_state` loads never changes what
 any consumer observes: a post-commit consumer sees its own commit, and a
-scalar projection decodes its field as the full load does and fails where the
-full load fails on that field; the per-field divergences (a corrupt
-`core_state`, a corrupt sibling field, a non-object ancestor, an integer above
-`i64::MAX`) are recorded in the evidence and no consumer proceeds on a row the
-full load would have refused.
+scalar or `meta`-only projection decodes its field as the full load does and
+fails where the full load fails on that field; the per-column and per-field
+divergences (a corrupt `core_state`, a corrupt sibling field, a non-object
+ancestor, an integer above `i64::MAX`) are recorded in the evidence, and a
+pre-transform consumer that proceeds on a row whose `core_state` the full load
+refuses does so only in a pass the transform's own snapshot then rejects before
+any commit.
 Check: `always` - Freshness: within one pass, every `cache_state` read that
 executes after `commit_transform`, [`descend_lineage`][descend],
 [`truncate_compartments_for_revert`][truncate], or an awaited historian
@@ -906,12 +910,13 @@ at [`commit_transform`][commit-meta], the stored bytes are either
 byte-identical to `serde_json::to_string(meta)` when no substitution occurred
 (the [unchanged-input branch][clean-branch]) or the serialization of the
 redacted tree; a duplicate object name at any depth refuses the write; every
-object key is bound-checked and scanned ([`validate_json_keys`][keys]); a
-detected value under an identity or integrity key refuses; a protected key
-with a container value refuses; a protected scalar substitutes and records a
-detection ([`record_observed_scan`][record-scan]); and the recorded scan for
-field `meta` carries the same detections as the walk observed. `always`
-because every committing pass runs this path.
+object key is bound-checked and scanned, in the [object arm][walk-keys] of
+the walk for containers it descends and by [`validate_json_keys`][keys] for a
+subtree it judges whole; a detected value under an identity or integrity key
+refuses; a protected key with a container value refuses; a protected scalar
+substitutes and records a detection ([`record_observed_scan`][record-scan]);
+and the recorded scan for field `meta` carries the same detections as the
+walk observed. `always` because every committing pass runs this path.
 Fault/timing angle: A single-pass redaction streams input and returns the
 original bytes for an unchanged prefix while a later duplicate name shadows
 an earlier value, which is the bypass the [comment][unique-doc] on
@@ -924,12 +929,13 @@ level and nested; a secret in a `BTreeMap` key such as
 object; a clean `meta` compared byte-for-byte with the stored column.
 Confidence: high - [Evidence](evidence/meta-json-preparation-scans-every-persisted-byte.md).
 The [policy][policy], [`prepare_json_content_collecting`][prepare-collecting],
+[`prepare_json_content_single_pass`][single-pass],
 [`prepare_value`][prepare-value], and the clean branch are source-verified;
 every reader deserializes and the transform compares values
 ([`next_meta != loaded.meta`][value-compare]), so no reader depends on byte
 form.
 Existing check: [State checks](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list five preparation tests; the canonical policy records are
+list eight preparation tests; the canonical policy records are
 [preserved-identity-name-does-not-exempt-its-value][ms-preserved] and
 [refused-durable-write-leaves-no-row-and-no-receipt][ms-refused]; all
 unaudited.
@@ -2581,7 +2587,6 @@ evaluation of this area and its disposition are recorded in
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2126
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6377
 [tag-entry]: ../../../../crates/daemon/src/transform.rs#L6843-L6868
-[tag-snapshot]: ../../../../crates/daemon/src/transform.rs#L6888-L6893
 [load-tags]: ../../../../crates/daemon/src/transform.rs#L6966-L7028
 [mint-input]: ../../../../crates/daemon/src/transform.rs#L7228-L7233
 [append-mint]: ../../../../crates/daemon/src/transform.rs#L7335-L7358
@@ -2614,7 +2619,6 @@ evaluation of this area and its disposition are recorded in
 [count-digest]: ../../../../crates/daemon/src/token_cache.rs#L103-L143
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L69-L81
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
-[sidecar-inc]: ../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
@@ -2662,17 +2666,19 @@ evaluation of this area and its disposition are recorded in
 [rejected]: ../../../../crates/memory-store/src/lib.rs#L6691-L6744
 [sched-history]: ../../../../crates/memory-store/src/lib.rs#L6792-L6825
 [passtrace-doc]: ../../../../crates/memory-store/src/lib.rs#L767-L784
-[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8306-L8315
+[commit-meta]: ../../../../crates/memory-store/src/lib.rs#L8614-L8623
 [commit-trace]: ../../../../crates/memory-store/src/lib.rs#L8427-L8494
-[json-content]: ../../../../crates/memory-store/src/lib.rs#L2116-L2126
-[record-scan]: ../../../../crates/memory-store/src/lib.rs#L2133-L2143
-[policy]: ../../../../crates/memory-store/src/lib.rs#L3077-L3098
-[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3109-L3287
-[keys]: ../../../../crates/memory-store/src/lib.rs#L3157-L3170
-[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3181-L3276
-[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3282-L3286
-[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3289-L3290
-[unique]: ../../../../crates/memory-store/src/lib.rs#L3291-L3372
+[json-content]: ../../../../crates/memory-store/src/lib.rs#L2207-L2217
+[record-scan]: ../../../../crates/memory-store/src/lib.rs#L2224-L2234
+[policy]: ../../../../crates/memory-store/src/lib.rs#L3168-L3189
+[prepare-collecting]: ../../../../crates/memory-store/src/lib.rs#L3207-L3217
+[single-pass]: ../../../../crates/memory-store/src/lib.rs#L3223-L3415
+[keys]: ../../../../crates/memory-store/src/lib.rs#L3273-L3286
+[prepare-value]: ../../../../crates/memory-store/src/lib.rs#L3297-L3398
+[walk-keys]: ../../../../crates/memory-store/src/lib.rs#L3388-L3394
+[clean-branch]: ../../../../crates/memory-store/src/lib.rs#L3409-L3414
+[unique-doc]: ../../../../crates/memory-store/src/lib.rs#L3417-L3418
+[unique]: ../../../../crates/memory-store/src/lib.rs#L3419-L3500
 [recomp]: ../../../../crates/memory-store/src/lib.rs#L10057-L10150
 [meta-epoch]: ../../../../crates/memory-store/src/lib.rs#L1387-L1388
 [meta-historian]: ../../../../crates/memory-store/src/lib.rs#L1503-L1504
@@ -2705,12 +2711,6 @@ evaluation of this area and its disposition are recorded in
 [newer]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.ts#L300-L357
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
-[pagemax]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L14-L15
-[pagecontract]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L631-L635
-[numbers]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L62-L111
-[bodyvalid]: ../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L494-L501
-[encodebody]: ../../../../packages/opencode-plugin/src/shared/host-client/client.ts#L1516-L1521
-[utf8body]: ../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L195-L229
 [sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
 [log-gate-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
@@ -2718,8 +2718,6 @@ evaluation of this area and its disposition are recorded in
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
 [flush]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L136-L162
 [redaction]: ../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
-[hostpage]: ../../../../crates/daemon/src/lib.rs#L748-L749
-[hostpagecheck]: ../../../../crates/daemon/src/lib.rs#L9334-L9340
 
 [agents]: ../../../../crates/shm-transport/AGENTS.md
 [arena-const]: ../../../../crates/shm-transport/src/arena.rs#L4-L7
@@ -2844,7 +2842,6 @@ evaluation of this area and its disposition are recorded in
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24518
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21483
 [serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28292
-[tok-fn]: ../../../../crates/tokenizer/src/lib.rs#L148
 [eval]: ../../../../crates/secret-scanner/src/evaluator.rs#L35-L157
 [captures]: ../../../../crates/secret-scanner/src/evaluator.rs#L112-L128
 [radius-window]: ../../../../crates/secret-scanner/src/evaluator.rs#L266-L297
