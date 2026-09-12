@@ -15,10 +15,14 @@ use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
 use super::source_identity::{
-    EncodedOccurrence, Occurrence, OccurrenceClass, OccurrenceRefusal, encode, payload_id, select,
-    well_formed_value,
+    self, EncodedOccurrence, Occurrence, OccurrenceClass, OccurrenceRefusal, encode,
+    encode_preserving_span, payload_id, select, well_formed_value,
 };
-use super::{CachedSql, KernelError, cas::is_exact_retention, map_sqlite};
+use super::{
+    CachedSql, KernelError,
+    cas::{is_artifact_digest, is_exact_retention},
+    map_sqlite,
+};
 
 /// The observation kind every descriptor row carries.
 pub const SOURCE_DESCRIPTOR_KIND: &str = "source_descriptor";
@@ -213,7 +217,7 @@ fn same_lineage(stored: &SourceDescriptorDetail, fresh: &SourceDescriptorDetail)
         && stored.span == fresh.span
 }
 
-fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> {
+pub(crate) fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> {
     let stored: ObservationPayload =
         serde_json::from_slice(payload).map_err(|_| KernelError::CorruptCanonicalRow)?;
     let detail: SourceDescriptorDetail = stored
@@ -225,6 +229,34 @@ fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, KernelError> 
         return Err(KernelError::CorruptCanonicalRow);
     }
     Ok(detail)
+}
+
+/// Publication derived the stored tuple, ids, span, payload id, and policy from
+/// one encoding of one request, so `None` here is corruption of the stored row.
+pub(crate) fn reencoded_identity(detail: &SourceDescriptorDetail) -> Option<EncodedOccurrence> {
+    let span = detail
+        .span
+        .map(|(start, end)| source_identity::Span { start, end });
+    let identity: Vec<(&str, &str)> = detail
+        .identity
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let encoded = encode_preserving_span(&Occurrence {
+        class: &detail.class,
+        identity: &identity,
+        revision: &detail.revision,
+        representation: &detail.representation,
+        span,
+    })
+    .ok()?;
+    (encoded.occurrence_id == detail.occurrence_id
+        && encoded.lineage_id == detail.lineage_id
+        && encoded.tuple == detail.occurrence_tuple
+        && encoded.span == span
+        && is_artifact_digest(&detail.payload_id)
+        && detail.source_policy.validate_for(encoded.class).is_ok())
+    .then_some(encoded)
 }
 
 impl Envelope<'_> {
