@@ -81,10 +81,10 @@ keyed snapshot.
 
 `cargo test -p storage --locked` passed 76 tests after the changes. The
 snapshot, freshness, and rollback checks named here are among them; they are
-existing checks and remain unaudited. The same suite passes 83 tests on this
+existing checks and remain unaudited. The same suite passes 84 tests on this
 branch merged with `origin/main`, the base's flush-on-unwind test, the rescan
-flush, the unretained-policy check, and the foreign-WAL check; the live
-anchors below are to that state.
+flush, the parsed-schema reload, the unretained-policy check, and the
+foreign-WAL check; the live anchors below are to that state.
 
 [read]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L220-L245
 [write]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L290-L316
@@ -93,5 +93,5 @@ anchors below are to that state.
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
 [live-read]: ../../../../crates/storage/src/lib.rs#L305-L321
 [live-write]: ../../../../crates/storage/src/lib.rs#L370-L434
-[live-test]: ../../../../crates/storage/src/lib.rs#L5391-L5428
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L5561-L5587
+[live-test]: ../../../../crates/storage/src/lib.rs#L5432-L5469
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L5602-L5628

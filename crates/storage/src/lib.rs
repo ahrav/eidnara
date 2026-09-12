@@ -888,12 +888,14 @@ mod sqlite_backend {
                 return Ok(Arc::clone(snapshot));
             }
             let snapshot = Arc::new(SchemaSnapshot::scan(conn)?);
-            // SQLite expires cached statements only when the schema cookie changes.
+            // SQLite expires cached statements and reloads its parsed schema only on a cookie change.
             if retained.is_none_or(|retained| {
                 retained.key.schema_version == key.schema_version
                     && retained.main_names != snapshot.main_names
             }) {
                 conn.flush_prepared_statement_cache();
+                conn.execute_batch("PRAGMA writable_schema = RESET")
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
             }
             // The retained snapshot must match the policy under which cached statements
             // were prepared, so an unretained snapshot clears the retained snapshot.
@@ -5332,6 +5334,45 @@ mod tests {
             })
             .expect("count temp objects");
         assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Restoring the old `schema_version` after renaming `kv` leaves SQLite's parsed schema
+    /// stale: SQLite still resolves `kv` and omits `kv2` even though `sqlite_schema` lists
+    /// `kv2`. The rescan must reload the parsed schema.
+    #[test]
+    fn a_rescan_under_an_unchanged_schema_version_reloads_the_parsed_schema() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('a', '1')", []))
+            .expect("resolve kv on this connection");
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        let version: i64 = raw
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .expect("schema version");
+        raw.execute_batch(&format!(
+            "ALTER TABLE kv RENAME TO kv2; PRAGMA schema_version = {version};"
+        ))
+        .expect("rename, then write the old schema version back");
+        drop(raw);
+
+        let outcome = store.with_conn_fenced(|tx| {
+            let old = tx.execute("INSERT INTO kv VALUES ('b', '2')", []);
+            tx.execute("INSERT INTO kv2 VALUES ('c', '3')", [])?;
+            Ok(old)
+        });
+        let old = outcome.expect("the callback resolves the renamed table");
+        assert!(
+            matches!(&old, Err(e) if e.to_string().contains("no such table")),
+            "the old name no longer resolves on this connection, got {old:?}"
+        );
+        let rows: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv2", [], |r| r.get(0)))
+            .expect("count through the renamed table");
+        assert_eq!(rows, 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

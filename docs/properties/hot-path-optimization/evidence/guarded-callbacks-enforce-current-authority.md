@@ -101,7 +101,11 @@ cache][snapshot-cache] when it changes the main-schema names under an unchanged
 schema version; the [rescan-flush test][rescan-flush-test] shows a cached
 `CREATE TEMP TABLE late (x)` refused `not authorized` after a foreign
 `CREATE TABLE late` that wrote the old schema version back, with no temp
-`late` created. An oversized snapshot also clears the retained one, so the
+`late` created. The same forged cookie leaves SQLite's parsed schema stale,
+so that rescan also runs `PRAGMA writable_schema = RESET`; the
+[parsed-schema test][parsed-schema-test] shows a callback after a foreign
+rename plus a written-back version resolving `kv2` and refusing `kv`. An
+oversized snapshot also clears the retained one, so the
 comparison never runs against a policy older than the cached statements; the
 [unretained-policy test][unretained-policy-test] caches the statement under an
 oversized foreign schema, restores the cookie the store last saw, and shows
@@ -219,9 +223,9 @@ Review-time verification: the new test failed with `Ok(())` in place of
 `not authorized` before the guard and passes with it. On this branch the
 flush is one action of the maintenance exit guard, and the same command
 passes 80 tests: the 76 above, the three from `origin/main`, and the
-flush-on-unwind test. With the rescan flush, the unretained-policy check, and
-the foreign-WAL check it passes 83 tests. The anchors below are to the live
-tree at that state.
+flush-on-unwind test. With the rescan flush, the parsed-schema reload, the
+unretained-policy check, and the foreign-WAL check it passes 84 tests. The
+anchors below are to the live tree at that state.
 
 [lock]: https://github.com/ahrav/eidnara/blob/9132344/crates/storage/src/lib.rs#L195-L209
 [read]: ../../../../crates/storage/src/lib.rs#L305-L321
@@ -232,35 +236,36 @@ tree at that state.
 [notes]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5999-L6025
 [scope-owners]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L4772-L4823
 [mode]: ../../../../crates/storage/src/lib.rs#L717-L729
-[gate-install]: ../../../../crates/storage/src/lib.rs#L1492
+[gate-install]: ../../../../crates/storage/src/lib.rs#L1494
 [flush]: ../../../../crates/storage/src/lib.rs#L334-L344
-[scope-install]: ../../../../crates/storage/src/lib.rs#L1035-L1137
-[mode-hold]: ../../../../crates/storage/src/lib.rs#L938-L940
-[apply]: ../../../../crates/storage/src/lib.rs#L1999-L2037
-[gate-tests]: ../../../../crates/storage/src/lib.rs#L2160-L2499
-[probe]: ../../../../crates/storage/src/lib.rs#L4878-L4975
-[read-witness]: ../../../../crates/storage/src/lib.rs#L5029-L5058
-[temp-write]: ../../../../crates/storage/src/lib.rs#L5065-L5088
-[restore-test]: ../../../../crates/storage/src/lib.rs#L5094-L5146
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L5152-L5182
-[surface-test]: ../../../../crates/storage/src/lib.rs#L5189-L5209
-[flush-test]: ../../../../crates/storage/src/lib.rs#L5211-L5253
-[cached-test]: ../../../../crates/storage/src/lib.rs#L4831
+[scope-install]: ../../../../crates/storage/src/lib.rs#L1037-L1139
+[mode-hold]: ../../../../crates/storage/src/lib.rs#L940-L942
+[apply]: ../../../../crates/storage/src/lib.rs#L2001-L2039
+[gate-tests]: ../../../../crates/storage/src/lib.rs#L2162-L2501
+[probe]: ../../../../crates/storage/src/lib.rs#L4880-L4977
+[read-witness]: ../../../../crates/storage/src/lib.rs#L5031-L5060
+[temp-write]: ../../../../crates/storage/src/lib.rs#L5067-L5090
+[restore-test]: ../../../../crates/storage/src/lib.rs#L5096-L5148
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L5154-L5184
+[surface-test]: ../../../../crates/storage/src/lib.rs#L5191-L5211
+[flush-test]: ../../../../crates/storage/src/lib.rs#L5213-L5255
+[cached-test]: ../../../../crates/storage/src/lib.rs#L4833
 [snapshot]: ../../../../crates/storage/src/lib.rs#L737-L747
-[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L884-L904
-[infra-check]: ../../../../crates/storage/src/lib.rs#L1110-L1125
+[snapshot-cache]: ../../../../crates/storage/src/lib.rs#L884-L906
+[infra-check]: ../../../../crates/storage/src/lib.rs#L1112-L1127
 [bound]: ../../../../crates/storage/src/lib.rs#L771
-[rename-test]: ../../../../crates/storage/src/lib.rs#L4982-L5022
-[pin-test]: ../../../../crates/storage/src/lib.rs#L2398-L2436
-[bound-test]: ../../../../crates/storage/src/lib.rs#L2347-L2368
-[durability-test]: ../../../../crates/storage/src/lib.rs#L4129-L4194
-[forge-test]: ../../../../crates/storage/src/lib.rs#L2311-L2341
+[rename-test]: ../../../../crates/storage/src/lib.rs#L4984-L5024
+[pin-test]: ../../../../crates/storage/src/lib.rs#L2400-L2438
+[bound-test]: ../../../../crates/storage/src/lib.rs#L2349-L2370
+[durability-test]: ../../../../crates/storage/src/lib.rs#L4131-L4196
+[forge-test]: ../../../../crates/storage/src/lib.rs#L2313-L2343
 [defensive]: ../../../../crates/storage/src/lib.rs#L835
-[defensive-test]: ../../../../crates/storage/src/lib.rs#L2285-L2305
-[release-test]: ../../../../crates/storage/src/lib.rs#L2374-L2390
-[pin]: ../../../../crates/storage/src/lib.rs#L910-L926
+[defensive-test]: ../../../../crates/storage/src/lib.rs#L2287-L2307
+[release-test]: ../../../../crates/storage/src/lib.rs#L2376-L2392
+[pin]: ../../../../crates/storage/src/lib.rs#L912-L928
 [maintenance-exit]: ../../../../crates/storage/src/lib.rs#L526-L535
-[unwind-test]: ../../../../crates/storage/src/lib.rs#L2441-L2490
-[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5297-L5336
-[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5260-L5290
-[unretained-policy-test]: ../../../../crates/storage/src/lib.rs#L5342-L5388
+[unwind-test]: ../../../../crates/storage/src/lib.rs#L2443-L2492
+[rescan-flush-test]: ../../../../crates/storage/src/lib.rs#L5299-L5338
+[foreign-wal-test]: ../../../../crates/storage/src/lib.rs#L5262-L5292
+[unretained-policy-test]: ../../../../crates/storage/src/lib.rs#L5383-L5429
+[parsed-schema-test]: ../../../../crates/storage/src/lib.rs#L5344-L5377

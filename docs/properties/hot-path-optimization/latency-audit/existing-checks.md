@@ -193,7 +193,7 @@ not performance measurements or a full-workspace gate.
 | [`preserved_json_identities_do_not_exempt_integrity_fields_credential_names_or_nested_values`][t-preserved] | Identity preservation is limited to structural scalar names. | unaudited |
 | [`cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity`][t-cache-redact] | Commit redacts the core payload, preserves legacy ids, and refuses an integrity secret in `meta`. | unaudited |
 | [`cache_state_identity_decision_comes_from_the_write_transaction`][t-identity-tx] | New-versus-existing session is decided inside the fenced transaction. | unaudited |
-| [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` is pinned on open and re-pinned per fenced write. | unaudited |
+| [`open_pins_full_synchronous`][t-sync] | `synchronous=FULL` is pinned on open and re-pinned by the first fenced write after a maintenance callback. | unaudited |
 
 None found: equivalence between a narrow `meta` scalar read and
 `MemoryStore::load`; `Handler::historian_active` reading the durable phase
@@ -548,7 +548,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15166
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L606
 [t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L15309
-[t-sync]: ../../../../crates/storage/src/lib.rs#L4095
+[t-sync]: ../../../../crates/storage/src/lib.rs#L4097
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249

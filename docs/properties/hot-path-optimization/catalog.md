@@ -319,7 +319,8 @@ snapshot keyed on the schema and data versions, a rename through a second
 connection is observed by the next callback even when the schema version is
 written back, a maintenance-left temp shadow is still refused, a panicking
 maintenance callback still discards the snapshot and re-arms the pin, a
-rescan under an unchanged schema version flushes the cached statements, a
+rescan under an unchanged schema version flushes the cached statements and
+reloads the parsed schema, a
 second connection cannot leave WAL while the store is open, and the
 durability pin runs once per connection until the maintenance path re-arms it. No baseline-versus-candidate trace over interleaved facade
 callers runs.
