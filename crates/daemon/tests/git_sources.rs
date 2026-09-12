@@ -886,6 +886,25 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         read_selection(&binding, &[good.clone(), garbled.clone()], bounds()),
         Err(GitRefusal::Unreadable(garbled))
     );
+    // A well-formed commit stored under another id is a substitution, not that id's object: the store's index is not trusted over the hash of the bytes it returns.
+    let mislabeled = repo
+        .root
+        .join(".git/objects")
+        .join(&missing[..2])
+        .join(&missing[2..]);
+    std::fs::create_dir_all(mislabeled.parent().unwrap()).unwrap();
+    std::fs::copy(
+        repo.root
+            .join(".git/objects")
+            .join(&good[..2])
+            .join(&good[2..]),
+        &mislabeled,
+    )
+    .unwrap();
+    assert_eq!(
+        read_selection(&binding, &[good.clone(), missing.clone()], bounds()),
+        Err(GitRefusal::HashMismatch(missing.clone()))
+    );
 
     let latin = repo.raw_commit(b"Caf\xe9 au lait\n", Some("ISO-8859-1"));
     let undeclared = repo.raw_commit(b"broken \xff byte\n", None);

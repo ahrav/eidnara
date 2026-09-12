@@ -58,6 +58,9 @@ pub enum GitRefusal {
     /// The object store failed to read or decode the object; absence is not inferred from it.
     #[error("object {0} could not be read")]
     Unreadable(String),
+    /// The returned bytes do not hash to the id, so they cannot represent that object.
+    #[error("object {0} does not hash to its id")]
+    HashMismatch(String),
     #[error("object {oid} decodes to {bytes} bytes, above the bound of {max}")]
     ObjectTooLarge { oid: String, bytes: u64, max: u64 },
     /// Materializing the object needs an allocation above the per-object bound. The store refuses before those bytes exist, so no decoded size is known.
@@ -215,6 +218,12 @@ pub fn read_selection(
             _ => GitRefusal::Unreadable(oid.clone()),
         })?;
         charge(oid, object.data.len() as u64, &mut decoded_total)?;
+        // A hash mismatch refuses the selection rather than retaining bytes under an id that does not identify them.
+        let actual = gix::objs::compute_hash(hash, object.kind, &object.data)
+            .map_err(|_| GitRefusal::Unreadable(oid.clone()))?;
+        if actual != *id {
+            return Err(GitRefusal::HashMismatch(oid.clone()));
+        }
         let commit = object
             .try_into_commit()
             .map_err(|_| GitRefusal::NotACommit(oid.clone()))?;
