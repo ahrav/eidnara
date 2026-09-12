@@ -28,5 +28,5 @@ durability, or a schema/version ledger.
 [write]: ../../../../crates/storage/src/lib.rs#L392-L456
 [scope]: ../../../../crates/storage/src/lib.rs#L1185-L1267
 [cache]: ../../../../crates/storage/src/lib.rs#L910-L917
-[facade]: ../../../../crates/memory-store/src/lib.rs#L5563-L5586
+[facade]: ../../../../crates/memory-store/src/lib.rs#L5669-L5692
 [snapshot]: ../../../../crates/storage/src/lib.rs#L5697-L5734

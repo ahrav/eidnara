@@ -142,10 +142,10 @@ specification enumerates the stages, and no name is built at run time.
 [meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12397-L12402
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L27797-L27803
-[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8132-L8149
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8155-L8210
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14428
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14503-L14525
+[h-pre]: ../../../../../crates/daemon/src/lib.rs#L8138-L8155
+[h-run]: ../../../../../crates/daemon/src/lib.rs#L8161-L8216
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14434
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14509-L14531
 [tt]: ../../../../../crates/daemon/src/transform.rs#L1026-L1205
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L217-L223
 [he-designated]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214

@@ -94,20 +94,20 @@ test records the marker, and none has all three kinds due in one pass drain.
   witness rather than the exemption.
 - Conclusion: resolved with answer - constructible; the witness is recorded.
 
-[pass-drain]: ../../../../../crates/daemon/src/lib.rs#L8131-L8135
-[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L35908
+[pass-drain]: ../../../../../crates/daemon/src/lib.rs#L8137-L8141
+[t-status-sc]: ../../../../../crates/daemon/src/lib.rs#L35956
 [daemon-cargo]: ../../../../../crates/daemon/Cargo.toml#L92
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L126
-[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4513-L4516
-[fail-sc]: ../../../../../crates/memory-store/src/lib.rs#L5900-L5909
-[publish]: ../../../../../crates/memory-store/src/lib.rs#L10559
-[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10762-L10771
-[drain]: ../../../../../crates/memory-store/src/lib.rs#L10806-L10851
-[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L10853-L10879
-[load-due]: ../../../../../crates/memory-store/src/lib.rs#L10881-L10915
-[due-predicate]: ../../../../../crates/memory-store/src/lib.rs#L10893-L10894
-[backoff]: ../../../../../crates/memory-store/src/lib.rs#L10981-L10985
-[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L13713-L13737
-[t-faults-sc]: ../../../../../crates/memory-store/src/lib.rs#L18704-L18801
-[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L18920-L18974
+[kinds]: ../../../../../crates/memory-store/src/lib.rs#L4598-L4601
+[fail-sc]: ../../../../../crates/memory-store/src/lib.rs#L6006-L6015
+[publish]: ../../../../../crates/memory-store/src/lib.rs#L10665
+[publish-drain]: ../../../../../crates/memory-store/src/lib.rs#L10868-L10877
+[drain]: ../../../../../crates/memory-store/src/lib.rs#L10912-L10957
+[status-sc]: ../../../../../crates/memory-store/src/lib.rs#L10959-L10985
+[load-due]: ../../../../../crates/memory-store/src/lib.rs#L10987-L11021
+[due-predicate]: ../../../../../crates/memory-store/src/lib.rs#L10999-L11000
+[backoff]: ../../../../../crates/memory-store/src/lib.rs#L11087-L11091
+[enqueue]: ../../../../../crates/memory-store/src/lib.rs#L13819-L13843
+[t-faults-sc]: ../../../../../crates/memory-store/src/lib.rs#L18872-L18969
+[t-restart]: ../../../../../crates/memory-store/src/lib.rs#L19088-L19142

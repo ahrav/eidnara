@@ -124,4 +124,4 @@ these shapes represent production traffic.
 [m1-pieces]: ../../../../../crates/daemon/src/m1_compose.rs#L174-L222
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8163-L8166
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8169-L8172
