@@ -27,6 +27,12 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | [`parse_charge_covers_dense_native_typed_decode_peak`][t-peak] | The metered footprint covers the tree decode's heap peak, the direct decode peaks at or below it, and the direct lane's own metered count covers its peak with the values under an ignored field. | unaudited |
 | [`decode_footprint_counts_values_and_retained_string_copies`][t-footprint] | Separators inside strings are not values; a 1 MiB text block is charged three times; a scalar-dense body's footprint is far above its wire size and string bytes are not charged as values; a cut body counts its decoded part. | unaudited |
 | [`metered_decode_charges_incrementally_and_refuses_above_capacity`][t-meter] | A fitting decode holds at least its footprint and under two steps more; a footprint above the capacity is refused as permanent with every byte released; a restarted meter reuses held bytes. | unaudited |
+| [`a_small_body_holds_no_more_than_twice_its_footprint`][t-small] | A body under one mebibyte holds at least its footprint and at most twice it. | unaudited |
+| [`a_nearly_drained_pool_is_charged_in_a_bounded_number_of_acquisitions`][t-acquire] | A body decoded against a pool with less than a batch free is refused as transient in under a hundred reservation attempts. | unaudited |
+| [`a_capacity_bound_count_stops_at_the_value_that_crosses_it`][t-count] | The count-only decode against a capacity stops within one node of it and agrees with the footprint on either side. | unaudited |
+| [`footprint_floor_counts_the_values_the_meter_visits`][t-floor] | The byte-derived floor equals the footprint on string-free bodies, including nesting to the depth limit, is the footprint less the retained string copies on a body with strings, and its refusal agrees with the footprint on either side of the capacity. | unaudited |
+| [`footprint_floor_never_exceeds_the_decoded_footprint`][t-floor-corpus] | For every well-formed corpus body the floor is at most the decoded footprint. | unaudited |
+| [`a_doomed_body_is_refused_without_touching_the_pool`][t-doomed] | A paged and an unpaged body of two hundred thousand values are refused as too large through `dispatch_body` with the pool never asked and no value counted. | unaudited |
 | [`both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies`][t-lanes] | Every corpus body, one with twenty thousand values under an ignored field among them, gives one outcome and one counted footprint through both lanes with a pool one byte short and a pool that just fits; the short pool refuses as too large. | unaudited |
 | [`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`][t-drain] | A held charge makes a fitting body's decode a transient refusal that releases its bytes, records the meter's shortfall marker, and returns `queue_full`; the body decodes once the holder releases; a transient refusal of a body the pool could never hold is too large. | unaudited |
 | [`a_refused_decode_has_no_dispatch_side_effect`][t-effect] | A permanent and a transient refusal through `dispatch_body` return the prior codes and leave the dispatch health counters, the route channel, and the store row untouched; the body is served with room. | unaudited |
@@ -444,21 +450,27 @@ Production guards go to
 categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12579-L12586
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12580-L12587
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L19163-L19242
-[t-probe]: ../../../../crates/daemon/src/lib.rs#L19245-L19290
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19450-L19569
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19592-L19633
-[t-footprint]: ../../../../crates/daemon/src/lib.rs#L19725-L19759
-[t-meter]: ../../../../crates/daemon/src/lib.rs#L19765-L19798
-[t-drain]: ../../../../crates/daemon/src/lib.rs#L19804-L19852
-[t-effect]: ../../../../crates/daemon/src/lib.rs#L19857-L19908
-[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19639-L19685
-[t-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L563
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L19168-L19247
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L19250-L19295
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19455-L19574
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19597-L19638
+[t-footprint]: ../../../../crates/daemon/src/lib.rs#L19737-L19771
+[t-meter]: ../../../../crates/daemon/src/lib.rs#L19777-L19810
+[t-small]: ../../../../crates/daemon/src/lib.rs#L19814-L19831
+[t-acquire]: ../../../../crates/daemon/src/lib.rs#L19836-L19864
+[t-count]: ../../../../crates/daemon/src/metered_decode.rs#L911-L939
+[t-floor]: ../../../../crates/daemon/src/metered_decode.rs#L941-L976
+[t-floor-corpus]: ../../../../crates/daemon/src/lib.rs#L19963-L19975
+[t-doomed]: ../../../../crates/daemon/src/lib.rs#L19923-L19958
+[t-drain]: ../../../../crates/daemon/src/lib.rs#L19870-L19918
+[t-effect]: ../../../../crates/daemon/src/lib.rs#L19980-L20031
+[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19644-L19690
+[t-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
-[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12653-L12687
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L28562-L28617
+[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12654-L12692
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L28685-L28740
 [t-shape]: ../../../../crates/daemon/src/lib.rs#L32704-L32721
 [t-shape2]: ../../../../crates/daemon/src/lib.rs#L32724-L32764
 [t-envelope]: ../../../../crates/daemon/src/transform.rs#L16201-L16227

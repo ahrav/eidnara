@@ -99,7 +99,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedSegment};
 use crate::metered_decode::{
-    DecodeFailure, Refusal, ResidentMeter, SkippedValue, decode_metered, footprint_of,
+    DecodeFailure, Refusal, ResidentMeter, SkippedValue, decode_metered, footprint_exceeds,
+    footprint_floor_exceeds,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -12657,6 +12658,10 @@ impl Handler {
         probe: Option<&RequestEntryProbe>,
         meter: &ResidentMeter<'_>,
     ) -> (BodyLane, PreparedOutcome) {
+        // Refusing from the bytes keeps a doomed body from holding pool bytes while it parses.
+        if footprint_floor_exceeds(body, meter.capacity()) {
+            return (BodyLane::Unread, request_too_large_error());
+        }
         if probe.is_some_and(RequestEntryProbe::routes_to_unpaged_transform) {
             let decode_started_at = Instant::now();
             match decode_metered::<TransformRequest>(body, meter) {
@@ -15474,6 +15479,8 @@ enum BodyLane {
     Direct,
     /// Decoded through the `Value` tree.
     Tree,
+    /// Refused from its bytes alone; neither decode ran.
+    Unread,
 }
 
 impl<'de> Deserialize<'de> for RequestEntryProbe {
@@ -15703,14 +15710,12 @@ impl RequestClassProbe {
     }
 }
 
-/// The outcome for a decode the meter refused. A footprint the pool can never hold is too
-/// large. A transient refusal is classed by the body's whole footprint, counted without
-/// charging: a body that would exceed the capacity anyway is too large, one that fits found
-/// the pool held by other requests.
 fn resident_refusal(refusal: Refusal, body: &[u8], meter: &ResidentMeter<'_>) -> PreparedOutcome {
     match refusal {
         Refusal::Permanent => request_too_large_error(),
-        Refusal::Transient if footprint_of(body) > meter.capacity() => request_too_large_error(),
+        Refusal::Transient if footprint_exceeds(body, meter.capacity()) => {
+            request_too_large_error()
+        }
         Refusal::Transient => resident_capacity_error(),
     }
 }
@@ -17317,7 +17322,7 @@ fn test_route(channel_id: u16) -> RouteHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metered_decode::{ResidentReserve, shortfall_count};
+    use crate::metered_decode::{ResidentReserve, footprint_floor, footprint_of, shortfall_count};
     use std::collections::{HashMap, VecDeque};
 
     use std::sync::{
@@ -19684,10 +19689,10 @@ mod tests {
         }
     }
 
-    /// A scratch pool for tests: a real byte budget with a known capacity.
     pub(crate) struct TestPool {
         budget: host_runtime::wire::ByteBudget,
         capacity: usize,
+        reserve_calls: AtomicUsize,
     }
 
     impl TestPool {
@@ -19695,7 +19700,13 @@ mod tests {
             Self {
                 budget: host_runtime::wire::ByteBudget::new(capacity as u64),
                 capacity,
+                reserve_calls: AtomicUsize::new(0),
             }
+        }
+
+        /// Reservation attempts so far, granted or not.
+        fn reserve_calls(&self) -> usize {
+            self.reserve_calls.load(Ordering::Relaxed)
         }
 
         /// Room for any body a test sends.
@@ -19713,6 +19724,7 @@ mod tests {
 
     impl ResidentReserve for TestPool {
         fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+            self.reserve_calls.fetch_add(1, Ordering::Relaxed);
             self.budget.try_charge(bytes)
         }
 
@@ -19797,6 +19809,60 @@ mod tests {
         assert_eq!(meter.charged(), held);
     }
 
+    /// A small body holds at most twice its footprint, not a full batch.
+    #[test]
+    fn a_small_body_holds_no_more_than_twice_its_footprint() {
+        for body in [
+            br#"{"kind":"status","session_id":"ses"}"#.to_vec(),
+            serde_json::to_vec(&request(vec![ck("m1", 1, "hello")])).unwrap(),
+        ] {
+            let footprint = footprint_of(&body);
+            assert!(footprint < 1024 * 1024, "the body is small: {footprint}");
+            let pool = TestPool::unbounded();
+            let meter = ResidentMeter::new(&pool);
+            let _: Value = decode_metered(&body, &meter).unwrap();
+            assert!(meter.charged() >= footprint);
+            assert!(
+                meter.charged() <= 2 * footprint,
+                "a body with footprint {footprint} holds {} bytes",
+                meter.charged()
+            );
+        }
+    }
+
+    /// When the free pool is smaller than a full step, reservations must not scale with the
+    /// parsed values.
+    #[test]
+    fn a_nearly_drained_pool_is_charged_in_a_bounded_number_of_acquisitions() {
+        let mut body = Vec::from(b"[0".as_slice());
+        for _ in 1..3_000 {
+            body.extend_from_slice(b",0");
+        }
+        body.push(b']');
+        let footprint = footprint_of(&body);
+        assert!(
+            footprint > 300 * 1024,
+            "the body needs several batches: {footprint}"
+        );
+
+        let pool = TestPool::with_capacity(10 * 1024 * 1024);
+        // Leave less than a full step free, and less than the body needs.
+        let holder = pool.hold(pool.capacity() - footprint * 3 / 4);
+        let meter = ResidentMeter::new(&pool);
+        let failure = decode_metered::<Value>(&body, &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Transient)
+        ));
+        let calls = pool.reserve_calls();
+        assert!(
+            calls < 100,
+            "{calls} reservation attempts to take {} bytes; one per value is a cliff",
+            footprint * 3 / 4
+        );
+        drop(holder);
+    }
+
     /// The pool-drain witness for the shortfall path: a body that fits the capacity finds the
     /// pool held by another request, is refused as transient, and is served once the holder
     /// releases.
@@ -19849,6 +19915,63 @@ mod tests {
             comparable_outcome(request_too_large_error())
         );
         drop(holder);
+    }
+
+    /// Bodies whose byte-derived footprint exceeds pool capacity are rejected before decoding
+    /// without reserving pool bytes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_doomed_body_is_refused_without_touching_the_pool() {
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let dense_values = || "0,".repeat(200_000) + "0";
+        // One body takes the tree lane, one is a complete unpaged transform request whose
+        // values sit under an ignored field, so the direct decode would refuse it.
+        let bodies = [
+            format!(
+                r#"{{"kind":"transform","transform_page_id":"p","x":[{}]}}"#,
+                dense_values()
+            ),
+            format!(
+                r#"{{"kind":"transform","v":2,"session_id":"ses","serializer_profile":"owned-llmrunner","render_config":"cfg","messages":[],"junk":[{}]}}"#,
+                dense_values()
+            ),
+        ];
+        for body in bodies {
+            let body = body.into_bytes();
+            let pool = TestPool::with_capacity(footprint_of(&body) / 2);
+            let meter = ResidentMeter::new(&pool);
+            let (lane, outcome) = handler
+                .dispatch_body(test_route(7), &body, probe_request(&body).as_ref(), &meter)
+                .await;
+            assert_eq!(
+                pool.reserve_calls(),
+                0,
+                "a doomed body must not hold the pool while it is parsed"
+            );
+            assert_eq!(
+                comparable_outcome(outcome),
+                comparable_outcome(request_too_large_error())
+            );
+            assert_eq!(lane, BodyLane::Unread);
+            assert_eq!(meter.needed(), 0, "no value was built");
+        }
+    }
+
+    /// The byte-derived floor never exceeds the footprint the decode counts, so it refuses no
+    /// body the meter would admit.
+    #[test]
+    fn footprint_floor_never_exceeds_the_decoded_footprint() {
+        for (name, body) in transform_decode_corpus() {
+            if serde_json::from_slice::<Value>(&body).is_err() {
+                continue;
+            }
+            assert!(
+                footprint_floor(&body) <= footprint_of(&body),
+                "{name}: floor {} above footprint {}",
+                footprint_floor(&body),
+                footprint_of(&body)
+            );
+        }
     }
 
     /// A refused decode ends the request with the prior code and touches nothing the dispatch

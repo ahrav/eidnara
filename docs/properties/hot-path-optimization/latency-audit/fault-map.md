@@ -181,11 +181,11 @@ deferred-punch bound, the durable-counter reconciliation action, the SOFT
 constants' status, and the plugin fail-open default remain owner gates named
 in the records' open questions.
 
-[handle]: ../../../../crates/daemon/src/lib.rs#L11898-L11913
+[handle]: ../../../../crates/daemon/src/lib.rs#L11899-L11914
 [capacity]: ../../../../crates/host-runtime/src/handler.rs#L486-L491
 [pools]: ../../../../crates/host-runtime/src/runtime.rs#L814-L822
 [paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12579-L12586
+[testentry]: ../../../../crates/daemon/src/lib.rs#L12580-L12587
 [pageapply]: ../../../../crates/daemon/src/lib.rs#L9425-L9433
 [expand]: ../../../../crates/daemon/src/lib.rs#L4151-L4245
 [hook]: ../../../../crates/daemon/src/lib.rs#L8224-L8232

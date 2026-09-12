@@ -230,27 +230,27 @@ generated the 19-case serialized corpus and passed
 the direct-host fixture, which compares the paged final `messages` bytes to the
 one-slice control.
 
-[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11898-L11913
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12653-L12687
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15460-L15464
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15479-L15513
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15524-L15549
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15540-L15590
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15553-L15558
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15568-L15575
-[class-probe]: ../../../../../crates/daemon/src/lib.rs#L15686-L15691
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15735-L15756
-[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7968-L7980
-[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7984-L8004
-[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8009
-[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9519
+[handle-live]: ../../../../../crates/daemon/src/lib.rs#L11899-L11914
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12654-L12692
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15465-L15469
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15486-L15520
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15531-L15556
+[skipped]: ../../../../../crates/daemon/src/metered_decode.rs#L403-L460
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15560-L15565
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15575-L15582
+[class-probe]: ../../../../../crates/daemon/src/lib.rs#L15693-L15698
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15740-L15761
+[direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7969-L7981
+[tree-lane]: ../../../../../crates/daemon/src/lib.rs#L7985-L8005
+[typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8010
+[page-apply-live]: ../../../../../crates/daemon/src/lib.rs#L9520
 [copies-live]: ../../../../../crates/daemon/src/metered_decode.rs#L38
-[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8592-L8604
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19245-L19290
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19293-L19430
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19450-L19569
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19592-L19633
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19163-L19242
+[test-entry]: ../../../../../crates/daemon/src/lib.rs#L8593-L8605
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19250-L19295
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19298-L19435
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19455-L19574
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19597-L19638
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19168-L19247
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L94-L153
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827

@@ -59,9 +59,6 @@ const RETAINED_STRING_COPIES: usize = 3;
 /// The charge for one visited value; object keys are values too.
 const NODE_BYTES: usize = VALUE_NODE_CHARGE_BYTES * RETAINED_NODE_COPIES;
 
-/// The pool is charged in steps of at least this size, or the whole shortfall when that is
-/// larger, so a body pays one acquisition per step rather than one per node; a step is
-/// trimmed to the capacity.
 const CHARGE_STEP_BYTES: usize = 1024 * 1024;
 
 /// The scratch pool a request's decode is charged against. The meter is held across the
@@ -83,16 +80,19 @@ impl ResidentReserve for RequestCtx {
     }
 }
 
-/// A reserve that grants everything and holds nothing, for measuring a footprint.
-struct Unbounded;
+/// A reserve that grants everything and holds nothing, for counting a footprint against a
+/// stated capacity.
+struct CountOnly {
+    capacity: usize,
+}
 
-impl ResidentReserve for Unbounded {
+impl ResidentReserve for CountOnly {
     fn try_reserve(&self, _bytes: usize) -> Option<ByteCharge> {
         Some(ByteCharge::none())
     }
 
     fn capacity(&self) -> usize {
-        usize::MAX
+        self.capacity
     }
 }
 
@@ -230,19 +230,22 @@ impl<'r> ResidentMeter<'r> {
             return Err(self.refuse(Refusal::Permanent));
         }
         let shortfall = needed - charged;
-        let step = shortfall.max(CHARGE_STEP_BYTES).min(capacity - charged);
-        // A full step may not be free while the exact shortfall is; the exact amount is the
-        // admission decision, the step is only the batching.
-        let charge = self
-            .reserve
-            .try_reserve(step)
-            .map(|charge| (charge, step))
-            .or_else(|| {
-                (shortfall < step)
-                    .then(|| self.reserve.try_reserve(shortfall))
-                    .flatten()
-                    .map(|charge| (charge, shortfall))
-            });
+        let step = shortfall
+            .max(needed.min(CHARGE_STEP_BYTES))
+            .min(capacity - charged);
+        // The exact shortfall is the admission decision; a larger batch only saves
+        // acquisitions. Halve a refused batch toward `shortfall` rather than retrying it once
+        // per value.
+        let mut attempt = step;
+        let charge = loop {
+            if let Some(charge) = self.reserve.try_reserve(attempt) {
+                break Some((charge, attempt));
+            }
+            if attempt == shortfall {
+                break None;
+            }
+            attempt = (attempt / 2).max(shortfall);
+        };
         match charge {
             Some((charge, bytes)) => {
                 self.charges
@@ -314,9 +317,87 @@ pub fn decode_metered<'de, T: serde::Deserialize<'de>>(
 /// The footprint `body` reaches when decoded, counted without charging any pool. A body that
 /// stops decoding partway yields the footprint of the part that decoded.
 pub fn footprint_of(body: &[u8]) -> usize {
-    let meter = ResidentMeter::new(&Unbounded);
+    let reserve = CountOnly {
+        capacity: usize::MAX,
+    };
+    let meter = ResidentMeter::new(&reserve);
     let _ = decode_metered::<SkippedValue>(body, &meter);
     meter.needed()
+}
+
+/// Whether the footprint `body` reaches when decoded exceeds `capacity`, counted without
+/// charging any pool. The count stops at the value that crosses `capacity`, so a body far
+/// above it is not parsed to its end.
+pub fn footprint_exceeds(body: &[u8], capacity: usize) -> bool {
+    let reserve = CountOnly { capacity };
+    let meter = ResidentMeter::new(&reserve);
+    matches!(
+        decode_metered::<SkippedValue>(body, &meter),
+        Err(DecodeFailure::Refused(Refusal::Permanent))
+    )
+}
+
+/// Whether `body`'s bytes alone prove its footprint exceeds `capacity`. Such a body is
+/// refused before it is decoded, so it never holds pool bytes while it is parsed.
+pub fn footprint_floor_exceeds(body: &[u8], capacity: usize) -> bool {
+    // Every value starts at a byte of its own, so a body this short cannot reach the
+    // capacity and is not scanned.
+    let most = body
+        .len()
+        .saturating_mul(NODE_BYTES)
+        .saturating_add(VALUE_ENVELOPE_BYTES);
+    most > capacity && footprint_floor(body) > capacity
+}
+
+/// Returns a lower bound on the footprint `body` reaches when decoded, from its bytes alone:
+/// one node per value start outside a string, with string bytes left out. A value starts at
+/// an opening quote, `[`, `{`, the first byte of a number, or the first letter of a literal,
+/// so for well-formed JSON the node count equals the one the meter visits and the bound is
+/// at most the footprint. Bytes past a parse error can only raise the bound, so a malformed
+/// body the bound refuses is one the decode could not have admitted whole.
+pub(crate) fn footprint_floor(body: &[u8]) -> usize {
+    let mut values: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_number = false;
+    for &byte in body {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => {
+                values += 1;
+                in_string = true;
+                in_number = false;
+            }
+            b'[' | b'{' | b't' | b'f' | b'n' => {
+                values += 1;
+                in_number = false;
+            }
+            b'-' | b'0'..=b'9' => {
+                if !in_number {
+                    values += 1;
+                    in_number = true;
+                }
+            }
+            // A sign or exponent inside a number, or the `e` of a literal; neither starts a value.
+            b'.' | b'e' | b'E' | b'+' => {}
+            _ => in_number = false,
+        }
+    }
+    if values == 0 {
+        return 0;
+    }
+    values
+        .saturating_mul(NODE_BYTES)
+        .saturating_add(VALUE_ENVELOPE_BYTES)
 }
 
 /// Skips one value through `deserialize_any`, so every check the deserializer applies to a
@@ -324,6 +405,7 @@ pub fn footprint_of(body: &[u8]) -> usize {
 /// `IgnoredAny` is not used because serde_json skips it without those checks and without
 /// visiting its contents, so a body the tree decode refuses would pass, and through the
 /// meter an ignored subtree would go uncounted.
+#[derive(Debug)]
 pub(crate) struct SkippedValue;
 
 impl<'de> serde::Deserialize<'de> for SkippedValue {
@@ -810,5 +892,86 @@ impl<'de, 'm, A: VariantAccess<'de>> VariantAccess<'de> for MeteredVariant<'m, A
                 meter: self.meter,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dense(values: usize) -> Vec<u8> {
+        let mut body = Vec::from(b"[0".as_slice());
+        for _ in 1..values {
+            body.extend_from_slice(b",0");
+        }
+        body.push(b']');
+        body
+    }
+
+    /// Classifying a refusal must not parse a body to its end: the count stops at the value
+    /// that crosses the capacity.
+    #[test]
+    fn a_capacity_bound_count_stops_at_the_value_that_crosses_it() {
+        let body = dense(200_000);
+        let footprint = footprint_of(&body);
+        let capacity = footprint / 4;
+
+        let reserve = CountOnly { capacity };
+        let meter = ResidentMeter::new(&reserve);
+        let failure = decode_metered::<SkippedValue>(&body, &meter).unwrap_err();
+        assert!(matches!(
+            failure,
+            DecodeFailure::Refused(Refusal::Permanent)
+        ));
+        assert!(meter.needed() > capacity);
+        assert!(
+            meter.needed() <= capacity + NODE_BYTES,
+            "the count reached {} against a capacity of {capacity}",
+            meter.needed()
+        );
+
+        assert!(footprint_exceeds(&body, footprint - 1));
+        assert!(!footprint_exceeds(&body, footprint));
+        assert!(
+            !footprint_exceeds(b"", 0),
+            "an undecodable body reaches nothing"
+        );
+    }
+
+    /// The byte scan counts the values the meter visits; the floor excludes string bytes,
+    /// which the meter retains.
+    #[test]
+    fn footprint_floor_counts_the_values_the_meter_visits() {
+        let deep = format!("{}1{}", "[".repeat(127), "]".repeat(127));
+        for body in [
+            "[0,0,0]",
+            "[[],{},[[]]]",
+            "[-1e-5,1.5E+3,-0,true,false,null,12]",
+            "{}",
+            "7",
+            deep.as_str(),
+        ] {
+            assert_eq!(
+                footprint_floor(body.as_bytes()),
+                footprint_of(body.as_bytes()),
+                "{body}"
+            );
+        }
+        let strings = br#"{"a":"x,y:z","b":["\"q\"",""]}"#;
+        let decoded_text = "a".len() + "x,y:z".len() + "b".len() + "\"q\"".len();
+        assert_eq!(
+            footprint_floor(strings) + RETAINED_STRING_COPIES * decoded_text,
+            footprint_of(strings)
+        );
+        assert_eq!(footprint_floor(b""), 0);
+        assert_eq!(footprint_floor(b"   "), 0);
+
+        // A dense body far above the capacity is refused from its bytes; one that fits is not.
+        let body = dense(200_000);
+        let footprint = footprint_of(&body);
+        assert!(footprint_floor_exceeds(&body, footprint - 1));
+        assert!(!footprint_floor_exceeds(&body, footprint));
+        // A body too short to reach the capacity is not scanned; the answer is the same.
+        assert!(!footprint_floor_exceeds(b"[0,0,0]", 1 << 20));
     }
 }

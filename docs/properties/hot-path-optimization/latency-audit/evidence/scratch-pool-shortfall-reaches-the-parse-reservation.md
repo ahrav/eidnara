@@ -119,15 +119,15 @@ arrives needs a barrier inside the handler that the fixture does not expose.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p daemon --locked` passed 1018 tests including the two above.
+`cargo test -p daemon --locked` passed 1024 tests including the two above.
 
 [meter]: ../../../../../crates/daemon/src/metered_decode.rs#L131-L138
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L269
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L272
 [marker]: ../../../../../crates/daemon/src/metered_decode.rs#L110-L117
 [shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L180-L185
 [count]: ../../../../../crates/daemon/src/metered_decode.rs#L124-L126
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19804-L19852
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19857-L19908
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19870-L19918
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19980-L20031
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [footprint]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15427-L15455
