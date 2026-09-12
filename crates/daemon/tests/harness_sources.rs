@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -192,28 +192,27 @@ fn intent(key: &str) -> CommitIntent {
 /// A kernel with one scoped, admitted project, opened at `root`.
 struct Corpus {
     kernel: Arc<KernelStore>,
-    /// Publication refuses a projection whose identity names a different kernel incarnation than the guard's, so this is read from the kernel database rather than hard-coded.
-    kernel_incarnation_id: String,
+    kernel_db: PathBuf,
 }
 
 impl Corpus {
     fn open(root: &Path) -> Self {
-        let kernel = Arc::new(KernelStore::open(root.join("kernel")).unwrap());
-        let kernel_incarnation_id = Connection::open_with_flags(
-            root.join("kernel").join("kernel.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap()
-        .query_row(
-            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+        let kernel_root = root.join("kernel");
         Self {
-            kernel,
-            kernel_incarnation_id,
+            kernel: Arc::new(KernelStore::open(&kernel_root).unwrap()),
+            kernel_db: kernel_root.join("kernel.sqlite"),
         }
+    }
+
+    fn kernel_incarnation_id(&self) -> String {
+        Connection::open_with_flags(&self.kernel_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
     fn seed(&self) {
@@ -323,9 +322,10 @@ impl Corpus {
     fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
+        let kernel_incarnation_id = self.kernel_incarnation_id();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(&self.kernel_incarnation_id), 1)?;
+                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
                 register_generation(conn, &generation(), 1)?;
                 Ok(())
             })
@@ -336,7 +336,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: self.kernel_incarnation_id.clone(),
+                kernel_incarnation_id,
                 hold_id: "0123456789abcdef0123456789abcdef".to_string(),
                 snapshot_commit_seq: snapshot,
                 through_commit_seq: snapshot,
