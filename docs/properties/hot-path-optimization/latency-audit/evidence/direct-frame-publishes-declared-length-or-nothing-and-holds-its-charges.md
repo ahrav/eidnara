@@ -152,7 +152,7 @@ deadline arm and the owned `into_parts` cases only.
 [publish-direct]: ../../../../../crates/host-runtime/src/ring_transport.rs#L788-L800
 [commit-before]: ../../../../../crates/host-runtime/src/ring_transport.rs#L814-L825
 [res-writer]: ../../../../../crates/host-runtime/src/ring_transport.rs#L827-L843
-[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1857-L1887
+[t-deadline]: ../../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
 [fixture-arm]: ../../../../../crates/host-runtime/tests/support/mod.rs#L441-L455
 [abort]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2268-L2304
 [prepare-commit]: ../../../../../crates/shm-transport/src/backend/ring.rs#L2306-L2343

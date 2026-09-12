@@ -2945,7 +2945,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L11668-L11672
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6295-L6335
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L92
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36758
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36765
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20386
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L20741
 [sched-tick]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L244-L261
