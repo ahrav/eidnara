@@ -15,6 +15,7 @@ pub mod batch;
 pub mod dispatch;
 pub mod eligibility;
 pub mod identity_sweep;
+pub mod message_cleanup;
 pub mod vectors;
 
 use std::collections::HashMap;

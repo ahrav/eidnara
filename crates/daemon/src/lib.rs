@@ -35,6 +35,7 @@ pub mod m0_compose;
 pub(crate) mod m1_compose;
 pub(crate) mod memory_render;
 pub mod memory_tool;
+pub mod message_cleanup;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;
@@ -14045,6 +14046,7 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
                 |(project, (_, route_root, schedule, authority_generation))| {
                     Some(dreamer_scheduler::ScheduledProject {
                         project,
+                        task: dreamer_scheduler::ScheduledTask::ReviewUserMemories,
                         route_root,
                         authority_generation,
                         schedule: schedule?,
@@ -14060,6 +14062,15 @@ impl dreamer_scheduler::SchedulerHost for SchedulerBridge {
         task: &str,
         command_id: &str,
     ) -> dreamer_scheduler::TaskRunOutcome {
+        // A host that never schedules cleanup still refuses to run it, so no configuration or flag can reach a reclamation through this daemon; every other kind has its Rust-owned inputs looked up below.
+        match project.task {
+            dreamer_scheduler::ScheduledTask::MessageIndexCleanup => {
+                return dreamer_scheduler::TaskRunOutcome::NotRunnable {
+                    reason: "message-index cleanup has no production enable path".to_string(),
+                };
+            }
+            dreamer_scheduler::ScheduledTask::ReviewUserMemories => {}
+        }
         let Some(binding) = self.binding_for_root(&project.route_root) else {
             return dreamer_scheduler::TaskRunOutcome::NotRunnable {
                 reason: "no live route is bound to the project".to_string(),

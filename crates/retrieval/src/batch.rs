@@ -91,6 +91,8 @@ pub struct BatchOutcome {
     /// The checkpoint after the batch; unchanged when the batch was an
     /// already-applied prefix.
     pub checkpoint_commit_seq: i64,
+    /// The batch ends strictly below the stored checkpoint, so none of its statements ran; `batch_status` is the way to interrogate such a window.
+    pub older_prefix: bool,
 }
 
 /// A covering checkpoint alone cannot distinguish batches that request different vector generations.
@@ -397,6 +399,8 @@ struct Admission<'a> {
     tombstoned: HashSet<&'a str>,
     /// Whether the projection already reaches the batch's end.
     already_applied: bool,
+    /// Whether a later window already moved the checkpoint past the batch's end. Such a batch is an older prefix: its rows may since have been tombstoned by later windows or reclaimed by cleanup, so running its statements again could only contradict state that supersedes it.
+    older_prefix: bool,
     /// The checkpoint after the batch.
     checkpoint_commit_seq: i64,
 }
@@ -535,6 +539,7 @@ fn admit<'a>(
             || stored
                 .as_ref()
                 .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
+        older_prefix: checkpoint_commit_seq > identity.through_commit_seq,
         checkpoint_commit_seq,
     })
 }
@@ -553,6 +558,10 @@ fn apply_batch_inner(
         checkpoint_commit_seq: admission.checkpoint_commit_seq,
         ..BatchOutcome::default()
     };
+    if admission.older_prefix {
+        outcome.older_prefix = true;
+        return Ok(outcome);
+    }
     let persisted = persist_occurrences(conn, &batch.records, bounds.persist, now)?;
     for (row, expected) in persisted.iter().zip(&admission.occurrence_ids) {
         if row.occurrence_id != *expected {

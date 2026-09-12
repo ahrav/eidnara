@@ -405,6 +405,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             pending_created: 3,
             pending_obsoleted: 0,
             checkpoint_commit_seq: 5,
+            older_prefix: false,
         }
     );
     let job = |id: &String| (id.clone(), GENERATION.to_string());
@@ -493,6 +494,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
             pending_created: 1,
             pending_obsoleted: 2,
             checkpoint_commit_seq: 9,
+            older_prefix: false,
         }
     );
     ledger.occurrences.insert(m1r2.clone());
@@ -677,6 +679,7 @@ fn a_fault_at_any_phase_leaves_the_whole_prior_state() {
             pending_created: 0,
             pending_obsoleted: 0,
             checkpoint_commit_seq: 4,
+            older_prefix: false,
         }
     );
     store
@@ -765,10 +768,10 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
         "obsolete"
     );
 
-    // Replaying the old prefix that created a1 neither revives it nor queues
-    // it again, and the checkpoint stays where it was.
+    // Replaying the old prefix that created a1 runs none of its statements:
+    // it neither revives a1 nor queues it again, and the checkpoint stays where it was.
     let replay = apply(&store, &batch1, 3).unwrap();
-    assert_eq!(replay.rows_replayed, 3);
+    assert_eq!((replay.rows_inserted, replay.rows_replayed), (0, 0));
     assert_eq!(replay.pending_created, 0);
     assert_eq!(replay.checkpoint_commit_seq, 5);
     store

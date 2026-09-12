@@ -1,0 +1,148 @@
+//! Runs one bounded slice of message-index cleanup against the projection: candidate pages are read under the acknowledged kernel prefix, each page is reclaimed in one fenced write transaction that re-checks eligibility, and the cursor is carried across slices so an interrupted slice resumes where it stopped. One `EvalBudget` gates every admission, and its deadline bounds the wait for the projection's write lock; cancellation leaves whatever committed, since each committed page is complete on its own.
+
+use std::num::NonZeroUsize;
+
+use kernel::applicability::EvalBudget;
+use retrieval::message_cleanup::{Candidate, Reclaimed, candidates, reclaim};
+use storage::{GuardedConn, StoreError};
+
+use crate::search_projection::{SearchProjection, SearchProjectionError};
+
+/// Bounds one slice: how many tombstoned rows one page inspects, how many pages one slice may write, and how many rows one slice may reclaim in total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanupBounds {
+    pub page_rows: NonZeroUsize,
+    pub max_pages: NonZeroUsize,
+    pub max_reclaimed: NonZeroUsize,
+}
+
+/// Why a slice stopped before the scan was exhausted. Every committed page stands; the cursor names where the next slice resumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CleanupStop {
+    /// The budget was cancelled or its deadline passed before the next page was admitted, or the deadline passed while waiting for the write lock.
+    Cancelled,
+    /// The slice reached its page or row bound with rows left to inspect.
+    BoundReached,
+    /// The store returned before the page's COMMIT, so the page's rows are unchanged and the same page is reclaimed again next slice.
+    Write(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub inspected: usize,
+    pub reclaimed: Reclaimed,
+    /// `None` once the scan is exhausted; otherwise the occurrence id the next slice continues after.
+    pub cursor: Option<String>,
+    pub stop: Option<CleanupStop>,
+}
+
+/// A cleanup identity carried across slices: the projection, the acknowledged prefix eligibility is judged against, and the scan cursor.
+pub struct MessageCleanup<'a> {
+    projection: &'a SearchProjection,
+    acknowledged_through: i64,
+    cursor: Option<String>,
+}
+
+impl<'a> MessageCleanup<'a> {
+    /// `acknowledged_through` is the kernel consumer checkpoint the search projection's own acknowledgements reached; the store caps it at the projection's checkpoint, and tombstones above the smaller stay.
+    pub fn new(projection: &'a SearchProjection, acknowledged_through: i64) -> Self {
+        Self {
+            projection,
+            acknowledged_through,
+            cursor: None,
+        }
+    }
+
+    /// Resumes a scan after `cursor`, as a slice interrupted by cancellation or a bound left it.
+    pub fn resuming(mut self, cursor: Option<String>) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+
+    /// Runs one slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns the projection's error when a read fails, a statement fails, or the store is quarantined, so the caller can quarantine as every other projection writer does; a write the store refused before COMMIT ends the slice in the report instead, since the page is unchanged.
+    pub fn run_slice(
+        &mut self,
+        bounds: CleanupBounds,
+        budget: &EvalBudget,
+    ) -> Result<CleanupReport, SearchProjectionError> {
+        let mut report = CleanupReport {
+            inspected: 0,
+            reclaimed: Reclaimed::default(),
+            cursor: self.cursor.clone(),
+            stop: None,
+        };
+        for _ in 0..bounds.max_pages.get() {
+            if budget.check().is_err() {
+                report.stop = Some(CleanupStop::Cancelled);
+                return Ok(report);
+            }
+            let acknowledged = self.acknowledged_through;
+            let after = self.cursor.clone();
+            let page = self
+                .projection
+                .read(|conn| candidates(conn, acknowledged, after.as_deref(), bounds.page_rows))?;
+            report.inspected += page.inspected;
+            let Some(last) = page.last_occurrence_id else {
+                report.cursor = None;
+                self.cursor = None;
+                return Ok(report);
+            };
+            let remaining = bounds.max_reclaimed.get() - report.reclaimed.occurrences;
+            let found = page.candidates.len();
+            let admitted: Vec<Candidate> = page.candidates.into_iter().take(remaining).collect();
+            let truncated = admitted.len() < found;
+            if budget.check().is_err() {
+                report.stop = Some(CleanupStop::Cancelled);
+                return Ok(report);
+            }
+            if !admitted.is_empty() {
+                let write = |conn: &GuardedConn<'_>| reclaim(conn, &admitted, acknowledged);
+                let outcome = match budget.deadline() {
+                    Some(deadline) => self.projection.write_within(deadline, write),
+                    None => self.projection.write(write),
+                };
+                match outcome {
+                    Ok(reclaimed) => {
+                        report.reclaimed.occurrences += reclaimed.occurrences;
+                        report.reclaimed.vectors += reclaimed.vectors;
+                        report.reclaimed.payloads += reclaimed.payloads;
+                        report.reclaimed.protected += reclaimed.protected;
+                    }
+                    Err(SearchProjectionError::Store(StoreError::Deadline)) => {
+                        report.stop = Some(CleanupStop::Cancelled);
+                        return Ok(report);
+                    }
+                    Err(SearchProjectionError::Store(StoreError::Backend(text))) => {
+                        report.stop = Some(CleanupStop::Write(text));
+                        return Ok(report);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            // A page cut by the row bound resumes at the last row it reclaimed; a whole page advances past its last inspected row.
+            let cursor = if truncated {
+                admitted
+                    .last()
+                    .map_or(last, |candidate| candidate.occurrence_id.clone())
+            } else {
+                last
+            };
+            self.cursor = Some(cursor.clone());
+            report.cursor = Some(cursor);
+            if report.reclaimed.occurrences >= bounds.max_reclaimed.get() {
+                report.stop = Some(CleanupStop::BoundReached);
+                return Ok(report);
+            }
+        }
+        report.stop = Some(CleanupStop::BoundReached);
+        Ok(report)
+    }
+}
