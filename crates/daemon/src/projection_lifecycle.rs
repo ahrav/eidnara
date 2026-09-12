@@ -188,8 +188,8 @@ pub enum IntentRefusal {
     Oversized,
     #[error("control record I/O failed: {0}")]
     Io(String),
-    /// The rename succeeded and the directory sync did not; the new record is visible now and may or may not survive power loss. The caller reads the record again rather than retrying the write.
-    #[error("the record was replaced but its directory sync failed: {0}")]
+    /// The control directory's sync failed. After a rename the new record is visible and may or may not survive power loss; the caller reads the record again rather than retrying the write.
+    #[error("the control directory sync failed: {0}")]
     DurabilityUnknown(String),
 }
 
@@ -224,19 +224,20 @@ pub struct ProjectionLifecycle {
 }
 
 impl ProjectionLifecycle {
-    /// Opens `<data_home>/search-lifecycle/`, creating it owner-only.
+    /// Opens `<data_home>/search-lifecycle/`, creating it owner-only. Syncs `data_home` after creating or finding the directory to make its entry durable.
     ///
     /// # Errors
     ///
-    /// Returns the I/O error when the directory cannot be created or is not owner-only.
+    /// Returns the I/O error when the directory cannot be created, synced, or is not owner-only.
     pub fn open(data_home: &Path) -> io::Result<Self> {
         let dir = data_home.join(CONTROL_DIR);
-        match fs::DirBuilder::new().mode(0o700).create(&dir) {
-            // Sync `data_home` to make the new `dir` entry durable.
-            Ok(()) => File::open(data_home)?.sync_all()?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+        if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&dir)
+            && error.kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(error);
         }
+        // The creator may have died before this sync, so an existing directory is synced too.
+        File::open(data_home)?.sync_all()?;
         let dir_fd = open_directory(&dir)?;
         // The umask may have narrowed the requested mode; the directory is set to exactly owner-only.
         dir_fd.set_permissions(Permissions::from_mode(0o700))?;
@@ -264,6 +265,8 @@ impl ProjectionLifecycle {
                 let _ = fs::remove_file(entry.path());
             }
         }
+        // A writer cut after its rename left the record visible but not yet durable.
+        this.dir_fd.sync_all()?;
         drop(lock);
         Ok(this)
     }
@@ -372,6 +375,7 @@ impl ProjectionLifecycle {
         match self.read() {
             ControlState::Absent => {}
             ControlState::Intent(existing) if existing.is_replay_of(request) => {
+                self.sync_directory()?;
                 return Ok(Recorded {
                     intent: existing,
                     replayed: true,
@@ -401,6 +405,19 @@ impl ProjectionLifecycle {
             authorization_ref: request.authorization_ref.clone(),
             recorded_at: now,
         };
+        // `consumed` grows to `allowance`; the record must still fit once it has.
+        if encode(&LifecycleIntent {
+            episodes: EpisodeAccounting {
+                consumed: request.allowance,
+                ..intent.episodes
+            },
+            ..intent.clone()
+        })?
+        .len() as u64
+            > MAX_RECORD_BYTES
+        {
+            return Err(IntentRefusal::Oversized);
+        }
         self.replace(&intent)?;
         Ok(Recorded {
             intent,
@@ -461,16 +478,23 @@ impl ProjectionLifecycle {
         if intent.episodes.consumed >= intent.episodes.allowance {
             return Err(IntentRefusal::AllowanceExhausted);
         }
+        // Nothing is removed on the strength of a record whose own durability is unknown.
+        self.sync_directory()?;
         let descriptor = search_descriptor(&self.data_home).map_err(store_refusal)?;
         delete_sqlite_family(&descriptor).map_err(store_refusal)?;
         Ok(intent)
     }
 
+    fn sync_directory(&self) -> Result<(), IntentRefusal> {
+        self.dir_fd
+            .sync_all()
+            .map_err(|error| IntentRefusal::DurabilityUnknown(error.kind().to_string()))
+    }
+
     /// Writes the record to a fresh temp file, syncs it, renames it over the record, and syncs the directory.
     fn replace(&self, intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
         let io = io_refusal;
-        let bytes =
-            serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+        let bytes = encode(intent)?;
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(IntentRefusal::Oversized);
         }
@@ -503,12 +527,14 @@ impl ProjectionLifecycle {
             return Err(io(error));
         }
         self.at(WriteBarrier::AfterRename);
-        self.dir_fd
-            .sync_all()
-            .map_err(|error| IntentRefusal::DurabilityUnknown(error.kind().to_string()))?;
+        self.sync_directory()?;
         self.at(WriteBarrier::AfterDirectorySync);
         Ok(())
     }
+}
+
+fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
+    serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))
 }
 
 /// Fields drop in declaration order, so the `flock` is released before `_threads`.

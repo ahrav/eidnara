@@ -280,6 +280,26 @@ fn replays_reconcile_to_one_intent_and_conflicts_change_nothing() {
     assert_eq!(replay.intent, expected(&request, 0));
     assert_eq!(fs::read(record_path(dir.path())).unwrap(), bytes);
 
+    // A replay after an episode is spent keeps the spent episode.
+    assert_eq!(
+        lifecycle.consume_episode(&gate, NOW + 6).unwrap().consumed,
+        1
+    );
+    let bytes = fs::read(record_path(dir.path())).unwrap();
+    let replay = lifecycle.record(&gate, &request, NOW + 7).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.intent, expected(&request, 1));
+    assert_eq!(fs::read(record_path(dir.path())).unwrap(), bytes);
+    assert_eq!(
+        lifecycle.consume_episode(&gate, NOW + 8).unwrap().consumed,
+        2
+    );
+    assert_eq!(
+        lifecycle.consume_episode(&gate, NOW + 8),
+        Err(IntentRefusal::AllowanceExhausted)
+    );
+    let bytes = fs::read(record_path(dir.path())).unwrap();
+
     let conflicts = [
         LifecycleRequest {
             attempt_id: "attempt-r2".to_owned(),
@@ -620,6 +640,28 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
     assert_eq!(lifecycle.read(), ControlState::Absent);
     assert!(!record_path(dir.path()).exists());
+
+    // A record that fits at `consumed: 0` but not once `consumed` gains a digit is refused up front, so every granted episode stays consumable.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let base = LifecycleRequest {
+        allowance: 10,
+        ..rebuild_request()
+    };
+    let slack = 64 * 1024 - serde_json::to_vec(&expected(&base, 0)).unwrap().len();
+    let near_cap = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
+        ..base
+    };
+    assert_eq!(
+        serde_json::to_vec(&expected(&near_cap, 0)).unwrap().len(),
+        64 * 1024
+    );
+    assert_eq!(
+        lifecycle.record(&open, &near_cap, NOW),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
 
     // A well-formed record the daemon did not write: a symlink to one.
     let dir = tempfile::tempdir().unwrap();

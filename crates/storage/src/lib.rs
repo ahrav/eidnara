@@ -1425,9 +1425,20 @@ mod sqlite_backend {
                 format!("sqlite path {} is not absolute", path.display()),
             )));
         }
-        let Some(parent) = path.parent().filter(|parent| parent.is_dir()) else {
+        let Some(parent) = path.parent() else {
             return Ok(());
         };
+        match std::fs::metadata(parent) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", parent.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(StoreError::Io(e)),
+        }
         let db_file_name = path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -1959,6 +1970,16 @@ mod tests {
         assert!(Path::new(path).exists(), "the held database is untouched");
         drop(store);
 
+        // Journals a crashed process left behind are family members too.
+        for suffix in ["-wal", "-shm"] {
+            std::fs::write(format!("{path}{suffix}"), b"orphan")
+                .expect("plant an orphaned journal");
+        }
+        assert!(
+            Path::new(&format!("{path}-wal")).exists()
+                && Path::new(&format!("{path}-shm")).exists()
+        );
+
         delete_sqlite_family(&d).expect("delete the released family");
         let remaining: Vec<String> = std::fs::read_dir(&root)
             .expect("read the store directory")
@@ -1995,6 +2016,37 @@ mod tests {
         let (root, d) = tmp();
         delete_sqlite_family(&d).expect("nothing to delete");
         assert!(!root.exists());
+    }
+
+    /// A parent whose metadata cannot be read is not an absent family.
+    #[cfg(unix)]
+    #[test]
+    fn delete_sqlite_family_reports_an_unreadable_parent_instead_of_success() {
+        use std::os::unix::fs::PermissionsExt;
+        let (outer, _) = tmp();
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).expect("create the store directory");
+        let path = inner.join("store.db");
+        let d = StorageDescriptor {
+            module_id: "test-module".into(),
+            storage_namespace: "main".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+            },
+        };
+        open_sqlite(&d, KV_BASELINE).expect("create the database");
+        std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000))
+            .expect("make the ancestor unreadable");
+        let outcome = delete_sqlite_family(&d);
+        std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the ancestor");
+        assert!(
+            matches!(outcome, Err(StoreError::Io(_))),
+            "an unreadable parent is an error, not a deleted family: {outcome:?}"
+        );
+        assert!(path.exists(), "the family is untouched");
+        let _ = std::fs::remove_dir_all(&outer);
     }
 
     const INVENTORY_FIXTURE: &str =
