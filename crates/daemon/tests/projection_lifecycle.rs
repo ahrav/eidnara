@@ -667,7 +667,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
     assert_eq!(lifecycle.read(), ControlState::Absent);
 
-    // A pin is refused when the record with the digest would not fit once `consumed` reaches `allowance`; the record is unchanged and every episode stays consumable.
+    // The record reserves the seed digest it may later pin as well as the terminal `consumed`: a request that fits only without the digest is refused up front, so an accepted intent can always be pinned and every episode consumed.
     let dir = tempfile::tempdir().unwrap();
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     let digest = "d".repeat(64);
@@ -681,12 +681,25 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
         ..base.clone()
     };
-    let recorded = lifecycle.record(&open, &pin_cap, NOW).unwrap();
+    assert!(
+        serde_json::to_vec(&expected(&pin_cap, base.allowance))
+            .unwrap()
+            .len()
+            <= 64 * 1024
+    );
     assert_eq!(
-        lifecycle.pin_seed(&open, &digest),
+        lifecycle.record(&open, &pin_cap, NOW),
         Err(IntentRefusal::Oversized)
     );
-    assert_eq!(lifecycle.read(), ControlState::Intent(recorded.intent));
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    // One byte less padding fits with the digest: the record is accepted, pinned, and consumed to its allowance.
+    let fits = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack - 1)),
+        ..base.clone()
+    };
+    lifecycle.record(&open, &fits, NOW).unwrap();
+    let pinned = lifecycle.pin_seed(&open, &digest).unwrap();
+    assert_eq!(pinned.staged_seed_digest.as_deref(), Some(digest.as_str()));
     for _ in 0..base.allowance {
         lifecycle.consume_episode(&open, NOW).unwrap();
     }

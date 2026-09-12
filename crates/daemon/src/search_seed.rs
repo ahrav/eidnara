@@ -85,7 +85,7 @@ pub enum SeedRefusal {
     Generation,
     #[error("the projection checkpoint row is missing or corrupt")]
     Checkpoint,
-    #[error("{0} vectors are not of the identity's dimension")]
+    #[error("{0} vectors are not of their generation's dimension")]
     VectorContract(u64),
     /// A job in a completed state has no vector row; the projection's writers refuse that shape as a corrupt row, and so does the certifier.
     #[error("{0} completed embedding jobs have no vector")]
@@ -401,7 +401,7 @@ fn closed_bytes(path: &Path, max_bytes: u64, ended: &Ended) -> Result<(u64, Stri
     Ok((bytes, file_sha256(path, ended)?))
 }
 
-/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, and every vector of the identity's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
+/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, every completed job with its vector, and every vector of its generation's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
 ///
 /// # Errors
 ///
@@ -516,10 +516,12 @@ fn verify_closed_until(
                 u64::try_from(n).map_err(|_| SeedRefusal::Store("negative count".to_owned()))
             })
     };
+    // A retired generation's vectors stay until the sweep reclaims them, so each vector is judged against its own generation's dimension, not the live one's.
     let off_dimension = conn
         .query_row(
-            "SELECT count(*) FROM occurrence_vectors WHERE vector_dimension<>?1",
-            [identity.vector_dimension],
+            "SELECT count(*) FROM occurrence_vectors v JOIN vector_generations g ON g.generation_id=v.generation_id
+             WHERE v.vector_dimension<>g.vector_dimension",
+            [],
             |row| row.get::<_, i64>(0),
         )
         .map_err(store)?;

@@ -560,13 +560,22 @@ fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
     serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))
 }
 
-/// `consumed` grows to `allowance`; every write of the record checks that it still fits once it has, so a granted episode is never refused as [`IntentRefusal::Oversized`].
+/// The hex SHA-256 a staged seed's digest takes; the record reserves room for one before any is pinned.
+const DIGEST_HEX_LEN: usize = 64;
+
+/// `consumed` grows to `allowance` and a seed digest may be pinned; every write of the record checks that it still fits with both, so neither a granted episode nor the pin of an accepted intent is refused as [`IntentRefusal::Oversized`].
 fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
     let exhausted = LifecycleIntent {
         episodes: EpisodeAccounting {
             consumed: intent.episodes.allowance,
             ..intent.episodes
         },
+        staged_seed_digest: Some(
+            intent
+                .staged_seed_digest
+                .clone()
+                .unwrap_or_else(|| "0".repeat(DIGEST_HEX_LEN)),
+        ),
         ..intent.clone()
     };
     if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {

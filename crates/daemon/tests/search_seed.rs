@@ -743,7 +743,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 10] = [
+    let cases: [(&str, &str, SeedRefusal); 12] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -790,6 +790,18 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
             "completed job without its vector",
             "DELETE FROM occurrence_vectors",
             SeedRefusal::VectorlessJobs(1),
+        ),
+        // A retired generation's vectors are still in the file until the sweep reclaims them; each vector is judged against its own generation's dimension.
+        (
+            "retired generation's vector at its own dimension",
+            "INSERT INTO vector_generations SELECT 'gen-0',embedding_model,tokenizer_fingerprint,4,generation_epoch,'retired',created_at,updated_at FROM vector_generations WHERE generation_id='gen-1';
+             INSERT INTO occurrence_vectors(occurrence_id,generation_id,vector,vector_dimension,input_bytes,input_tokens,completed_at) SELECT occurrence_id,'gen-0',zeroblob(16),4,1,1,1 FROM occurrence_vectors WHERE generation_id='gen-1'",
+            SeedRefusal::BytesChanged,
+        ),
+        (
+            "vector disagreeing with its generation's dimension",
+            "UPDATE occurrence_vectors SET vector=zeroblob(16),vector_dimension=4",
+            SeedRefusal::VectorContract(1),
         ),
         (
             "orphan vector",
