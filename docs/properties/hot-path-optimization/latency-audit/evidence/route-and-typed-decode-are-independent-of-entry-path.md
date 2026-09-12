@@ -122,21 +122,21 @@ oracle once the change replaces it.
 - Missing evidence: A differential run over the numeric corpus.
 - Conclusion: unresolved, needs a differential run.
 
-[handle]: ../../../../../crates/daemon/src/lib.rs#L11858-L11880
-[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15525-L15541
-[probe]: ../../../../../crates/daemon/src/lib.rs#L15364-L15376
-[probestr]: ../../../../../crates/daemon/src/lib.rs#L15383-L15446
-[class]: ../../../../../crates/daemon/src/lib.rs#L15448-L15459
-[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12611-L12705
-[pagefields]: ../../../../../crates/daemon/src/lib.rs#L12707-L12711
-[unrecognized]: ../../../../../crates/daemon/src/lib.rs#L12727-L12751
-[typename]: ../../../../../crates/daemon/src/lib.rs#L12753-L12762
+[handle]: ../../../../../crates/daemon/src/lib.rs#L11863-L11885
+[bytecap]: ../../../../../crates/daemon/src/lib.rs#L15530-L15546
+[probe]: ../../../../../crates/daemon/src/lib.rs#L15369-L15381
+[probestr]: ../../../../../crates/daemon/src/lib.rs#L15388-L15451
+[class]: ../../../../../crates/daemon/src/lib.rs#L15453-L15464
+[dispatch]: ../../../../../crates/daemon/src/lib.rs#L12616-L12710
+[pagefields]: ../../../../../crates/daemon/src/lib.rs#L12712-L12716
+[unrecognized]: ../../../../../crates/daemon/src/lib.rs#L12732-L12756
+[typename]: ../../../../../crates/daemon/src/lib.rs#L12758-L12767
 [pageconst]: ../../../../../crates/daemon/src/lib.rs#L752-L759
-[tdispatch]: ../../../../../crates/daemon/src/lib.rs#L7931-L7947
-[observed]: ../../../../../crates/daemon/src/lib.rs#L7970-L7976
-[fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7977-L7985
-[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9478-L9486
-[testentry]: ../../../../../crates/daemon/src/lib.rs#L12537-L12552
+[tdispatch]: ../../../../../crates/daemon/src/lib.rs#L7936-L7952
+[observed]: ../../../../../crates/daemon/src/lib.rs#L7975-L7981
+[fromvalue]: ../../../../../crates/daemon/src/lib.rs#L7982-L7990
+[pageapply]: ../../../../../crates/daemon/src/lib.rs#L9483-L9491
+[testentry]: ../../../../../crates/daemon/src/lib.rs#L12542-L12557
 [wirestruct]: ../../../../../crates/daemon/src/transform.rs#L809-L980
 [typed-decode]: ../../../../../crates/daemon/src/transform.rs#L917-L980
 [wiremsg]: ../../../../../crates/memory-store/src/lib.rs#L126-L143

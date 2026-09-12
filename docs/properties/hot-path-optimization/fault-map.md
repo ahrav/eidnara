@@ -88,7 +88,7 @@ policy, M5 allocation acceptance, and final external scope remain owner gates.
 [scopes]: ../../../crates/storage/src/lib.rs#L1202-L1284
 [snapshot]: ../../../crates/storage/src/lib.rs#L5714-L5751
 [history]: ../../../crates/daemon/src/decay_render.rs#L296-L338
-[prepare]: ../../../crates/memory-store/src/lib.rs#L2198-L2237
+[prepare]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
 [outer]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [ledger]: evidence/request-work-accounting-covers-retained-resources.md#evidence-trail
 [reference]: catalog.md#fixed-reference-identity

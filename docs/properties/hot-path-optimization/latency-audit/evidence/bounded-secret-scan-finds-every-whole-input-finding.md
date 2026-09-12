@@ -144,5 +144,5 @@ has no second side.
 [airtable]: ../../../../../crates/secret-scanner/default_rules.yaml#L297-L309
 [overlap]: ../../../../../crates/context-core/src/redaction.rs#L365-L377
 [edge-margin]: ../../../../../crates/context-core/src/redaction.rs#L380-L385
-[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2064-L2072
-[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2351-L2386
+[ms-content]: ../../../../../crates/memory-store/src/lib.rs#L2155-L2163
+[ms-digest]: ../../../../../crates/memory-store/src/lib.rs#L2442-L2477

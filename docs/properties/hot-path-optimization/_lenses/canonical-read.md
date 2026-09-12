@@ -28,8 +28,8 @@ the baseline. Skipped corrupt-row error observability remains unresolved.
 [Existing indexes][indexes] are evidence of schema shape, not an EQP result or
 a performance claim. No query-plan experiment runs here.
 
-[pass]: ../../../../crates/daemon/src/lib.rs#L8177-L8254
-[retry]: ../../../../crates/daemon/src/lib.rs#L8318-L8420
+[pass]: ../../../../crates/daemon/src/lib.rs#L8182-L8262
+[retry]: ../../../../crates/daemon/src/lib.rs#L8323-L8425
 [sql]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
 [read]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
 [convert]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212
