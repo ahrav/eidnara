@@ -203,8 +203,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
   violation); a stable pass; an Emergency95 pass that reruns and commits
   twice; a fresh session whose first pass commits.
 - Reachability: default-production - every transform request.
-- Existing check: [`transform_reject_records_trace_without_advancing_row_version`][t-reject],
-  [`transform_success_records_received_and_completed_trace`][t-success],
+- Existing check: [`transform_success_records_received_and_completed_trace`][t-success],
   [`repeated_rejects_increment_trace_and_overwrite_last_error`][t-repeat],
   [`sequential_failing_passes_trace_every_reject_while_cache_state_stays_frozen`][t-frozen],
   [`status_and_health_surface_pass_trace_for_rejected_sessions`][t-status],
@@ -426,7 +425,6 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 | [`transform_snapshot_keeps_row_version_and_overlays_from_one_commit`][t-snap-keeps] | snapshot row_version matches overlays from the same commit | unaudited |
 | [`transform_cas_conflict_leaves_every_overlay_table_empty`][t-cas-empty] | CAS loser commits no overlay rows | unaudited |
 | [`competing_pass_counter_survives_direct_primary_lifecycle_and_reopen`][t-counter] | CAS loser rejected; state survives reopen | unaudited |
-| [`transform_reject_records_trace_without_advancing_row_version`][t-reject] | reject: `receive_count == 1`, `reject_count == 1`, row_version unchanged | unaudited |
 | [`transform_success_records_received_and_completed_trace`][t-success] | success: received then completed timestamps | unaudited |
 | [`repeated_rejects_increment_trace_and_overwrite_last_error`][t-repeat] | counters increment per pass; last error overwritten | unaudited |
 | [`sequential_failing_passes_trace_every_reject_while_cache_state_stays_frozen`][t-frozen] | four rejects: `receive_count == 4`, row_version frozen | unaudited |
@@ -521,8 +519,8 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [snapshot-impl]: ../../../../../crates/memory-store/src/lib.rs#L6774-L6904
 [with-conn]: ../../../../../crates/storage/src/lib.rs#L343-L360
 [fenced]: ../../../../../crates/storage/src/lib.rs#L409-L473
-[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1492-L1493
-[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2221-L2239
+[pin-sync]: ../../../../../crates/storage/src/lib.rs#L1500-L1501
+[claim-fence]: ../../../../../crates/storage/src/lib.rs#L2229-L2247
 [pw-execute]: ../../../../../crates/memory-store/src/lib.rs#L2380-L2407
 [audit]: ../../../../../crates/memory-store/src/lib.rs#L2430-L2598
 [opaque-id]: ../../../../../crates/memory-store/src/lib.rs#L2623-L2631
@@ -618,10 +616,9 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [idx-due]: ../../../../../crates/memory-store/baseline.sql#L507-L510
 [idx-order]: ../../../../../crates/memory-store/baseline.sql#L531-L535
 
-[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36850
-[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36057
+[t-no-fire]: ../../../../../crates/daemon/src/lib.rs#L36886
+[t-emergency]: ../../../../../crates/daemon/src/lib.rs#L36093
 [t-cas]: ../../../../../crates/daemon/src/lib.rs#L23425
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23857
 [t-success]: ../../../../../crates/daemon/src/lib.rs#L24562
 [t-repeat]: ../../../../../crates/daemon/src/lib.rs#L24578
 [t-frozen]: ../../../../../crates/daemon/src/lib.rs#L24606
@@ -644,4 +641,4 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [t-preserved]: ../../../../../crates/memory-store/src/lib.rs#L16273
 [t-identity-tx]: ../../../../../crates/memory-store/src/lib.rs#L16416
 [t-cache-redact]: ../../../../../crates/memory-store/tests/production_redaction.rs#L728
-[t-sync]: ../../../../../crates/storage/src/lib.rs#L4278-L4343
+[t-sync]: ../../../../../crates/storage/src/lib.rs#L4286-L4351

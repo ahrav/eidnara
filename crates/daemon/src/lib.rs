@@ -36035,6 +36035,42 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
+    /// The wrapup's entry load reads the full row before any scalar `meta` read, so a row
+    /// whose core no longer deserializes is refused instead of answering `nothing_to_compact`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_refuses_a_row_whose_core_state_is_corrupt() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        store
+            .replace_compartments("ses", &[stored_comp(1, 1, 10, "m10", "covered")])
+            .unwrap();
+        cache_wrapup_messages(
+            &handler,
+            vec![ck("m1", 1, "one"), ck("m2", 2, "two"), ck("m3", 3, "three")],
+        );
+        store
+            .execute_tag_sql_for_test(
+                "UPDATE cache_state SET core_state = '{not json' WHERE session_id = 'ses'",
+            )
+            .unwrap();
+
+        let outcome = handler
+            .dispatch_value(
+                test_route(7),
+                json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+            )
+            .await;
+        assert!(
+            matches!(&outcome, PreparedOutcome::Error { code, .. } if code == "store_load_failed"),
+            "a corrupt core is refused, got {outcome:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_busy_dedups_while_firing_is_in_progress() {
         let producer = Arc::new(ProducerState::default());

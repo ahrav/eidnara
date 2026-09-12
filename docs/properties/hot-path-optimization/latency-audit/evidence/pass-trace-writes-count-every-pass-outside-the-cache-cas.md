@@ -42,12 +42,12 @@ cache-state CAS, which two doc comments state it must not do. The parent's
   `cache_state` so a rejected pass leaves a trail without advancing
   `row_version`.
 - Readers: [session status][status-read] and [health][health-read] JSON, the
-  `newest_pass_at` age at [`:6238`][age], and the plugin's
+  `newest_pass_at` age at [`:6300-6311`][age], and the plugin's
   [`Passes: N received, M rejected`][plugin] line.
   [`load_pass_scheduler_history`][sched-history] has one non-store caller,
   a [test][sched-test].
-- An Emergency95 pass can rerun `run_transform` at [`:8264-8267`][rerun-a] and
-  [`:8372-8375`][rerun-b] after one receive breadcrumb.
+- An Emergency95 pass can rerun `run_transform` at [`:8349-8352`][rerun-a] and
+  [`:8448-8451`][rerun-b] after one receive breadcrumb.
 
 ## Failure scenario
 
@@ -77,7 +77,7 @@ unchanged; `first_divergence` is NULL after a reject; `scheduler_history`
 gains one observation per accepted pass; and the cache-state row commits when
 the trace write fails. The
 [state checks](../existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list seven pass-trace tests ([`t-reject`][t-reject], [`t-success`][t-success],
+list six pass-trace tests ([`t-success`][t-success],
 [`t-repeat`][t-repeat], [`t-frozen`][t-frozen], [`t-status`][t-status],
 [`t-upserts`][t-upserts], [`t-sched`][t-sched]) and the identity gate
 ([`t-secret`][t-secret]); none covers `first_divergence` after a reject,
@@ -95,8 +95,7 @@ channel, the authority route read, and dreamer tasks only.
 ### Q: Is under-counting rejected passes an acceptable semantic change?
 
 - Sources examined: [`trace_pass_received`][received], the
-  [`PassTrace` doc][passtrace-doc], [`t-reject`][t-reject],
-  [`t-frozen`][t-frozen].
+  [`PassTrace` doc][passtrace-doc], [`t-frozen`][t-frozen].
 - Findings: The doc states the reject-trail purpose; the tests encode
   `receive_count == reject_count` after rejects. A fold cannot preserve that
   without a second write on the reject path.
@@ -131,7 +130,6 @@ channel, the authority route read, and dreamer tasks only.
 [status-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L6197-L6247
 [age]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L6238
 [health-read]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7826-L7874
-[t-reject]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23449
 [t-success]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23479
 [t-repeat]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23495
 [t-frozen]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L23523
