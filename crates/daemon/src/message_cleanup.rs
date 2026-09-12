@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
-use retrieval::message_cleanup::{Candidate, Reclaimed, candidates, reclaim};
+use retrieval::message_cleanup::{Candidate, Reclaimed, candidates, present, reclaim};
 use storage::{GuardedConn, StoreError};
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
@@ -23,8 +23,8 @@ pub enum CleanupStop {
     Cancelled,
     /// The slice reached its page or row bound with rows left to inspect.
     BoundReached,
-    /// The store returned before the page's COMMIT, so the page's rows are unchanged and the same page is reclaimed again next slice.
-    Write(String),
+    /// The store's reply to the page's write was lost at or before COMMIT. `reclaimed.occurrences` counts the admitted rows that are gone; vectors and payloads count only acknowledged writes. The cursor stays where the page began, so rows still present are selected again next slice.
+    Unresolved(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,20 +36,27 @@ pub struct CleanupReport {
     pub stop: Option<CleanupStop>,
 }
 
-/// A cleanup identity carried across slices: the projection, the acknowledged prefix eligibility is judged against, and the scan cursor.
 pub struct MessageCleanup<'a> {
     projection: &'a SearchProjection,
+    kernel_incarnation_id: String,
     acknowledged_through: i64,
     cursor: Option<String>,
+    lose_write_reply: bool,
 }
 
 impl<'a> MessageCleanup<'a> {
-    /// `acknowledged_through` is the kernel consumer checkpoint the search projection's own acknowledgements reached; the store caps it at the projection's checkpoint, and tombstones above the smaller stay.
-    pub fn new(projection: &'a SearchProjection, acknowledged_through: i64) -> Self {
+    /// `acknowledged_through` is the kernel consumer checkpoint the search projection's own acknowledgements reached; the store caps it at the projection's checkpoint, and tombstones above the smaller stay. A projection installed under a kernel incarnation other than `kernel_incarnation_id` is refused by every slice.
+    pub fn new(
+        projection: &'a SearchProjection,
+        kernel_incarnation_id: String,
+        acknowledged_through: i64,
+    ) -> Self {
         Self {
             projection,
+            kernel_incarnation_id,
             acknowledged_through,
             cursor: None,
+            lose_write_reply: false,
         }
     }
 
@@ -63,11 +70,17 @@ impl<'a> MessageCleanup<'a> {
         self.cursor.as_deref()
     }
 
+    /// Makes the next page's write return as if its COMMIT reply were lost after the store applied it, so the reconciliation path can be exercised.
+    #[cfg(feature = "test-support")]
+    pub fn lose_next_write_reply_for_test(&mut self) {
+        self.lose_write_reply = true;
+    }
+
     /// Runs one slice.
     ///
     /// # Errors
     ///
-    /// Returns the projection's error when a read fails, a statement fails, or the store is quarantined, so the caller can quarantine as every other projection writer does; a write the store refused before COMMIT ends the slice in the report instead, since the page is unchanged.
+    /// Returns the projection's error when a read fails, a statement fails, or the store is quarantined, so the caller can quarantine as every other projection writer does; a write whose reply the store lost ends the slice in the report as [`CleanupStop::Unresolved`], with the page reconciled from its rows.
     pub fn run_slice(
         &mut self,
         bounds: CleanupBounds,
@@ -85,10 +98,17 @@ impl<'a> MessageCleanup<'a> {
                 return Ok(report);
             }
             let acknowledged = self.acknowledged_through;
+            let kernel = self.kernel_incarnation_id.as_str();
             let after = self.cursor.clone();
-            let page = self
-                .projection
-                .read(|conn| candidates(conn, acknowledged, after.as_deref(), bounds.page_rows))?;
+            let page = self.projection.read(|conn| {
+                candidates(
+                    conn,
+                    kernel,
+                    acknowledged,
+                    after.as_deref(),
+                    bounds.page_rows,
+                )
+            })?;
             report.inspected += page.inspected;
             let Some(last) = page.last_occurrence_id else {
                 report.cursor = None;
@@ -104,10 +124,17 @@ impl<'a> MessageCleanup<'a> {
                 return Ok(report);
             }
             if !admitted.is_empty() {
-                let write = |conn: &GuardedConn<'_>| reclaim(conn, &admitted, acknowledged);
+                let write = |conn: &GuardedConn<'_>| reclaim(conn, kernel, &admitted, acknowledged);
                 let outcome = match budget.deadline() {
                     Some(deadline) => self.projection.write_within(deadline, write),
                     None => self.projection.write(write),
+                };
+                let outcome = if std::mem::take(&mut self.lose_write_reply) && outcome.is_ok() {
+                    Err(SearchProjectionError::Store(StoreError::Backend(
+                        "database is locked".to_owned(),
+                    )))
+                } else {
+                    outcome
                 };
                 match outcome {
                     Ok(reclaimed) => {
@@ -120,8 +147,14 @@ impl<'a> MessageCleanup<'a> {
                         report.stop = Some(CleanupStop::Cancelled);
                         return Ok(report);
                     }
+                    // `Backend` covers a failed COMMIT, whose outcome is unknown; the rows decide what to count.
                     Err(SearchProjectionError::Store(StoreError::Backend(text))) => {
-                        report.stop = Some(CleanupStop::Write(text));
+                        for candidate in &admitted {
+                            if !self.projection.read(|conn| present(conn, candidate))? {
+                                report.reclaimed.occurrences += 1;
+                            }
+                        }
+                        report.stop = Some(CleanupStop::Unresolved(text));
                         return Ok(report);
                     }
                     Err(error) => return Err(error),

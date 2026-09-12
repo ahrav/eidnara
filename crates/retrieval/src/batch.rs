@@ -397,7 +397,7 @@ macro_rules! phase {
 struct Admission<'a> {
     occurrence_ids: Vec<String>,
     tombstoned: HashSet<&'a str>,
-    /// Whether the projection already reaches the batch's end.
+    /// Whether the stored checkpoint is exactly the batch's end, so the batch re-validates its rows without moving the checkpoint.
     already_applied: bool,
     /// Whether a later window already moved the checkpoint past the batch's end. Such a batch is an older prefix: its rows may since have been tombstoned by later windows or reclaimed by cleanup, so running its statements again could only contradict state that supersedes it.
     older_prefix: bool,
@@ -535,10 +535,9 @@ fn admit<'a>(
     Ok(Admission {
         occurrence_ids,
         tombstoned,
-        already_applied: checkpoint_commit_seq > identity.through_commit_seq
-            || stored
-                .as_ref()
-                .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
+        already_applied: stored
+            .as_ref()
+            .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
         older_prefix: checkpoint_commit_seq > identity.through_commit_seq,
         checkpoint_commit_seq,
     })
