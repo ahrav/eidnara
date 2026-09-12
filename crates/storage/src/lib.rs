@@ -43,6 +43,9 @@ pub enum StoreError {
     /// An io failure preparing the store location.
     #[error("storage io: {0}")]
     Io(#[source] std::io::Error),
+    /// The family's files were removed and the directory sync after the removal failed, so the removal is visible but may not survive power loss.
+    #[error("family removed but its directory sync failed: {0}")]
+    DurabilityUnknown(#[source] std::io::Error),
     /// A fenced (epoch-checked) write was rejected because the database has already
     /// been claimed by a newer writer. `db_epoch` (the epoch stamped in the
     /// database) is greater than `holder_epoch` (this store's lease epoch), so this
@@ -1835,7 +1838,7 @@ mod sqlite_backend {
     /// derive two leases and two sidecar sets, so neither writer sees the other's fence
     /// claim. The link count comes from an opened handle so the rule holds on Windows too.
     fn refuse_unfit_store_files(path: &Path) -> Result<(), StoreError> {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
+        for suffix in SQLITE_FAMILY_SUFFIXES {
             let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
             let meta = match std::fs::symlink_metadata(&candidate) {
                 Ok(meta) => meta,
@@ -1858,6 +1861,64 @@ mod sqlite_backend {
             }
         }
         Ok(())
+    }
+
+    /// The database file and the journals SQLite keeps beside it. The lease sidecar is not a member: it outlives the database as the floor for the next writer epoch.
+    const SQLITE_FAMILY_SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
+
+    /// Removes the descriptor's database and journals under the store's exclusive lease. A WAL-mode connection left open across the removal would keep committing into the unlinked inodes and, on close, unlink by path whatever replacement had been opened since; holding the exclusive lease excludes every live store, opener, and inspection of this descriptor for the duration.
+    ///
+    /// The parent directory is synced after the removal. The lease sidecar stays and its epoch is advanced by the acquisition. A missing parent directory removes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::UnsupportedBackend`] for non-SQLite descriptors, [`StoreError::Lease`] when a live holder has the lease or the lease sidecar cannot be used, [`StoreError::Io`] for a relative path, an unreadable parent, or a removal that failed for a reason other than the file being absent, and [`StoreError::DurabilityUnknown`] when the files were removed and the directory sync after them failed.
+    pub fn delete_sqlite_family(descriptor: &StorageDescriptor) -> Result<(), StoreError> {
+        let path = match &descriptor.backend {
+            StorageBackend::Sqlite { path } => Path::new(path),
+            other => return Err(StoreError::UnsupportedBackend(other.label().to_string())),
+        };
+        if !path.is_absolute() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("sqlite path {} is not absolute", path.display()),
+            )));
+        }
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        match std::fs::metadata(parent) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", parent.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+        let db_file_name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let leases = FileLeaseStore::new(parent).map_err(StoreError::Io)?;
+        let _lease = leases
+            .acquire(&lease_key(descriptor, &db_file_name)?)
+            .map_err(StoreError::Lease)?;
+        // An unfit member refuses the whole family before any member is removed, so a failure never leaves a partial removal behind.
+        refuse_unfit_store_files(path)?;
+        for suffix in SQLITE_FAMILY_SUFFIXES {
+            let member = PathBuf::from(format!("{}{suffix}", path.display()));
+            match std::fs::remove_file(&member) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(StoreError::DurabilityUnknown)
     }
 
     /// Opens `path` for reading without following a final symlink and without waiting on a
@@ -2687,7 +2748,7 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    open_sqlite, schema_inventory,
+    delete_sqlite_family, open_sqlite, schema_inventory,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -2730,6 +2791,145 @@ mod tests {
     }
 
     const KV_BASELINE: &str = "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);";
+
+    #[test]
+    fn delete_sqlite_family_refuses_a_live_holder_and_leaves_the_lease_sidecar() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let store = open_sqlite(&d, KV_BASELINE).expect("create the database");
+        let held_epoch = store.epoch();
+        std::fs::write(format!("{path}-journal"), b"j").expect("plant a rollback journal");
+        match delete_sqlite_family(&d) {
+            Err(StoreError::Lease(LeaseError::Held { .. })) => {}
+            other => panic!("a live store's family must not be deleted, got {other:?}"),
+        }
+        assert!(Path::new(path).exists(), "the held database is untouched");
+        drop(store);
+
+        // Journals a crashed process left behind are family members too.
+        for suffix in ["-wal", "-shm"] {
+            std::fs::write(format!("{path}{suffix}"), b"orphan")
+                .expect("plant an orphaned journal");
+        }
+        assert!(
+            Path::new(&format!("{path}-wal")).exists()
+                && Path::new(&format!("{path}-shm")).exists()
+        );
+
+        delete_sqlite_family(&d).expect("delete the released family");
+        let remaining: Vec<String> = std::fs::read_dir(&root)
+            .expect("read the store directory")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            remaining.iter().all(|name| !name.starts_with("store.db")),
+            "the database and every journal are gone: {remaining:?}"
+        );
+        assert!(
+            remaining.iter().any(|name| name.ends_with(".lease")),
+            "the lease sidecar outlives the family: {remaining:?}"
+        );
+        delete_sqlite_family(&d).expect("deleting an absent family removes nothing");
+
+        let reopened = open_sqlite(&d, KV_BASELINE).expect("a fresh database opens");
+        assert!(
+            reopened.epoch() > held_epoch,
+            "the next writer epoch exceeds the deleted store's {held_epoch}"
+        );
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Deleting where no directory exists must not create one as a side effect of taking the lease.
+    #[test]
+    fn delete_sqlite_family_of_a_missing_directory_creates_nothing() {
+        let (root, d) = tmp();
+        delete_sqlite_family(&d).expect("nothing to delete");
+        assert!(!root.exists());
+    }
+
+    /// A member that is not a regular file refuses the whole deletion before any member is removed.
+    #[test]
+    fn delete_sqlite_family_removes_nothing_when_a_member_is_unfit() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        std::fs::create_dir(format!("{path}-wal")).expect("plant a directory where the WAL goes");
+        let outcome = delete_sqlite_family(&d);
+        assert!(
+            matches!(outcome, Err(StoreError::Baseline(_))),
+            "an unfit member refuses the deletion: {outcome:?}"
+        );
+        assert!(Path::new(path).exists(), "the database is untouched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A parent that can be written but not opened for reading lets the removals through and fails the directory sync after them.
+    #[cfg(unix)]
+    #[test]
+    fn delete_sqlite_family_reports_a_failed_post_removal_sync_as_durability_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300))
+            .expect("make the directory unreadable but writable");
+        let outcome = delete_sqlite_family(&d);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the directory");
+        assert!(
+            !Path::new(path).exists(),
+            "the family was removed: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Err(StoreError::DurabilityUnknown(_))),
+            "a removal whose directory sync failed is reported as such: {outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A parent whose metadata cannot be read is not an absent family.
+    #[cfg(unix)]
+    #[test]
+    fn delete_sqlite_family_reports_an_unreadable_parent_instead_of_success() {
+        use std::os::unix::fs::PermissionsExt;
+        let (outer, _) = tmp();
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).expect("create the store directory");
+        let path = inner.join("store.db");
+        let d = StorageDescriptor {
+            module_id: "test-module".into(),
+            storage_namespace: "main".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+            },
+        };
+        open_sqlite(&d, KV_BASELINE).expect("create the database");
+        std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o000))
+            .expect("make the ancestor unreadable");
+        let outcome = delete_sqlite_family(&d);
+        std::fs::set_permissions(&outer, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the ancestor");
+        assert!(
+            matches!(outcome, Err(StoreError::Io(_))),
+            "an unreadable parent is an error, not a deleted family: {outcome:?}"
+        );
+        assert!(path.exists(), "the family is untouched");
+        let _ = std::fs::remove_dir_all(&outer);
+    }
 
     const INVENTORY_FIXTURE: &str =
         include_str!("../../../fixtures/schema/storage-inventory-v1.json");

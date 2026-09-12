@@ -603,7 +603,7 @@ pub fn obsolete_judged_job(
 pub const MAX_AUTHORIZATION_REF_BYTES: usize = 128;
 
 /// One token of `[A-Za-z0-9._:-]`, so a reference carries no separator, whitespace, or control byte into the episode identity.
-fn valid_authorization_ref(authorization_ref: &str) -> bool {
+pub fn valid_authorization_ref(authorization_ref: &str) -> bool {
     !authorization_ref.is_empty()
         && authorization_ref.len() <= MAX_AUTHORIZATION_REF_BYTES
         && authorization_ref
