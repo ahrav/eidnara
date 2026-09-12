@@ -72,7 +72,9 @@ not the handler.
 | [Canonical frozen-corpus witness][served-corpus] | Original and fully typed shells match the independent `to_vec(to_value(message))` reference and prepared-frame bytes. Pairwise block identity digests agree with structural equality across the corpus. | unaudited |
 | [Fingerprint candidate witness][served-fallback] | Real projection receipts match the frozen structural reference on the same candidates in both signed-zero directions, with original and typed zeros, latent extras, unknown fields, and first-duplicate reuse. Reused and fresh zero fingerprints intentionally differ while served bytes agree. Separately poisoned receipts expose candidate choice and positional precedence, not byte-hash equality. Null block input is rejected. | unaudited |
 | [Single-serialization counter][served-once] | Each nested counted `Serialize` implementation runs once. Nested scalar and decoded-key ordering checks preserve serde bytes and reject unsorted struct output. | unaudited |
-| [Fallback source guard][served-source] | The constructor has no `to_value` round trip. The absent-position fallback has no linear `find` or structural wire-comparison expression and has one lazy digest-index initializer. Positional equality is allowed. | unaudited |
+| [Prefix and escaped key ordering][served-key-order] | Objects whose quoted or escaped key spellings order differently from their decoded strings (`"a"` against `"a b"`, `"\n"` against `"!"`, `\t` against `\u0001`, non-ASCII against ASCII) encode to the `serde_json::Value` reference from both sorted and reversed input. | unaudited |
+| [Passthrough allocation witness][served-allocations] | Under a counting global allocator, a 65-block retained-original shell with 12 keys per block costs at most 8 allocation events per block over a 1-block shell while matching the `to_vec(to_value(message))` bytes. Decoding every key costs 12 per block. | unaudited |
+| [Fallback source guard][served-source] | The constructor has no `to_value` round trip. The absent-position fallback has no linear `find`, has one lazy digest-index initializer, routes its selected candidate through `fingerprint_from_projected_wire` exactly once, and composes no receipt inline. | unaudited |
 | [`served_fingerprint_block_ids_pin_flat_mid_index_format`][t-fpids] | Fingerprint block ids are `mid#index` and synthetic ids. | unaudited |
 | [`transform_segments_preserve_existing_golden_bytes`][t-segments] | `Exact` segments concatenate into the golden body. | unaudited |
 | [`incremental_native_cache_replays_complex_prefix_and_encodes_only_tail`][t-native-inc] | Real tail expansion shares native values and sidecar metadata. Fresh, reattached, and shared replay produce equal native bytes and projected identity data. At most two served tail messages are encoded; prefix chunks retain pointer identity. The warm request charge equals a fresh walk using the same size estimator, independently of cached charges. The compiled test setting enables the native differential; the negative controls below verify detection. | unaudited |
@@ -466,12 +468,14 @@ not a claim that no related check exists anywhere in the repository.
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28953
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27866
 [synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L23247
-[t-parked]: ../../../../crates/daemon/src/transform.rs#L13986
-[served-shells]: ../../../../crates/daemon/src/transform.rs#L13714
-[served-corpus]: ../../../../crates/daemon/src/transform.rs#L13760
-[served-fallback]: ../../../../crates/daemon/src/transform.rs#L13797
-[served-once]: ../../../../crates/daemon/src/served_json.rs#L148
-[served-source]: ../../../../crates/daemon/src/transform.rs#L13942
+[t-parked]: ../../../../crates/daemon/src/transform.rs#L13990
+[served-shells]: ../../../../crates/daemon/src/transform.rs#L13711
+[served-corpus]: ../../../../crates/daemon/src/transform.rs#L13757
+[served-fallback]: ../../../../crates/daemon/src/transform.rs#L13794
+[served-once]: ../../../../crates/daemon/src/served_json.rs#L171
+[served-key-order]: ../../../../crates/daemon/src/served_json.rs#L218
+[served-allocations]: ../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L68
+[served-source]: ../../../../crates/daemon/src/transform.rs#L13939
 [t-fpids]: ../../../../crates/daemon/src/transform.rs#L13605
 [t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L33-L52
 [t-native-inc]: ../../../../crates/daemon/src/lib.rs#L20668

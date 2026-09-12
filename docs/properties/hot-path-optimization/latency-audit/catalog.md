@@ -375,8 +375,10 @@ only an absent position searches the first identity-equal candidate. The fallbac
 index uses a [request-local SHA-256 identity][block-identity] over typed kind,
 provider extras, and retained original, normalizing floating signed zero but
 not integer zero. Its key is distinct from the projected serialized-byte hash.
-A matching candidate supplies its fingerprint and byte length; otherwise the
-result is `(fingerprint(to_string(block)), to_string(block).len())`.
+The selected candidate then passes through the same [equality helper][fp-reuse]
+as a positional candidate, which supplies its fingerprint and byte length or
+rejects it; otherwise the result is
+`(fingerprint(to_string(block)), to_string(block).len())`.
 Equal floating zeros can therefore reuse a candidate whose byte spelling
 differs, as in the structural-equality baseline. `always` because
 every pass projects and serves, every plugin turn attaches, and every
@@ -413,7 +415,9 @@ charge shell backing, content capacity, retained block JSON, and Arc counters
 using the existing conservative full-charge-per-holder rule. Cached prefix
 charges can exceed the canonical shell's smaller footprint; only suffix sizes
 are recomputed. Cache budgets are unchanged. Canonical serialization uses
-serde formatter spans rather than a materialized `Value` round trip. The
+serde formatter spans rather than a materialized `Value` round trip; keys
+without escapes order by their raw bytes, and an object already in order is
+not sorted, so a retained-original shell decodes no keys. The
 positional map, lazy digest index, and serialization spans are per-message
 scratch, not retained cache entries. All checks remain unaudited for adequacy.
 Impact: Output identity, served fingerprints, token caches, tag mint, and the
@@ -2531,10 +2535,10 @@ evaluation of this area and its disposition are recorded in
 [cached-boundary]: ../../../../crates/daemon/src/lib.rs#L16600
 [sel-kind]: ../../../../crates/daemon/src/lib.rs#L16662
 [token-count]: ../../../../crates/daemon/src/lib.rs#L2035-L2059
-[served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L227
-[ser-served]: ../../../../crates/daemon/src/transform.rs#L304-L311
+[served-reusing]: ../../../../crates/daemon/src/transform.rs#L164-L224
+[ser-served]: ../../../../crates/daemon/src/transform.rs#L301-L308
 [served-byte-witnesses]: evidence/derived-artifacts-are-ownership-independent.md#canonical-served-bytes-and-fingerprint-identity
-[block-identity]: ../../../../crates/daemon/src/wire.rs#L882
+[block-identity]: ../../../../crates/daemon/src/wire.rs#L885
 [gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2016
 [normalize]: ../../../../crates/daemon/src/transform.rs#L2126
 [sel-item]: ../../../../crates/daemon/src/transform.rs#L6377
