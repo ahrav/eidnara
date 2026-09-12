@@ -55,7 +55,7 @@ describe("Broca credential fingerprints", () => {
         expect(() => credentialFingerprints(new Uint8Array(31), "pi", {})).toThrow(/exactly 32/);
     });
 
-    test("omits only the provider whose value exceeds the cap", () => {
+    test("a value exactly at the cap qualifies and only an oversize provider is omitted", () => {
         // The host qualifies rows per provider, so one oversize value must not hide the
         // fingerprints of the other providers.
         const key = new Uint8Array(32);
@@ -67,13 +67,10 @@ describe("Broca credential fingerprints", () => {
         });
         expect(Object.keys(fingerprints).sort()).toEqual(["anthropic", "openai"]);
         expect(credentialFingerprints(key, "pi", { ANTHROPIC_API_KEY: oversize })).toEqual({});
-    });
 
-    test("a value exactly at the cap still qualifies", () => {
-        const key = new Uint8Array(32);
-        const fingerprints = credentialFingerprints(key, "pi", {
+        const atCap = credentialFingerprints(key, "pi", {
             ANTHROPIC_API_KEY: "x".repeat(BROCA_CREDENTIAL_VALUE_CAP_BYTES),
         });
-        expect(Object.keys(fingerprints)).toEqual(["anthropic"]);
+        expect(Object.keys(atCap)).toEqual(["anthropic"]);
     });
 });

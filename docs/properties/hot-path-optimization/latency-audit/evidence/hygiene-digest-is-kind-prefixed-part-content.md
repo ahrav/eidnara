@@ -183,8 +183,9 @@ anchors above identify each branch.
   Daemon all-target/all-feature
   clippy, release all-feature library check, and scoped rustfmt checks pass.
   Checks remain unaudited.
-- Payoff evidence: The implementation pass did not execute benchmarks; the
-  subsequent [frozen local payoff run](tail-hygiene-payoff.md) is complete.
+- Historical payoff evidence: The implementation pass did not execute
+  benchmarks; the subsequent [frozen local payoff run](tail-hygiene-payoff.md)
+  is complete.
   The benchmark creates and primes the same memo owner used by measurement
   before its callback and timed loop. Per-call slot hashing, locking, lookup,
   validity, accounting, and full-result construction/drop remain timed. The
@@ -193,13 +194,41 @@ anchors above identify each branch.
 - Missing evidence: No independently replayable pre-memo characterization
   artifact, allocator/RSS validation, production workload, concurrent-session
   timing, or cold-call timing is established here.
-- Conclusion: The recorded correctness and retained-accounting checks pass.
+- Historical conclusion: The recorded correctness and retained-accounting checks pass.
   The fixed three-pair A/A and five-pair A/B evidence meets both predeclared
   ticket-local payoff conditions, with a 73.1659% reduction in warm-call time.
   Retention is justified for that local payoff, not as a general latency or
   merge-readiness claim. The controller reports all 14 recent local gates
   passed; logs remain at `/tmp/opencode/hygiene-memo-*.log`. This documentation
   pass inspects logs and receipts without rerunning tests or benchmarks.
+
+### Q: Does the integrated decoded-ingress workload retain a local payoff?
+
+- Sources examined: The [integrated payoff evidence](tail-hygiene-integrated-payoff.md)
+  and its [compact manifest](tail-hygiene-integrated-payoff.json), the safe
+  experiment's plan, results, A/A and A/B summaries, source identities,
+  checksums, raw samples, and recorded build/process receipts.
+- Findings: The new experiment compares archived parent `16542f5e` plus only
+  the required six-addition/six-deletion release-accessor repair with candidate
+  `05c33bf0`. Both use the same decoded-ingress helper and retain original JSON.
+  Three A/A pairs establish a new guard before five A/B pairs run under the
+  same fixed rule. All 16 processes are valid. The warm-call time reduction is
+  72.5513%; every paired log gain exceeds the new A/A guard, and the mean
+  exceeds twice the sample SD. Both 477-input source maps and both binaries
+  still match their measurement hashes during this documentation pass.
+- Verification provenance: The controller reports all 14 local gates passed
+  on `05c33bf0`; `/tmp/opencode/memo-integrated-*.log` contains the recorded
+  outputs. Empty gate logs do not independently establish exit status or
+  source revision. No test, build, or benchmark runs for this docs-only update.
+- Missing evidence: Production, concurrent-session, cold-call, total-turn or
+  session latency, and allocator/RSS validation remain outside the experiment.
+  The paired interval is conditional on the exact artifacts and host window.
+  The pre-memo characterization remains agent-witnessed and transcript-only.
+- Conclusion: resolved with answer - the new measurement closes the integrated
+  workload's payoff gap for this local warm-call boundary. The historical
+  73.1659% result remains valid only for its earlier fixture and artifacts; it
+  is not reinterpreted as an integrated result. Only the new safe experiment
+  bundle is read for this update; the older secret-bearing raw bundle is not.
 
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L731-L796
 [token-count]: ../../../../../crates/daemon/src/lib.rs#L2035-L2059
@@ -223,4 +252,4 @@ anchors above identify each branch.
 [memo]: ../../../../../crates/daemon/src/tail_hygiene.rs#L69-L328
 [caller]: ../../../../../crates/daemon/src/transform.rs#L4699-L4713
 [declaration]: ../../../../../crates/daemon/src/lib.rs#L2250-L2269
-[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L90-L131
+[bench]: ../../../../../crates/daemon/benches/hot_path.rs#L137-L175

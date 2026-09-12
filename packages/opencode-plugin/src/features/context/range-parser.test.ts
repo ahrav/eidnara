@@ -29,7 +29,6 @@ describe("parseRangeString", () => {
         ["throws on empty string", ""],
         ["throws on non-numeric input", "abc"],
         ["throws on reversed range", "5-3"],
-        ["throws on range of 1001 elements", "1-1001"],
         // 2^53 is where `i++` stops advancing, so an unrejected endpoint there would never terminate.
         ["throws on a single id above MAX_SAFE_INTEGER", "9007199254740992"],
         [
@@ -48,11 +47,9 @@ describe("parseRangeString", () => {
         expect(parseRangeString("9007199254740991")).toEqual([9007199254740991]);
     });
 
-    it("throws on range exceeding 1000 elements", () => {
-        //#given
-        const input = "1-10000";
-        expect(() => parseRangeString(input)).toThrow(
-            'Range "1-10000" exceeds maximum size of 1000 elements (got 10000)',
+    it("throws on range of 1001 elements, naming the range and its size", () => {
+        expect(() => parseRangeString("1-1001")).toThrow(
+            'Range "1-1001" exceeds maximum size of 1000 elements (got 1001)',
         );
     });
 

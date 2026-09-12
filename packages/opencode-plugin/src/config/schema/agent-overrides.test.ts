@@ -1,91 +1,57 @@
 import { describe, expect, it } from "bun:test";
+import type { z } from "zod";
 
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
+type Permission = NonNullable<z.input<typeof AgentOverrideConfigSchema>["permission"]>;
+
 describe("AgentOverrideConfigSchema permission", () => {
-    it("keeps permission keys that are not named in the schema", () => {
-        const result = AgentOverrideConfigSchema.safeParse({
-            permission: {
-                edit: "allow",
-                read: "deny",
-                task: "deny",
-                websearch: "ask",
-                mcp_github_create_issue: "deny",
-                "*": "ask",
-            },
-        });
-
-        expect(result.success).toBe(true);
-        if (!result.success) {
-            return;
-        }
-        expect(result.data.permission).toEqual({
-            edit: "allow",
-            read: "deny",
-            task: "deny",
-            websearch: "ask",
-            mcp_github_create_issue: "deny",
-            "*": "ask",
-        });
-    });
-
-    it("accepts a pattern map for an unnamed permission key", () => {
-        const result = AgentOverrideConfigSchema.safeParse({
-            permission: { read: { "*.env": "deny", "*": "allow" } },
-        });
-
-        expect(result.success).toBe(true);
-        if (!result.success) {
-            return;
-        }
-        expect(result.data.permission).toEqual({ read: { "*.env": "deny", "*": "allow" } });
-    });
-
-    it("accepts pattern maps on the named rule-capable keys", () => {
-        const permission = {
-            edit: { "*": "deny", "src/**": "allow" },
-            bash: { "git *": "allow", "*": "ask" },
-            external_directory: { "/tmp/**": "allow" },
-        };
-        const result = AgentOverrideConfigSchema.safeParse({ permission });
-
-        expect(result.success).toBe(true);
-        if (!result.success) {
-            return;
-        }
-        expect(result.data.permission).toEqual(permission);
-    });
-
-    it("rejects a pattern map on an action-only named key", () => {
-        for (const key of ["webfetch", "doom_loop"]) {
-            const result = AgentOverrideConfigSchema.safeParse({
-                permission: { [key]: { "*": "allow" } },
-            });
-            expect(result.success).toBe(false);
+    it("keeps unnamed keys and accepts pattern maps on unnamed and rule-capable named keys", () => {
+        const accepted: Array<[string, Permission]> = [
+            [
+                "unnamed action keys",
+                {
+                    edit: "allow",
+                    read: "deny",
+                    task: "deny",
+                    websearch: "ask",
+                    mcp_github_create_issue: "deny",
+                    "*": "ask",
+                },
+            ],
+            ["pattern map on an unnamed key", { read: { "*.env": "deny", "*": "allow" } }],
+            [
+                "pattern maps on the named rule-capable keys",
+                {
+                    edit: { "*": "deny", "src/**": "allow" },
+                    bash: { "git *": "allow", "*": "ask" },
+                    external_directory: { "/tmp/**": "allow" },
+                },
+            ],
+        ];
+        for (const [title, permission] of accepted) {
+            const result = AgentOverrideConfigSchema.safeParse({ permission });
+            expect([title, result.success]).toEqual([title, true]);
+            if (!result.success) {
+                continue;
+            }
+            expect([title, result.data.permission]).toEqual([title, permission]);
         }
     });
 
-    it("rejects an invalid action on an unnamed permission key", () => {
-        const result = AgentOverrideConfigSchema.safeParse({
-            permission: { read: "maybe" },
-        });
-
-        expect(result.success).toBe(false);
-    });
-
-    it("rejects an invalid action inside an unnamed key's pattern map", () => {
-        const result = AgentOverrideConfigSchema.safeParse({
-            permission: { task: { "*": "sometimes" } },
-        });
-
-        expect(result.success).toBe(false);
-    });
-
-    it("still rejects an invalid action on a named key", () => {
-        const result = AgentOverrideConfigSchema.safeParse({
-            permission: { edit: "maybe" },
-        });
-
-        expect(result.success).toBe(false);
+    it("rejects invalid actions on any key and pattern maps on action-only named keys", () => {
+        const rejected: Array<[string, Record<string, unknown>]> = [
+            ["pattern map on action-only webfetch", { webfetch: { "*": "allow" } }],
+            ["pattern map on action-only doom_loop", { doom_loop: { "*": "allow" } }],
+            ["invalid action on an unnamed key", { read: "maybe" }],
+            ["invalid action inside an unnamed key's pattern map", { task: { "*": "sometimes" } }],
+            ["invalid action on a named key", { edit: "maybe" }],
+        ];
+        for (const [title, permission] of rejected) {
+            expect([title, AgentOverrideConfigSchema.safeParse({ permission }).success]).toEqual([
+                title,
+                false,
+            ]);
+        }
     });
 });

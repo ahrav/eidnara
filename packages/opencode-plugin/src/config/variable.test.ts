@@ -43,25 +43,19 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(0);
         });
 
-        it("JSON-escapes quotes in env values so JSONC parsing survives", () => {
+        it("JSON-escapes quotes and newlines in env values so JSONC parsing survives", () => {
             process.env.EIDNARA_QUOTED = 'sk-"quoted"-value';
-            const input = `{ "api_key": "{env:EIDNARA_QUOTED}" }`;
-
-            const result = substituteConfigVariables({ text: input });
-
-            expect(result.text).toBe(`{ "api_key": "sk-\\"quoted\\"-value" }`);
-            expect(JSON.parse(result.text).api_key).toBe('sk-"quoted"-value');
-            expect(result.warnings).toHaveLength(0);
-        });
-
-        it("JSON-escapes newlines in env values so JSONC parsing survives", () => {
             process.env.EIDNARA_MULTILINE = "line1\nline2";
-            const input = `{ "api_key": "{env:EIDNARA_MULTILINE}" }`;
+            const input = `{ "api_key": "{env:EIDNARA_QUOTED}", "note": "{env:EIDNARA_MULTILINE}" }`;
 
             const result = substituteConfigVariables({ text: input });
 
-            expect(result.text).toBe(`{ "api_key": "line1\\nline2" }`);
-            expect(JSON.parse(result.text).api_key).toBe("line1\nline2");
+            expect(result.text).toBe(
+                `{ "api_key": "sk-\\"quoted\\"-value", "note": "line1\\nline2" }`,
+            );
+            const parsed = JSON.parse(result.text);
+            expect(parsed.api_key).toBe('sk-"quoted"-value');
+            expect(parsed.note).toBe("line1\nline2");
             expect(result.warnings).toHaveLength(0);
         });
 
@@ -77,18 +71,6 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(0);
         });
 
-        it("emits warning and empty string for missing env var", () => {
-            delete process.env.EIDNARA_MISSING_VAR;
-            const input = `{ "api_key": "{env:EIDNARA_MISSING_VAR}" }`;
-
-            const result = substituteConfigVariables({ text: input });
-
-            expect(result.text).toBe(`{ "api_key": "" }`);
-            expect(result.warnings).toHaveLength(1);
-            expect(result.warnings[0]).toContain("EIDNARA_MISSING_VAR");
-            expect(result.warnings[0]).toContain("not set");
-        });
-
         it("emits warning for empty-string env var", () => {
             process.env.EIDNARA_EMPTY = "";
             const input = `{ "api_key": "{env:EIDNARA_EMPTY}" }`;
@@ -99,19 +81,20 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(1);
         });
 
-        it("passes {env:} literally through (matches OpenCode regex: at least one char required)", () => {
-            const input = `{ "api_key": "{env:}" }`;
+        it("passes empty {env:} and {file:} tokens through literally (matches OpenCode regex: at least one char required)", () => {
+            const input = `{ "api_key": "{env:}", "prompt": "{file:}" }`;
 
             const result = substituteConfigVariables({ text: input });
 
-            // `{env:}` passes through because env tokens require a nonempty name.
+            // Both token kinds require a nonempty name, so neither is substituted.
             expect(result.text).toBe(input);
             expect(result.warnings).toHaveLength(0);
         });
 
-        it("handles multiple env tokens in one text", () => {
+        it("handles multiple env tokens in one text, emptying a missing var with one warning", () => {
             process.env.EIDNARA_A = "alpha";
             process.env.EIDNARA_B = "beta";
+            delete process.env.EIDNARA_MISSING;
             const input = `{ "a": "{env:EIDNARA_A}", "b": "{env:EIDNARA_B}", "c": "{env:EIDNARA_MISSING}" }`;
 
             const result = substituteConfigVariables({ text: input });
@@ -119,6 +102,7 @@ describe("substituteConfigVariables", () => {
             expect(result.text).toBe(`{ "a": "alpha", "b": "beta", "c": "" }`);
             expect(result.warnings).toHaveLength(1);
             expect(result.warnings[0]).toContain("EIDNARA_MISSING");
+            expect(result.warnings[0]).toContain("not set");
         });
     });
 
@@ -134,27 +118,16 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(0);
         });
 
-        it("resolves relative path against configPath directory", () => {
+        it("resolves relative paths against the configPath directory with or without a leading ./", () => {
             const keyFile = join(tmpDir, "key.txt");
             writeFileSync(keyFile, "relative-value");
             const configPath = join(tmpDir, "eidnara.jsonc");
 
-            const input = `{ "api_key": "{file:./key.txt}" }`;
+            const input = `{ "a": "{file:./key.txt}", "b": "{file:key.txt}" }`;
             const result = substituteConfigVariables({ text: input, configPath });
 
-            expect(result.text).toBe(`{ "api_key": "relative-value" }`);
+            expect(result.text).toBe(`{ "a": "relative-value", "b": "relative-value" }`);
             expect(result.warnings).toHaveLength(0);
-        });
-
-        it("resolves relative path without leading ./", () => {
-            const keyFile = join(tmpDir, "key.txt");
-            writeFileSync(keyFile, "no-dot-slash");
-            const configPath = join(tmpDir, "eidnara.jsonc");
-
-            const input = `{ "api_key": "{file:key.txt}" }`;
-            const result = substituteConfigVariables({ text: input, configPath });
-
-            expect(result.text).toBe(`{ "api_key": "no-dot-slash" }`);
         });
 
         it("expands ~/ to home directory", () => {
@@ -192,63 +165,29 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings[0]).toContain(missing);
         });
 
-        it("emits warning and empty string for an empty file", () => {
+        it("emits warning and empty string for empty and whitespace-only files", () => {
             const emptyFile = join(tmpDir, "empty.txt");
             writeFileSync(emptyFile, "");
-            const input = `{ "api_key": "{file:${emptyFile}}" }`;
-
-            const result = substituteConfigVariables({ text: input });
-
-            expect(result.text).toBe(`{ "api_key": "" }`);
-            expect(result.warnings).toHaveLength(1);
-            expect(result.warnings[0]).toContain("is empty");
-            expect(result.warnings[0]).toContain(emptyFile);
-        });
-
-        it("emits warning and empty string for a whitespace-only file", () => {
             const blankFile = join(tmpDir, "blank.txt");
             writeFileSync(blankFile, "  \n\t\n");
-            const input = `{ "api_key": "{file:${blankFile}}" }`;
+            const input = `{ "a": "{file:${emptyFile}}", "b": "{file:${blankFile}}" }`;
 
             const result = substituteConfigVariables({ text: input });
 
-            expect(result.text).toBe(`{ "api_key": "" }`);
-            expect(result.warnings).toHaveLength(1);
+            expect(result.text).toBe(`{ "a": "", "b": "" }`);
+            expect(result.warnings).toHaveLength(2);
             expect(result.warnings[0]).toContain("is empty");
+            expect(result.warnings[0]).toContain(emptyFile);
+            expect(result.warnings[1]).toContain("is empty");
+            expect(result.warnings[1]).toContain(blankFile);
         });
 
-        it("passes {file:} literally through (matches OpenCode regex: at least one char required)", () => {
-            const input = `{ "api_key": "{file:}" }`;
-
-            const result = substituteConfigVariables({ text: input });
-
-            // `{file:}` is not a valid token and passes through literally.
-            expect(result.text).toBe(input);
-            expect(result.warnings).toHaveLength(0);
-        });
-
-        it("suppresses {file:} expansion inside // line comments", () => {
+        it("suppresses {file:} expansion inside // line and /* block */ comments", () => {
             const keyFile = join(tmpDir, "key.txt");
             writeFileSync(keyFile, "should-not-appear");
             const input = [
                 `{`,
                 `    // see docs: {file:${keyFile}}`,
-                `    "other": "value"`,
-                `}`,
-            ].join("\n");
-
-            const result = substituteConfigVariables({ text: input });
-
-            expect(result.text).not.toContain(`{file:${keyFile}}`);
-            expect(result.text).not.toContain("should-not-appear");
-            expect(result.warnings).toHaveLength(0);
-        });
-
-        it("suppresses {file:} expansion inside block comments", () => {
-            const keyFile = join(tmpDir, "key.txt");
-            writeFileSync(keyFile, "should-not-appear");
-            const input = [
-                `{`,
                 `    /* see docs: {file:${keyFile}} */`,
                 `    "other": "value"`,
                 `}`,
@@ -406,17 +345,8 @@ describe("substituteConfigVariables", () => {
     });
 
     describe("no-op cases", () => {
-        it("returns text unchanged when no tokens present", () => {
-            const input = `{ "api_key": "literal-value", "provider": "openai-compatible" }`;
-
-            const result = substituteConfigVariables({ text: input });
-
-            expect(result.text).toBe(input);
-            expect(result.warnings).toHaveLength(0);
-        });
-
-        it("leaves partial patterns like {env alone", () => {
-            const input = `{ "note": "this {env is not a token" }`;
+        it("returns text unchanged when only literals and partial patterns like {env are present", () => {
+            const input = `{ "api_key": "literal-value", "provider": "openai-compatible", "note": "this {env is not a token" }`;
 
             const result = substituteConfigVariables({ text: input });
 
@@ -480,14 +410,8 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings.some((w) => w.includes("SSH keys"))).toBe(true);
         });
 
-        it("does NOT warn for an ordinary {file:} path", () => {
-            const input = `{ "prompt": "{file:~/notes/context.md}" }`;
-            const result = substituteConfigVariables({ text: input });
-            expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
-        });
-
-        it("does NOT warn for a sibling whose name merely extends a sensitive directory", () => {
-            const input = `{ "prompt": "{file:~/.ssh-backup/notes.md}" }`;
+        it("does NOT warn for an ordinary path or a sibling whose name merely extends a sensitive directory", () => {
+            const input = `{ "prompt": "{file:~/notes/context.md}", "notes": "{file:~/.ssh-backup/notes.md}" }`;
             const result = substituteConfigVariables({ text: input });
             expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
         });

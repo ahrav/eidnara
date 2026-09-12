@@ -32,25 +32,6 @@ function createForwardingHook(options?: {
 }
 
 describe("createToolExecuteAfterHook todo snapshots", () => {
-    test("rust mode forwards todo state to the daemon", async () => {
-        const { hook, calls } = createForwardingHook();
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-rust-todo",
-            args: {
-                todos: [{ status: "pending", priority: "high", content: "Forward me" }],
-                owner_message_id: "msg-owner",
-            },
-        });
-        expect(calls).toEqual([
-            {
-                sessionId: "ses-rust-todo",
-                stateJson: '[{"content":"Forward me","status":"pending","priority":"high"}]',
-                ownerMessageId: "msg-owner",
-            },
-        ]);
-    });
-
     test("ts mode does not forward todo state", async () => {
         const calls: TodoStateCall[] = [];
         const hook = createToolExecuteAfterHook({
@@ -164,69 +145,64 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
         ]);
     });
 
-    test("non-todowrite tools do not forward todo state", async () => {
-        const { hook, calls } = createForwardingHook();
+    test("non-todowrite tools, subagent sessions, and foreign or malformed todo payloads are not forwarded", async () => {
+        const refused: Array<{
+            label: string;
+            subagentSessions?: ReadonlySet<string>;
+            input: Parameters<ReturnType<typeof createToolExecuteAfterHook>>[0];
+        }> = [
+            {
+                label: "non-todowrite tool",
+                input: {
+                    tool: "read",
+                    sessionID: "ses-other",
+                    args: { todos: [{ content: "Nope", status: "pending", priority: "high" }] },
+                },
+            },
+            {
+                label: "subagent session",
+                subagentSessions: new Set(["ses-sub"]),
+                input: {
+                    tool: "todowrite",
+                    sessionID: "ses-sub",
+                    args: { todos: [{ content: "Sub work", status: "pending", priority: "high" }] },
+                },
+            },
+            {
+                label: "foreign status",
+                input: {
+                    tool: "todowrite",
+                    sessionID: "ses-foreign",
+                    args: { todos: [{ content: "Third-party", status: "done" }] },
+                },
+            },
+            {
+                label: "missing todos",
+                input: { tool: "todowrite", sessionID: "ses-malformed", args: {} },
+            },
+            {
+                label: "non-array todos",
+                input: {
+                    tool: "todowrite",
+                    sessionID: "ses-malformed",
+                    args: { todos: { content: "Not an array", status: "pending" } },
+                },
+            },
+            {
+                label: "todo without status",
+                input: {
+                    tool: "todowrite",
+                    sessionID: "ses-malformed",
+                    args: { todos: [{ content: "Missing status" }] },
+                },
+            },
+        ];
 
-        await hook({
-            tool: "read",
-            sessionID: "ses-other",
-            args: { todos: [{ content: "Nope", status: "pending", priority: "high" }] },
-        });
-
-        expect(calls).toEqual([]);
-    });
-
-    test("subagent sessions skip todo snapshot forwarding", async () => {
-        const { hook, calls } = createForwardingHook({ subagentSessions: new Set(["ses-sub"]) });
-
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-sub",
-            args: { todos: [{ content: "Sub work", status: "pending", priority: "high" }] },
-        });
-
-        expect(calls).toEqual([]);
-    });
-
-    test("foreign todowrite statuses are not forwarded", async () => {
-        const { hook, calls } = createForwardingHook();
-
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-foreign",
-            args: { todos: [{ content: "Third-party", status: "done" }] },
-        });
-
-        expect(calls).toEqual([]);
-    });
-
-    test("missing or non-array todowrite todos are not forwarded", async () => {
-        const { hook, calls } = createForwardingHook();
-
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-malformed",
-            args: {},
-        });
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-malformed",
-            args: { todos: { content: "Not an array", status: "pending" } },
-        });
-
-        expect(calls).toEqual([]);
-    });
-
-    test("malformed todowrite args are not forwarded", async () => {
-        const { hook, calls } = createForwardingHook();
-
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-malformed",
-            args: { todos: [{ content: "Missing status" }] },
-        });
-
-        expect(calls).toEqual([]);
+        for (const { label, subagentSessions, input } of refused) {
+            const { hook, calls } = createForwardingHook({ subagentSessions });
+            await hook(input);
+            expect(calls, label).toEqual([]);
+        }
     });
 });
 

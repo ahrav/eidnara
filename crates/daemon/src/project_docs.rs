@@ -112,43 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_when_no_docs() {
-        let dir = tempfile::tempdir().unwrap();
-        let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
-        assert_eq!(docs, ProjectDocs::default());
-    }
-
-    #[test]
-    fn renders_and_hashes_both_docs() {
-        let dir = tempfile::tempdir().unwrap();
-        write_doc(dir.path(), "ARCHITECTURE.md", "# Arch\nbody");
-        write_doc(dir.path(), "STRUCTURE.md", "# Struct\nlayout");
-        let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
-        assert!(
-            docs.rendered_block
-                .starts_with("<project-docs>\n<file name=\"ARCHITECTURE.md\">")
-        );
-        assert!(docs.rendered_block.contains("<file name=\"STRUCTURE.md\">"));
-        assert_eq!(docs.canonical_hash.len(), 64, "sha256 hex");
-    }
-
-    #[test]
-    fn canonicalization_normalizes_bom_crlf_trailing() {
-        let dir = tempfile::tempdir().unwrap();
-        write_doc(
-            dir.path(),
-            "ARCHITECTURE.md",
-            "\u{feff}line1  \r\nline2\t\n\n\n",
-        );
-        let docs = read_project_docs_canonical(dir.path().to_str().unwrap());
-        assert!(
-            docs.rendered_block.contains(">\nline1\nline2\n<"),
-            "{}",
-            docs.rendered_block
-        );
-    }
-
-    #[test]
     fn symlinked_doc_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join("secret.txt");

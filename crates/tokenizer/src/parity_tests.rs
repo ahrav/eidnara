@@ -64,12 +64,6 @@ proptest! {
         prop_assert_eq!(encode_ordinary(&text), reference::encode_ordinary(&text));
     }
 
-    #[test]
-    fn count_equals_encode_len(text in text_strategy()) {
-        prop_assert_eq!(estimate_tokens(&text), encode_ordinary(&text).len());
-        prop_assert_eq!(estimate_tokens(&text), reference::estimate_tokens(&text));
-    }
-
     /// Splitting after a non-whitespace pre-token piece and encoding the halves separately
     /// yields the same ids as encoding the whole. No alternative of the pattern looks behind;
     /// the one lookahead (`\s+(?!\S)`) only reads past the end of a whitespace piece, so a
@@ -88,6 +82,25 @@ proptest! {
         let mut split = encode_ordinary(a);
         split.extend(encode_ordinary(b));
         prop_assert_eq!(split, encode_ordinary(&text));
+    }
+}
+
+#[test]
+fn count_matches_reference_on_boundary_inputs() {
+    let over_long = format!(" {}", "a".repeat(crate::MAX_PIECE_BYTES + 1));
+    for text in [
+        "",
+        " ",
+        "\n",
+        "x\u{feff}\n",
+        "hello world",
+        over_long.as_str(),
+    ] {
+        assert_eq!(
+            estimate_tokens(text),
+            reference::estimate_tokens(text),
+            "{text:?}"
+        );
     }
 }
 

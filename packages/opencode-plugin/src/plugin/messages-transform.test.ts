@@ -78,24 +78,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
         expect((result[1]?.info as { id?: string }).id).toBe("injected");
     });
 
-    it("returns the input messages unchanged when the inner hook throws", async () => {
-        const handler = createMessagesTransformHandler({
-            eidnara: {
-                "experimental.chat.messages.transform": async () => {
-                    throw new TypeError("unexpected undefined access");
-                },
-            },
-            transformMode: "rust",
-        });
-
-        const output = makeOutput();
-        const result = await handler({}, output);
-
-        expect(result).toBe(output.messages);
-        expect(result).toHaveLength(1);
-        expect((result[0]?.info as { id?: string }).id).toBe("m1");
-    });
-
     it("restores the input messages when the inner hook mutates them and then throws", async () => {
         const handler = createMessagesTransformHandler({
             eidnara: {

@@ -626,30 +626,23 @@ describe("setup-opencode DCP preflight", () => {
 });
 
 describe("setup-opencode compaction-off writer (issue #266)", () => {
-    it("skips the compaction.auto=false write when compactionEnabled=false", () => {
+    it("leaves compaction untouched when compactionEnabled=false and turns it off once mode is on", () => {
         const root = tempDir();
         const configPath = join(root, "opencode.jsonc");
         writeFileSync(configPath, JSON.stringify({ compaction: { auto: true, prune: true } }));
 
         addPluginToOpenCodeConfig(configPath, "jsonc", false, false);
-
-        const merged = parseJsonc(readFileSync(configPath, "utf-8")) as {
+        const afterOff = parseJsonc(readFileSync(configPath, "utf-8")) as {
             compaction?: { auto?: boolean; prune?: boolean };
         };
-        expect(merged.compaction).toEqual({ auto: true, prune: true });
-    });
+        expect(afterOff.compaction).toEqual({ auto: true, prune: true });
 
-    it("writes compaction.auto=false when compactionEnabled=true (default mode-on)", () => {
-        const root = tempDir();
-        const configPath = join(root, "opencode.jsonc");
-        writeFileSync(configPath, JSON.stringify({ compaction: { auto: true, prune: true } }));
-
+        // The same config is rewritten with the mode on, so only the mode flag can explain the change.
         addPluginToOpenCodeConfig(configPath, "jsonc", false, true);
-
-        const merged = parseJsonc(readFileSync(configPath, "utf-8")) as {
+        const afterOn = parseJsonc(readFileSync(configPath, "utf-8")) as {
             compaction?: { auto?: boolean; prune?: boolean };
         };
-        expect(merged.compaction).toEqual({ auto: false, prune: false });
+        expect(afterOn.compaction).toEqual({ auto: false, prune: false });
     });
 
     it("does not create a compaction block when compactionEnabled=false and none exists", () => {
@@ -661,24 +654,6 @@ describe("setup-opencode compaction-off writer (issue #266)", () => {
             compaction?: unknown;
         };
         expect(merged.compaction).toBeUndefined();
-    });
-
-    it("mutation direction: same config gets auto=false when mode forced on", () => {
-        const root = tempDir();
-        const configPath = join(root, "opencode.jsonc");
-        writeFileSync(configPath, JSON.stringify({ compaction: { auto: true } }));
-
-        addPluginToOpenCodeConfig(configPath, "jsonc", false, false);
-        const afterOff = parseJsonc(readFileSync(configPath, "utf-8")) as {
-            compaction?: { auto?: boolean };
-        };
-        expect(afterOff.compaction?.auto).toBe(true);
-
-        addPluginToOpenCodeConfig(configPath, "jsonc", false, true);
-        const afterOn = parseJsonc(readFileSync(configPath, "utf-8")) as {
-            compaction?: { auto?: boolean };
-        };
-        expect(afterOn.compaction?.auto).toBe(false);
     });
 });
 

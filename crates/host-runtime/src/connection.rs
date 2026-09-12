@@ -839,23 +839,22 @@ mod tests {
 
     /// The reader can record the Pong between ring publication and the writer's timestamp.
     #[test]
-    fn a_pong_recorded_before_the_completion_instant_settles_the_probe() {
+    fn a_pong_recorded_on_either_side_of_the_completion_instant_settles_the_probe() {
         let sent = Instant::now();
-        let mut probe = unwritten_probe(sent);
-        probe.answered_at = Some(sent + Duration::from_millis(1));
         let completed_at = sent + Duration::from_millis(5);
+        for answered_at in [
+            sent + Duration::from_millis(1),
+            completed_at + Duration::from_millis(500),
+        ] {
+            let mut probe = unwritten_probe(sent);
+            probe.answered_at = Some(answered_at);
 
-        assert!(probe.complete_write(completed_at, Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn a_pong_recorded_after_the_completion_instant_settles_the_probe_within_the_deadline() {
-        let sent = Instant::now();
-        let mut probe = unwritten_probe(sent);
-        let completed_at = sent + Duration::from_millis(5);
-        probe.answered_at = Some(completed_at + Duration::from_millis(500));
-
-        assert!(probe.complete_write(completed_at, Duration::from_secs(1)));
+            assert!(
+                probe.complete_write(completed_at, Duration::from_secs(1)),
+                "answer at {:?} after send must settle the probe",
+                answered_at.duration_since(sent)
+            );
+        }
     }
 
     #[test]

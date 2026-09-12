@@ -2,23 +2,24 @@ import { describe, expect, test } from "bun:test";
 import { stableStringify } from "./stable-json";
 
 describe("stableStringify", () => {
-    test("primitive values match JSON.stringify", () => {
+    test("primitives match JSON.stringify, undefined renders literally, and empty containers stay empty", () => {
         expect(stableStringify("hello")).toBe('"hello"');
         expect(stableStringify(42)).toBe("42");
         expect(stableStringify(true)).toBe("true");
         expect(stableStringify(false)).toBe("false");
         expect(stableStringify(null)).toBe("null");
-    });
-
-    test("undefined renders as literal string", () => {
         expect(stableStringify(undefined)).toBe("undefined");
+        expect(stableStringify({})).toBe("{}");
+        expect(stableStringify([])).toBe("[]");
     });
 
-    test("object keys sort by code-point order, not locale", () => {
+    test("object keys sort by code-point order, not locale, for ASCII and non-ASCII keys", () => {
         // 'Z' (0x5a) sorts before 'a' (0x61) by code-point.
         // localeCompare can sort 'a' before 'Z'.
-        const input = { Z: 1, a: 2 };
-        expect(stableStringify(input)).toBe('{"Z":1,"a":2}');
+        expect(stableStringify({ Z: 1, a: 2 })).toBe('{"Z":1,"a":2}');
+        // 'ä' (U+00E4) sorts AFTER 'z' (U+007A) by code-point.
+        // localeCompare can sort 'ä' before 'z'.
+        expect(stableStringify({ z: 1, ä: 2 })).toBe('{"z":1,"ä":2}');
     });
 
     test("nested objects sort recursively", () => {
@@ -39,27 +40,13 @@ describe("stableStringify", () => {
         expect(stableStringify(input)).toBe('[{"a":2,"b":1},{"c":4,"d":3}]');
     });
 
-    test("identical objects with different key insertion order produce same string", () => {
-        const a = { foo: 1, bar: 2 };
-        const b = { bar: 2, foo: 1 };
-        expect(stableStringify(a)).toBe(stableStringify(b));
-    });
-
-    test("circular references render as marker, do not throw", () => {
+    test("circular references through objects and arrays render as a marker instead of throwing", () => {
         const a: Record<string, unknown> = { x: 1 };
         a.self = a;
         expect(stableStringify(a)).toBe('{"self":"[Circular]","x":1}');
-    });
-
-    test("mixed cycle through array does not crash", () => {
         const arr: unknown[] = [];
         arr.push(arr);
         expect(stableStringify(arr)).toBe('["[Circular]"]');
-    });
-
-    test("empty object and array", () => {
-        expect(stableStringify({})).toBe("{}");
-        expect(stableStringify([])).toBe("[]");
     });
 
     test("sparse arrays keep their length instead of collapsing to []", () => {
@@ -75,14 +62,6 @@ describe("stableStringify", () => {
     test("special string characters JSON-escaped in keys", () => {
         const input = { 'with "quotes"': 1 };
         expect(stableStringify(input)).toBe('{"with \\"quotes\\"":1}');
-    });
-
-    test("Unicode key sort by code-point, not by collation", () => {
-        // 'ä' (U+00E4) sorts AFTER 'z' (U+007A) by code-point.
-        // localeCompare can sort 'ä' before 'z'.
-        const input = { z: 1, ä: 2 };
-        const result = stableStringify(input);
-        expect(result).toBe('{"z":1,"ä":2}');
     });
 
     test("deterministic across multiple calls", () => {

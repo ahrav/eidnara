@@ -10,11 +10,8 @@ import {
 describe("isToolPartWithOutput", () => {
     const base = { type: "tool", callID: "call-1" };
 
-    it("accepts a tool part with a string output and no input", () => {
+    it("accepts a tool part with a string output whose input is absent or a record", () => {
         expect(isToolPartWithOutput({ ...base, state: { output: "ok" } })).toBe(true);
-    });
-
-    it("accepts a tool part whose input is a record", () => {
         expect(isToolPartWithOutput({ ...base, state: { output: "ok", input: { a: 1 } } })).toBe(
             true,
         );

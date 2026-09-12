@@ -2,13 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { BoundedSessionMap } from "./bounded-session-map";
 
 describe("BoundedSessionMap", () => {
-    it("rejects non-positive caps", () => {
+    it("rejects non-positive, NaN, fractional, and infinite caps", () => {
         expect(() => new BoundedSessionMap(0)).toThrow();
         expect(() => new BoundedSessionMap(-5)).toThrow();
         expect(() => new BoundedSessionMap(Number.NaN)).toThrow();
-    });
-
-    it("rejects fractional and infinite caps", () => {
         expect(() => new BoundedSessionMap(1.5)).toThrow();
         expect(() => new BoundedSessionMap(Number.POSITIVE_INFINITY)).toThrow();
     });

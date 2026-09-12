@@ -32,26 +32,18 @@ describe("Pi footer status", () => {
         expect(renderStatusText(ctx as never, sessionId)).toBe("eidnara: -- (--) · idle");
     });
 
-    it("shows the recomp state while a recomp is active for the session", () => {
+    it("shows the recomp state while active and repaints the footer under the eidnara key at both transitions", () => {
         const sessionId = "ses-footer-recomp";
-        const { ctx, statuses } = statusRecordingContext(sessionId, 50_000);
+        const { ctx, statuses, keys } = statusRecordingContext(sessionId, 50_000);
         setEidnaraRecompActive(ctx as never, sessionId, true);
         try {
             expect(renderStatusText(ctx as never, sessionId)).toEndWith("· recomp");
+            expect(statuses.at(-1)).toBe("eidnara: 50K (63%) · recomp");
         } finally {
             setEidnaraRecompActive(ctx as never, sessionId, false);
         }
         expect(renderStatusText(ctx as never, sessionId)).toEndWith("· idle");
-        expect(statuses.map((text) => text?.split(" · ").at(-1))).toEqual(["recomp", "idle"]);
-    });
-
-    it("repaints the footer under the eidnara key at both recomp transitions", () => {
-        const sessionId = "ses-footer-recomp-paint";
-        const { ctx, statuses, keys } = statusRecordingContext(sessionId, 50_000);
-        setEidnaraRecompActive(ctx as never, sessionId, true);
-        expect(statuses.at(-1)).toBe("eidnara: 50K (63%) · recomp");
-        setEidnaraRecompActive(ctx as never, sessionId, false);
-        expect(statuses.at(-1)).toBe("eidnara: 50K (63%) · idle");
+        expect(statuses).toEqual(["eidnara: 50K (63%) · recomp", "eidnara: 50K (63%) · idle"]);
         expect(new Set(keys)).toEqual(new Set(["eidnara"]));
     });
 

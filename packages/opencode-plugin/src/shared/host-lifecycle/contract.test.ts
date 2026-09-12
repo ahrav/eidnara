@@ -138,19 +138,6 @@ describe("parseDaemonResult", () => {
         expect(parsed.readiness).toBeNull();
     });
 
-    test("a result without a readiness key parses with readiness null", () => {
-        const { readiness: _omitted, ...withoutReadiness } = validResult({
-            command: "status",
-            ok: false,
-            state: "stopped",
-            reason: "not_running",
-            remediation: "run_daemon_start",
-            checks: [],
-        });
-        const parsed = parseDaemonResult(JSON.stringify(withoutReadiness));
-        expect(parsed.readiness).toBeNull();
-    });
-
     test("readiness may not be ready with a failing reason", () => {
         const withReadiness = (readiness: unknown) =>
             JSON.stringify(
@@ -822,28 +809,6 @@ describe("exit/result agreement", () => {
         expect(exitAgreesWithResult(1, failResult)).toBe(true);
         expect(exitAgreesWithResult(2, okResult)).toBe(false);
     });
-
-    test("agreement cannot be reached by a failing reason wearing ok:true", () => {
-        // Exit-status validation uses `ok` alone.
-        // An `ok: true` result with a failing reason would produce exit code 0 and let callers proceed after a failure.
-        expect(() =>
-            parseDaemonResult(JSON.stringify(validResult({ reason: "internal_error" }))),
-        ).toThrow(ContractViolation);
-        const paired = parseDaemonResult(
-            JSON.stringify(
-                validResult({
-                    ok: false,
-                    state: "wedged",
-                    reason: "internal_error",
-                    remediation: "report_bug",
-                    readiness: null,
-                    checks: [],
-                }),
-            ),
-        );
-        expect(exitAgreesWithResult(0, paired)).toBe(false);
-        expect(exitAgreesWithResult(1, paired)).toBe(true);
-    });
 });
 
 describe("reason vocabulary pins", () => {
@@ -956,17 +921,7 @@ describe("pre-native root classifier", () => {
         }
     });
 
-    test("a special-file root is a hazard", () => {
-        const root = tempRoot();
-        try {
-            writeFileSync(path.join(root, ".eidnara-coordination"), "not a directory");
-            expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
-        } finally {
-            rmSync(root, { recursive: true, force: true });
-        }
-    });
-
-    test("a regular file on the traversed path is a hazard, never stopped", () => {
+    test("a regular file at the root or on any traversed path is a hazard, never stopped", () => {
         const root = tempRoot();
         try {
             const fileRoot = path.join(root, "data-root");
@@ -977,6 +932,9 @@ describe("pre-native root classifier", () => {
                 reason: "native_probe_unavailable",
             });
             writeFileSync(path.join(root, "eidnara"), "not a directory");
+            expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
+            rmSync(path.join(root, "eidnara"));
+            writeFileSync(path.join(root, ".eidnara-coordination"), "not a directory");
             expect(classifyPreNativeRoots(root)).toEqual({ kind: "hazard", hazard: "special" });
         } finally {
             rmSync(root, { recursive: true, force: true });

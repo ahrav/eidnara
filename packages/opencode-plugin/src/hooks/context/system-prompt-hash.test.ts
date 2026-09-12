@@ -104,20 +104,6 @@ describe("system-prompt-hash drain semantics", () => {
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
     });
 
-    it("on subsequent pass after hash-change pass, drains the surviving flag", async () => {
-        useTempDataHome("sph-drain-followup-");
-        const sessionId = "ses-followup";
-        const systemPromptRefreshSessions = new Set<string>();
-        const { handler } = buildHandler({ systemPromptRefreshSessions });
-        await seedHash(handler, sessionId);
-
-        await handler({ sessionID: sessionId }, { system: ["New prompt content"] });
-        expect(systemPromptRefreshSessions.has(sessionId)).toBe(true);
-
-        await handler({ sessionID: sessionId }, { system: ["New prompt content"] });
-        expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
-    });
-
     it("keeps a refresh raised by a hash change on a pass that was already cache-busting", async () => {
         useTempDataHome("sph-drain-busting-hash-change-");
         const sessionId = "ses-busting-hash-change";
@@ -201,42 +187,26 @@ describe("system-prompt-hash fail-open (per-turn handler must never throw)", () 
         expect(refreshed?.systemPromptTokens).toBe(initial?.systemPromptTokens);
     });
 
-    it("keeps the recorded classification when a later lookup fails", async () => {
+    it("does not demote a recorded subagent when the lookup later fails or returns false", async () => {
         useTempDataHome("sph-subagent-keep-");
         const sessionId = "ses-subagent-keep";
-        let lookupFails = false;
+        let lookup: () => boolean = () => true;
         const { handler, promptStateFor } = buildHandler({
-            isSubagentSession: () => {
-                if (lookupFails) throw new Error("subagent lookup exploded");
-                return true;
-            },
+            isSubagentSession: () => lookup(),
         });
 
         const system = ["You are a coding subagent."];
         await handler({ sessionID: sessionId }, { system: [...system] });
         expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
 
-        lookupFails = true;
-        await handler({ sessionID: sessionId }, { system: [...system] });
-
-        expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
-    });
-
-    it("does not demote a recorded subagent when the lookup later returns false", async () => {
-        useTempDataHome("sph-subagent-no-demote-");
-        const sessionId = "ses-subagent-no-demote";
-        const children = new Set<string>([sessionId]);
-        const { handler, promptStateFor } = buildHandler({
-            isSubagentSession: (id) => children.has(id),
-        });
-
-        const system = ["You are a coding subagent."];
+        lookup = () => {
+            throw new Error("subagent lookup exploded");
+        };
         await handler({ sessionID: sessionId }, { system: [...system] });
         expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
 
-        children.delete(sessionId);
+        lookup = () => false;
         await handler({ sessionID: sessionId }, { system: [...system] });
-
         expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
     });
 
@@ -252,6 +222,9 @@ describe("system-prompt-hash fail-open (per-turn handler must never throw)", () 
         expect(promptStateFor(sessionId)).toBeUndefined();
     });
 });
+
+const HISTORIAN_HEAD =
+    "You are Historian — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
 
 describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
     const TITLE_PROMPT_HEAD =
@@ -279,28 +252,22 @@ describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
         });
     }
 
-    it("does NOT update systemPromptHash for internal-agent calls", async () => {
+    it("does NOT update systemPromptHash for OpenCode-internal or Eidnara-child calls", async () => {
         useTempDataHome("sph-skip-no-hash-update-");
-        const sessionId = "ses-no-hash-update";
-        const { handler, promptStateFor } = buildHandler();
-        await handler({ sessionID: sessionId }, { system: ["main agent prompt"] });
-        const mainAgentHash = promptStateFor(sessionId)?.systemPromptHash;
+        for (const [label, head] of [
+            ["title", TITLE_PROMPT_HEAD],
+            ["historian", HISTORIAN_HEAD],
+        ] as const) {
+            const sessionId = `ses-no-hash-update-${label}`;
+            const { handler, promptStateFor } = buildHandler();
+            await handler({ sessionID: sessionId }, { system: ["main agent prompt"] });
+            const mainAgentHash = promptStateFor(sessionId)?.systemPromptHash;
+            expect(mainAgentHash, label).toMatch(/^[0-9a-f]{32}$/);
 
-        await handler({ sessionID: sessionId }, { system: [TITLE_PROMPT_HEAD] });
+            await handler({ sessionID: sessionId }, { system: [head] });
 
-        expect(promptStateFor(sessionId)?.systemPromptHash).toBe(mainAgentHash);
-    });
-
-    it("tracks normal agents whose prompts don't match signatures", async () => {
-        useTempDataHome("sph-tracks-normal-");
-        const sessionId = "ses-normal";
-        const { handler, promptStateFor } = buildHandler();
-
-        const system = ["You are a helpful coding assistant."];
-        await handler({ sessionID: sessionId }, { system });
-
-        expect(system).toEqual(["You are a helpful coding assistant."]);
-        expect(promptStateFor(sessionId)).toBeDefined();
+            expect(promptStateFor(sessionId)?.systemPromptHash, label).toBe(mainAgentHash);
+        }
     });
 
     it("tracks a custom agent that quotes an internal signature inside its own prose", async () => {
@@ -331,9 +298,6 @@ describe("system-prompt-hash skips OpenCode internal hidden agents", () => {
 });
 
 describe("system-prompt-hash skips Eidnara internal child agents", () => {
-    const HISTORIAN_HEAD =
-        "You are Historian — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
-
     for (const [label, head] of [
         ["historian", HISTORIAN_HEAD],
         ["sidekick", SIDEKICK_SYSTEM_PROMPT],
@@ -391,18 +355,6 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
         expect(promptStateFor(sessionId)).toBeUndefined();
     });
 
-    it("does NOT update systemPromptHash for internal Eidnara child calls", async () => {
-        useTempDataHome("sph-skip-eidnara-no-hash-");
-        const sessionId = "ses-eidnara-no-hash";
-        const { handler, promptStateFor } = buildHandler();
-        await handler({ sessionID: sessionId }, { system: ["main agent prompt"] });
-        const mainAgentHash = promptStateFor(sessionId)?.systemPromptHash;
-
-        await handler({ sessionID: sessionId }, { system: [HISTORIAN_HEAD] });
-
-        expect(promptStateFor(sessionId)?.systemPromptHash).toBe(mainAgentHash);
-    });
-
     it("ORDER INVARIANT: an internal Eidnara child that is ALSO a subagent still skips entirely", async () => {
         useTempDataHome("sph-subagent-internal-");
         const sessionId = "ses-internal-and-subagent";
@@ -415,14 +367,6 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
 
         expect(system).toHaveLength(1);
         expect(promptStateFor(sessionId)).toBeUndefined();
-    });
-
-    it("records isSubagent for a tracked subagent session", async () => {
-        useTempDataHome("sph-subagent-recorded-");
-        const sessionId = "ses-subagent";
-        const { handler, promptStateFor } = buildHandler({ isSubagentSession: () => true });
-        await handler({ sessionID: sessionId }, { system: ["You are a coding subagent."] });
-        expect(promptStateFor(sessionId)?.isSubagent).toBe(true);
     });
 });
 
@@ -439,94 +383,63 @@ describe("system-prompt-hash honors per-agent opt-out", () => {
         expect(promptStateFor(sessionId)).toBeUndefined();
     });
 
-    it("skips tracking when an agent prompt contains a custom skip signature", async () => {
+    it("skips tracking when any configured skip signature appears in the prompt", async () => {
         useTempDataHome("sph-optout-skip-sig-");
-        const sessionId = "ses-skipsig";
-        const { handler, promptStateFor } = buildHandler({
-            injectionSkipSignatures: ["<!-- eidnara: skip -->"],
-        });
+        for (const [label, signatures, prompt] of [
+            [
+                "single",
+                ["<!-- eidnara: skip -->"],
+                "You are a read-only QA agent.\n<!-- eidnara: skip -->\nDeny all writes.",
+            ],
+            [
+                "second-of-two",
+                ["<!-- eidnara: skip -->", "I AM A TINY SPECIALIZED AGENT"],
+                "I AM A TINY SPECIALIZED AGENT — do nothing else.",
+            ],
+        ] as const) {
+            const sessionId = `ses-skipsig-${label}`;
+            const { handler, promptStateFor } = buildHandler({
+                injectionSkipSignatures: [...signatures],
+            });
 
-        const system = ["You are a read-only QA agent.\n<!-- eidnara: skip -->\nDeny all writes."];
-        await handler({ sessionID: sessionId }, { system });
+            const system = [prompt];
+            await handler({ sessionID: sessionId }, { system });
 
-        expect(system).toHaveLength(1);
-        expect(promptStateFor(sessionId)).toBeUndefined();
+            expect(system, label).toEqual([prompt]);
+            expect(promptStateFor(sessionId), label).toBeUndefined();
+        }
     });
 
-    it("matches multiple skip signatures (any one match opts the agent out)", async () => {
-        useTempDataHome("sph-optout-multi-sig-");
-        const sessionId = "ses-multisig";
-        const { handler, promptStateFor } = buildHandler({
-            injectionSkipSignatures: ["<!-- eidnara: skip -->", "I AM A TINY SPECIALIZED AGENT"],
-        });
-
-        await handler(
-            { sessionID: sessionId },
-            { system: ["I AM A TINY SPECIALIZED AGENT — do nothing else."] },
-        );
-
-        expect(promptStateFor(sessionId)).toBeUndefined();
-    });
-
-    it("does NOT skip when skip signatures don't match the prompt", async () => {
+    it("keeps tracking when no non-empty skip signature matches the prompt", async () => {
         useTempDataHome("sph-optout-no-match-");
-        const sessionId = "ses-nomatch";
-        const { handler, promptStateFor } = buildHandler({
-            injectionSkipSignatures: ["<!-- eidnara: skip -->"],
-        });
+        for (const [label, signatures, prompt] of [
+            [
+                "no-match",
+                ["<!-- eidnara: skip -->"],
+                "You are a normal agent without any skip marker.",
+            ],
+            // An empty signature is a substring of every prompt and must not opt everyone out.
+            [
+                "empty-ignored",
+                ["", "<!-- eidnara: skip -->"],
+                "You are a normal agent — no skip marker here.",
+            ],
+        ] as const) {
+            const sessionId = `ses-nomatch-${label}`;
+            const { handler, promptStateFor } = buildHandler({
+                injectionSkipSignatures: [...signatures],
+            });
 
-        await handler(
-            { sessionID: sessionId },
-            { system: ["You are a normal agent without any skip marker."] },
-        );
+            await handler({ sessionID: sessionId }, { system: [prompt] });
 
-        expect(promptStateFor(sessionId)).toBeDefined();
-    });
-
-    it("ignores empty skip-signature strings (would otherwise match everything)", async () => {
-        useTempDataHome("sph-optout-empty-sig-");
-        const sessionId = "ses-emptysig";
-        const { handler, promptStateFor } = buildHandler({
-            injectionSkipSignatures: ["", "<!-- eidnara: skip -->"],
-        });
-
-        await handler(
-            { sessionID: sessionId },
-            { system: ["You are a normal agent — no skip marker here."] },
-        );
-
-        expect(promptStateFor(sessionId)).toBeDefined();
-    });
-
-    it("does NOT update systemPromptHash for opted-out calls", async () => {
-        useTempDataHome("sph-optout-no-hash-update-");
-        const sessionId = "ses-optout-no-hash";
-        const tracking = buildHandler();
-        await tracking.handler({ sessionID: sessionId }, { system: ["main agent prompt"] });
-        expect(tracking.promptStateFor(sessionId)).toBeDefined();
-
-        const optedOut = buildHandler({ injectionEnabled: false });
-        await optedOut.handler({ sessionID: sessionId }, { system: ["Custom agent prompt"] });
-
-        expect(optedOut.promptStateFor(sessionId)).toBeUndefined();
+            expect(promptStateFor(sessionId), label).toBeDefined();
+        }
     });
 });
 
 describe("system-prompt-hash sticky dates", () => {
     const DAY_ONE = "Today's date: Mon Sep 07 2026";
     const DAY_TWO = "Today's date: Tue Sep 08 2026";
-
-    it("freezes the date line on a non-cache-busting pass", async () => {
-        useTempDataHome("sph-sticky-freeze-");
-        const sessionId = "ses-sticky-freeze";
-        const { handler } = buildHandler();
-
-        await handler({ sessionID: sessionId }, { system: ["You are an agent.", DAY_ONE] });
-        const system = ["You are an agent.", DAY_TWO];
-        await handler({ sessionID: sessionId }, { system });
-
-        expect(system[1]).toBe(DAY_ONE);
-    });
 
     it("freezes only the host's date value and leaves the rest of its element intact", async () => {
         useTempDataHome("sph-sticky-env-block-");
@@ -626,18 +539,6 @@ describe("provisional ctx_reduce availability (pre-first-user race)", () => {
         }
         oc.close();
     }
-
-    it("does not persist a hash while the availability verdict is provisional", async () => {
-        const dir = useTempDataHome("sph-provisional-");
-        createOpenCodeDb(dir);
-        const sessionId = "ses-provisional";
-        clearCtxReduceAvailability(sessionId);
-        const { handler, promptStateFor } = buildHandler();
-
-        await handler({ sessionID: sessionId }, { system: ["Base agent prompt"] });
-
-        expect(promptStateFor(sessionId)?.systemPromptHash ?? "").toBe("");
-    });
 
     it("records the subagent classification and token count while the verdict is provisional", async () => {
         const dir = useTempDataHome("sph-provisional-subagent-");

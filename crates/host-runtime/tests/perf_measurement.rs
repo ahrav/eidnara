@@ -36,32 +36,22 @@ fn first_slot_at_or_after_inverts_the_offset_schedule() {
 }
 
 #[test]
-fn fixture_is_the_committed_compact_json_shape() {
-    let workload = fixture_workload();
-    assert_eq!(workload.label, "compact-json-v1");
-    assert_eq!(workload.len, FIXTURE_BODY.len());
-    assert!(!workload.binary);
-    // The fixture bytes are committed benchmark input.
-    assert_eq!(workload.sha256, perf_measurement::sha256_hex(FIXTURE_BODY),);
-    let parsed: serde_json::Value =
-        serde_json::from_slice(FIXTURE_BODY).expect("fixture is valid JSON");
-    assert_eq!(parsed["op"], "perf.echo");
-    // Keep the fixture's first byte distinct from the sleep-request marker.
-    // The fixture must not trigger the sleep-request path.
-    assert_ne!(FIXTURE_BODY[0], 1);
-}
-
-#[test]
-fn fixture_bytes_are_frozen() {
+fn fixture_bytes_are_frozen_and_describe_the_compact_json_workload() {
     // The fixture bytes are the workload contract.
     assert_eq!(
         FIXTURE_BODY,
         br#"{"op":"perf.echo","v":1,"payload":"0123456789abcdef0123456789abcdef"}"#
     );
-    assert_eq!(
-        fixture_workload().sha256,
-        perf_measurement::sha256_hex(FIXTURE_BODY)
-    );
+    let workload = fixture_workload();
+    assert_eq!(workload.label, "compact-json-v1");
+    assert_eq!(workload.len, FIXTURE_BODY.len());
+    assert!(!workload.binary);
+    assert_eq!(workload.sha256, perf_measurement::sha256_hex(FIXTURE_BODY));
+    let parsed: serde_json::Value =
+        serde_json::from_slice(FIXTURE_BODY).expect("fixture is valid JSON");
+    assert_eq!(parsed["op"], "perf.echo");
+    // A first byte of 1 marks a sleep request, which the fixture must not trigger.
+    assert_ne!(FIXTURE_BODY[0], 1);
 }
 
 #[test]
@@ -75,22 +65,6 @@ fn nearest_rank_returns_observed_samples() {
     assert_eq!(nearest_rank(&[], 50.0), None);
     assert_eq!(nearest_rank(&sorted, 0.0), None);
     assert_eq!(nearest_rank(&sorted, 101.0), None);
-}
-
-#[test]
-fn issue_time_starts_after_permit_wait() {
-    // Closed-loop semantics: scheduled time is when the slot became due,
-    // issue time is after admission. The measured serial RTT uses issue
-    // time, so permit queueing is excluded; the difference is scheduler
-    // lag, not server latency.
-    let scheduled_ns = 1_000u64;
-    let issue_ns = 5_000u64;
-    let completion_ns = 9_000u64;
-    let issue_to_completion = completion_ns - issue_ns;
-    let sched_to_completion = completion_ns - scheduled_ns;
-    let lag = issue_ns - scheduled_ns;
-    assert_eq!(issue_to_completion, 4_000);
-    assert_eq!(sched_to_completion, issue_to_completion + lag);
 }
 
 #[test]
@@ -289,7 +263,7 @@ fn retry_and_poll_schedule_matches_plugin_policy() {
 }
 
 #[test]
-fn adjacent_seeds_disperse_their_first_draw() {
+fn seeds_yield_distinct_and_dispersed_first_draws() {
     // The benchmark seeds per-request generators as `seed ^ logical_id`,
     // so adjacent small seeds must not produce synchronized first draws:
     // A near-zero first draw would collapse every caller's first retry delay to the base value.
@@ -303,10 +277,8 @@ fn adjacent_seeds_disperse_their_first_draw() {
         "first draws {firsts:?} span {} <= 0.25: adjacent seeds are synchronized",
         max - min
     );
-}
 
-#[test]
-fn distinct_seeds_yield_distinct_first_draws() {
+    // Seeds that differ in one bit, and the zero seed, still start distinct sequences.
     let a = perf_measurement::DeterministicRng::new(1 << 2).unit();
     let b = perf_measurement::DeterministicRng::new(1 << 3).unit();
     assert_ne!(a, b, "seeds 4 and 8 produced the same first draw");

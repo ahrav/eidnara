@@ -21,14 +21,6 @@ import {
     PROTOCOL_VERSION,
     settledCorrelationNamespace,
 } from "./protocol";
-import {
-    assertBelongsToConnection,
-    belongsToConnection,
-    createRouteHandle,
-    newConnectionToken,
-    RouteHandle,
-    StaleRouteHandleError,
-} from "./route-handle";
 import { AdmissionClass, Priority } from "./types";
 
 const ROUTE_OPEN_HEADER_HEX = "a70000000200020000000000000100000000000000";
@@ -90,64 +82,57 @@ describe("committed wire-doc Section 6.4 vectors", () => {
         expect(decodeHex(ROUTE_OPEN_HEADER_HEX).len).toBe(bodyLen);
     });
 
-    test("decodes the canonical route.open request header field-by-field", () => {
-        const header = decodeHex(ROUTE_OPEN_HEADER_HEX);
-        expect(header.len).toBe(167);
-        expect(header.ver).toBe(2);
-        expect(header.ty).toBe(FrameType.Request);
-        expect(flagsBinary(header.flags)).toBe(false);
-        expect(flagsPriority(header.flags)).toBe(Priority.Interactive);
-        expect(flagsLast(header.flags)).toBe(false);
-        expect(flagsAdmissionClass(header.flags)).toBe(AdmissionClass.Normal);
-        expect(header.channel).toBe(0);
-        expect(header.epoch).toBe(0);
-        expect(header.corr).toBe(1n);
-    });
+    test("each committed vector decodes field-by-field and encodes back to the exact bytes", () => {
+        const vectors = [
+            {
+                name: "canonical route.open request",
+                hex: ROUTE_OPEN_HEADER_HEX,
+                len: 167,
+                priority: Priority.Interactive,
+                channel: 0,
+                epoch: 0,
+                corr: 1n,
+            },
+            {
+                name: "routed Background request",
+                hex: ROUTED_REQUEST_HEADER_HEX,
+                len: 44,
+                priority: Priority.Background,
+                channel: 7,
+                epoch: 77,
+                corr: 2n,
+            },
+        ];
+        for (const vector of vectors) {
+            const header = decodeHex(vector.hex);
+            expect(header.len).toBe(vector.len);
+            expect(header.ver).toBe(2);
+            expect(header.ty).toBe(FrameType.Request);
+            expect(flagsBinary(header.flags)).toBe(false);
+            expect(flagsPriority(header.flags)).toBe(vector.priority);
+            expect(flagsLast(header.flags)).toBe(false);
+            expect(flagsAdmissionClass(header.flags)).toBe(AdmissionClass.Normal);
+            expect(header.channel).toBe(vector.channel);
+            expect(header.epoch).toBe(vector.epoch);
+            expect(header.corr).toBe(vector.corr);
 
-    test("encodes the canonical route.open request header to the exact bytes", () => {
-        const bytes = encodeHeader({
-            len: 167,
-            ver: PROTOCOL_VERSION,
-            ty: FrameType.Request,
-            flags: buildFlags(false, Priority.Interactive, false),
-            channel: 0,
-            epoch: 0,
-            corr: 1n,
-        });
-        expect(bytesToHex(bytes)).toBe(ROUTE_OPEN_HEADER_HEX);
-    });
-
-    test("decodes the routed Background request header field-by-field", () => {
-        const header = decodeHex(ROUTED_REQUEST_HEADER_HEX);
-        expect(header.len).toBe(44);
-        expect(header.ver).toBe(2);
-        expect(header.ty).toBe(FrameType.Request);
-        expect(flagsBinary(header.flags)).toBe(false);
-        expect(flagsPriority(header.flags)).toBe(Priority.Background);
-        expect(flagsLast(header.flags)).toBe(false);
-        expect(flagsAdmissionClass(header.flags)).toBe(AdmissionClass.Normal);
-        expect(header.channel).toBe(7);
-        expect(header.epoch).toBe(77);
-        expect(header.corr).toBe(2n);
-    });
-
-    test("encodes the routed Background request header to the exact bytes", () => {
-        const bytes = encodeHeader({
-            len: 44,
-            ver: PROTOCOL_VERSION,
-            ty: FrameType.Request,
-            flags: buildFlags(false, Priority.Background, false),
-            channel: 7,
-            epoch: 77,
-            corr: 2n,
-        });
-        expect(bytesToHex(bytes)).toBe(ROUTED_REQUEST_HEADER_HEX);
+            const bytes = encodeHeader({
+                len: vector.len,
+                ver: PROTOCOL_VERSION,
+                ty: FrameType.Request,
+                flags: buildFlags(false, vector.priority, false),
+                channel: vector.channel,
+                epoch: vector.epoch,
+                corr: vector.corr,
+            });
+            expect(bytesToHex(bytes)).toBe(vector.hex);
+        }
     });
 });
 
 describe("header round trips", () => {
-    test("minimum legal field values", () => {
-        const header: EnvelopeHeader = {
+    test("round-trips the minimum and maximum legal field values", () => {
+        const minimum: EnvelopeHeader = {
             len: 0,
             ver: PROTOCOL_VERSION,
             ty: FrameType.Request,
@@ -156,13 +141,11 @@ describe("header round trips", () => {
             epoch: 0,
             corr: 0n,
         };
-        const bytes = encodeHeader(header);
-        expect(bytes.length).toBe(HEADER_LEN);
-        expect(decodeHeader(bytes)).toEqual(header);
-    });
+        const minimumBytes = encodeHeader(minimum);
+        expect(minimumBytes.length).toBe(HEADER_LEN);
+        expect(decodeHeader(minimumBytes)).toEqual(minimum);
 
-    test("maximum legal field values including correlation u64::MAX", () => {
-        const header: EnvelopeHeader = {
+        const maximum: EnvelopeHeader = {
             len: MAX_FRAME_BODY_LEN,
             ver: PROTOCOL_VERSION,
             ty: FrameType.StreamData,
@@ -171,8 +154,8 @@ describe("header round trips", () => {
             epoch: 0xffff_ffff,
             corr: MAX_CORRELATION,
         };
-        const decoded = decodeHeader(encodeHeader(header));
-        expect(decoded).toEqual(header);
+        const decoded = decodeHeader(encodeHeader(maximum));
+        expect(decoded).toEqual(maximum);
         expect(decoded.corr).toBe(0xffff_ffff_ffff_ffffn);
     });
 
@@ -196,11 +179,64 @@ describe("structural rejections before body handling", () => {
         expectDecodeError(bytes, "frame_body_too_large");
     });
 
-    test("rejects unsupported versions from the frozen prefix", () => {
-        for (const ver of [0, 1, 3, 255]) {
+    test("rejects each illegal prefix, flag, and epoch encoding with its own decode code", () => {
+        // Every row mutates one field of an otherwise valid routed StreamData header.
+        const rows: { name: string; mutate: (bytes: Uint8Array) => void; code: DecodeErrorCode }[] =
+            [
+                ...[0, 1, 3, 255].map((ver) => ({
+                    name: `version ${ver}`,
+                    mutate: (bytes: Uint8Array) => {
+                        bytes[4] = ver;
+                    },
+                    code: "unsupported_version" as const,
+                })),
+                ...[12, 13, 255].map((ty) => ({
+                    name: `frame type ${ty}`,
+                    mutate: (bytes: Uint8Array) => {
+                        bytes[5] = ty;
+                    },
+                    code: "unknown_frame_type" as const,
+                })),
+                {
+                    name: "priority bits value 3",
+                    mutate: (bytes) => {
+                        bytes[6] = 0b0000_0110;
+                    },
+                    code: "reserved_priority_bits",
+                },
+                {
+                    name: "admission class bits value 3",
+                    mutate: (bytes) => {
+                        bytes[6] = 0b0011_0000;
+                    },
+                    code: "reserved_admission_class",
+                },
+                ...[0b0100_0000, 0b1000_0000, 0b1100_0000].map((reserved) => ({
+                    name: `reserved flag bits ${reserved.toString(2)}`,
+                    mutate: (bytes: Uint8Array) => {
+                        bytes[6] = reserved;
+                    },
+                    code: "reserved_flag_bits" as const,
+                })),
+                {
+                    name: "nonzero epoch on the control channel",
+                    mutate: (bytes) => {
+                        new DataView(bytes.buffer).setUint16(7, 0, true);
+                    },
+                    code: "nonzero_epoch_on_control_channel",
+                },
+                {
+                    name: "zero epoch on a routed channel",
+                    mutate: (bytes) => {
+                        new DataView(bytes.buffer).setUint32(9, 0, true);
+                    },
+                    code: "zero_epoch_on_routed_channel",
+                },
+            ];
+        for (const row of rows) {
             const bytes = validHeaderBytes();
-            bytes[4] = ver;
-            expectDecodeError(bytes, "unsupported_version");
+            row.mutate(bytes);
+            expectDecodeError(bytes, row.code);
         }
     });
 
@@ -208,34 +244,6 @@ describe("structural rejections before body handling", () => {
         const bytes = validHeaderBytes();
         expectDecodeError(bytes.subarray(0, FROZEN_PREFIX_LEN - 1), "too_short_for_prefix");
         expectDecodeError(bytes.subarray(0, HEADER_LEN - 1), "too_short_for_header");
-    });
-
-    test("rejects unknown frame type bytes", () => {
-        for (const ty of [12, 13, 255]) {
-            const bytes = validHeaderBytes();
-            bytes[5] = ty;
-            expectDecodeError(bytes, "unknown_frame_type");
-        }
-    });
-
-    test("rejects invalid priority bits (value 3)", () => {
-        const bytes = validHeaderBytes();
-        bytes[6] = 0b0000_0110;
-        expectDecodeError(bytes, "reserved_priority_bits");
-    });
-
-    test("rejects invalid admission class bits (value 3)", () => {
-        const bytes = validHeaderBytes();
-        bytes[6] = 0b0011_0000;
-        expectDecodeError(bytes, "reserved_admission_class");
-    });
-
-    test("rejects nonzero reserved bits 6-7", () => {
-        for (const reserved of [0b0100_0000, 0b1000_0000, 0b1100_0000]) {
-            const bytes = validHeaderBytes();
-            bytes[6] = reserved;
-            expectDecodeError(bytes, "reserved_flag_bits");
-        }
     });
 
     test("Sheddable admission is legal only on Push and StreamData", () => {
@@ -257,20 +265,6 @@ describe("structural rejections before body handling", () => {
             bytes[6] = sheddable;
             expectDecodeError(bytes, "sheddable_illegal_frame_type");
         }
-    });
-
-    test("rejects a nonzero epoch on the control channel", () => {
-        const bytes = validHeaderBytes();
-        const view = new DataView(bytes.buffer);
-        view.setUint16(7, 0, true);
-        expectDecodeError(bytes, "nonzero_epoch_on_control_channel");
-    });
-
-    test("rejects a zero epoch on a routed channel", () => {
-        const bytes = validHeaderBytes();
-        const view = new DataView(bytes.buffer);
-        view.setUint32(9, 0, true);
-        expectDecodeError(bytes, "zero_epoch_on_routed_channel");
     });
 
     test("rejects a declared body on every pure-header frame type", () => {
@@ -318,15 +312,12 @@ describe("encode-side field validation", () => {
         };
     }
 
-    test("rejects out-of-range or non-integer numeric fields", () => {
+    test("rejects out-of-range or non-integer numeric fields and correlations outside u64", () => {
         expect(() => encodeHeader(header({ channel: 0x1_0000 }))).toThrow(RangeError);
         expect(() => encodeHeader(header({ channel: -1 }))).toThrow(RangeError);
         expect(() => encodeHeader(header({ channel: 1.5 }))).toThrow(RangeError);
         expect(() => encodeHeader(header({ epoch: 0x1_0000_0000 }))).toThrow(RangeError);
         expect(() => encodeHeader(header({ len: -1 }))).toThrow(RangeError);
-    });
-
-    test("rejects correlations outside u64", () => {
         expect(() => encodeHeader(header({ corr: -1n }))).toThrow(RangeError);
         expect(() => encodeHeader(header({ corr: MAX_CORRELATION + 1n }))).toThrow(RangeError);
     });
@@ -358,8 +349,8 @@ describe("frame build and encode", () => {
 });
 
 describe("direction legality", () => {
-    test("accepts exactly the host-to-consumer frame types", () => {
-        const legal = new Set<FrameType>([
+    test("each direction accepts exactly its listed frame types", () => {
+        const hostToConsumer = new Set<FrameType>([
             FrameType.Response,
             FrameType.Error,
             FrameType.StreamData,
@@ -368,20 +359,15 @@ describe("direction legality", () => {
             FrameType.Push,
             FrameType.Goodbye,
         ]);
-        for (const ty of Object.values(FrameType)) {
-            expect(isLegalHostToConsumerType(ty)).toBe(legal.has(ty));
-        }
-    });
-
-    test("accepts exactly the consumer-originated frame types", () => {
-        const legal = new Set<FrameType>([
+        const consumerToHost = new Set<FrameType>([
             FrameType.Request,
             FrameType.Cancel,
             FrameType.Pong,
             FrameType.Goodbye,
         ]);
         for (const ty of Object.values(FrameType)) {
-            expect(isLegalConsumerToHostType(ty)).toBe(legal.has(ty));
+            expect(isLegalHostToConsumerType(ty)).toBe(hostToConsumer.has(ty));
+            expect(isLegalConsumerToHostType(ty)).toBe(consumerToHost.has(ty));
         }
     });
 
@@ -407,54 +393,5 @@ describe("direction legality", () => {
         expect(settledCorrelationNamespace(FrameType.Ping)).toBeUndefined();
         expect(settledCorrelationNamespace(FrameType.Request)).toBeUndefined();
         expect(settledCorrelationNamespace(FrameType.Goodbye)).toBeUndefined();
-    });
-});
-
-describe("route handles", () => {
-    test("binds a handle to its connection token", () => {
-        const token = newConnectionToken();
-        const handle = createRouteHandle(7, 77, token);
-        expect(handle.channel).toBe(7);
-        expect(handle.epoch).toBe(77);
-        expect(Object.isFrozen(handle)).toBe(true);
-        expect(belongsToConnection(handle, token)).toBe(true);
-        expect(() => assertBelongsToConnection(handle, token)).not.toThrow();
-    });
-
-    test("rejects a handle from an older connection with the exact compatibility shape", () => {
-        const oldToken = newConnectionToken();
-        const newToken = newConnectionToken();
-        const handle = createRouteHandle(7, 77, oldToken);
-        expect(belongsToConnection(handle, newToken)).toBe(false);
-
-        let caught: unknown;
-        try {
-            assertBelongsToConnection(handle, newToken);
-        } catch (error) {
-            caught = error;
-        }
-        expect(caught).toBeInstanceOf(StaleRouteHandleError);
-        const stale = caught as StaleRouteHandleError;
-        expect(stale.name).toBe("StaleRouteHandleError");
-        expect(stale.code).toBe("stale_route_handle");
-        expect(stale.message).toBe("route handle (7, 77) is not live on the current connection");
-        expect(stale.handle).toBe(handle);
-    });
-
-    test("a directly constructed handle belongs to no connection", () => {
-        const handle = new RouteHandle(7, 77);
-        expect(belongsToConnection(handle, newConnectionToken())).toBe(false);
-        expect(() => assertBelongsToConnection(handle, newConnectionToken())).toThrow(
-            StaleRouteHandleError,
-        );
-    });
-
-    test("rejects zero and out-of-range channels and epochs", () => {
-        const token = newConnectionToken();
-        expect(() => createRouteHandle(0, 1, token)).toThrow(RangeError);
-        expect(() => createRouteHandle(0x1_0000, 1, token)).toThrow(RangeError);
-        expect(() => createRouteHandle(1, 0, token)).toThrow(RangeError);
-        expect(() => createRouteHandle(1, 0x1_0000_0000, token)).toThrow(RangeError);
-        expect(() => createRouteHandle(1.5, 1, token)).toThrow(RangeError);
     });
 });

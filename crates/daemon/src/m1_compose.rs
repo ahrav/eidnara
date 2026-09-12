@@ -93,7 +93,6 @@ pub fn m1_revision_signal_timed(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M1Composition {
     pub body: String,
-    pub memory_update_count: usize,
     pub new_coverage: Option<(String, u64)>,
     pub note_deliveries: Vec<NoteDelivery>,
     pub profile_rendered: bool,
@@ -228,7 +227,6 @@ pub fn compose_m1(
             &profile_and_notes,
             M1_PLACEHOLDER,
         ),
-        memory_update_count: 0,
         new_coverage,
         note_deliveries,
         profile_rendered,

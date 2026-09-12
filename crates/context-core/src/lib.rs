@@ -118,162 +118,161 @@ mod tests {
         }
     }
 
+    /// One row per shape and signal combination; the row order follows the
+    /// precedence `classify` applies.
     #[test]
-    fn bootstrap_when_uninitialized_is_hard() {
-        let input = ClassifierInput {
-            shape: PersistedShape::Fresh,
-            m1_revision_changed: true,
-            ..Default::default()
-        };
-        assert_eq!(classify(&input), PassPlan::Hard);
-    }
-
-    #[test]
-    fn legacy_baseline_migrates() {
-        let input = ClassifierInput {
-            shape: PersistedShape::LegacyBaseline,
-            m1_revision_changed: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::MigrateHard);
-    }
-
-    #[test]
-    fn missing_m1_is_rebuilt_as_hard() {
-        let input = ClassifierInput {
-            shape: PersistedShape::CachedM1Missing,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Hard);
-    }
-
-    #[test]
-    fn unknown_shape_rejects_never_clears() {
-        let input = ClassifierInput {
-            shape: PersistedShape::Unknown,
-            m1_revision_changed: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Reject);
-    }
-
-    #[test]
-    fn defaulted_input_rejects() {
-        assert_eq!(classify(&ClassifierInput::default()), PassPlan::Reject);
-    }
-
-    #[test]
-    fn epoch_change_is_hard() {
-        let input = ClassifierInput {
-            render_config_changed: true,
-            m1_revision_changed: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Hard);
-    }
-
-    #[test]
-    fn hard_fold_requested_is_hard() {
-        let input = ClassifierInput {
-            hard_fold_requested: true,
-            m1_revision_changed: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Hard);
-    }
-
-    #[test]
-    fn reconcile_boundary_absent_rematerializes() {
-        let input = ClassifierInput {
-            reconcile_pending: true,
-            boundary_present: false,
-            m1_revision_changed: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Hard);
-    }
-
-    #[test]
-    fn reconcile_boundary_present_defers_to_clear() {
-        let input = ClassifierInput {
-            reconcile_pending: true,
-            boundary_present: true,
-            m1_revision_changed: true, // even with a delta, the clearing defer wins
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Defer);
-    }
-
-    #[test]
-    fn soft_delta_rides_only_with_boundary_present() {
-        let present = ClassifierInput {
-            boundary_present: true,
-            m1_revision_changed: true,
-            ..base()
-        };
-        assert_eq!(classify(&present), PassPlan::Soft);
-
-        let absent = ClassifierInput {
-            boundary_present: false,
-            m1_revision_changed: true,
-            reconcile_pending: false,
-            ..base()
-        };
-        assert_eq!(classify(&absent), PassPlan::Defer);
-    }
-
-    #[test]
-    fn pending_delta_without_bust_opportunity_defers() {
-        let input = ClassifierInput {
-            m1_revision_changed: true,
-            bust_opportunity: false,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Defer);
-    }
-
-    #[test]
-    fn boundary_present_no_delta_defers() {
-        let input = ClassifierInput {
-            boundary_present: true,
-            m1_revision_changed: false,
-            reductions_pending: false,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Defer);
-    }
-
-    #[test]
-    fn a_new_reduction_rides_a_soft() {
-        let input = ClassifierInput {
-            boundary_present: true,
-            m1_revision_changed: false,
-            reductions_pending: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Soft);
-    }
-
-    #[test]
-    fn m1_and_reduction_coalesce_into_one_soft() {
-        let input = ClassifierInput {
-            boundary_present: true,
-            m1_revision_changed: true,
-            reductions_pending: true,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Soft);
-    }
-
-    #[test]
-    fn boundary_absent_reduction_defers_never_soft() {
-        let input = ClassifierInput {
-            boundary_present: false,
-            m1_revision_changed: true,
-            reductions_pending: true,
-            reconcile_pending: false,
-            ..base()
-        };
-        assert_eq!(classify(&input), PassPlan::Defer);
+    fn classify_selects_the_pass_for_each_shape_and_signal_combination() {
+        let cases = [
+            (
+                "a fresh shape bootstraps with Hard before any defer",
+                ClassifierInput {
+                    shape: PersistedShape::Fresh,
+                    m1_revision_changed: true,
+                    ..Default::default()
+                },
+                PassPlan::Hard,
+            ),
+            (
+                "a legacy baseline migrates",
+                ClassifierInput {
+                    shape: PersistedShape::LegacyBaseline,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::MigrateHard,
+            ),
+            (
+                "a missing m1 rebuilds with Hard",
+                ClassifierInput {
+                    shape: PersistedShape::CachedM1Missing,
+                    ..base()
+                },
+                PassPlan::Hard,
+            ),
+            (
+                "an unknown shape rejects and never clears",
+                ClassifierInput {
+                    shape: PersistedShape::Unknown,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::Reject,
+            ),
+            (
+                "a defaulted input rejects",
+                ClassifierInput::default(),
+                PassPlan::Reject,
+            ),
+            (
+                "a render-config change is Hard",
+                ClassifierInput {
+                    render_config_changed: true,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::Hard,
+            ),
+            (
+                "a hard fold request is Hard",
+                ClassifierInput {
+                    hard_fold_requested: true,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::Hard,
+            ),
+            (
+                "a pending reconcile with the boundary absent rematerializes",
+                ClassifierInput {
+                    reconcile_pending: true,
+                    boundary_present: false,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::Hard,
+            ),
+            (
+                "a pending reconcile with the boundary present defers even with a delta",
+                ClassifierInput {
+                    reconcile_pending: true,
+                    boundary_present: true,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::Defer,
+            ),
+            (
+                "an m1 delta rides a Soft when the boundary is present",
+                ClassifierInput {
+                    boundary_present: true,
+                    m1_revision_changed: true,
+                    ..base()
+                },
+                PassPlan::Soft,
+            ),
+            (
+                "an m1 delta defers when the boundary is absent",
+                ClassifierInput {
+                    boundary_present: false,
+                    m1_revision_changed: true,
+                    reconcile_pending: false,
+                    ..base()
+                },
+                PassPlan::Defer,
+            ),
+            (
+                "an m1 delta without a bust opportunity defers",
+                ClassifierInput {
+                    m1_revision_changed: true,
+                    bust_opportunity: false,
+                    ..base()
+                },
+                PassPlan::Defer,
+            ),
+            (
+                "a present boundary with no delta defers",
+                ClassifierInput {
+                    boundary_present: true,
+                    m1_revision_changed: false,
+                    reductions_pending: false,
+                    ..base()
+                },
+                PassPlan::Defer,
+            ),
+            (
+                "a new reduction rides a Soft",
+                ClassifierInput {
+                    boundary_present: true,
+                    m1_revision_changed: false,
+                    reductions_pending: true,
+                    ..base()
+                },
+                PassPlan::Soft,
+            ),
+            (
+                "an m1 delta and a reduction coalesce into one Soft",
+                ClassifierInput {
+                    boundary_present: true,
+                    m1_revision_changed: true,
+                    reductions_pending: true,
+                    ..base()
+                },
+                PassPlan::Soft,
+            ),
+            (
+                "a reduction with the boundary absent defers, never Soft",
+                ClassifierInput {
+                    boundary_present: false,
+                    m1_revision_changed: true,
+                    reductions_pending: true,
+                    reconcile_pending: false,
+                    ..base()
+                },
+                PassPlan::Defer,
+            ),
+        ];
+        for (case, input, expected) in cases {
+            assert_eq!(classify(&input), expected, "{case}: {input:?}");
+        }
     }
 }

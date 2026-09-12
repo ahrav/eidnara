@@ -21,37 +21,32 @@ describe("assertOpenAiCompatAdjacency", () => {
         expect(assertOpenAiCompatAdjacency(messages).ok).toBe(true);
     });
 
-    test("fails when assistant tool_calls is separated from tool by another assistant", () => {
-        const messages: OpenAiCompatWireMessage[] = [
-            { role: "user", content: "go" },
-            {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                    { id: "call-1", type: "function", function: { name: "read", arguments: "{}" } },
-                ],
-            },
-            { role: "assistant", content: "[dropped]" },
-            { role: "tool", tool_call_id: "call-1", content: "ok" },
-        ];
-        const result = assertOpenAiCompatAdjacency(messages);
-        expect(result.ok).toBe(false);
-        expect(result.violations[0]?.kind).toBe("missing_tool_messages");
-    });
-
-    test("fails when user message intervenes between tool_calls and tool", () => {
-        const messages: OpenAiCompatWireMessage[] = [
-            {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                    { id: "c1", type: "function", function: { name: "x", arguments: "{}" } },
-                ],
-            },
-            { role: "user", content: "[dropped]" },
-            { role: "tool", tool_call_id: "c1", content: "y" },
-        ];
-        expect(assertOpenAiCompatAdjacency(messages).ok).toBe(false);
+    test("fails when an assistant or user message separates tool_calls from its tool result", () => {
+        for (const role of ["assistant", "user"] as const) {
+            const messages: OpenAiCompatWireMessage[] = [
+                { role: "user", content: "go" },
+                {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                        {
+                            id: "call-1",
+                            type: "function",
+                            function: { name: "read", arguments: "{}" },
+                        },
+                    ],
+                },
+                { role, content: "[dropped]" },
+                { role: "tool", tool_call_id: "call-1", content: "ok" },
+            ];
+            const result = assertOpenAiCompatAdjacency(messages);
+            expect(result.ok).toBe(false);
+            expect(result.violations.map((v) => v.kind)).toEqual([
+                "missing_tool_messages",
+                "orphan_tool_message",
+            ]);
+            expect(result.violations[0]?.index).toBe(1);
+        }
     });
 
     test("issue #135 pinned orphan fixture stays failing until fixed", () => {
@@ -100,22 +95,24 @@ describe("assertOpenAiCompatAdjacency", () => {
         expect(result.violations.map((v) => v.kind)).toEqual(["duplicate_tool_call_id"]);
     });
 
-    test("fails when a tool message without tool_call_id opens the conversation", () => {
-        const result = assertOpenAiCompatAdjacency([{ role: "tool", content: "orphan" }]);
-        expect(result.ok).toBe(false);
-        expect(result.violations).toEqual([
-            expect.objectContaining({ index: 0, kind: "orphan_tool_message" }),
-        ]);
-    });
-
-    test("fails when a tool message without tool_call_id follows a user message", () => {
-        const messages: OpenAiCompatWireMessage[] = [
-            { role: "user", content: "hi" },
-            { role: "tool", content: "orphan" },
+    test("fails when a tool message without tool_call_id opens the conversation or follows a user message", () => {
+        const cases: Array<{ messages: OpenAiCompatWireMessage[]; index: number }> = [
+            { messages: [{ role: "tool", content: "orphan" }], index: 0 },
+            {
+                messages: [
+                    { role: "user", content: "hi" },
+                    { role: "tool", content: "orphan" },
+                ],
+                index: 1,
+            },
         ];
-        const result = assertOpenAiCompatAdjacency(messages);
-        expect(result.ok).toBe(false);
-        expect(result.violations.map((v) => v.kind)).toEqual(["orphan_tool_message"]);
+        for (const { messages, index } of cases) {
+            const result = assertOpenAiCompatAdjacency(messages);
+            expect(result.ok).toBe(false);
+            expect(result.violations).toEqual([
+                expect.objectContaining({ index, kind: "orphan_tool_message" }),
+            ]);
+        }
     });
 
     test("reports a tool message without tool_call_id inside a run exactly once", () => {

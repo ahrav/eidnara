@@ -2328,13 +2328,32 @@ mod tests {
     }
 
     #[test]
-    fn daemon_version_range_check_uses_contract_bounds() {
-        assert!(daemon_version_compatible("eidnara-host/0.1.0"));
-        assert!(daemon_version_compatible("eidnara-host/0.1.9"));
-        assert!(!daemon_version_compatible("eidnara-host/0.2.0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.0.9"));
-        assert!(!daemon_version_compatible("other/0.1.0"));
-        assert!(!daemon_version_compatible("eidnara-host/1"));
+    fn daemon_version_check_applies_contract_range_and_typescript_shape_rule() {
+        for accepted in ["eidnara-host/0.1.0", "eidnara-host/0.1.9"] {
+            assert!(daemon_version_compatible(accepted), "{accepted}");
+        }
+        for rejected in [
+            "eidnara-host/0.2.0",
+            "eidnara-host/0.0.9",
+            "other/0.1.0",
+            "eidnara-host/1",
+            "eidnara-host/+0.1.0",
+            "eidnara-host/0.+1.0",
+            "eidnara-host/0.1.+0",
+            "eidnara-host/0..0",
+            "eidnara-host/0.1.",
+            "eidnara-host/-0.1.0",
+            "eidnara-host/ 0.1.0",
+            "eidnara-host/0.1.0 ",
+            "eidnara-host/0.1.0-rc1",
+            "eidnara-host/0.1.0.0",
+            "eidnara-host/0.01.0",
+            "eidnara-host/00.1.0",
+            "eidnara-host/0.1.00",
+            "eidnara-host/01.2.3",
+        ] {
+            assert!(!daemon_version_compatible(rejected), "{rejected}");
+        }
     }
 
     #[test]
@@ -2512,23 +2531,5 @@ mod tests {
         );
         assert!(observed.procfs_self_fd, "procfs self links resolve");
         assert_eq!(supported_target(), Ok("linux-x64-gnu"));
-    }
-    #[test]
-    fn daemon_version_shape_matches_the_typescript_gate() {
-        assert!(!daemon_version_compatible("eidnara-host/+0.1.0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.+1.0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.1.+0"));
-        assert!(!daemon_version_compatible("eidnara-host/0..0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.1."));
-        assert!(!daemon_version_compatible("eidnara-host/-0.1.0"));
-        assert!(!daemon_version_compatible("eidnara-host/ 0.1.0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.1.0 "));
-        assert!(!daemon_version_compatible("eidnara-host/0.1.0-rc1"));
-        assert!(!daemon_version_compatible("eidnara-host/0.1.0.0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.01.0"));
-        assert!(!daemon_version_compatible("eidnara-host/00.1.0"));
-        assert!(!daemon_version_compatible("eidnara-host/0.1.00"));
-        assert!(!daemon_version_compatible("eidnara-host/01.2.3"));
-        assert!(daemon_version_compatible("eidnara-host/0.1.0"));
     }
 }

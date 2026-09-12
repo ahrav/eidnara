@@ -9,7 +9,7 @@ use support::kernel_daemon::{
 };
 
 #[tokio::test]
-async fn a_commit_retried_with_the_same_intent_yields_one_receipt() {
+async fn a_commit_retried_with_the_same_intent_replays_one_receipt_from_the_store() {
     let daemon = KernelDaemon::start().await;
     let first = daemon.commit("create-1", vec![insert_decision(1)]).await;
     assert_eq!(state_kind(&first), "available");
@@ -20,6 +20,12 @@ async fn a_commit_retried_with_the_same_intent_yields_one_receipt() {
         json!([{"object_id": "decision-object-1", "known_as_of": commit_seq}])
     );
     let tip = daemon.tip();
+    assert_eq!(commit_seq, tip);
+    let (_, states) = daemon
+        .store()
+        .object_states(&["decision-object-1".to_string()])
+        .unwrap();
+    assert_eq!(states[0].as_ref().unwrap().object.created_commit_seq, tip);
 
     let retried = daemon.commit("create-1", vec![insert_decision(1)]).await;
     assert_eq!(state_kind(&retried), "available");
@@ -27,7 +33,10 @@ async fn a_commit_retried_with_the_same_intent_yields_one_receipt() {
     assert_eq!(retried["receipt"]["replayed"], true);
     assert_eq!(retried["tokens"], first["tokens"]);
     assert_eq!(retried["known_as_of"], first["known_as_of"]);
+    assert_eq!(retried["known_as_of"], tip);
     assert_eq!(daemon.tip(), tip);
+    let read = daemon.read("explicit_search", None, None).await;
+    assert_eq!(object_ids(&read), ["decision-object-1"]);
 
     let reused = daemon
         .commit_with_digest_seed("create-1", "other-bytes", vec![insert_decision(2)])
@@ -35,47 +44,19 @@ async fn a_commit_retried_with_the_same_intent_yields_one_receipt() {
     assert_eq!(state_kind(&reused), "invalid");
     assert_eq!(state_reason(&reused), Some("operation_key_reused"));
     assert_eq!(daemon.tip(), tip);
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_commit_retried_after_its_response_is_discarded_rebuilds_the_receipt_from_the_store() {
-    let daemon = KernelDaemon::start().await;
-    let _discarded = daemon.commit("create-2", vec![insert_decision(2)]).await;
-    let tip_after_first = daemon.tip();
-    let (_, states) = daemon
-        .store()
-        .object_states(&["decision-object-2".to_string()])
-        .unwrap();
-    let created_at = states[0].as_ref().unwrap().object.created_commit_seq;
-    assert_eq!(created_at, tip_after_first);
-
-    let retried = daemon.commit("create-2", vec![insert_decision(2)]).await;
-    assert_eq!(state_kind(&retried), "available");
-    assert_eq!(retried["receipt"]["replayed"], true);
-    assert_eq!(retried["receipt"]["commit_seq"], tip_after_first);
-    assert_eq!(retried["known_as_of"], tip_after_first);
-    assert_eq!(
-        retried["tokens"],
-        json!([{"object_id": "decision-object-2", "known_as_of": created_at}])
-    );
-    assert_eq!(daemon.tip(), tip_after_first);
-
-    let read = daemon.read("explicit_search", None, None).await;
-    assert_eq!(object_ids(&read), ["decision-object-2"]);
 
     // Deduplication is keyed by intent, not by content: the same operations under a new
     // key are a second commit.
     let again = daemon
-        .commit("create-2-again", vec![insert_decision(2)])
+        .commit("create-1-again", vec![insert_decision(1)])
         .await;
     assert_eq!(state_kind(&again), "invalid");
     assert_eq!(state_reason(&again), Some("already_exists"));
-    assert_eq!(daemon.tip(), tip_after_first);
+    assert_eq!(daemon.tip(), tip);
     let renamed = daemon.commit("create-3", vec![insert_decision(3)]).await;
     assert_eq!(state_kind(&renamed), "available");
     assert_eq!(renamed["receipt"]["replayed"], false);
-    assert_eq!(renamed["receipt"]["commit_seq"], tip_after_first + 1);
+    assert_eq!(renamed["receipt"]["commit_seq"], tip + 1);
     daemon.shutdown().await;
 }
 
