@@ -54,13 +54,15 @@ const GATES: [&str; 5] = [
     "capability",
     "both_harness",
 ];
-const INVALIDATION_IDENTITY: [&str; 6] = [
+const INVALIDATION_IDENTITY: [&str; 8] = [
     "schema_version",
     "tokenizer_fingerprint",
     "embedding_model",
     "projection_policy_version",
     "identity_contract_version",
     "limit_manifest_protocol_version",
+    "vector_dimension",
+    "generation_epoch",
 ];
 const MANIFEST_FIELDS: [&str; 9] = [
     "protocol_version",

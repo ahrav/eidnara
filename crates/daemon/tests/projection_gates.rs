@@ -24,7 +24,9 @@ use daemon::projection_gates::{
 };
 use host_runtime::synapse::SynapseLimits;
 use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
 use kernel::{ArtifactDestination, KernelStore, ProjectScope};
+use retrieval::batch::dense_eligible;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use support::embedding_fixtures::{
@@ -68,6 +70,128 @@ fn manifest_json(hooks: &[ProjectionHook]) -> Value {
 
 fn passing() -> EvidenceEvaluator {
     passing_evaluator(&identity("k", 8), 10, &ProjectionHook::ALL)
+}
+
+fn construction_contracts() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../kernel/tests/fixtures/search-projection/construction-contracts.json");
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+fn str_set(value: &Value) -> BTreeSet<&str> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect()
+}
+
+/// The gate's tables agree with the frozen construction contract: limit names, hook keys and their classes, capability dispositions, harnesses, and the invalidation-identity field set. A rename on either side fails here rather than turning every conforming manifest into a refusal.
+#[test]
+fn gate_tables_match_the_frozen_construction_contract() {
+    let contracts = construction_contracts();
+
+    let limits: BTreeSet<&str> = contracts["limit_manifest_interface"]["limits"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(REQUIRED_LIMITS.into_iter().collect::<BTreeSet<_>>(), limits);
+
+    let hooks = contracts["hooks"].as_object().unwrap();
+    assert_eq!(
+        ProjectionHook::ALL
+            .iter()
+            .map(|hook| hook.id())
+            .collect::<BTreeSet<_>>(),
+        hooks.keys().map(String::as_str).collect::<BTreeSet<_>>()
+    );
+    for hook in ProjectionHook::ALL {
+        let classes: BTreeSet<&str> = hook.classes().iter().map(|class| class.code()).collect();
+        assert_eq!(
+            classes,
+            str_set(&hooks[hook.id()]["classes"]),
+            "{}",
+            hook.id()
+        );
+    }
+    // The dense hooks require exactly the dense-eligible classes, so a class that becomes dense-eligible is covered without a second list to update.
+    let dense: BTreeSet<&str> = OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| dense_eligible(*class))
+        .map(|class| class.code())
+        .collect();
+    for hook in [
+        ProjectionHook::EmbeddingBootstrap,
+        ProjectionHook::EmbeddingRouting,
+        ProjectionHook::EmbeddingRegistry,
+        ProjectionHook::EmbeddingBackfill,
+        ProjectionHook::EmbeddingIdentityGc,
+    ] {
+        let classes: BTreeSet<&str> = hook.classes().iter().map(|class| class.code()).collect();
+        assert_eq!(classes, dense, "{}", hook.id());
+    }
+
+    let listed: Vec<(&str, &str)> = contracts["capability_dispositions"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|capability| {
+            let disposition = capability["opencode"].as_str().unwrap();
+            assert_eq!(disposition, capability["pi"].as_str().unwrap());
+            (disposition != "not_applicable")
+                .then(|| (capability["capability"].as_str().unwrap(), disposition))
+        })
+        .collect();
+    let gate: Vec<(&str, &str)> = CAPABILITIES
+        .iter()
+        .map(|capability| {
+            let disposition = match capability.disposition {
+                CapabilityDisposition::Required => "required",
+                CapabilityDisposition::OptionalDisabled => "optional_disabled",
+            };
+            (capability.name, disposition)
+        })
+        .collect();
+    assert_eq!(gate, listed);
+    assert_eq!(
+        str_set(&contracts["hook_defaults"]["both_harness_evidence"]),
+        HARNESSES.into_iter().collect::<BTreeSet<_>>()
+    );
+
+    // The identity struct requires every field the contract lists and refuses every other, so an object of exactly the contract's fields deserializes and nothing else does.
+    let fields = str_set(&contracts["hook_defaults"]["invalidation_identity"]);
+    let typed = manifest_json(&[])["invalidation_identity"]
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        typed.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        fields,
+        "the test manifest carries the contract's identity fields"
+    );
+    let contract_shaped: serde_json::Map<String, Value> = fields
+        .iter()
+        .map(|field| ((*field).to_owned(), typed[*field].clone()))
+        .collect();
+    serde_json::from_value::<InvalidationIdentity>(Value::Object(contract_shaped.clone()))
+        .expect("the contract's identity tuple is the struct's field set");
+    for field in &fields {
+        let mut missing = contract_shaped.clone();
+        missing.remove(*field);
+        assert!(
+            serde_json::from_value::<InvalidationIdentity>(Value::Object(missing)).is_err(),
+            "{field} is required"
+        );
+    }
+    let mut extra = contract_shaped;
+    extra.insert("kernel_incarnation_id".to_owned(), json!("k"));
+    assert!(
+        serde_json::from_value::<InvalidationIdentity>(Value::Object(extra)).is_err(),
+        "the kernel incarnation is not part of the invalidation identity"
+    );
 }
 
 /// The durable rows of every projection table a hook may write, so "no new durable work" is a comparison rather than a claim.
@@ -242,13 +366,31 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
     let hook = ProjectionHook::EmbeddingBackfill;
     passing().judge(hook).unwrap();
     let gate = HookGate::closed();
+    assert_eq!(
+        gate.admit_all(&[], EntryPoint::Dispatch).map(|a| a.len()),
+        Err(Denial::NoManifest),
+        "asking for nothing is not a grant"
+    );
     gate.install(passing());
+    assert_eq!(
+        gate.admit_all(&[], EntryPoint::Dispatch).map(|a| a.len()),
+        Err(Denial::NoManifest),
+        "asking for nothing is not a grant even under a manifest"
+    );
+    let mut last = None;
     for entry in EntryPoint::ALL {
         let admission = gate.admit(hook, entry).unwrap();
         assert_eq!((admission.hook, admission.entry), (hook, entry));
-        assert_eq!(admission.protocol_version, "limits.v1");
         assert!(!admission.invalidated.is_cancelled());
+        last = Some(admission);
     }
+    // Closing the gate cancels every outstanding grant and denies what follows.
+    gate.close();
+    assert!(last.unwrap().invalidated.is_cancelled());
+    assert_eq!(
+        gate.admit(hook, EntryPoint::Dispatch).unwrap_err(),
+        Denial::NoManifest
+    );
 
     let mut absent_flag = passing();
     absent_flag.manifest.enabled.remove(&hook);
@@ -302,15 +444,28 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         "a hook that does not touch the unreported class is unaffected"
     );
 
+    // The lag is measured from the tip the coverage packet itself records: the observer's snapshot, not a tip supplied beside it.
     let mut stale = passing();
-    stale.evidence.kernel_tip += 5;
+    stale
+        .evidence
+        .coverage
+        .as_mut()
+        .unwrap()
+        .kernel_snapshot
+        .tip += 5;
     stale
         .manifest
         .limits
         .insert("catchup_lag_commits".to_owned(), 4);
     assert_eq!(stale.judge(hook), Err(Denial::Stale { lag: 5, max: 4 }));
     let mut ahead = passing();
-    ahead.evidence.kernel_tip -= 1;
+    ahead
+        .evidence
+        .coverage
+        .as_mut()
+        .unwrap()
+        .kernel_snapshot
+        .tip -= 1;
     assert_eq!(
         ahead.judge(hook),
         Err(Denial::Stale {

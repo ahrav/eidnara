@@ -112,7 +112,6 @@ pub fn passing_evaluator(
         evidence: Evidence {
             identity: current.clone(),
             coverage: Some(empty_coverage(identity, kernel_tip)),
-            kernel_tip,
             resource: Some(ResourceEvidence {
                 observer: APPROVED_OBSERVERS[0].to_owned(),
                 decoded_heap_high_water_bytes: 0,

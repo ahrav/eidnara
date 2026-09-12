@@ -218,7 +218,9 @@
       "embedding_model",
       "projection_policy_version",
       "identity_contract_version",
-      "limit_manifest_protocol_version"
+      "limit_manifest_protocol_version",
+      "vector_dimension",
+      "generation_epoch"
     ],
     "entry_points": [
       "startup",

@@ -273,7 +273,12 @@ different identity is inapplicable and does not pass.
 
 The invalidation identity is the tuple `(schema_version,
 tokenizer_fingerprint, embedding_model, projection_policy_version,
-identity_contract_version, limit_manifest_protocol_version)`.
+identity_contract_version, limit_manifest_protocol_version,
+vector_dimension, generation_epoch)`: every projection identity field except
+the kernel incarnation, which changes on every kernel restart while the
+evidence about the projection's content, model, and limits stays valid. A new
+generation epoch or vector dimension invalidates coverage evidence, since the
+vectors it counted belong to the earlier generation.
 
 | Hook | Classes | Built by |
 | --- | --- | --- |

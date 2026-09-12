@@ -103,12 +103,12 @@ impl EntryPoint {
     pub const ALL: [EntryPoint; 3] = [Self::Startup, Self::Reload, Self::Dispatch];
 }
 
+/// The gates a denial names. The capability gate denies through [`Denial::Unsupported`], which names the harness and capability instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
     ClassCoverage,
     Freshness,
     Resource,
-    Capability,
     BothHarness,
 }
 
@@ -127,16 +127,28 @@ pub struct InvalidationIdentity {
 }
 
 impl From<&ProjectionIdentity> for InvalidationIdentity {
+    // Destructured without `..` so a field added to the projection identity is an explicit include-or-exclude decision here rather than a silent exclusion from invalidation.
     fn from(identity: &ProjectionIdentity) -> Self {
+        let ProjectionIdentity {
+            schema_version,
+            kernel_incarnation_id: _,
+            projection_policy_version,
+            identity_contract_version,
+            limit_manifest_protocol_version,
+            embedding_model,
+            tokenizer_fingerprint,
+            vector_dimension,
+            generation_epoch,
+        } = identity;
         Self {
-            schema_version: identity.schema_version,
-            tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
-            embedding_model: identity.embedding_model.clone(),
-            projection_policy_version: identity.projection_policy_version.clone(),
-            identity_contract_version: identity.identity_contract_version.clone(),
-            limit_manifest_protocol_version: identity.limit_manifest_protocol_version.clone(),
-            vector_dimension: identity.vector_dimension,
-            generation_epoch: identity.generation_epoch,
+            schema_version: *schema_version,
+            tokenizer_fingerprint: tokenizer_fingerprint.clone(),
+            embedding_model: embedding_model.clone(),
+            projection_policy_version: projection_policy_version.clone(),
+            identity_contract_version: identity_contract_version.clone(),
+            limit_manifest_protocol_version: limit_manifest_protocol_version.clone(),
+            vector_dimension: *vector_dimension,
+            generation_epoch: *generation_epoch,
         }
     }
 }
@@ -363,8 +375,6 @@ pub enum HarnessRun {
 pub struct Evidence {
     pub identity: InvalidationIdentity,
     pub coverage: Option<ProjectionCoverage>,
-    /// The kernel tip when `coverage` was taken.
-    pub kernel_tip: i64,
     pub resource: Option<ResourceEvidence>,
     /// `(harness, capability)` to what the harness proved.
     pub capabilities: BTreeMap<(String, String), CapabilityEvidence>,
@@ -405,8 +415,6 @@ pub enum Denial {
 pub struct Admission {
     pub hook: ProjectionHook,
     pub entry: EntryPoint,
-    pub protocol_version: String,
-    pub identity: InvalidationIdentity,
     pub invalidated: CancellationToken,
 }
 
@@ -478,11 +486,12 @@ impl EvidenceEvaluator {
         Ok(())
     }
 
+    // The tip is the one the coverage packet was judged at, so the lag describes that observation and not a tip read elsewhere.
     fn freshness(&self, coverage: &ProjectionCoverage) -> Result<(), Denial> {
         let max = self.limit("catchup_lag_commits")?;
-        let lag = self
-            .evidence
-            .kernel_tip
+        let lag = coverage
+            .kernel_snapshot
+            .tip
             .checked_sub(coverage.report.checkpoint.checkpoint_commit_seq)
             .ok_or(Denial::Failed(
                 Gate::Freshness,
@@ -581,12 +590,6 @@ pub struct HookGate {
     ledger: Mutex<Vec<LedgerEntry>>,
 }
 
-impl Default for HookGate {
-    fn default() -> Self {
-        Self::closed()
-    }
-}
-
 impl HookGate {
     /// A gate with no manifest denies every hook.
     pub fn closed() -> Self {
@@ -628,7 +631,7 @@ impl HookGate {
             .clone()
     }
 
-    /// Judges every hook in `hooks` at `entry` under one gate state and admits only when all pass. A poisoned gate denies as a closed one does.
+    /// Admits all hooks at `entry` when each judge succeeds under the same gate state. A poisoned gate denies as a closed one does, and so does an empty request.
     ///
     /// # Errors
     ///
@@ -638,6 +641,9 @@ impl HookGate {
         hooks: &[ProjectionHook],
         entry: EntryPoint,
     ) -> Result<Vec<Admission>, Denial> {
+        if hooks.is_empty() {
+            return Err(Denial::NoManifest);
+        }
         let state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
         let verdicts: Vec<Result<Admission, Denial>> = hooks
             .iter()
@@ -648,8 +654,6 @@ impl HookGate {
                 Ok(Admission {
                     hook: *hook,
                     entry,
-                    protocol_version: evaluator.manifest.protocol_version.clone(),
-                    identity: evaluator.current.clone(),
                     invalidated: state.invalidated.clone(),
                 })
             })
