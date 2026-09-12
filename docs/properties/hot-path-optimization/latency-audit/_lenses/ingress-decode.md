@@ -354,7 +354,7 @@ bodies opaque and states only the `invalid_params` cap codes
 [t-dispatch]: ../../../../../crates/daemon/src/lib.rs#L26568-L26623
 [t-shape]: ../../../../../crates/daemon/src/lib.rs#L32419-L32436
 [t-shape2]: ../../../../../crates/daemon/src/lib.rs#L32439-L32479
-[t-envelope]: ../../../../../crates/daemon/src/transform.rs#L16159-L16185
+[t-envelope]: ../../../../../crates/daemon/src/transform.rs#L16162-L16188
 [t-meta]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../../crates/daemon/tests/direct_host.rs#L48-L128
 [fixture]: ../../../../../crates/daemon/tests/direct_host.rs#L285-L290

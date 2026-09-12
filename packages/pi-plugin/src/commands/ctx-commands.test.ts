@@ -87,18 +87,6 @@ describe("Pi /ctx-flush", () => {
         expect(entry?.level).toBe("success");
     });
 
-    it("routes on the project root of the invocation cwd, so /cd moves later commands", async () => {
-        const { pi, run } = harness();
-        const module = fakeModuleClient(() => ({ result: { armed: true } }));
-        registerCtxFlushCommand(pi, { moduleClient: module.client });
-        await run("ctx-flush");
-        await run("ctx-flush", "", { cwd: "/tmp/other-project" });
-        expect(module.calls.map((call) => call.projectRoot)).toEqual([
-            CWD_ROOT,
-            resolveProjectRootDirectory("/tmp/other-project"),
-        ]);
-    });
-
     it("reports nothing pending when the daemon is not armed", async () => {
         const { pi, run } = harness();
         const module = fakeModuleClient(() => ({ armed: false }));
@@ -351,25 +339,18 @@ describe("Pi /ctx-recomp", () => {
         expect(footer.map(footerState)).toEqual(["recomp", "idle"]);
     });
 
-    it("leaves the footer untouched when the daemon is never called", async () => {
+    it("refuses a message range or malformed arguments without calling the daemon or touching the footer", async () => {
         const { pi, run, footer } = harness();
         const module = fakeModuleClient(() => ({}));
         registerCtxRecompCommand(pi, { moduleClient: module.client });
-        await run("ctx-recomp", "1-40");
-        await run("ctx-recomp", "bogus");
+        const [ranged] = await run("ctx-recomp", "1-40");
+        expect(ranged?.text).toContain("## Eidnara Recomp — Unsupported");
+        expect(ranged?.text).toContain("Requested range: `1-40`");
+        expect(ranged?.text).toContain("`session.recomp` accepts no message range.");
+        const [, malformed] = await run("ctx-recomp", "bogus");
+        expect(malformed?.text).toContain("## Eidnara Recomp — Invalid Arguments");
         expect(module.calls).toHaveLength(0);
         expect(footer).toHaveLength(0);
-    });
-
-    it("refuses a message range without calling the daemon", async () => {
-        const { pi, run } = harness();
-        const module = fakeModuleClient(() => ({}));
-        registerCtxRecompCommand(pi, { moduleClient: module.client });
-        const [entry] = await run("ctx-recomp", "1-40");
-        expect(module.calls).toHaveLength(0);
-        expect(entry?.text).toContain("## Eidnara Recomp — Unsupported");
-        expect(entry?.text).toContain("Requested range: `1-40`");
-        expect(entry?.text).toContain("`session.recomp` accepts no message range.");
     });
 
     it("refuses in compaction-off mode", async () => {

@@ -5,7 +5,7 @@ search projection that the retrieval crate's
 [baseline](../../../crates/retrieval/baseline.sql) creates. Identity or schema
 incompatibility requires a rebuild from the canonical store, not a schema
 migration. A change to this inventory requires a new schema version and a
-rebuild.
+rebuild. The schema version is 3.
 
 The [lifecycle contract](spec-traceability.md) requires staging and verifying a
 complete, compatible replacement before selecting it. During replacement,
@@ -195,6 +195,14 @@ Indexes:
 
 - `idx_embedding_jobs_dispatch` on `(state,next_attempt_at,job_id)`
 - `idx_embedding_jobs_generation` on `(generation_id,job_id)`
+- `idx_embedding_jobs_open_order` on `(created_at,job_id) WHERE state IN ('pending','admitted') AND stop_reason IS NULL`
+
+Dispatch reads open jobs in creation order, breaking ties by job identity. The
+partial index avoids sorting the due backlog before applying the row limit.
+Deferred or WrongScope rows can still form a long prefix, so the daemon keeps a
+process-local keyset cursor across successful passes. One pass reads at most two
+pages of at most 1,024 candidates and wraps to the beginning at the ordered tail.
+The index supplies order; the dispatcher supplies the scan and action budgets.
 
 ## `embedding_recovery_authorizations`
 

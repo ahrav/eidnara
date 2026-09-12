@@ -42,15 +42,8 @@ function snapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot {
     };
 }
 
-test("renders raw input-versus-model usage rather than threshold-relative fill", () => {
-    const value = nativeCompactionContextLabel(snapshot());
-
-    expect(value).toBe("Context: 41.0% · native compaction");
-    expect(value).not.toBe("Context: 63.1% · native compaction");
-});
-
 test("uses the native-window percentage, not inputTokens over the reserved contextLimit", () => {
-    // 40k tokens: 100k native window → 40%; the 80k output-reserved limit would read 50%.
+    // 40k tokens: 100k native window → 40%; the 80k output-reserved limit would read 50% and the threshold-relative usagePercentage 63.1%.
     const value = nativeCompactionContextLabel(
         snapshot({
             inputTokens: 40_000,

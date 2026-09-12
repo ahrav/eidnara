@@ -48,7 +48,7 @@ three direct `tokenizer::estimate_tokens` calls in production transform code.
   the SOFT predicate's `m0_tokens` and `m1_tokens` at
   [`:4298-4309`][soft-direct] (W9); the tag-mint `token_count` persisted into
   `TagMintInput` at [`:7160`][mint-direct]; `ActiveTagForNudge.token_count`
-  at [`:8558`][nudge-direct]. The tokenizer crate's
+  at [`:8561`][nudge-direct]. The tokenizer crate's
   [`estimate_tokens`][tok-fn] exposes no call counter.
 - The existing source scan
   [`protected_floor_has_no_global_estimator_bypass`][t-bypass] slices the
@@ -100,7 +100,7 @@ declared sum, measures contention, or scans the whole `apply_once` body.
 ### Q: Should `:7160` and `:8558` stay direct or route through the interface?
 
 - Sources examined: [`:7160`][mint-direct] in the tag-mint loop,
-  [`:8558`][nudge-direct] in the nudge derivation.
+  [`:8561`][nudge-direct] in the nudge derivation.
 - Findings: Both count `taggable_source` text of tail blocks and store the
   result in a durable or served `token_count`; neither is counted in
   `tokenize_calls`, and neither is reachable by an injected estimator.
@@ -116,6 +116,24 @@ declared sum, measures contention, or scans the whole `apply_once` body.
 - Missing evidence: None for the mechanism; the choice is a test-strategy
   decision.
 - Conclusion: unresolved, needs `/testing:test-strategy`.
+
+## Implementation evidence
+
+The preceding discovery snapshot is retained at its stated baseline. Current
+checks and decision provenance are in [shared selection and pressure
+accounting](shared-selection-and-pressure-accounting.md).
+
+The accounting choice is resolved without adding parameters to tag helpers:
+SOFT uses the injected estimator; tag minting and nudge derivation use the
+existing cache entry point. The whole-production-module scan rejects direct
+tokenizer paths and explicitly includes serialization, SOFT, minting, and
+nudge helpers. It fails on all four direct baseline calls before edits.
+
+Runtime checks cover exact SOFT inputs and classification, cached/direct
+equality, placeholder and missing-m0 call gates, two warm hits, tag/nudge
+counter deltas, and zero serialization estimates. The declaration and cache
+capacity are unchanged. Contention measurement and an independent recomputed
+declaration sum remain outside this change.
 
 [tc-doc]: ../../../../../crates/daemon/src/token_cache.rs#L1-L7
 [tc-cap]: ../../../../../crates/daemon/src/token_cache.rs#L16
@@ -135,6 +153,6 @@ declared sum, measures contention, or scans the whole `apply_once` body.
 [ao-sig]: ../../../../../crates/daemon/src/transform.rs#L2836-L2845
 [soft-direct]: ../../../../../crates/daemon/src/transform.rs#L4298-L4309
 [mint-direct]: ../../../../../crates/daemon/src/transform.rs#L7160
-[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8558
-[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24170-L24181
+[nudge-direct]: ../../../../../crates/daemon/src/transform.rs#L8561
+[t-bypass]: ../../../../../crates/daemon/src/transform.rs#L24173-L24184
 [tok-fn]: ../../../../../crates/tokenizer/src/lib.rs#L148

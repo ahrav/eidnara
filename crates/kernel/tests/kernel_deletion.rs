@@ -350,7 +350,7 @@ fn barrier_specific_consumer_abandonment_records_operator_barrier_and_time() {
 }
 
 #[test]
-fn evidence_identity_delete_and_reissue_are_no_effects() {
+fn caller_supplied_evidence_id_selects_the_digest_and_reissue_has_no_effects() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
@@ -360,8 +360,10 @@ fn evidence_identity_delete_and_reissue_are_no_effects() {
         &handle.digest,
         ArtifactDeletionKind::Delete,
     );
-    request.identity = ArtifactDeletionIdentity::EvidenceId(handle.evidence_id.clone());
+    request.identity = ArtifactDeletionIdentity::EvidenceId("evidence-identity".to_string());
     let first = store.delete_artifact(request).unwrap();
+    assert_eq!(first.digest, handle.digest);
+    assert!(!first.affected_object_ids.is_empty());
     let counts = |root: &std::path::Path| -> (i64, i64, i64) {
         inspect(root)
             .query_row(
@@ -857,46 +859,6 @@ fn abandoning_a_consumer_clears_every_barrier_it_blocks() {
 }
 
 #[test]
-fn deregistering_a_caught_up_consumer_clears_its_barriers() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let handle = ingest(&store, "deregister", b"deregister");
-    store
-        .commit(intent("register-deregister"), |envelope| {
-            envelope.register_outbox_consumer("search", 1)?;
-            Ok("registered".to_string())
-        })
-        .unwrap();
-    let deletion = store
-        .delete_artifact(delete_request(
-            "deregister",
-            &handle.digest,
-            ArtifactDeletionKind::Delete,
-        ))
-        .unwrap();
-    assert!(
-        !store
-            .deletion_barrier(&deletion.barrier_id)
-            .unwrap()
-            .cleared
-    );
-    store
-        .acknowledge_outbox("search", deletion.commit_seq, 5)
-        .unwrap();
-    store
-        .commit(intent("deregister-search"), |envelope| {
-            envelope.deregister_outbox_consumer("search", 6)?;
-            Ok("deregistered".to_string())
-        })
-        .unwrap();
-
-    let status = store.deletion_barrier(&deletion.barrier_id).unwrap();
-    assert!(status.cleared);
-    assert!(status.completed_at.is_some());
-}
-
-#[test]
 fn abandonment_does_not_satisfy_a_later_deletion_of_the_same_digest() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
@@ -963,7 +925,7 @@ fn abandonment_does_not_satisfy_a_later_deletion_of_the_same_digest() {
 }
 
 #[test]
-fn purge_audit_fields_are_redacted_in_every_durable_sink() {
+fn purge_audit_fields_are_redacted_in_every_durable_sink_and_recorded_in_the_ledger() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
@@ -1010,79 +972,19 @@ fn purge_audit_fields_are_redacted_in_every_durable_sink() {
             "change_event payload retained the raw credential"
         );
     }
-}
 
-#[test]
-fn a_rejected_commit_intent_leaves_no_durable_purge_record() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    // An accepted purge first proves the log records digests at all, so the
-    // absence asserted below is a refusal rather than an unread log.
-    let accepted = ingest(&store, "good-intent", b"good-intent");
-    store
-        .delete_artifact(delete_request(
-            "good-intent",
-            &accepted.digest,
-            ArtifactDeletionKind::Purge,
-        ))
+    let recorded: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM durable_text_redactions WHERE field_name IN
+             ('operator_id','target_locator','reason')",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    let handle = ingest(&store, "bad-intent", b"bad-intent");
-    let mut request = delete_request("bad-intent", &handle.digest, ArtifactDeletionKind::Purge);
-    request.intent.request_digest = "not-a-digest".to_string();
-
-    assert_eq!(
-        store.delete_artifact(request).unwrap_err().kind(),
-        ArtifactErrorKind::InvalidInput
-    );
-
-    let log = root.path().join("purge-intent.jsonl");
-    let contents = fs::read_to_string(&log).expect("purge intent log is readable");
     assert!(
-        contents.contains(&accepted.digest),
-        "an accepted purge is recorded as a durable intent"
+        recorded > 0,
+        "redacted purge audit text left no ledger rows"
     );
-    assert!(
-        !contents.contains(&handle.digest),
-        "a rejected purge left a durable intent record"
-    );
-    assert_eq!(
-        inspect(root.path())
-            .query_row(
-                "SELECT COUNT(*) FROM artifact_purge_tombstones WHERE artifact_digest=?1",
-                [&handle.digest],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert!(object_path(root.path(), &handle.digest).exists());
-}
-
-#[test]
-fn deletion_accepts_the_evidence_id_the_caller_supplied_at_ingestion() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let external_id = "evidence-caller-supplied".to_string();
-    let mut request = ingest_request("caller-identity", b"caller-identity");
-    request.evidence_id = external_id.clone();
-    let handle = store.ingest_artifact(request).unwrap();
-
-    let deletion = store
-        .delete_artifact(ArtifactDeletionRequest {
-            intent: intent("delete-caller-identity"),
-            identity: ArtifactDeletionIdentity::EvidenceId(external_id),
-            kind: ArtifactDeletionKind::Delete,
-            operator_id: None,
-            target_locator: None,
-            reason: None,
-            deleted_at: 42,
-        })
-        .unwrap();
-
-    assert_eq!(deletion.digest, handle.digest);
-    assert!(!deletion.affected_object_ids.is_empty());
 }
 
 #[test]
@@ -1127,7 +1029,7 @@ fn a_replayed_deletion_reports_the_generation_it_committed() {
 }
 
 #[test]
-fn a_barrier_records_acknowledgement_before_its_consumer_is_removed() {
+fn deregistering_a_caught_up_consumer_clears_its_barrier_and_keeps_its_acknowledgement() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
@@ -1145,6 +1047,12 @@ fn a_barrier_records_acknowledgement_before_its_consumer_is_removed() {
             ArtifactDeletionKind::Delete,
         ))
         .unwrap();
+    assert!(
+        !store
+            .deletion_barrier(&deletion.barrier_id)
+            .unwrap()
+            .cleared
+    );
     store
         .acknowledge_outbox("search", deletion.commit_seq, 5)
         .unwrap();
@@ -1157,6 +1065,7 @@ fn a_barrier_records_acknowledgement_before_its_consumer_is_removed() {
 
     let status = store.deletion_barrier(&deletion.barrier_id).unwrap();
     assert!(status.cleared);
+    assert!(status.completed_at.is_some());
     assert_eq!(status.consumers.len(), 1);
     assert!(
         status.consumers[0].satisfied,
@@ -1361,34 +1270,6 @@ fn a_foreign_receipt_replay_never_unlinks_the_artifact() {
 }
 
 #[test]
-fn purge_redactions_are_recorded_in_the_durable_ledger() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let handle = ingest(&store, "ledger", b"ledger");
-    let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678";
-    let mut request = delete_request("ledger", &handle.digest, ArtifactDeletionKind::Purge);
-    request.operator_id = Some(format!("operator {secret}"));
-    request.target_locator = Some(format!("incident://{secret}"));
-    request.reason = Some(format!("leaked {secret}"));
-
-    store.delete_artifact(request).unwrap();
-
-    let recorded: i64 = inspect(root.path())
-        .query_row(
-            "SELECT COUNT(*) FROM durable_text_redactions WHERE field_name IN
-             ('operator_id','target_locator','reason')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        recorded > 0,
-        "redacted purge audit text left no ledger rows"
-    );
-}
-
-#[test]
 fn a_delete_receipt_cannot_authorize_a_purge_unlink() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
@@ -1438,30 +1319,6 @@ fn a_delete_receipt_cannot_authorize_a_purge_unlink() {
                 |row| row.get::<_, bool>(0),
             )
             .unwrap()
-    );
-}
-
-#[test]
-fn an_oversized_evidence_identity_is_rejected_before_lookup() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    ingest(&store, "bounded-id", b"bounded-id");
-
-    assert_eq!(
-        store
-            .delete_artifact(ArtifactDeletionRequest {
-                intent: intent("delete-oversized"),
-                identity: ArtifactDeletionIdentity::EvidenceId("e".repeat(4096)),
-                kind: ArtifactDeletionKind::Delete,
-                operator_id: None,
-                target_locator: None,
-                reason: None,
-                deleted_at: 42,
-            })
-            .unwrap_err()
-            .kind(),
-        ArtifactErrorKind::InvalidInput
     );
 }
 
@@ -1570,13 +1427,27 @@ fn purging_after_a_completed_delete_barrier_mints_a_new_barrier() {
 }
 
 #[test]
-fn a_purge_identity_is_validated_before_its_intent_is_durable() {
+fn every_invalid_purge_request_is_refused_before_its_intent_is_durable() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
+    // An accepted purge first proves the log records digests at all, so the
+    // unchanged log asserted below is a refusal rather than an unread log.
+    let accepted = ingest(&store, "good-intent", b"good-intent");
+    store
+        .delete_artifact(delete_request(
+            "good-intent",
+            &accepted.digest,
+            ArtifactDeletionKind::Purge,
+        ))
+        .unwrap();
     let handle = ingest(&store, "identity-gate", b"identity-gate");
     let log = root.path().join("purge-intent.jsonl");
     let before = fs::read_to_string(&log).expect("purge intent log is readable");
+    assert!(
+        before.contains(&accepted.digest),
+        "an accepted purge is recorded as a durable intent"
+    );
 
     for mutate in [
         (|request: &mut ArtifactDeletionRequest| request.intent.producer = String::new())
@@ -1589,6 +1460,12 @@ fn a_purge_identity_is_validated_before_its_intent_is_durable() {
         |request: &mut ArtifactDeletionRequest| {
             request.intent.operation_key =
                 "key sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678".to_string();
+        },
+        |request: &mut ArtifactDeletionRequest| {
+            request.intent.request_digest = "not-a-digest".to_string();
+        },
+        |request: &mut ArtifactDeletionRequest| {
+            request.identity = ArtifactDeletionIdentity::EvidenceId("e".repeat(4096));
         },
     ] {
         let mut request =
@@ -1606,6 +1483,16 @@ fn a_purge_identity_is_validated_before_its_intent_is_durable() {
     }
 
     assert!(object_path(root.path(), &handle.digest).exists());
+    assert_eq!(
+        inspect(root.path())
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_purge_tombstones WHERE artifact_digest=?1",
+                [&handle.digest],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

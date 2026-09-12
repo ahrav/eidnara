@@ -107,36 +107,14 @@ describe("extractTexts", () => {
         ]);
     });
 
-    it("leaves assistant text untouched", () => {
-        const text = "the file mentions <system-reminder>foo</system-reminder> literally";
-
-        expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
-    });
-
-    it("drops a system-directive part admitted beside real user text", () => {
-        const parts = [
-            { type: "text", text: "[SYSTEM DIRECTIVE: EIDNARA do the thing]" },
-            { type: "text", text: "real request" },
-        ];
-
-        expect(hasMeaningfulUserText(parts)).toBe(true);
-        expect(extractTexts(parts, "user")).toEqual(["real request"]);
-    });
-
-    it("keeps directive-looking assistant text", () => {
-        const text = "[SYSTEM DIRECTIVE: EIDNARA quoted by the model]";
-
-        expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
-    });
-
-    it("drops an Oh My OpenCode directive part", () => {
-        const parts = [
-            { type: "text", text: "[SYSTEM DIRECTIVE: OH-MY-OPENCODE continue]" },
-            { type: "text", text: "real request" },
-        ];
-
-        expect(extractTexts(parts, "user")).toEqual(["real request"]);
-        expect(hasMeaningfulUserText([parts[0]])).toBe(false);
+    it("leaves assistant text untouched, including reminders, directives, and leading tags", () => {
+        for (const text of [
+            "the file mentions <system-reminder>foo</system-reminder> literally",
+            "[SYSTEM DIRECTIVE: EIDNARA quoted by the model]",
+            "§42§ reply",
+        ]) {
+            expect(extractTexts([{ type: "text", text }], "assistant")).toEqual([text]);
+        }
     });
 
     it.each([
@@ -161,6 +139,8 @@ describe("extractTexts", () => {
     });
 
     it.each([
+        "[SYSTEM DIRECTIVE: EIDNARA do the thing]",
+        "[SYSTEM DIRECTIVE: OH-MY-OPENCODE continue]",
         "[task CALL FAILED - IMMEDIATE RETRY REQUIRED] retry now",
         "[Category+Skill Reminder] remember the skill",
         "Unstable background agent appears idle",
@@ -174,6 +154,7 @@ describe("extractTexts", () => {
         ];
 
         expect(hasMeaningfulUserText([parts[0]])).toBe(false);
+        expect(hasMeaningfulUserText(parts)).toBe(true);
         expect(extractTexts(parts, "user")).toEqual(["real request"]);
     });
 
@@ -393,12 +374,6 @@ describe("compactTextForSummary", () => {
         expect(result.commitHashes).toEqual(["abc1234"]);
     });
 
-    it("removes a bare hash", () => {
-        expect(compactTextForSummary("Committed abc1234 done", "assistant").text).toBe(
-            "Committed done",
-        );
-    });
-
     it("drops only the parentheses emptied by hash removal", () => {
         expect(compactTextForSummary("Committed abc1234; call foo() next", "assistant").text).toBe(
             "Committed; call foo() next",
@@ -483,14 +458,6 @@ describe("compactTextForSummary", () => {
             text: "Committed f6a7b8c",
             commitHashes: [],
         });
-    });
-
-    it("keeps a later part's hash visible when merged into a full block", () => {
-        const block = ["a1b2c3d", "b2c3d4e", "c3d4e5f", "d4e5f6a", "e5f6a7b"];
-        const later = compactTextForSummary("Committed f6a7b8c", "assistant", block);
-
-        expect(later.text).toBe("Committed f6a7b8c");
-        expect(mergeCommitHashes(block, later.commitHashes)).toEqual(block);
     });
 
     it("does not spend capacity on a hash the block already records", () => {

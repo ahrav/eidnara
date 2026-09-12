@@ -35,10 +35,11 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 pub const CONSUMER: &str = "search";
-pub const KERNEL_INCARNATION: &str = "kernel-1";
 pub const POLICY: &str = "source-policy.v1";
 pub const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+pub const PROJECT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 pub const SCOPE: &str = "project:a";
+pub const SCOPE_B: &str = "project:b";
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 pub const MODEL: &str = "tiny-test-model";
 pub const FINGERPRINT: &str = "a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234a2b4c6d8e0f01234";
@@ -63,6 +64,7 @@ pub struct TestEngine {
     count_calls: AtomicUsize,
     completed: AtomicUsize,
     fail_next: Mutex<Option<InferenceError>>,
+    count_failure: Mutex<Option<InferenceError>>,
     malformed: AtomicBool,
     gate: Mutex<Option<Gate>>,
 }
@@ -74,6 +76,7 @@ impl TestEngine {
             count_calls: AtomicUsize::new(0),
             completed: AtomicUsize::new(0),
             fail_next: Mutex::new(None),
+            count_failure: Mutex::new(None),
             malformed: AtomicBool::new(false),
             gate: Mutex::new(None),
         })
@@ -96,6 +99,11 @@ impl TestEngine {
         *self.fail_next.lock().unwrap() = Some(error);
     }
 
+    /// The next token count fails with `error` instead of counting.
+    pub fn fail_next_count(&self, error: InferenceError) {
+        *self.count_failure.lock().unwrap() = Some(error);
+    }
+
     /// Every later inference returns a vector of the right width whose values the publisher rejects.
     pub fn return_malformed(&self) {
         self.malformed.store(true, Ordering::SeqCst);
@@ -108,7 +116,7 @@ impl TestEngine {
     }
 
     pub fn release(gate: &Gate) {
-        *gate.0.lock().unwrap() = true;
+        *gate.0.lock().unwrap_or_else(|error| error.into_inner()) = true;
         gate.1.notify_all();
     }
 
@@ -130,6 +138,9 @@ impl TestEngine {
 impl EmbeddingEngine for TestEngine {
     fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
         self.count_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.count_failure.lock().unwrap().take() {
+            return Err(error);
+        }
         Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
     }
 
@@ -188,10 +199,10 @@ pub fn generation() -> VectorGeneration {
     }
 }
 
-pub fn identity() -> ProjectionIdentity {
+pub fn identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
     ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+        kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
         identity_contract_version: "search-projection-identity-v2".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -293,6 +304,21 @@ impl Corpus {
                         ..ScopeTermSpec::default()
                     }],
                 })?;
+                envelope.insert_scope(ScopeSpec {
+                    scope_id: SCOPE_B.to_string(),
+                    object_id: SCOPE_B.to_string(),
+                    source_id: SCOPE_B.to_string(),
+                    domain_id: "domain".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                    terms: vec![ScopeTermSpec {
+                        dimension: Dimension::Project.as_str().to_string(),
+                        operator: "exact".to_string(),
+                        exact_value: Some(PROJECT_B.to_string()),
+                        ..ScopeTermSpec::default()
+                    }],
+                })?;
                 envelope.register_outbox_consumer(CONSUMER, 1)?;
                 Ok(String::new())
             })
@@ -304,10 +330,35 @@ impl Corpus {
     }
 
     pub fn publish(&self, key: &str, text: &str) -> String {
-        self.publish_class(key, text, "messages")
+        self.publish_scoped(key, text, SCOPE)
+    }
+
+    pub fn publish_scoped(&self, key: &str, text: &str, scope: &str) -> String {
+        self.publish_class_scoped_with(key, text, "messages", scope, Sensitivity::Normal, true)
     }
 
     pub fn publish_class(&self, key: &str, text: &str, class: &str) -> String {
+        self.publish_class_scoped_with(key, text, class, SCOPE, Sensitivity::Normal, true)
+    }
+
+    /// Publishes a descriptor that records no admission, so the kernel judges it hidden.
+    pub fn publish_hidden(&self, key: &str, text: &str) -> String {
+        self.publish_class_scoped_with(key, text, "messages", SCOPE, Sensitivity::Normal, false)
+    }
+
+    pub fn publish_sensitive(&self, key: &str, text: &str) -> String {
+        self.publish_class_scoped_with(key, text, "messages", SCOPE, Sensitivity::Sensitive, true)
+    }
+
+    fn publish_class_scoped_with(
+        &self,
+        key: &str,
+        text: &str,
+        class: &str,
+        scope: &str,
+        sensitivity: Sensitivity,
+        admitted: bool,
+    ) -> String {
         let handle = self
             .kernel
             .ingest_exact_artifact(ArtifactIngestRequest {
@@ -323,7 +374,7 @@ impl Corpus {
                 media_type: "text/plain".to_string(),
                 retention_class: "canonical".to_string(),
                 retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
+                asserted_sensitivity: sensitivity,
                 provider_egress: ProviderEgress::RemoteAllowed,
                 provenance: Some(RepositoryProvenance {
                     repository_id: "repo".to_string(),
@@ -369,27 +420,29 @@ impl Corpus {
                             span: None,
                         },
                         domain_id: "domain",
-                        scope_id: Some(SCOPE),
+                        scope_id: Some(scope),
                         evidence_id: &handle.evidence_id,
                         artifact_digest: &handle.digest,
                         buffer: text,
-                        sensitivity: Sensitivity::Normal,
+                        sensitivity,
                         observed_at: 1,
                     })
                     .unwrap();
-                envelope.record_admission(AdmissionRequest {
-                    candidate_id: None,
-                    subject_object_id: Some(outcome.object_id.clone()),
-                    source_class: Some(SourceClass::ExplicitUser),
-                    taint_class: Some(TaintClass::UserExplicit),
-                    event: AdmissionEvent {
-                        kind: EventKind::Other,
-                        trigger_object_id: None,
-                        approval_object_id: None,
-                        evidence_id: None,
-                        reason: "test".to_string(),
-                    },
-                })?;
+                if admitted {
+                    envelope.record_admission(AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some(outcome.object_id.clone()),
+                        source_class: Some(SourceClass::ExplicitUser),
+                        taint_class: Some(TaintClass::UserExplicit),
+                        event: AdmissionEvent {
+                            kind: EventKind::Other,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "test".to_string(),
+                        },
+                    })?;
+                }
                 object = outcome.object_id;
                 Ok(String::new())
             })
@@ -464,9 +517,21 @@ impl Corpus {
     pub fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
         let projection = SearchProjection::open(data_home).unwrap();
+        // The projection identity names the kernel database it mirrors, so the incarnation comes from the kernel file rather than a constant.
+        let kernel_incarnation_id: String = Connection::open_with_flags(
+            data_home.join("kernel/kernel.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(), 1)?;
+                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
                 register_generation(conn, &generation(), 1)?;
                 Ok(())
             })
@@ -477,7 +542,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id,
                 hold_id: "0123456789abcdef0123456789abcdef".to_string(),
                 snapshot_commit_seq: snapshot,
                 through_commit_seq: snapshot,

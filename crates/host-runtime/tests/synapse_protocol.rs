@@ -386,7 +386,7 @@ async fn route_loss_drops_queued_query_without_engine_work_and_releases_slot() {
 const WAITER_BOUNDARY: usize = 31;
 
 #[test]
-fn waiter_boundary_is_the_last_feasible_startup_configuration() {
+fn unservable_startup_limits_are_refused_before_publication() {
     let engine = DeterministicEngine::new();
     host_runtime::synapse::SynapseComponent::ready_with_engine(
         test_lane(),
@@ -394,18 +394,45 @@ fn waiter_boundary_is_the_last_feasible_startup_configuration() {
         waiter_limits(WAITER_BOUNDARY),
     )
     .expect("the boundary configuration is feasible");
-    let error = match host_runtime::synapse::SynapseComponent::ready_with_engine(
-        test_lane(),
-        engine,
-        waiter_limits(WAITER_BOUNDARY + 1),
-    ) {
-        Ok(_) => panic!("one waiter past the boundary must fail validation"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("query admission capacity requires")
+
+    let cases = [
+        (
+            waiter_limits(WAITER_BOUNDARY + 1),
+            "query admission capacity requires",
+        ),
+        (
+            SynapseLimits {
+                max_retained_result_bytes: 8 * 4 + 1 + 64,
+                ..SynapseLimits::default()
+            },
+            "maximum batch result",
+        ),
+        (
+            SynapseLimits {
+                max_batch_items: 10_000_000,
+                max_text_bytes: 30 * 1024 * 1024,
+                max_batch_text_bytes: 30 * 1024 * 1024,
+                max_retained_result_bytes: u64::MAX,
+                ..SynapseLimits::default()
+            },
+            "parse reservation",
+        ),
+    ];
+    for (limits, fragment) in cases {
+        let error = match host_runtime::synapse::SynapseComponent::ready_with_engine(
+            test_lane(),
+            engine.clone(),
+            limits,
+        ) {
+            Ok(_) => panic!("limits violating {fragment:?} must fail startup"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(fragment), "{error}");
+    }
+    assert_eq!(
+        engine.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a startup-rejected lane must not reach inference"
     );
 }
 
@@ -842,31 +869,7 @@ async fn full_job_admission_rejects_with_the_batch_retry_delay() {
 }
 
 #[tokio::test]
-async fn batch_result_over_retention_cap_is_rejected_before_inference() {
-    let engine = DeterministicEngine::new();
-    // Each encoded record contains eight `f32` components, one ID byte, and one 64-byte content hash.
-    let limits = SynapseLimits {
-        max_retained_result_bytes: 8 * 4 + 1 + 64,
-        ..SynapseLimits::default()
-    };
-    let error = match host_runtime::synapse::SynapseComponent::ready_with_engine(
-        test_lane(),
-        engine.clone(),
-        limits,
-    ) {
-        Ok(_) => panic!("an unservable retained-result cap must fail startup"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("maximum batch result"));
-    assert_eq!(
-        engine.calls.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "oversized result must be rejected before inference"
-    );
-}
-
-#[tokio::test]
-async fn embed_batch_validation_creates_no_job_and_no_inference() {
+async fn embed_batch_validation_rejects_over_limit_pages_and_admits_exact_boundaries() {
     let engine = DeterministicEngine::new();
     let limits = SynapseLimits {
         max_batch_items: 4,
@@ -947,23 +950,8 @@ async fn embed_batch_validation_creates_no_job_and_no_inference() {
         0,
         "rejected batches must not run inference"
     );
-    host.shutdown().await.expect("graceful shutdown");
-}
 
-#[tokio::test]
-async fn exact_boundary_batches_are_accepted() {
-    let engine = DeterministicEngine::new();
-    let limits = SynapseLimits {
-        max_batch_items: 4,
-        max_batch_text_bytes: 64,
-        max_text_bytes: 32,
-        ..Default::default()
-    };
-    let host = SynapseHost::start(ready_component(engine, limits)).await;
-    let mut client = host.client().await;
-    let (channel, epoch) = open_synapse_route(&mut client).await;
-    let lane = test_lane();
-
+    // A page at exactly the item count and byte bounds admits.
     let sixteen = "z".repeat(16);
     let page = items(&[
         ("a", sixteen.as_str()),
@@ -1281,26 +1269,7 @@ fn a_model_name_needing_escapes_fits_its_output_reservation() {
 }
 
 #[tokio::test]
-async fn unknown_and_foreign_jobs_are_module_restarted() {
-    let engine = DeterministicEngine::new();
-    let host = SynapseHost::start(ready_component(engine, SynapseLimits::default())).await;
-    let mut client = host.client().await;
-    let (channel, epoch) = open_synapse_route(&mut client).await;
-    let lane = test_lane();
-
-    for job_id in ["deadbeefdeadbeef-1", "0011223344556677-42", "no-dash-here"] {
-        let mut params = constraints(&lane);
-        params["job_id"] = job_id.into();
-        params["request_key"] = sha256_hex("any").into();
-        params["cursor"] = serde_json::Value::Null;
-        let frame = call(&mut client, channel, epoch, "embed.result", params).await;
-        assert_eq!(frame.error_code(), "module_restarted", "job {job_id}");
-    }
-    host.shutdown().await.expect("graceful shutdown");
-}
-
-#[tokio::test]
-async fn wrong_request_key_for_a_live_job_is_a_schema_violation() {
+async fn embed_result_distinguishes_unknown_jobs_from_wrong_keys() {
     let engine = DeterministicEngine::new();
     let host = SynapseHost::start(ready_component(engine, SynapseLimits::default())).await;
     let mut client = host.client().await;
@@ -1316,16 +1285,41 @@ async fn wrong_request_key_for_a_live_job_is_a_schema_violation() {
         batch_params(&lane, &page),
     )
     .await;
-    let job_id = frame.json()["result"]["job_id"]
+    let live_job = frame.json()["result"]["job_id"]
         .as_str()
         .expect("job")
         .to_owned();
 
-    let mut params = constraints(&lane);
-    params["job_id"] = job_id.into();
-    params["request_key"] = sha256_hex("a different key").into();
-    params["cursor"] = serde_json::Value::Null;
-    let frame = call(&mut client, channel, epoch, "embed.result", params).await;
+    let poll = |job_id: &str, key: &str| {
+        let mut params = constraints(&lane);
+        params["job_id"] = job_id.into();
+        params["request_key"] = sha256_hex(key).into();
+        params["cursor"] = serde_json::Value::Null;
+        params
+    };
+
+    // Unknown, foreign-incarnation, and malformed job IDs never resolve to this module's jobs.
+    for job_id in ["deadbeefdeadbeef-1", "0011223344556677-42", "no-dash-here"] {
+        let frame = call(
+            &mut client,
+            channel,
+            epoch,
+            "embed.result",
+            poll(job_id, "any"),
+        )
+        .await;
+        assert_eq!(frame.error_code(), "module_restarted", "job {job_id}");
+    }
+
+    // A live job polled with a key other than its own is a malformed request, not a restart.
+    let frame = call(
+        &mut client,
+        channel,
+        epoch,
+        "embed.result",
+        poll(&live_job, "a different key"),
+    )
+    .await;
     assert_eq!(frame.error_code(), "schema_violation");
 
     host.shutdown().await.expect("graceful shutdown");
@@ -1404,32 +1398,4 @@ async fn a_routed_depth_nine_request_is_a_schema_violation() {
         "the depth-nine request must never reach inference"
     );
     host.shutdown().await.expect("graceful shutdown");
-}
-
-/// Configurations whose parse reservation exceeds the scratch ceiling are rejected before publication.
-#[tokio::test]
-async fn a_body_above_resident_capacity_is_a_permanent_size_violation() {
-    let engine = DeterministicEngine::new();
-    let limits = SynapseLimits {
-        // Inflating the per-item term can exceed the fixed scratch pool.
-        max_batch_items: 10_000_000,
-        max_text_bytes: 30 * 1024 * 1024,
-        max_batch_text_bytes: 30 * 1024 * 1024,
-        max_retained_result_bytes: u64::MAX,
-        ..SynapseLimits::default()
-    };
-    let error = match host_runtime::synapse::SynapseComponent::ready_with_engine(
-        test_lane(),
-        engine.clone(),
-        limits,
-    ) {
-        Ok(_) => panic!("an unservable parse reservation must fail startup"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("parse reservation"));
-    assert_eq!(
-        engine.calls.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "a startup-rejected lane must not reach inference"
-    );
 }

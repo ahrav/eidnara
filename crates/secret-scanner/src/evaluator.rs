@@ -2145,43 +2145,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prepared_case_insensitive_any_replays_scalar_work() {
-        let needles = vec![
-            "placeholder".to_owned(),
-            "example".to_owned(),
-            "changeme".to_owned(),
-        ];
-        assert_prepared_replays_scalar_work(
-            &needles,
-            &[
-                b"ordinary text".as_slice(),
-                b"EXAMPLE value".as_slice(),
-                b"prefix ChangeMe".as_slice(),
-            ],
-        );
-    }
-
     // Case-insensitive duplicate needles at one offset make scalar work stop at the lowest matching pattern index, not the number of reported matches.
     #[test]
-    fn prepared_case_insensitive_any_replays_scalar_work_for_case_duplicate_needles() {
-        let needles = vec![
-            "placeholder".to_owned(),
-            "PLACEHOLDER".to_owned(),
-            "example".to_owned(),
-            "EXAMPLE".to_owned(),
+    fn prepared_case_insensitive_any_replays_scalar_work() {
+        let distinct = ["placeholder", "example", "changeme"];
+        let distinct_haystacks = [
+            b"ordinary text".as_slice(),
+            b"EXAMPLE value".as_slice(),
+            b"prefix ChangeMe".as_slice(),
         ];
-        assert_prepared_replays_scalar_work(
-            &needles,
-            &[
-                b"ordinary text".as_slice(),
-                b"placeholder value".as_slice(),
-                b"PLACEHOLDER value".as_slice(),
-                b"PlaceHolder value".as_slice(),
-                b"an example and a PLACEHOLDER".as_slice(),
-                b"an EXAMPLE only".as_slice(),
-            ],
-        );
+        let case_duplicates = ["placeholder", "PLACEHOLDER", "example", "EXAMPLE"];
+        let case_duplicate_haystacks = [
+            b"ordinary text".as_slice(),
+            b"placeholder value".as_slice(),
+            b"PLACEHOLDER value".as_slice(),
+            b"PlaceHolder value".as_slice(),
+            b"an example and a PLACEHOLDER".as_slice(),
+            b"an EXAMPLE only".as_slice(),
+        ];
+        for (needles, haystacks) in [
+            (distinct.as_slice(), distinct_haystacks.as_slice()),
+            (
+                case_duplicates.as_slice(),
+                case_duplicate_haystacks.as_slice(),
+            ),
+        ] {
+            let needles: Vec<String> = needles.iter().map(|needle| (*needle).to_owned()).collect();
+            assert_prepared_replays_scalar_work(&needles, haystacks);
+        }
     }
 
     fn assert_prepared_replays_scalar_work(needles: &[String], haystacks: &[&[u8]]) {
@@ -2221,11 +2212,10 @@ mod tests {
     }
 
     fn only_candidate(rule: &Rule, input: &str) -> Result<Option<Finding>, Abort> {
-        let rules = RuleSet::from_embedded().unwrap();
         let captures = rule.regex.captures(input.as_bytes()).unwrap();
         let mut work = 0usize;
         evaluate_candidate(
-            &rules,
+            &EMBEDDED_RULES_FOR_TESTS,
             rule,
             &captures,
             input,
@@ -2234,46 +2224,38 @@ mod tests {
         )
     }
 
+    /// Each rule declares one group that only one alternation branch binds;
+    /// the branch without it yields no finding and the branch with it does.
     #[test]
-    fn a_declared_value_group_that_does_not_participate_skips_the_candidate() {
-        let rule = alternation_rule(
-            r#"{"name":"t-value","regex":"(?:alpha=(?P<value>[A-Za-z0-9]{20})|beta)","anchors":["alpha"],"radius":16,"value_group":"value"}"#,
-        );
-        assert!(matches!(only_candidate(&rule, "beta"), Ok(None)));
-        assert!(matches!(
-            only_candidate(&rule, "alpha=Ab3fGh1jKlMnOpQrStUv"),
-            Ok(Some(_))
-        ));
-    }
-
-    #[test]
-    fn a_declared_secret_group_that_does_not_participate_skips_the_candidate() {
-        let rule = alternation_rule(
-            r#"{"name":"t-secret","regex":"(?:alpha=([A-Za-z0-9]{20})|beta=[A-Za-z0-9]{20})","anchors":["alpha"],"radius":16,"secret_group":1}"#,
-        );
-        assert!(matches!(
-            only_candidate(&rule, "beta=Ab3fGh1jKlMnOpQrStUv"),
-            Ok(None)
-        ));
-        assert!(matches!(
-            only_candidate(&rule, "alpha=Ab3fGh1jKlMnOpQrStUv"),
-            Ok(Some(_))
-        ));
-    }
-
-    #[test]
-    fn a_declared_key_group_that_does_not_participate_skips_the_candidate() {
-        let rule = alternation_rule(
-            r#"{"name":"t-key","regex":"(?:(?P<key>[a-z_]*token)=[A-Za-z0-9]{20}|beta=[A-Za-z0-9]{20})","anchors":["token"],"radius":16,"key_group":"key"}"#,
-        );
-        assert!(matches!(
-            only_candidate(&rule, "beta=Ab3fGh1jKlMnOpQrStUv"),
-            Ok(None)
-        ));
-        assert!(matches!(
-            only_candidate(&rule, "auth_token=Ab3fGh1jKlMnOpQrStUv"),
-            Ok(Some(_))
-        ));
+    fn a_declared_group_that_does_not_participate_skips_the_candidate() {
+        for (declaration, skipped, reported) in [
+            (
+                r#"{"name":"t-value","regex":"(?:alpha=(?P<value>[A-Za-z0-9]{20})|beta)","anchors":["alpha"],"radius":16,"value_group":"value"}"#,
+                "beta",
+                "alpha=Ab3fGh1jKlMnOpQrStUv",
+            ),
+            (
+                r#"{"name":"t-secret","regex":"(?:alpha=([A-Za-z0-9]{20})|beta=[A-Za-z0-9]{20})","anchors":["alpha"],"radius":16,"secret_group":1}"#,
+                "beta=Ab3fGh1jKlMnOpQrStUv",
+                "alpha=Ab3fGh1jKlMnOpQrStUv",
+            ),
+            (
+                r#"{"name":"t-key","regex":"(?:(?P<key>[a-z_]*token)=[A-Za-z0-9]{20}|beta=[A-Za-z0-9]{20})","anchors":["token"],"radius":16,"key_group":"key"}"#,
+                "beta=Ab3fGh1jKlMnOpQrStUv",
+                "auth_token=Ab3fGh1jKlMnOpQrStUv",
+            ),
+        ] {
+            let rule = alternation_rule(declaration);
+            let name = rule.declaration.name.as_str();
+            assert!(
+                matches!(only_candidate(&rule, skipped), Ok(None)),
+                "{name} reported {skipped:?}"
+            );
+            assert!(
+                matches!(only_candidate(&rule, reported), Ok(Some(_))),
+                "{name} skipped {reported:?}"
+            );
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! rather than messages. Unknown supported entry and block shapes remain opaque.
 
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
 use crate::wire::{
@@ -130,7 +131,7 @@ pub fn decode_pi_with_sidecar(
                 mid,
                 ordinal,
                 role,
-                raw: raw_entry.clone(),
+                raw: Arc::new(raw_entry.clone()),
                 stable_key: Some(stable_key),
                 blocks: block_metas,
             },
@@ -379,7 +380,7 @@ fn decode_opaque_entry(
             mid: mid.clone(),
             ordinal,
             role,
-            raw: raw_entry.clone(),
+            raw: Arc::new(raw_entry.clone()),
             stable_key: Some(stable_key),
             blocks,
         },
@@ -388,7 +389,7 @@ fn decode_opaque_entry(
 }
 
 fn encode_with_meta(msg: &WireMessage, meta: &HarnessMessageMeta) -> Option<Value> {
-    let mut raw = meta.raw.clone();
+    let mut raw = meta.raw.as_ref().clone();
     let matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
     if meta.role == "toolResult" || raw.get("role").and_then(Value::as_str) == Some("toolResult") {
         let (block, matched_meta) = msg
@@ -397,15 +398,15 @@ fn encode_with_meta(msg: &WireMessage, meta: &HarnessMessageMeta) -> Option<Valu
             .zip(&matched_metas.by_block)
             .find(|(block, _)| matches!(block.kind(), BlockKind::ToolResult { .. }))?;
         if matched_meta.is_some_and(|meta| block_is_unchanged(block, meta)) {
-            return Some(meta.raw.clone());
+            return Some(raw);
         }
         if let Some(message) = pi_message_mut(&mut raw) {
             update_tool_result_message(message, msg, matched_meta.is_some());
         } else {
             update_tool_result_message(&mut raw, msg, matched_meta.is_some());
         }
-        return Some(if raw == meta.raw {
-            meta.raw.clone()
+        return Some(if raw == *meta.raw {
+            meta.raw.as_ref().clone()
         } else {
             raw
         });
@@ -423,8 +424,8 @@ fn encode_with_meta(msg: &WireMessage, meta: &HarnessMessageMeta) -> Option<Valu
     } else if msg.content().is_empty() {
         return None;
     }
-    Some(if raw == meta.raw {
-        meta.raw.clone()
+    Some(if raw == *meta.raw {
+        meta.raw.as_ref().clone()
     } else {
         raw
     })

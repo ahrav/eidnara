@@ -1,23 +1,27 @@
-//! Holds the kernel writer while a consumer publishes work derived from one source descriptor, so no canonical mutation can change that input until the consumer's own transaction is over.
+//! Holds one kernel instance's writer while a consumer publishes work derived from one source descriptor.
 //!
-//! Every canonical mutation runs under the writer mutex: source publication and retirement, artifact classification, remediation, and restore.
-//! Taking that mutex therefore excludes all of them for as long as the guard lives, and revalidating the descriptor under it makes the comparison and the exclusion one step.
+//! Every canonical mutation through that instance runs under the writer mutex: source publication and retirement, artifact classification, remediation, and restore.
+//! Taking that mutex excludes those mutations for as long as the guard lives, and revalidating the descriptor under it makes the comparison and the exclusion one step.
 //! The guard opens no kernel transaction, so the consumer may commit to its own store while holding it without two transactions ever overlapping.
+//! A successor kernel instance can advance the durable writer fence while this process still holds its instance-local mutex. The daemon excludes that topology with its process-lifetime instance fence; standalone cross-store consumers must provide equivalent lifetime ownership.
 //! Acquisition is bounded by a deadline, and the guard performs no work of its own: what the consumer does under it is the consumer's bound.
 
 use std::sync::MutexGuard;
 use std::time::Instant;
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::cas::ArtifactDestination;
 use super::eligibility::{
     EligibilityCandidate, EligibilityVerdict, ProjectScope, check_bounds, judge_in_tx,
 };
 use super::envelope::check_fence;
-use super::open::AcquireLimit;
-use super::source_descriptor::{descriptor_object_id, reencoded_identity, stored_detail};
-use super::{CachedSql, KernelError, KernelStore, map_sqlite};
+use super::open::{AcquireLimit, database_incarnation_id_via};
+use super::source_descriptor::{
+    SOURCE_DESCRIPTOR_KIND, SourceDescriptorDetail, descriptor_object_id, reencoded_identity,
+    stored_detail,
+};
+use super::{CachedSql, KernelError, KernelStore, Sensitivity, map_sqlite};
 
 /// The descriptor a consumer believes it is publishing work for, as it read it when the work began.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +55,41 @@ pub enum StaleInput {
     Ineligible(EligibilityVerdict),
 }
 
-/// The kernel writer, held until dropped. No canonical mutation can begin while it lives.
+/// The complete canonical descriptor validated while the writer is held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentInputDescriptor {
+    pub object_id: String,
+    pub source_revision: i64,
+    pub detail: SourceDescriptorDetail,
+    pub domain_id: String,
+    pub sensitivity: Sensitivity,
+    pub created_commit_seq: i64,
+}
+
+/// A stale verdict that retains the writer until the consumer finishes acting on it.
+#[derive(Debug)]
+pub struct StaleCurrentInput<'a> {
+    reason: StaleInput,
+    _writer: MutexGuard<'a, Connection>,
+    tip: i64,
+    database_incarnation_id: String,
+}
+
+impl StaleCurrentInput<'_> {
+    pub fn reason(&self) -> &StaleInput {
+        &self.reason
+    }
+
+    pub fn tip(&self) -> i64 {
+        self.tip
+    }
+
+    pub fn database_incarnation_id(&self) -> &str {
+        &self.database_incarnation_id
+    }
+}
+
+/// One kernel instance's writer, held until dropped. No canonical mutation through that instance can begin while it lives.
 ///
 /// The holder must call nothing on the [`KernelStore`] until the guard drops: the writer mutex is not reentrant, and a bounded kernel call would burn its whole deadline before failing.
 /// The only lock order is kernel writer first, then the consumer's own store; code that holds its own store's writer must never wait for this guard.
@@ -59,12 +97,22 @@ pub enum StaleInput {
 pub struct CurrentInputGuard<'a> {
     _writer: MutexGuard<'a, Connection>,
     tip: i64,
+    database_incarnation_id: String,
+    descriptor: CurrentInputDescriptor,
 }
 
 impl CurrentInputGuard<'_> {
-    /// The commit-log tip the descriptor was judged current at; nothing can move it while the guard lives.
+    /// The commit-log tip the descriptor was judged current at; no writer through this kernel instance can move it while the guard lives.
     pub fn tip(&self) -> i64 {
         self.tip
+    }
+
+    pub fn database_incarnation_id(&self) -> &str {
+        &self.database_incarnation_id
+    }
+
+    pub fn descriptor(&self) -> &CurrentInputDescriptor {
+        &self.descriptor
     }
 
     /// Whether the held writer connection has a transaction open; the guard promises it never does.
@@ -76,8 +124,8 @@ impl CurrentInputGuard<'_> {
 
 impl KernelStore {
     /// Takes the kernel writer within `deadline` and, under it, judges whether `expected` still names the current, eligible descriptor.
-    /// `Ok(Ok(guard))` means every field agreed at the moment the writer was taken and nothing canonical can change until the guard drops.
-    /// `Ok(Err(stale))` names the first disagreement and has already released the writer.
+    /// `Ok(Ok(guard))` means every field agreed at the moment the writer was taken and no canonical mutation through this kernel instance can begin until the guard drops.
+    /// `Ok(Err(stale))` names the first disagreement and retains the writer so the consumer can act on that verdict without a canonical mutation intervening.
     ///
     /// # Errors
     ///
@@ -87,7 +135,7 @@ impl KernelStore {
         expected: &CurrentInputExpectation,
         eligibility: EligibilityBinding<'_>,
         deadline: Instant,
-    ) -> Result<Result<CurrentInputGuard<'_>, StaleInput>, KernelError> {
+    ) -> Result<Result<CurrentInputGuard<'_>, StaleCurrentInput<'_>>, KernelError> {
         let candidate = EligibilityCandidate {
             object_id: expected.object_id.clone(),
             source_revision: expected.source_revision,
@@ -101,10 +149,95 @@ impl KernelStore {
         if !writer.is_autocommit() {
             return Err(KernelError::Io);
         }
-        Ok(judged.map(|tip| CurrentInputGuard {
-            _writer: writer,
-            tip,
-        }))
+        Ok(match judged.outcome {
+            Ok(descriptor) => Ok(CurrentInputGuard {
+                _writer: writer,
+                tip: judged.tip,
+                database_incarnation_id: judged.database_incarnation_id,
+                descriptor,
+            }),
+            Err(reason) => Err(StaleCurrentInput {
+                reason,
+                _writer: writer,
+                tip: judged.tip,
+                database_incarnation_id: judged.database_incarnation_id,
+            }),
+        })
+    }
+}
+
+struct RevalidatedInput {
+    tip: i64,
+    database_incarnation_id: String,
+    outcome: Result<CurrentInputDescriptor, StaleInput>,
+}
+
+struct StoredDescriptorRow {
+    object_kind: String,
+    domain_id: String,
+    source_kind: String,
+    source_id: String,
+    source_revision: i64,
+    registry_created: i64,
+    registry_invalidated: Option<i64>,
+    registry_sensitivity: String,
+    observation_kind: String,
+    payload: Vec<u8>,
+    evidence_id: Option<String>,
+    observation_created: i64,
+    observation_invalidated: Option<i64>,
+    observation_sensitivity: String,
+}
+
+impl StoredDescriptorRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            object_kind: row.get(0)?,
+            domain_id: row.get(1)?,
+            source_kind: row.get(2)?,
+            source_id: row.get(3)?,
+            source_revision: row.get(4)?,
+            registry_created: row.get(5)?,
+            registry_invalidated: row.get(6)?,
+            registry_sensitivity: row.get(7)?,
+            observation_kind: row.get(8)?,
+            payload: row.get(9)?,
+            evidence_id: row.get(10)?,
+            observation_created: row.get(11)?,
+            observation_invalidated: row.get(12)?,
+            observation_sensitivity: row.get(13)?,
+        })
+    }
+
+    fn into_validated_descriptor(
+        self,
+        expected: &CurrentInputExpectation,
+    ) -> Result<CurrentInputDescriptor, KernelError> {
+        let detail = stored_detail(&self.payload)?;
+        let encoded = reencoded_identity(&detail).ok_or(KernelError::CorruptCanonicalRow)?;
+        if self.object_kind != "observation"
+            || self.observation_kind != SOURCE_DESCRIPTOR_KIND
+            || self.source_kind != detail.class
+            || self.source_id != detail.lineage_id
+            || self.source_revision.to_string() != detail.revision
+            || self.registry_created != self.observation_created
+            || self.registry_invalidated != self.observation_invalidated
+            || self.registry_sensitivity != self.observation_sensitivity
+            || descriptor_object_id(&detail.lineage_id, &detail.revision) != expected.object_id
+            || self.evidence_id.as_deref() != Some(detail.evidence_id.as_str())
+            || (detail.span.is_none() && detail.payload_id != detail.artifact_digest)
+            || detail.source_policy.validate_for(encoded.class).is_err()
+        {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        Ok(CurrentInputDescriptor {
+            object_id: expected.object_id.clone(),
+            source_revision: self.source_revision,
+            detail,
+            domain_id: self.domain_id,
+            sensitivity: Sensitivity::from_stored(&self.observation_sensitivity),
+            created_commit_seq: self.observation_created,
+        })
     }
 }
 
@@ -115,7 +248,7 @@ fn revalidate(
     expected: &CurrentInputExpectation,
     candidate: &EligibilityCandidate,
     eligibility: EligibilityBinding<'_>,
-) -> Result<Result<i64, StaleInput>, KernelError> {
+) -> Result<RevalidatedInput, KernelError> {
     let tx = writer
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(map_sqlite)?;
@@ -126,6 +259,7 @@ fn revalidate(
             |row| row.get(0),
         )
         .map_err(map_sqlite)?;
+    let database_incarnation_id = database_incarnation_id_via(&tx)?;
     let verdicts = judge_in_tx(
         &tx,
         tip,
@@ -133,46 +267,99 @@ fn revalidate(
         eligibility.destination,
         std::slice::from_ref(candidate),
     )?;
-    match verdicts.first().ok_or(KernelError::CorruptCanonicalRow)? {
-        EligibilityVerdict::Ok => {}
-        EligibilityVerdict::Retracted => return Ok(Err(StaleInput::Retracted)),
-        EligibilityVerdict::Superseded => return Ok(Err(StaleInput::Superseded)),
-        EligibilityVerdict::Stale => {
-            let current: i64 = tx
-                .query_row_cached(
-                    "SELECT source_revision FROM object_registry WHERE object_id=?1",
-                    [&expected.object_id],
-                    |row| row.get(0),
-                )
-                .map_err(map_sqlite)?;
-            return Ok(Err(StaleInput::RevisionChanged { current }));
-        }
-        verdict => return Ok(Err(StaleInput::Ineligible(*verdict))),
-    }
-    let (payload, evidence_id): (Vec<u8>, Option<String>) = tx
+    let (early_stale, binding_stale, eligibility_stale) =
+        match verdicts.first().ok_or(KernelError::CorruptCanonicalRow)? {
+            EligibilityVerdict::Ok => (None, None, None),
+            EligibilityVerdict::Retracted => (Some(StaleInput::Retracted), None, None),
+            EligibilityVerdict::Superseded => (Some(StaleInput::Superseded), None, None),
+            EligibilityVerdict::Stale => {
+                let current: i64 = tx
+                    .query_row_cached(
+                        "SELECT source_revision FROM object_registry WHERE object_id=?1",
+                        [&expected.object_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(map_sqlite)?;
+                (Some(StaleInput::RevisionChanged { current }), None, None)
+            }
+            EligibilityVerdict::WrongScope => (
+                None,
+                Some(StaleInput::Ineligible(EligibilityVerdict::WrongScope)),
+                None,
+            ),
+            verdict => (None, None, Some(StaleInput::Ineligible(*verdict))),
+        };
+    let stored = tx
         .query_row_cached(
-            "SELECT observation_payload, evidence_id FROM observations WHERE object_id=?1",
+            "SELECT r.object_kind,r.domain_id,r.source_kind,r.source_id,r.source_revision,
+                    r.created_commit_seq,r.invalidated_commit_seq,r.sensitivity_class,
+                    o.observation_kind,o.observation_payload,o.evidence_id,
+                    o.created_commit_seq,o.invalidated_commit_seq,o.sensitivity_class
+             FROM object_registry r JOIN observations o ON o.object_id=r.object_id
+             WHERE r.object_id=?1",
             [&expected.object_id],
+            StoredDescriptorRow::from_row,
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    let Some(stored) = stored else {
+        if let Some(stale) = early_stale {
+            return Ok(RevalidatedInput {
+                tip,
+                database_incarnation_id,
+                outcome: Err(stale),
+            });
+        }
+        return Err(KernelError::CorruptCanonicalRow);
+    };
+    let descriptor = stored.into_validated_descriptor(expected)?;
+    if let Some(stale) = early_stale.or(binding_stale) {
+        return Ok(RevalidatedInput {
+            tip,
+            database_incarnation_id,
+            outcome: Err(stale),
+        });
+    }
+    let evidence: Option<(String, Option<i64>)> = tx
+        .query_row_cached(
+            "SELECT artifact_digest,invalidated_commit_seq
+             FROM evidence_meta WHERE evidence_id=?1",
+            params![descriptor.detail.evidence_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(map_sqlite)?
-        .ok_or(KernelError::CorruptCanonicalRow)?;
-    let detail = stored_detail(&payload)?;
-    // Mismatches indicate canonical-row corruption, not staleness.
-    if descriptor_object_id(&detail.lineage_id, &detail.revision) != expected.object_id
-        || detail.revision != expected.source_revision.to_string()
-        || evidence_id.as_deref() != Some(detail.evidence_id.as_str())
-        || reencoded_identity(&detail).is_none()
-        || (detail.span.is_none() && detail.payload_id != detail.artifact_digest)
-    {
-        return Err(KernelError::CorruptCanonicalRow);
+        .map_err(map_sqlite)?;
+    match evidence {
+        Some((digest, None)) if digest == descriptor.detail.artifact_digest => {}
+        Some((_, Some(_))) => {
+            return Ok(RevalidatedInput {
+                tip,
+                database_incarnation_id,
+                outcome: Err(StaleInput::Retracted),
+            });
+        }
+        Some((_, None)) | None => return Err(KernelError::CorruptCanonicalRow),
     }
-    if detail.occurrence_id != expected.occurrence_id
-        || detail.payload_id != expected.payload_id
-        || detail.artifact_digest != expected.artifact_digest
-    {
-        return Ok(Err(StaleInput::InputChanged));
+    if let Some(reason) = eligibility_stale {
+        return Ok(RevalidatedInput {
+            tip,
+            database_incarnation_id,
+            outcome: Err(reason),
+        });
     }
-    Ok(Ok(tip))
+    if descriptor.detail.occurrence_id != expected.occurrence_id
+        || descriptor.detail.payload_id != expected.payload_id
+        || descriptor.detail.artifact_digest != expected.artifact_digest
+    {
+        return Ok(RevalidatedInput {
+            tip,
+            database_incarnation_id,
+            outcome: Err(StaleInput::InputChanged),
+        });
+    }
+    Ok(RevalidatedInput {
+        tip,
+        database_incarnation_id,
+        outcome: Ok(descriptor),
+    })
 }

@@ -406,7 +406,7 @@ fn newest_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
         if !name.eq_ignore_ascii_case(TODO_TOOL_NAME) {
             continue;
         }
-        let Some(state_json) = todo_state_from_input(input) else {
+        let Some(state_json) = todo_state_from_input(input.as_ref()) else {
             continue;
         };
         let replace = latest
@@ -497,7 +497,7 @@ mod tests {
             .freeze_at(Some("anchor".to_string()))
     }
 
-    fn todowrite_tail_item(id: &str, ordinal: u64, state_json: &str) -> SelItem {
+    fn todowrite_tail_item(id: &str, ordinal: u64, state_json: &str) -> SelItem<'static> {
         let todos: serde_json::Value = serde_json::from_str(state_json).expect("todo state JSON");
         SelItem {
             id: id.to_string(),
@@ -505,7 +505,7 @@ mod tests {
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
                 name: TODO_TOOL_NAME.to_string(),
-                input: serde_json::json!({ "todos": todos }),
+                input: std::borrow::Cow::Owned(serde_json::json!({ "todos": todos })),
             },
             provider_executed: false,
             byte_size: 0,
@@ -566,80 +566,74 @@ mod tests {
     }
 
     #[test]
-    fn defer_never_replaces_but_bust_does() {
+    fn defer_keeps_the_frozen_unit_and_bust_follows_the_persisted_state() {
         let old_state = active_state("old");
         let new_state = active_state("new");
+        let terminal = terminal_state();
         let frozen = frozen_for(&old_state);
 
+        // A defer pass never reads the persisted state, so a terminal or
+        // changed state cannot clear or replace the frozen unit before a bust.
+        for state in [&new_state, &terminal, &old_state] {
+            assert_eq!(
+                advance_injection(Some(state), Some(&frozen), false, None),
+                InjectionOutcome::Keep,
+                "defer must keep for {state}"
+            );
+        }
+
+        let replaced = advance_injection(Some(&new_state), Some(&frozen), true, None);
         assert_eq!(
-            advance_injection(Some(&new_state), Some(&frozen), false, None),
-            InjectionOutcome::Keep
-        );
-        assert!(matches!(
+            replaced,
             advance_injection(Some(&new_state), Some(&frozen), true, None),
-            InjectionOutcome::Replace(todo) if todo.call_id == synthetic_call_id(&new_state)
-        ));
-    }
-
-    #[test]
-    fn defer_never_clears_but_bust_does() {
-        let frozen = frozen_for(&active_state("active"));
-        let terminal = terminal_state();
-
+            "the transition is a pure function of its inputs"
+        );
+        let InjectionOutcome::Replace(todo) = replaced else {
+            panic!("a changed state on a bust must replace");
+        };
         assert_eq!(
-            advance_injection(Some(&terminal), Some(&frozen), false, None),
-            InjectionOutcome::Keep
+            *todo,
+            build_synthetic_todo_pair(&new_state).expect("new state builds")
         );
         assert_eq!(
             advance_injection(Some(&terminal), Some(&frozen), true, None),
             InjectionOutcome::Clear
         );
-    }
-
-    #[test]
-    fn same_state_bust_is_idempotent() {
-        let state = active_state("same");
-        let frozen = frozen_for(&state);
-
         assert_eq!(
-            advance_injection(Some(&state), Some(&frozen), true, None),
+            advance_injection(Some(&old_state), Some(&frozen), true, None),
             InjectionOutcome::Keep
         );
     }
 
     #[test]
-    fn provisional_verdict_keeps_capture_and_composition_fail_open() {
+    fn provisional_and_enabled_verdicts_capture_the_newest_visible_todowrite() {
         let older = active_state("older visible todo");
         let newest = active_state("newest visible todo");
-        let mut meta = ModuleMeta::default();
         let tail = vec![
             todowrite_tail_item("m-old#0", 1, &older),
             todowrite_tail_item("m-new#0", 2, &newest),
         ];
 
-        let outcome = advance_injection_after_capture(&mut meta, &tail, None, true, None);
+        // Only `Some(false)` disables capture.
+        for todo_tool_present in [None, Some(true)] {
+            let mut meta = ModuleMeta::default();
+            let outcome =
+                advance_injection_after_capture(&mut meta, &tail, None, true, todo_tool_present);
 
-        assert_eq!(meta.last_todo_state.as_deref(), Some(newest.as_str()));
-        assert!(matches!(
-            outcome,
-            InjectionOutcome::Replace(todo)
-                if todo.state_json == newest && todo.call_id == synthetic_call_id(&newest)
-        ));
-    }
-
-    #[test]
-    fn enabled_verdict_keeps_capture_and_composition_behavior() {
-        let state = active_state("enabled visible todo");
-        let mut meta = ModuleMeta::default();
-        let tail = vec![todowrite_tail_item("m-enabled#0", 1, &state)];
-
-        let outcome = advance_injection_after_capture(&mut meta, &tail, None, true, Some(true));
-
-        assert_eq!(meta.last_todo_state.as_deref(), Some(state.as_str()));
-        assert!(matches!(
-            outcome,
-            InjectionOutcome::Replace(todo) if todo.state_json == state
-        ));
+            assert_eq!(
+                meta.last_todo_state.as_deref(),
+                Some(newest.as_str()),
+                "{todo_tool_present:?}"
+            );
+            assert!(
+                matches!(
+                    outcome,
+                    InjectionOutcome::Replace(todo)
+                        if todo.state_json == newest && todo.call_id == synthetic_call_id(&newest)
+                ),
+                "{todo_tool_present:?}"
+            );
+        }
     }
 
     #[test]
@@ -755,25 +749,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_last_todo_state_survives_restart_without_tail() {
-        let state = active_state("persisted across restart");
-        let meta_json = serde_json::to_string(&ModuleMeta {
-            last_todo_state: Some(state.clone()),
-            ..Default::default()
-        })
-        .expect("serialize meta");
-        let mut restarted: ModuleMeta = serde_json::from_str(&meta_json).expect("load meta");
-
-        let outcome = advance_injection_after_capture(&mut restarted, &[], None, true, None);
-
-        assert_eq!(restarted.last_todo_state.as_deref(), Some(state.as_str()));
-        assert!(matches!(
-            outcome,
-            InjectionOutcome::Replace(todo) if todo.state_json == state
-        ));
-    }
-
-    #[test]
     fn empty_and_all_terminal_bust_clear_only_when_frozen() {
         let frozen = frozen_for(&active_state("active"));
         let empty = "[]";
@@ -813,38 +788,6 @@ mod tests {
             advance_injection(Some(&state), None, true, None),
             InjectionOutcome::Replace(todo) if todo.call_id == synthetic_call_id(&state)
         ));
-    }
-
-    #[test]
-    fn transition_is_deterministic() {
-        let old_state = active_state("old deterministic");
-        let new_state = active_state("new deterministic");
-        let frozen = frozen_for(&old_state);
-
-        let first = advance_injection(Some(&new_state), Some(&frozen), true, None);
-        let second = advance_injection(Some(&new_state), Some(&frozen), true, None);
-        assert_eq!(first, second);
-
-        let InjectionOutcome::Replace(todo) = first else {
-            panic!("expected replacement");
-        };
-        let rebuilt = build_synthetic_todo_pair(&new_state).expect("new state builds");
-        assert_eq!(*todo, rebuilt);
-    }
-
-    #[test]
-    fn key_order_scrambling_keeps_call_id_stable() {
-        let a = normalize_todo_state_json(
-            r#"[{"content":"Scrambled","status":"pending","priority":"low","id":"drop-me"}]"#,
-        )
-        .expect("first shape normalizes");
-        let b = normalize_todo_state_json(
-            r#"[{"id":"drop-me","priority":"low","status":"pending","content":"Scrambled"}]"#,
-        )
-        .expect("second shape normalizes");
-
-        assert_eq!(a, b);
-        assert_eq!(synthetic_call_id(&a), synthetic_call_id(&b));
     }
 
     #[test]

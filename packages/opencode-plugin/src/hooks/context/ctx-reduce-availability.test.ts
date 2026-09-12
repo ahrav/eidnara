@@ -125,34 +125,21 @@ describe("ctx_reduce availability (OpenCode DB)", () => {
 });
 
 describe("ctx_reduce availability (spawn tools map)", () => {
-    it("resolves false for an explicit allow-list without ctx_reduce", () => {
-        clearCtxReduceAvailability("ses-allow");
-        const verdict = resolveCtxReduceAvailabilityFromMessages("ses-allow", [
-            userMsg({ "*": false, read: true, grep: true }),
-        ]);
-        expect(verdict).toEqual({ callable: false, frozen: true });
-    });
-
-    it("resolves true when ctx_reduce is explicitly allowed", () => {
-        clearCtxReduceAvailability("ses-explicit");
-        const verdict = resolveCtxReduceAvailabilityFromMessages("ses-explicit", [
-            userMsg({ "*": false, read: true, ctx_reduce: true }),
-        ]);
-        expect(verdict).toEqual({ callable: true, frozen: true });
-    });
-
-    it("fails open for sessions without a tools map (normal sessions)", () => {
-        clearCtxReduceAvailability("ses-plain");
-        const verdict = resolveCtxReduceAvailabilityFromMessages("ses-plain", [userMsg()]);
-        expect(verdict).toEqual({ callable: true, frozen: true });
-    });
-
-    it("resolves false when ctx_reduce is explicitly denied", () => {
-        clearCtxReduceAvailability("ses-deny");
-        const verdict = resolveCtxReduceAvailabilityFromMessages("ses-deny", [
-            userMsg({ ctx_reduce: false }),
-        ]);
-        expect(verdict).toEqual({ callable: false, frozen: true });
+    it("freezes the first user message's verdict: explicit signal decides, no signal fails open", () => {
+        for (const [sessionId, messages, callable] of [
+            ["ses-allow", [userMsg({ "*": false, read: true, grep: true })], false],
+            ["ses-explicit", [userMsg({ "*": false, read: true, ctx_reduce: true })], true],
+            ["ses-plain", [userMsg()], true],
+            ["ses-deny", [userMsg({ ctx_reduce: false })], false],
+            // Non-user messages carry no policy; an empty tools map is no signal.
+            ["ses-nosignal", [{ info: { role: "assistant" } }, userMsg({})], true],
+        ] as const) {
+            clearCtxReduceAvailability(sessionId);
+            expect(
+                resolveCtxReduceAvailabilityFromMessages(sessionId, messages),
+                sessionId,
+            ).toEqual({ callable, frozen: true });
+        }
     });
 
     it("freezes the verdict per session — later, different tool maps cannot flap it", () => {
@@ -167,15 +154,6 @@ describe("ctx_reduce availability (spawn tools map)", () => {
             userMsg({ "*": false, ctx_reduce: true }),
         ]);
         expect(second).toEqual({ callable: false, frozen: true });
-    });
-
-    it("ignores non-user messages and falls open when the first user message carries no signal", () => {
-        clearCtxReduceAvailability("ses-nosignal");
-        const verdict = resolveCtxReduceAvailabilityFromMessages("ses-nosignal", [
-            { info: { role: "assistant" } },
-            userMsg({}),
-        ]);
-        expect(verdict).toEqual({ callable: true, frozen: true });
     });
 
     it("does not freeze a fail-open verdict from an array with no user message", () => {
@@ -195,34 +173,19 @@ describe("ctx_reduce availability (spawn tools map)", () => {
 });
 
 describe("todowrite availability (generalized resolver)", () => {
-    it("resolves false for an explicit allow-list without todowrite", () => {
-        clearTodowriteAvailability("ses-td-allow");
-        const verdict = resolveTodowriteAvailabilityFromMessages("ses-td-allow", [
-            userMsg({ "*": false, read: true, grep: true }),
-        ]);
-        expect(verdict).toEqual({ callable: false, frozen: true });
-    });
-
-    it("resolves true when todowrite is explicitly allowed", () => {
-        clearTodowriteAvailability("ses-td-explicit");
-        const verdict = resolveTodowriteAvailabilityFromMessages("ses-td-explicit", [
-            userMsg({ "*": false, read: true, todowrite: true }),
-        ]);
-        expect(verdict).toEqual({ callable: true, frozen: true });
-    });
-
-    it("resolves false when todowrite is explicitly denied", () => {
-        clearTodowriteAvailability("ses-td-deny");
-        const verdict = resolveTodowriteAvailabilityFromMessages("ses-td-deny", [
-            userMsg({ todowrite: false }),
-        ]);
-        expect(verdict).toEqual({ callable: false, frozen: true });
-    });
-
-    it("fails open for sessions without a tools map (normal sessions)", () => {
-        clearTodowriteAvailability("ses-td-plain");
-        const verdict = resolveTodowriteAvailabilityFromMessages("ses-td-plain", [userMsg()]);
-        expect(verdict).toEqual({ callable: true, frozen: true });
+    it("freezes the first user message's todowrite verdict the same way as ctx_reduce", () => {
+        for (const [sessionId, tools, callable] of [
+            ["ses-td-allow", { "*": false, read: true, grep: true }, false],
+            ["ses-td-explicit", { "*": false, read: true, todowrite: true }, true],
+            ["ses-td-deny", { todowrite: false }, false],
+            ["ses-td-plain", undefined, true],
+        ] as const) {
+            clearTodowriteAvailability(sessionId);
+            expect(
+                resolveTodowriteAvailabilityFromMessages(sessionId, [userMsg(tools)]),
+                sessionId,
+            ).toEqual({ callable, frozen: true });
+        }
     });
 
     it("resolves ctx_reduce and todowrite independently for the same session", () => {
@@ -239,24 +202,14 @@ describe("todowrite availability (generalized resolver)", () => {
 });
 
 describe("OpenCode todowrite permission evaluator", () => {
-    it("denies a top-level agent rule for the whole tool", () => {
-        expect(
-            permissionDisabled("todowrite", [
-                { permission: "todowrite", pattern: "*", action: "deny" },
-            ]),
-        ).toBe(true);
-    });
-
-    it("uses findLast semantics so a later per-agent allow overrides deny", () => {
+    it("uses findLast semantics so the last matching rule decides in either direction", () => {
         expect(
             permissionDisabled("todowrite", [
                 { permission: "todowrite", pattern: "*", action: "deny" },
                 { permission: "todowrite", pattern: "*", action: "allow" },
             ]),
         ).toBe(false);
-    });
-
-    it("applies a session overlay after the merged agent rules", () => {
+        // A session overlay appended after the merged agent rules wins the same way.
         expect(
             permissionDisabled("todowrite", [
                 { permission: "todowrite", pattern: "*", action: "allow" },
@@ -697,21 +650,16 @@ describe("permission cache lifetime", () => {
 });
 
 describe("ctx_reduce process-global registration override (compaction-off #266 S4)", () => {
-    // The override applies process-wide.
-    // `afterEach` resets the process-wide override to `true` so later tests cannot inherit `false`.
-    // `afterEach` resets the process-wide override to `true` so later tests cannot inherit `false`.
+    // The override applies process-wide; each test resets it so later tests cannot inherit `false`.
     it("when ctx_reduce is not registered globally, every session resolves callable=false frozen=true", () => {
         setCtxReduceRegisteredGlobally(false);
         try {
-            // The override must force `callable=false` so unregistration reaches guidance, nudges, and `§N§` prefix injection.
             // The override must force `callable=false` so unregistration reaches guidance, nudges, and `§N§` prefix injection.
             clearCtxReduceAvailability("ses-plain-off");
             const verdict = resolveCtxReduceAvailabilityFromMessages("ses-plain-off", [userMsg()]);
             expect(verdict).toEqual({ callable: false, frozen: true });
 
-            // Global registration takes precedence over a per-session `ctx_reduce` allow.
-            // Global registration takes precedence over a per-session `ctx_reduce` allow.
-            // Global unregistration overrides the per-session map.
+            // Global unregistration overrides a per-session `ctx_reduce` allow.
             clearCtxReduceAvailability("ses-allow-off");
             const verdictAllow = resolveCtxReduceAvailabilityFromMessages("ses-allow-off", [
                 userMsg({ "*": false, ctx_reduce: true }),
@@ -728,28 +676,6 @@ describe("ctx_reduce process-global registration override (compaction-off #266 S
             clearTodowriteAvailability("ses-td-off");
             const verdict = resolveTodowriteAvailabilityFromMessages("ses-td-off", [userMsg()]);
             expect(verdict).toEqual({ callable: true, frozen: true });
-        } finally {
-            resetCtxReduceRegisteredGloballyForTest();
-        }
-    });
-
-    it("when ctx_reduce IS registered globally (default), the per-session tools map decides as before", () => {
-        // With `registered=true`, the per-session tools map determines `ctx_reduce` availability.
-        clearCtxReduceAvailability("ses-plain-on");
-        const verdict = resolveCtxReduceAvailabilityFromMessages("ses-plain-on", [userMsg()]);
-        expect(verdict).toEqual({ callable: true, frozen: true });
-    });
-
-    // `callable=false` in compaction-off mode closes the nudge gate; no separate mode gate is needed at the nudge site.
-    it("nudge gate source: compaction-off resolves callable=false (Channel-1/Channel-2 stay silent)", () => {
-        setCtxReduceRegisteredGlobally(false);
-        try {
-            clearCtxReduceAvailability("ses-nudge-off");
-            const verdict = resolveCtxReduceAvailabilityFromMessages("ses-nudge-off", [userMsg()]);
-            // `callable=false` prevents the Channel-1 append and Channel-2 claim.
-            // `callable=false` prevents the Channel-1 append and Channel-2 claim.
-            expect(verdict.callable).toBe(false);
-            expect(verdict.frozen).toBe(true);
         } finally {
             resetCtxReduceRegisteredGloballyForTest();
         }

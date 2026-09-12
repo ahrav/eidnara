@@ -2,6 +2,9 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The implementation evidence below describes the live
+pass-local view.
 
 ## Discovery trigger
 
@@ -108,29 +111,157 @@ replayed pair ([`warm_cache_...`][t-collapsed]); none compares the two lanes.
 - Conclusion: needs human input.
 
 [tc-synthetic]: ../../../daemon/transform/catalog.md#synthetic-strip-precedes-every-coverage-read
-[normalize]: ../../../../../crates/daemon/src/transform.rs#L2083-L2100
-[apply-head]: ../../../../../crates/daemon/src/transform.rs#L2836-L2866
-[shadow-first]: ../../../../../crates/daemon/src/transform.rs#L2855-L2856
-[shadow]: ../../../../../crates/daemon/src/transform.rs#L2951
-[pending-pass]: ../../../../../crates/daemon/src/transform.rs#L6626-L6654
-[t-pending]: ../../../../../crates/daemon/src/transform.rs#L19129
-[t-collapsed]: ../../../../../crates/daemon/src/transform.rs#L27269-L27270
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L622-L685
-[meta-clone]: ../../../../../crates/daemon/src/wire.rs#L514
-[reattach]: ../../../../../crates/daemon/src/wire.rs#L146-L187
-[reattach-meta]: ../../../../../crates/daemon/src/wire.rs#L181
-[arc-parsed]: ../../../../../crates/daemon/src/lib.rs#L8115
-[prepare-call]: ../../../../../crates/daemon/src/lib.rs#L8245-L8247
-[historian-fire]: ../../../../../crates/daemon/src/lib.rs#L4994
-[boundary-call]: ../../../../../crates/daemon/src/lib.rs#L5074
-[assemble]: ../../../../../crates/daemon/src/lib.rs#L5234-L5238
-[store-pc]: ../../../../../crates/daemon/src/lib.rs#L4302-L4345
-[native-attach]: ../../../../../crates/daemon/src/lib.rs#L13082-L13094
-[newest-assistant]: ../../../../../crates/daemon/src/lib.rs#L13138-L13143
-[cached-boundary]: ../../../../../crates/daemon/src/lib.rs#L16566-L16626
-[msg-filter]: ../../../../../crates/daemon/src/lib.rs#L16586-L16588
-[boundary-filter]: ../../../../../crates/daemon/src/lib.rs#L16597
+[normalize]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2083-L2100
+[apply-head]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2836-L2866
+[shadow-first]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2855-L2856
+[shadow]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2951
+[pending-pass]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L6626-L6654
+[t-pending]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L19129
+[t-collapsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L27269-L27270
+[flatten]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L622-L685
+[meta-clone]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L514
+[reattach]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L146-L187
+[reattach-meta]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/wire.rs#L181
+[arc-parsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8115
+[prepare-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8245-L8247
+[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
+[boundary-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5074
+[assemble]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5234-L5238
+[store-pc]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4302-L4345
+[native-attach]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L13082-L13094
+[newest-assistant]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L13138-L13143
+[cached-boundary]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16566-L16626
+[msg-filter]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16586-L16588
+[boundary-filter]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L16597
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../../crates/memory-store/src/lib.rs#L210-L216
+
+## Pass-local view evidence
+
+Implementation base: `bf6b9d5fad969fa29da852a1dd9f1de569732197`.
+Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/419)
+and [parent specification](https://github.com/ahrav/eidnara/issues/350).
+
+[`TransformIngress`][ingress-view] borrows the request. Its
+[`MessageProjection`][message-view] owns a set of borrowed message IDs for
+unflagged synthetic todo carriers. Projection rejects duplicate message IDs;
+the override uses the same identity as the projection map. Both full and
+incremental projection consult the view for block flags, identity membership
+and message metadata. The set is pass-local, not a retained cache. The derived
+projection retains normalized metadata and the handler may cache it. Prefix
+reattachment restores those flags. The independent lineage ordinal rebase
+still clones the request.
+
+Request-dependent transform helpers read the view. Passthrough rendering
+changes the output clone's typed flag without clearing retained ingress JSON.
+The handler still passes the original request to boundary construction,
+historian assembly, projection-cache accounting and native attachment. These
+handler call sites have no production changes.
+
+The [reference comparison][reference-test] uses decoded unflagged messages and
+a clone with only the pair's typed flags set. Fresh, pending-rewrite and
+lineage-passthrough cases compare canonical served bytes, complete projection
+state (including digests), native attachment bytes and tag rows. Passthrough
+also pins both `eidnara_todo:` fingerprint IDs and the unflagged ingress bytes.
+The original request remains unchanged. The historian lane retains two empty
+boundary messages; its chunk input retains ordinals `[90, 91, 92]`, and chunk
+text, snapshot and metadata agree across the two transform inputs.
+
+The [handler comparison][delta-parity-test] compares full and incremental
+projection and expands the native response delta before comparing native
+bytes. The [firing witness][delta-witness-test] establishes the required
+delta-turn situation separately from the equivalence assertions.
+
+### Focused execution, 2026-09-11
+
+Before production edits, `cargo test -p daemon --lib --locked` with each of
+these filters passed: `synthetic_ingress_matches_flagged_reference` (1),
+`handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier`
+(1), `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live`
+(1), `dg_goldens` (2), and
+`continued_lineage_tolerates_a_synthetic_head_like_the_seam_check` (1).
+The firing-input and nonempty-native/tag assertions extend the reference
+comparison after that baseline; they are not claimed as pre-edit checks.
+
+After implementation, the same Cargo command passed filters `synthetic` (20),
+`lineage` (15), `differential` (8), `golden` (32), `projection` (15),
+`pending_rewrite` (4), `strip` (18), `temporal` (9) and `user_hint` (4).
+The strengthened reference comparison, handler delta comparison and
+`native_attachment_reuses_transform_tag_baseline_and_preserves_bytes` each
+passed individually. Counts overlap; they are not a unique-test total.
+
+Test adequacy remains unaudited. No production plugin trace, benchmark,
+before/after measurement or A/A evidence is claimed. Whole-workspace gates
+and independent reviews belong to the controller. The historical design
+questions above are resolved only as preservation requirements: neither
+observer semantics nor fingerprint identifiers change.
+
+[ingress-view]: ../../../../../crates/daemon/src/transform.rs#L2083-L2132
+[message-view]: ../../../../../crates/daemon/src/wire.rs#L378
+[reference-test]: ../../../../../crates/daemon/src/transform.rs#L27077
+[delta-parity-test]: ../../../../../crates/daemon/src/lib.rs#L23384
+[delta-witness-test]: ../../../../../crates/daemon/src/lib.rs#L23117
+[lineage-rebase-test]: ../../../../../crates/daemon/src/transform.rs#L28343
+
+## Retention and observer-scope verification
+
+The normalized metadata is not a new retention behavior. At
+`bf6b9d5fad969fa29da852a1dd9f1de569732197`, the
+[normalizer][baseline-normalizer] clones the request and sets the typed flag;
+the [pass entry][baseline-projection-input] projects that clone; and the
+[projector][baseline-projection-meta] copies `msg.ck.meta` into
+`ProjectionMessageMeta`. Removing normalized flags from cached metadata would
+change that baseline. The optimization removes the input clone and discards
+the override set after the pass, not the derived projection's flags.
+
+The handler's original request means its current, expanded ingress. An
+unflagged replay in a full array or delta suffix is an empty boundary message
+and contributes an input ordinal to historian chunk construction. When the
+same replay enters a cached prefix, reattachment restores its normalized flag
+and both historian filters omit it. The
+[three-turn handler witness][delta-witness-test] checks this distinction;
+it does not require full raw ingress and reattached ingress to be identical.
+It compares actual producer prompts and native bytes against a full request
+whose prefix is reconstructed from the clone-era typed-flag projection.
+
+The [direct reference comparison][reference-test] intentionally gives both
+transform variants the same original handler-observer request. Its tuple now
+also compares all `BoundaryMsg` debug fields. Fresh mode excludes replay
+carriers. Passthrough mode asserts typed flags are true while original input
+flags and retained bytes stay unflagged. A nonempty carrier-targeted tag and
+temporal overlay leaves the replay bytes and fingerprints unchanged; the live
+control takes its tag. The carrier contains text so a guard that reads the
+unflagged ingress metadata would permit a visible temporal edit.
+
+The [lineage comparison][lineage-rebase-test] first establishes a valid
+descent, then replays the edge as a non-subagent with a fresh-ordinal synthetic
+head. The actual pass rebases ordinal 1 to 11, excludes the head from live
+identity, and matches the typed-flag reference's projection, served bytes and
+fingerprints. Rebasing changes ordinals and their metadata, not message or
+tool IDs. Recomputing overrides after rebasing preserves classification while
+borrowing IDs from the rebased request; no owned-string set is needed.
+
+All non-indexed scans reached through `TransformIngress` that explicitly
+exclude synthetic messages use `live_messages()`. The additive-only pass and
+`clear_served_native_reasoning_from_iter` keep their raw predicates, matching
+the baseline. The reverse scan that uses array positions keeps its indexed
+predicate. `provisional_tail_mid` consumes only the message view and
+`mid_turn`, and returns a reference with the message-data lifetime. Raw
+immutable request forwarding through `Deref` remains deliberate for scalar
+consumers. Normalized decisions use the view, as its source contract states.
+
+### Follow-up focused execution
+
+The strengthened direct comparison, three-turn handler witness and lineage
+rebase test each passed before the local scan/helper cleanup. After cleanup,
+`cargo test -p daemon --lib --locked` passed filters `synthetic` (21),
+`lineage` (16), `projection` (15), `pending_rewrite` (4), `strip` (18),
+`temporal` (9), `user_hint` (4), `additive` (2) and `differential` (8).
+`cargo clippy -p daemon --lib --tests --locked -- -D warnings` passed.
+These overlap and remain focused checks, not a whole-workspace verdict.
+
+[baseline-normalizer]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/transform.rs#L2083-L2100
+[baseline-projection-input]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/transform.rs#L2855-L2866
+[baseline-projection-meta]: https://github.com/ahrav/eidnara/blob/bf6b9d5fad969fa29da852a1dd9f1de569732197/crates/daemon/src/wire.rs#L505-L519

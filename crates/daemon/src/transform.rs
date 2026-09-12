@@ -70,7 +70,7 @@ use std::time::Instant;
 
 use crate::wire::{
     FlatBlock, FlatProjection, IngressMessage, WireBlock, WireError, WireMessage, duplicate_ids,
-    project_messages, project_messages_incremental, reduced_block, split_block_id,
+    project_messages, reduced_block, split_block_id,
 };
 
 /// Maximum CAS retries before returning a conflict.
@@ -692,7 +692,7 @@ pub struct TransformRequest {
     #[serde(default)]
     pub serve_native: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_messages: Option<Vec<Value>>,
+    pub native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_array_fingerprint: Option<String>,
     pub messages: Vec<IngressMessage>,
@@ -855,7 +855,7 @@ struct TransformRequestWire {
     #[serde(default)]
     serve_native: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    native_messages: Option<Vec<Value>>,
+    native_messages: Option<Vec<Arc<Value>>>,
     #[serde(default)]
     full_array_fingerprint: Option<String>,
     #[serde(default)]
@@ -1622,7 +1622,7 @@ struct PendingOverlayDecisions {
 }
 
 struct OverlayComputation<'a, 'ctx> {
-    req: &'a TransformRequest,
+    req: &'a TransformIngress<'a>,
     ctx: &'a ProducerContext<'ctx>,
     projection: &'a FlatProjection,
     trusted_projection_prefix: Option<(&'a str, usize)>,
@@ -1760,12 +1760,6 @@ fn compose_m0_for_context(
 
 /// The CAS retry reloads and reclassifies because classification depends on freshly loaded state.
 ///
-/// The real Claude token estimator ([`tokenizer::estimate_tokens`]) is injected into
-/// the m0 compose and the legacy publication-floor backfill. Both are reached ONLY on the
-/// Hard/MigrateHard arm — never SOFT, defer, m1 compose, or the tail splice — so it can
-/// only change bytes during an intentional HARD rematerialization; determinism (the same
-/// text always counts identically, via the vendored+pinned vocab) is what preserves
-/// byte-identical replay between HARDs.
 /// Test entry point; production enters the pipeline only through
 /// `transform_with_projection_cached`.
 #[cfg(test)]
@@ -1854,9 +1848,6 @@ fn pass_scheduler_observation(
     }
 }
 
-/// The retry wrapper around [`apply_once`], parameterized by the token estimator so tests
-/// can inject a panicking/counting one to prove the estimator is HARD-only (never called
-/// on SOFT/defer). Production always passes [`crate::token_cache::cached_estimate_tokens`].
 #[cfg(test)]
 fn apply_once_with_estimator(
     store: &MemoryStore,
@@ -2019,11 +2010,19 @@ fn prefix_projection_differential_enabled() -> bool {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn assert_prefix_projection_equivalent(
     incremental: &FlatProjection,
     messages: &[IngressMessage],
 ) -> Result<(), WireError> {
-    let full = project_messages(messages)?;
+    assert_message_projection_equivalent(incremental, &wire::MessageProjection::new(messages))
+}
+
+fn assert_message_projection_equivalent(
+    incremental: &FlatProjection,
+    messages: &wire::MessageProjection<'_>,
+) -> Result<(), WireError> {
+    let full = messages.project()?;
     assert_eq!(
         incremental.differential_bytes(),
         full.differential_bytes(),
@@ -2080,9 +2079,43 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     fingerprints
 }
 
-fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformRequest> {
-    let mut normalized = None;
-    for (index, message) in req.messages.iter().enumerate() {
+/// Normalized decisions use `projection`, not raw message flags exposed through `Deref`.
+struct TransformIngress<'a> {
+    request: &'a TransformRequest,
+    projection: wire::MessageProjection<'a>,
+}
+
+impl<'a> TransformIngress<'a> {
+    fn original(request: &'a TransformRequest) -> Self {
+        Self {
+            request,
+            projection: wire::MessageProjection::new(&request.messages),
+        }
+    }
+
+    fn is_synthetic(&self, message: &IngressMessage) -> bool {
+        self.projection.is_synthetic(message)
+    }
+
+    fn rendered_message(&self, message: &IngressMessage) -> WireMessage {
+        // Retained ingress JSON preserves passthrough bytes despite the typed metadata override.
+        let mut rendered = message.ck.clone();
+        rendered.meta.synthetic = self.is_synthetic(message);
+        rendered
+    }
+}
+
+impl std::ops::Deref for TransformIngress<'_> {
+    type Target = TransformRequest;
+
+    fn deref(&self) -> &Self::Target {
+        self.request
+    }
+}
+
+fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> TransformIngress<'_> {
+    let mut normalized = TransformIngress::original(req);
+    for message in &req.messages {
         if message.ck.meta.synthetic
             || !message.ck.content().iter().any(|block| match block.kind() {
                 wire::BlockKind::ToolCall { id, .. } | wire::BlockKind::ToolResult { id, .. } => {
@@ -2093,8 +2126,7 @@ fn normalize_synthetic_todo_ingress(req: &TransformRequest) -> Option<TransformR
         {
             continue;
         }
-        let next = normalized.get_or_insert_with(|| req.clone());
-        next.messages[index].ck.meta.synthetic = true;
+        normalized.projection.mark_synthetic(message);
     }
     normalized
 }
@@ -2156,7 +2188,7 @@ fn continuation_summary_anchor(
 
 fn validate_lineage_anchor(
     meta: &ModuleMeta,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     projection: &FlatProjection,
 ) -> Result<(), String> {
     let (Some(anchor_id), Some(expected_hash), Some(base)) = (
@@ -2187,9 +2219,9 @@ fn validate_lineage_anchor(
     // The transform skips synthetic head messages so seam and anchor validation use the same first-message boundary.
     // Skipping synthetic head messages prevents them from passing seam validation but failing anchor validation on every pass.
     let first = req
-        .messages
-        .iter()
-        .find(|message| !message.ck.meta.synthetic)
+        .projection
+        .live_messages()
+        .next()
         .ok_or_else(|| "anchor message is absent from the live request".to_string())?;
     if first.mid != block.mid {
         return Err(format!(
@@ -2218,14 +2250,10 @@ fn validate_lineage_anchor(
 }
 
 fn rebase_descent_ordinals(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     base: u64,
 ) -> Result<Option<TransformRequest>, TransformError> {
-    let Some(first) = req
-        .messages
-        .iter()
-        .find(|message| !message.ck.meta.synthetic)
-    else {
+    let Some(first) = req.projection.live_messages().next() else {
         return Err(TransformError::LineageProtocol(
             "descent replacement array has no real messages".to_string(),
         ));
@@ -2247,7 +2275,7 @@ fn rebase_descent_ordinals(
     let offset = expected_first
         .checked_sub(first.ordinal)
         .expect("first.ordinal <= 1 <= expected_first");
-    let mut rebased = req.clone();
+    let mut rebased = req.request.clone();
     for message in &mut rebased.messages {
         if message.ordinal < first.ordinal {
             return Err(TransformError::LineageProtocol(format!(
@@ -2264,7 +2292,7 @@ fn rebase_descent_ordinals(
 }
 
 fn lineage_protocol_passthrough(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     projection: FlatProjection,
 ) -> TransformWithProjection {
     TransformWithProjection {
@@ -2282,7 +2310,7 @@ fn lineage_protocol_passthrough(
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
-                .map(|message| message.ck.clone())
+                .map(|message| req.rendered_message(message))
                 .collect(),
             req.full_array_fingerprint.clone(),
         ),
@@ -2544,7 +2572,8 @@ fn apply_additive_only(
         meta.last_upgrade_state = req.upgrade_state.clone();
         meta.last_render_config = effective_render_config.clone();
     }
-    let provisional_tail_mid = provisional_tail_mid(req);
+    let provisional_tail_mid =
+        provisional_tail_mid(&wire::MessageProjection::new(&req.messages), req.mid_turn);
     apply_ingress_meta(&mut meta, req, &projection, provisional_tail_mid, None, &[]);
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
@@ -2853,16 +2882,18 @@ fn apply_once(
     let mut m1_revision_read_timings = M1RevisionReadTimings::default();
     let projection_started_at = Instant::now();
     let normalized_req = normalize_synthetic_todo_ingress(req);
-    let ingress_req = normalized_req.as_ref().unwrap_or(req);
+    let ingress_req = &normalized_req;
     let reusable_projection = projection_cache.filter(|cache| {
         !ingress_req.lineage_switched
             && cache.replace_from <= ingress_req.messages.len()
             && cache.replace_from <= cache.projection.message_count()
     });
-    let initial_projection = if let Some(cache) = reusable_projection {
-        project_messages_incremental(&ingress_req.messages, &cache.projection, cache.replace_from)?
+    let (initial_projection, reused_messages) = if let Some(cache) = reusable_projection {
+        ingress_req
+            .projection
+            .project_incremental(&cache.projection, cache.replace_from)?
     } else {
-        project_messages(&ingress_req.messages)?
+        (ingress_req.projection.project()?, 0)
     };
     let trusted_projection_prefix = reusable_projection.and_then(|cache| {
         cache
@@ -2871,13 +2902,13 @@ fn apply_once(
             .map(|blocks| (cache.prior_fingerprint.as_str(), blocks))
     });
     timings.projection = elapsed_ms(projection_started_at);
-    timings.projection_reused_messages = reusable_projection.map_or(0, |cache| cache.replace_from);
+    timings.projection_reused_messages = reused_messages;
     timings.projection_projected_messages = ingress_req
         .messages
         .len()
         .saturating_sub(timings.projection_reused_messages);
     if reusable_projection.is_some() && prefix_projection_differential_enabled() {
-        assert_prefix_projection_equivalent(&initial_projection, &ingress_req.messages)?;
+        assert_message_projection_equivalent(&initial_projection, &ingress_req.projection)?;
     }
     if ingress_req.lineage_switched && ingress_req.is_subagent {
         return Ok(lineage_protocol_passthrough(
@@ -2948,11 +2979,12 @@ fn apply_once(
             rebased_req = rebase_descent_ordinals(ingress_req, base)?;
         }
     }
-    let req = rebased_req.as_ref().unwrap_or(ingress_req);
+    let rebased_ingress = rebased_req.as_ref().map(normalize_synthetic_todo_ingress);
+    let req = rebased_ingress.as_ref().unwrap_or(ingress_req);
 
     let projection = if rebased_req.is_some() {
         let rebase_projection_started_at = Instant::now();
-        let projection = project_messages(&req.messages)?;
+        let projection = req.projection.project()?;
         timings.projection += elapsed_ms(rebase_projection_started_at);
         projection
     } else {
@@ -2973,7 +3005,7 @@ fn apply_once(
         }
     }
     let mut prev: Option<u64> = None;
-    for msg in req.messages.iter().filter(|m| !m.ck.meta.synthetic) {
+    for msg in req.projection.live_messages() {
         if let Some(p) = prev
             && msg.ordinal <= p
         {
@@ -2987,7 +3019,7 @@ fn apply_once(
 
     let serializer_profile = SerializerProfile::parse(&req.serializer_profile);
     let mutation_exempt_mid = latest_assistant_message_mutation_exempt_mid(
-        &req.messages,
+        &req.projection,
         serializer_profile,
         req.mid_turn,
     );
@@ -3044,9 +3076,9 @@ fn apply_once(
             )));
         }
         let first_live = req
-            .messages
-            .iter()
-            .find(|message| !message.ck.meta.synthetic)
+            .projection
+            .live_messages()
+            .next()
             .map(|message| message.ordinal);
         if first_live != Some(expected_boundary) {
             return Err(TransformError::LineageProtocol(format!(
@@ -3358,7 +3390,7 @@ fn apply_once(
     let clear_pending_rewrite_on_present =
         loaded.meta.pending_rewrite.is_some() && boundary_present;
 
-    let provisional_tail_mid = provisional_tail_mid(req);
+    let provisional_tail_mid = provisional_tail_mid(&req.projection, req.mid_turn);
     let identity_enforce_started_at = Instant::now();
     let tail_identity_re_adoptions = enforce_block_identity(
         &loaded.meta,
@@ -4295,25 +4327,12 @@ fn apply_once(
                     crate::token_cache::cached_estimate_tokens,
                 )?;
                 note_deliveries = m1.note_deliveries.clone();
-                let m0_tokens = core
-                    .frozen_units
-                    .iter()
-                    .find(|unit| unit.key == "m0")
-                    .map(|unit| tokenizer::estimate_tokens(&unit.frozen_payload))
-                    .unwrap_or(0);
-                let m1_has_content = m1.body != M1_PLACEHOLDER;
-                let m1_tokens = if m1_has_content {
-                    tokenizer::estimate_tokens(&m1.body)
-                } else {
-                    0
-                };
-                let pressure_refold = m1.memory_update_count > 40
-                    || (m1_has_content
-                        && m1_tokens as f64 > (ctx.history_budget_tokens * 0.20)
-                        && ctx.history_budget_tokens > 0.0)
-                    || (m1_has_content
-                        && m0_tokens >= 500
-                        && m1_tokens as f64 > m0_tokens as f64 * 0.15);
+                let pressure_refold = soft_pressure_refold(
+                    &core.frozen_units,
+                    &m1.body,
+                    ctx.history_budget_tokens,
+                    estimate_tokens,
+                );
                 if pressure_refold {
                     let compartments_for_fold = store.load_compartments(&req.session_id)?;
                     let coverage_bounds =
@@ -4522,7 +4541,7 @@ fn apply_once(
                         Some(&mut m1_revision_read_timings),
                         ctx,
                     )?;
-                    if m1_has_content || memory_gate_digest_transition {
+                    if m1.body != M1_PLACEHOLDER || memory_gate_digest_transition {
                         meta.m1_revision = applied_m1_signal.revision;
                     }
                     meta.m1_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
@@ -5065,13 +5084,16 @@ fn apply_once(
     })
 }
 
-fn provisional_tail_mid(req: &TransformRequest) -> Option<&str> {
-    if !req.mid_turn {
+fn provisional_tail_mid<'a>(
+    projection: &wire::MessageProjection<'a>,
+    mid_turn: bool,
+) -> Option<&'a str> {
+    if !mid_turn {
         return None;
     }
-    req.messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+    projection
+        .live_messages()
+        .filter(|message| message.ck.role == "assistant")
         .max_by_key(|message| message.ordinal)
         .map(|message| message.mid.as_str())
 }
@@ -5115,7 +5137,7 @@ fn trailing_blank_identity_replays_stored(
 
 fn enforce_block_identity(
     meta: &ModuleMeta,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     projection: &FlatProjection,
     core: &CoreState,
     provisional_tail_mid: Option<&str>,
@@ -5133,7 +5155,7 @@ fn enforce_block_identity(
             continue;
         }
         if trailing_blank_identity_replays_stored(req, core, mid, stored) {
-            if latest_assistant_reasoning_mutation_exempt_mid(&req.messages) == Some(mid.as_str())
+            if latest_assistant_reasoning_mutation_exempt_mid(&req.projection) == Some(mid.as_str())
                 && frozen_trailing_blank_decision(core, mid)
                     == Some(FrozenTrailingBlankDecision::Strip)
             {
@@ -5182,14 +5204,14 @@ fn enforce_block_identity(
 
 fn identity_drift_requires_reject(
     meta: &ModuleMeta,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     core: &CoreState,
     mid: &str,
 ) -> bool {
     let covered = req
-        .messages
-        .iter()
-        .find(|message| !message.ck.meta.synthetic && message.mid == mid)
+        .projection
+        .live_messages()
+        .find(|message| message.mid == mid)
         .is_some_and(|message| !is_tail(message.ordinal, meta.coverage_ordinal));
     let boundary_anchor = core.boundary_id == mid
         || split_block_id(&core.boundary_id).is_some_and(|(anchor_mid, _)| anchor_mid == mid);
@@ -5786,13 +5808,13 @@ fn surviving_caveman_units(
 
 fn frozen_units_matched_to_tail(
     core: &CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     coverage: Option<u64>,
 ) -> usize {
     let tail_mids: HashSet<&str> = req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && is_tail(message.ordinal, coverage))
+        .projection
+        .live_messages()
+        .filter(|message| is_tail(message.ordinal, coverage))
         .map(|message| message.mid.as_str())
         .collect();
     core.frozen_units
@@ -5966,18 +5988,15 @@ fn system_content_for_m0(message: &WireMessage) -> String {
 }
 
 fn covered_system_messages_for_coverage(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     coverage_ordinal: Option<u64>,
     coverage_start_ordinal: Option<u64>,
     profile: Option<SerializerProfile>,
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut covered = Vec::new();
-    for message in req.messages.iter().filter(|message| {
-        if message.ck.meta.synthetic
-            || message.ck.role != "system"
-            || is_tail(message.ordinal, coverage_ordinal)
-        {
+    for message in req.projection.live_messages().filter(|message| {
+        if message.ck.role != "system" || is_tail(message.ordinal, coverage_ordinal) {
             return false;
         }
         if profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
@@ -5994,16 +6013,15 @@ fn covered_system_messages_for_coverage(
 }
 
 fn coverage_advance_covers_new_system(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     old_coverage: Option<u64>,
     new_coverage: Option<u64>,
 ) -> bool {
     if !coverage_advanced(old_coverage, new_coverage) {
         return false;
     }
-    req.messages.iter().any(|message| {
-        !message.ck.meta.synthetic
-            && message.ck.role == "system"
+    req.projection.live_messages().any(|message| {
+        message.ck.role == "system"
             && is_tail(message.ordinal, old_coverage)
             && !is_tail(message.ordinal, new_coverage)
     })
@@ -6294,6 +6312,25 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
     }
 }
 
+fn soft_pressure_refold(
+    frozen_units: &[FrozenUnit],
+    m1_body: &str,
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> bool {
+    let m0_tokens = frozen_units
+        .iter()
+        .find(|unit| unit.key == "m0")
+        .map(|unit| estimate_tokens(&unit.frozen_payload))
+        .unwrap_or(0);
+    if m1_body == M1_PLACEHOLDER {
+        return false;
+    }
+    let m1_tokens = estimate_tokens(m1_body);
+    (m1_tokens as f64 > (history_budget_tokens * 0.20) && history_budget_tokens > 0.0)
+        || (m0_tokens >= 500 && m1_tokens as f64 > m0_tokens as f64 * 0.15)
+}
+
 fn render_m1_placeholder() -> FrozenUnit {
     synth_region("m1", M1_PLACEHOLDER.to_string())
 }
@@ -6312,11 +6349,14 @@ fn synth_region(key: &str, payload: String) -> FrozenUnit {
     }
 }
 
-fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usize>) -> SelItem {
+fn sel_item_from_flat<'a>(
+    block: &'a FlatBlock,
+    tag_tokens_by_block: &HashMap<&str, usize>,
+) -> SelItem<'a> {
     let kind = match block.wire.kind() {
         wire::BlockKind::ToolCall { name, input, .. } => SelKind::ToolCall {
             name: name.clone(),
-            input: input.clone(),
+            input: Cow::Borrowed(input),
         },
         wire::BlockKind::ToolResult { tool_name, .. } => SelKind::ToolResult {
             tool_name: tool_name.clone(),
@@ -6343,24 +6383,23 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
     }
 }
 
-fn tail_sel_items(
-    live: &[&FlatBlock],
+fn tail_sel_items<'a>(
+    live: &[&'a FlatBlock],
     coverage: Option<u64>,
     tag_tokens_by_block: &HashMap<&str, usize>,
-) -> Vec<SelItem> {
+) -> Vec<SelItem<'a>> {
     live.iter()
         .filter(|block| is_tail(block.ordinal(), coverage))
         .map(|block| sel_item_from_flat(block, tag_tokens_by_block))
         .collect()
 }
 
-fn tail_end_mid(req: &TransformRequest, coverage: Option<u64>) -> Option<String> {
-    req.messages
-        .iter()
+fn tail_end_mid(req: &TransformIngress<'_>, coverage: Option<u64>) -> Option<String> {
+    req.projection
+        .live_messages()
         .rev()
         .find(|msg| {
-            !msg.ck.meta.synthetic
-                && !msg.ck.meta.summary
+            !msg.ck.meta.summary
                 && !msg.ck.meta.errored
                 && !msg.ck.meta.finish.as_deref().is_some_and(|finish| {
                     let finish = finish.to_ascii_lowercase();
@@ -6372,10 +6411,10 @@ fn tail_end_mid(req: &TransformRequest, coverage: Option<u64>) -> Option<String>
         .map(|msg| msg.mid.clone())
 }
 
-fn tail_contains_mid(req: &TransformRequest, coverage: Option<u64>, mid: &str) -> bool {
-    req.messages
-        .iter()
-        .any(|msg| !msg.ck.meta.synthetic && msg.mid == mid && is_tail(msg.ordinal, coverage))
+fn tail_contains_mid(req: &TransformIngress<'_>, coverage: Option<u64>, mid: &str) -> bool {
+    req.projection
+        .live_messages()
+        .any(|msg| msg.mid == mid && is_tail(msg.ordinal, coverage))
 }
 
 fn coverage_advanced(old: Option<u64>, new: Option<u64>) -> bool {
@@ -6447,7 +6486,7 @@ fn boundary_available(
 
 fn resolve_boundary_state(
     store: &MemoryStore,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     core: &CoreState,
     meta: &ModuleMeta,
     live: &[&FlatBlock],
@@ -6528,9 +6567,9 @@ fn resolve_boundary_state(
     }
 
     let first_live_non_system = req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && message.ck.role != "system")
+        .projection
+        .live_messages()
+        .filter(|message| message.ck.role != "system")
         .map(|message| message.ordinal)
         .min();
     if first_live_non_system != Some(declared.next_absolute_ordinal) {
@@ -6625,7 +6664,7 @@ struct PendingPassthroughArgs<'a> {
 
 fn pending_passthrough_messages(
     projection: &FlatProjection,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_overlay: Option<&TagOverlayState>,
     mutation_exempt_mid: Option<&str>,
 ) -> Vec<ServedMessage> {
@@ -6637,11 +6676,12 @@ fn pending_passthrough_messages(
                 .get(message.mid.as_str())
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let mut rendered = message.ck.clone();
+            let mut rendered = req.rendered_message(message);
             if !blocks.is_empty() {
                 apply_tag_overlay_to_message(
                     &mut rendered,
                     message,
+                    req.is_synthetic(message),
                     blocks,
                     tag_overlay,
                     |_| false,
@@ -6701,15 +6741,14 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
 }
 
 fn anchor_folded_by_coverage(
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     old_coverage: Option<u64>,
     new_coverage: Option<u64>,
     anchor_mid: &str,
 ) -> bool {
     coverage_advanced(old_coverage, new_coverage)
-        && req.messages.iter().any(|msg| {
-            !msg.ck.meta.synthetic
-                && msg.mid == anchor_mid
+        && req.projection.live_messages().any(|msg| {
+            msg.mid == anchor_mid
                 && is_tail(msg.ordinal, old_coverage)
                 && !is_tail(msg.ordinal, new_coverage)
         })
@@ -6720,7 +6759,7 @@ fn advance_synthetic_todo(
     is_bust_pass: bool,
     old_coverage: Option<u64>,
     coverage_shrunk_on_bust: bool,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
 ) -> Result<(), TransformError> {
     let existing = meta.synthetic_todo.clone();
     let outcome = advance_injection_from_meta(
@@ -6754,7 +6793,7 @@ fn reanchor_kept_synthetic_todo_if_folded_or_shrunk(
     meta: &mut ModuleMeta,
     old_coverage: Option<u64>,
     coverage_shrunk_on_bust: bool,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
 ) -> Result<(), TransformError> {
     let Some(pair) = meta.synthetic_todo.as_mut() else {
         return Ok(());
@@ -7134,6 +7173,7 @@ fn tag_mint_inputs_from(
         frontier_memo.as_deref(),
     )
     .unwrap_or((0, 0));
+    let tokenized_bytes_at_start = crate::token_cache::local_stats().tokenized_bytes;
     let mut work = TagMintWork {
         candidate_count: prefix_candidates,
         ..TagMintWork::default()
@@ -7153,14 +7193,16 @@ fn tag_mint_inputs_from(
             continue;
         };
         work.candidate_count = work.candidate_count.saturating_add(1);
-        work.tokenized_bytes = work.tokenized_bytes.saturating_add(source.len());
         work.inputs.push(TagMintInput {
             block_id: block.id.clone(),
             kind: kind.as_store_kind().to_string(),
-            token_count: tokenizer::estimate_tokens(source) as i64,
+            token_count: crate::token_cache::cached_estimate_tokens(source) as i64,
             source_bytes: source.as_bytes().to_vec(),
         });
     }
+    // Cache hits tokenize nothing, so the cost metric is the tokenizer's byte delta.
+    work.tokenized_bytes =
+        (crate::token_cache::local_stats().tokenized_bytes - tokenized_bytes_at_start) as usize;
     if let Some(memo) = frontier_memo {
         let newly_minted = work
             .inputs
@@ -7447,6 +7489,7 @@ pub fn temporal_gap_prefix(gap_ms: i64) -> Option<String> {
 fn apply_tag_overlay_to_message(
     message: &mut WireMessage,
     ingress: &IngressMessage,
+    synthetic: bool,
     blocks: &[&FlatBlock],
     overlay: Option<&TagOverlayState>,
     is_reduced: impl Fn(&FlatBlock) -> bool,
@@ -7458,7 +7501,7 @@ fn apply_tag_overlay_to_message(
     let Some(overlay) = overlay else {
         return;
     };
-    if ingress.ck.role == "system" || ingress.ck.meta.synthetic {
+    if ingress.ck.role == "system" || synthetic {
         return;
     }
     let mut modified = false;
@@ -7779,7 +7822,7 @@ fn is_entire_system_reminder_wrapped(text: &str) -> bool {
 }
 
 fn is_system_reminder_transport_message(message: &IngressMessage) -> bool {
-    if message.ck.role != "user" || message.ck.meta.synthetic || message.ck.content().is_empty() {
+    if message.ck.role != "user" || message.ck.content().is_empty() {
         return false;
     }
     // CK has no transport-origin field for this Claude Code shape.
@@ -7798,27 +7841,28 @@ fn is_system_reminder_transport_message(message: &IngressMessage) -> bool {
     saw_text
 }
 
-fn is_authored_user_message(message: &IngressMessage) -> bool {
-    message.ck.role == "user"
-        && !message.ck.meta.synthetic
-        && message
-            .ck
-            .content()
-            .iter()
-            .any(|block| matches!(block.kind(), wire::BlockKind::Text { .. }))
-        && !is_system_reminder_transport_message(message)
+impl TransformIngress<'_> {
+    fn is_authored_user_message(&self, message: &IngressMessage) -> bool {
+        message.ck.role == "user"
+            && !self.is_synthetic(message)
+            && message
+                .ck
+                .content()
+                .iter()
+                .any(|block| matches!(block.kind(), wire::BlockKind::Text { .. }))
+            && !is_system_reminder_transport_message(message)
+    }
 }
 
-fn eligible_authored_user_tail(req: &TransformRequest) -> Option<&IngressMessage> {
+fn eligible_authored_user_tail<'a>(req: &TransformIngress<'a>) -> Option<&'a IngressMessage> {
     // Tool results are transport messages even when a provider carries them with role=user.
     // Tool-result carriers are skipped like synthetic and system messages; an assistant tail closes authored-user eligibility.
-    let tail = req.messages.iter().rev().find(|message| {
-        !message.ck.meta.synthetic
-            && message.ck.role != "system"
+    let tail = req.projection.live_messages().rev().find(|message| {
+        message.ck.role != "system"
             && message.ck.role != "tool"
-            && (message.ck.role != "user" || is_authored_user_message(message))
+            && (message.ck.role != "user" || req.is_authored_user_message(message))
     })?;
-    is_authored_user_message(tail).then_some(tail)
+    req.is_authored_user_message(tail).then_some(tail)
 }
 
 fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {
@@ -7896,16 +7940,15 @@ fn compute_active_overlay_decisions(
     let authored_tail = eligible_authored_user_tail(req);
     let mut previous_new_user_mint = None;
     let mut temporal_marks = Vec::new();
-    for message in req.messages.iter().filter(|message| {
-        !message.ck.meta.synthetic
-            && message.ck.role != "system"
+    for message in req.projection.live_messages().filter(|message| {
+        message.ck.role != "system"
             && message.ck.role != "tool"
-            && (message.ck.role != "user" || is_authored_user_message(message))
+            && (message.ck.role != "user" || req.is_authored_user_message(message))
             && mutation_exempt_mid != Some(message.mid.as_str())
             && lineage_anchor_mid != Some(message.mid.as_str())
     }) {
         let is_new = frontier.is_none_or(|frontier| message.ordinal > frontier);
-        if !is_authored_user_message(message) || !is_new {
+        if !req.is_authored_user_message(message) || !is_new {
             previous_new_user_mint = None;
             continue;
         }
@@ -7981,7 +8024,7 @@ fn compute_active_overlay_decisions(
     for message in req
         .messages
         .iter()
-        .filter(|message| is_authored_user_message(message))
+        .filter(|message| req.is_authored_user_message(message))
     {
         if frontier.is_some_and(|current| message.ordinal <= current) {
             continue;
@@ -8020,7 +8063,7 @@ fn compute_active_overlay_decisions(
 #[allow(clippy::too_many_arguments)]
 fn maybe_decide_live_user_hint(
     store: &MemoryStore,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     _ctx: &ProducerContext<'_>,
     projection: &FlatProjection,
     user_hint_rows: &[UserHintRow],
@@ -8555,7 +8598,7 @@ fn active_tags_for_channel2(
         derived.push(ActiveTagForNudge {
             tag_number: next_tag,
             kind: kind.as_store_kind().to_string(),
-            token_count: tokenizer::estimate_tokens(source) as i64,
+            token_count: crate::token_cache::cached_estimate_tokens(source) as i64,
         });
         next_tag = next_tag.saturating_add(1);
     }
@@ -9421,7 +9464,7 @@ fn tag_age_cutoff(req: &TransformRequest, tag_numbers: &BTreeMap<String, u64>) -
 
 fn new_frozen_strip_units(
     core: &CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_numbers: &BTreeMap<String, u64>,
     reasoning_clear_cutoff: Option<u64>,
     is_bust_pass: bool,
@@ -9442,7 +9485,7 @@ fn new_frozen_strip_units(
         .saturating_sub(req.protected_tags.saturating_mul(2));
     let age_cutoff = tag_age_cutoff(req, tag_numbers);
     let reasoning_mutation_exempt_mid =
-        latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+        latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
     let cc_reasoning_cutoff = if SerializerProfile::parse(&req.serializer_profile)
         == Some(SerializerProfile::ClaudeCodeAnthropic)
     {
@@ -9455,7 +9498,7 @@ fn new_frozen_strip_units(
 
     for index in (0..req.messages.len()).rev() {
         let message = &req.messages[index];
-        if message.ck.meta.synthetic
+        if req.is_synthetic(message)
             || message.mid.is_empty()
             || lineage_anchor_mid == Some(message.mid.as_str())
         {
@@ -10518,7 +10561,7 @@ fn enforce_unique_tool_use_ids(
 
 fn new_merged_reasoning_strip_units(
     core: &CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     rendered_messages: &[ServedMessage],
     can_mutate_provider_prefix: bool,
 ) -> Vec<FrozenUnit> {
@@ -10533,7 +10576,7 @@ fn new_merged_reasoning_strip_units(
         .iter()
         .map(|unit| unit.key.as_str())
         .collect::<HashSet<_>>();
-    let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
     let mut prev_assistant = false;
     let mut units = Vec::new();
     for rendered in rendered_messages {
@@ -10668,7 +10711,7 @@ fn apply_frozen_trailing_blank_decision(
 
 fn refresh_trailing_blank_decisions(
     core: &mut CoreState,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     rendered_messages: &[ServedMessage],
     record_historical: bool,
 ) -> (usize, bool) {
@@ -10678,7 +10721,7 @@ fn refresh_trailing_blank_decisions(
         return (0, false);
     }
 
-    let newest_assistant_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let newest_assistant_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
     let mut updates = Vec::new();
     for rendered in rendered_messages {
         let Some(mid) = rendered.meta.harness_id.as_deref() else {
@@ -10793,7 +10836,7 @@ fn build_output(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_overlay: Option<&TagOverlayState>,
     synthetic_todo_enabled: bool,
     mutation_exempt_mid: Option<&str>,
@@ -10830,7 +10873,7 @@ fn build_output_with_tags(
     core: &CoreState,
     meta: &ModuleMeta,
     projection: &FlatProjection,
-    req: &TransformRequest,
+    req: &TransformIngress<'_>,
     tag_overlay: Option<&TagOverlayState>,
     synthetic_todo_enabled: bool,
     mutation_exempt_mid: Option<&str>,
@@ -10932,9 +10975,8 @@ fn build_output_with_tags(
         .and_then(split_block_id)
         .map(|(mid, _)| mid);
     let output_mids = req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic)
+        .projection
+        .live_messages()
         .filter(|message| {
             is_tail(message.ordinal, output_coverage)
                 || (serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic)
@@ -10950,7 +10992,7 @@ fn build_output_with_tags(
     let full_drop_ids = full_drop_tool_ids(&frozen_units, projection, &reasoning_ineligible_arcs);
     build_timings.full_drop_tool_ids = elapsed_ms(full_drop_tool_ids_started_at);
     let reasoning_mutation_exempt_mid =
-        latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+        latest_assistant_reasoning_mutation_exempt_mid(&req.projection);
 
     if synthetic_todo_enabled
         && let Some(pair) = meta
@@ -10989,11 +11031,7 @@ fn build_output_with_tags(
         .map(|anchor| synthetic_todo_render_anchor_mid(projection, anchor));
     let mut inserted_synthetic_todo = false;
     let tail_loop_started_at = Instant::now();
-    for msg in req
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic)
-    {
+    for msg in req.projection.live_messages() {
         let keep_leading_system = serializer_profile
             != Some(SerializerProfile::ClaudeCodeAnthropic)
             && is_uncovered_leading_system(msg, meta);
@@ -11064,6 +11102,7 @@ fn build_output_with_tags(
                 apply_tag_overlay_to_message(
                     &mut rebuilt,
                     msg,
+                    req.is_synthetic(msg),
                     blocks,
                     tag_overlay,
                     |_| false,
@@ -11175,6 +11214,7 @@ fn build_output_with_tags(
                     apply_tag_overlay_to_message(
                         &mut rebuilt,
                         msg,
+                        req.is_synthetic(msg),
                         blocks,
                         tag_overlay,
                         |block| reduced.contains_key(&block.block_index),
@@ -11364,19 +11404,21 @@ fn is_mutable_merged_reasoning_block(block: &WireBlock) -> bool {
             .is_some_and(|extras| extras.contains_key("cache_control"))
 }
 
-fn latest_assistant_reasoning_mutation_exempt_mid(messages: &[IngressMessage]) -> Option<&str> {
+fn latest_assistant_reasoning_mutation_exempt_mid<'a>(
+    messages: &wire::MessageProjection<'a>,
+) -> Option<&'a str> {
     messages
-        .iter()
+        .live_messages()
         .rev()
-        .find(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+        .find(|message| message.ck.role == "assistant")
         .map(|message| message.mid.as_str())
 }
 
-fn latest_assistant_message_mutation_exempt_mid(
-    messages: &[IngressMessage],
+fn latest_assistant_message_mutation_exempt_mid<'a>(
+    messages: &wire::MessageProjection<'a>,
     profile: Option<SerializerProfile>,
     mid_turn: bool,
-) -> Option<&str> {
+) -> Option<&'a str> {
     if profile == Some(SerializerProfile::OpencodeAiSdk) && !mid_turn {
         return None;
     }
@@ -11387,9 +11429,9 @@ fn latest_assistant_message_mutation_exempt_mid(
         return None;
     }
     messages
-        .iter()
+        .live_messages()
         .rev()
-        .find(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+        .find(|message| message.ck.role == "assistant")
         .filter(|message| {
             message
                 .ck
@@ -11831,24 +11873,11 @@ pub(crate) mod tests {
         assert_eq!(claude_code_marker_ttl("300m"), "1h");
         assert_eq!(claude_code_marker_ttl("0m"), "");
         assert_eq!(claude_code_marker_ttl(""), "");
-    }
-
-    #[test]
-    fn claude_code_cache_ttl_mapper_treats_garbage_as_unset() {
-        assert_eq!(claude_code_marker_ttl("not-a-ttl"), "5m");
-    }
-
-    #[test]
-    fn wire_normalization_does_not_change_the_raw_effective_cache_lifetime() {
-        let config = crate::config::DaemonConfig {
-            cache_ttl: "300m".to_string(),
-            ..crate::config::DaemonConfig::default()
-        };
-        let internally_resolved = config.resolve_cache_ttl(None);
-
-        assert_eq!(internally_resolved, "300m");
-        assert_eq!(claude_code_marker_ttl(&internally_resolved), "1h");
-        assert_eq!(internally_resolved, "300m");
+        assert_eq!(
+            claude_code_marker_ttl("not-a-ttl"),
+            "5m",
+            "unparseable input falls back to the provider default"
+        );
     }
 
     #[test]
@@ -11923,23 +11952,6 @@ pub(crate) mod tests {
         let provider_default_round_trip: TransformResponse =
             serde_json::from_value(provider_default_json).unwrap();
         assert_eq!(provider_default_round_trip.cache_ttl, Some(String::new()));
-    }
-
-    #[test]
-    fn cache_ttl_serialization_discriminates_no_opinion_from_provider_default() {
-        let no_opinion = TransformResponse::passthrough(Vec::new(), None);
-        let mut provider_default = no_opinion.clone();
-        provider_default.cache_ttl = Some(String::new());
-
-        let no_opinion_json = serde_json::to_value(no_opinion).unwrap();
-        let provider_default_json = serde_json::to_value(provider_default).unwrap();
-        assert!(
-            !no_opinion_json
-                .as_object()
-                .unwrap()
-                .contains_key("cache_ttl")
-        );
-        assert_eq!(provider_default_json["cache_ttl"], "");
     }
 
     #[test]
@@ -12337,45 +12349,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn apply_once_records_per_stage_timings() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let messages = (0..40)
-            .map(|index| item(&format!("stage-{index}"), index as u64 + 1, "stage payload"))
-            .collect::<Vec<_>>();
-        let request = req("stage-timings", "cfg0", messages);
-        let first = run(&store, &request, &[]);
-        let timings = first.timings.expect("apply_once records timings");
-        assert!(timings.projection >= 0.0);
-        assert!(timings.decide >= 0.0);
-        assert!(timings.compose_m0m1 >= 0.0);
-        assert!(timings.selection >= 0.0);
-        assert!(timings.todo >= 0.0);
-        assert!(timings.tag_overlay >= 0.0);
-        assert!(timings.unit_mint >= 0.0);
-        assert!(timings.temporal >= 0.0);
-        assert!(timings.caveman >= 0.0);
-        assert!(timings.build_frozen_unit_scan >= 0.0);
-        assert!(timings.build_frozen_unit_index >= 0.0);
-        eprintln!(
-            "apply_once-stage-breakdown projection={:.1} decide={:.1} tag_overlay={:.1} unit_mint={:.1} temporal={:.1} caveman={:.1} compose_m0m1={:.1} selection={:.1} todo={:.1} build_frozen_unit_scan={:.1} build_frozen_unit_index={:.1} build_output={:.1} total={:.1}",
-            timings.projection,
-            timings.decide,
-            timings.tag_overlay,
-            timings.unit_mint,
-            timings.temporal,
-            timings.caveman,
-            timings.compose_m0m1,
-            timings.selection,
-            timings.todo,
-            timings.build_frozen_unit_scan,
-            timings.build_frozen_unit_index,
-            timings.build_output,
-            timings.total,
-        );
-    }
-
-    #[test]
     #[ignore = "run manually to decompose a production-sized apply_once"]
     fn apply_once_stage_timings_large_fixture() {
         let dir = tempfile::tempdir().unwrap();
@@ -12611,62 +12584,38 @@ pub(crate) mod tests {
     /// Wire fixtures must preserve every prefixable tool-result output variant and each block's pass-through bytes through serialization.
     /// Each case fails when the overlay no longer clears the retained bytes of the block it mutates.
     #[test]
-    fn wire_tool_result_text_variant_tags_survive_serialization() {
-        let joined = second_active_pass_json(
-            "wire-tr-text",
-            vec![
-                wire_tool_call("a1", 1, "call_t1"),
-                wire_tool_result(
-                    "t1",
-                    2,
-                    json!({ "kind": { "type": "text", "text": "plain output" } }),
-                ),
-            ],
-        );
-        assert!(
-            joined.contains("\u{a7}1\u{a7} plain output"),
-            "text output lost its tag: {joined}"
-        );
-    }
-
-    #[test]
-    fn wire_tool_result_error_text_variant_tags_survive_serialization() {
-        let joined = second_active_pass_json(
-            "wire-tr-err",
-            vec![
-                wire_tool_call("a1", 1, "call_t1"),
-                wire_tool_result(
-                    "t1",
-                    2,
-                    json!({ "kind": { "type": "error_text", "text": "boom" } }),
-                ),
-            ],
-        );
-        assert!(
-            joined.contains("\u{a7}1\u{a7} boom"),
-            "error_text output lost its tag: {joined}"
-        );
-    }
-
-    #[test]
-    fn wire_tool_result_content_variant_tags_survive_serialization() {
-        let joined = second_active_pass_json(
-            "wire-tr-content",
-            vec![
-                wire_tool_call("a1", 1, "call_t1"),
-                wire_tool_result(
-                    "t1",
-                    2,
-                    json!({ "kind": { "type": "content", "blocks": [
-                        { "kind": { "type": "text", "text": "nested text" } },
-                    ]}}),
-                ),
-            ],
-        );
-        assert!(
-            joined.contains("\u{a7}1\u{a7} nested text"),
-            "content-variant output lost its tag: {joined}"
-        );
+    fn wire_tool_result_output_variants_keep_tags_through_serialization() {
+        for (session, output, expected) in [
+            (
+                "wire-tr-text",
+                json!({ "kind": { "type": "text", "text": "plain output" } }),
+                "\u{a7}1\u{a7} plain output",
+            ),
+            (
+                "wire-tr-err",
+                json!({ "kind": { "type": "error_text", "text": "boom" } }),
+                "\u{a7}1\u{a7} boom",
+            ),
+            (
+                "wire-tr-content",
+                json!({ "kind": { "type": "content", "blocks": [
+                    { "kind": { "type": "text", "text": "nested text" } },
+                ]}}),
+                "\u{a7}1\u{a7} nested text",
+            ),
+        ] {
+            let joined = second_active_pass_json(
+                session,
+                vec![
+                    wire_tool_call("a1", 1, "call_t1"),
+                    wire_tool_result("t1", 2, output),
+                ],
+            );
+            assert!(
+                joined.contains(expected),
+                "{session}: tool-result output lost its tag: {joined}"
+            );
+        }
     }
 
     #[test]
@@ -12874,10 +12823,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// The strip treats all whitespace as an inter-prefix separator.
-    /// Malformed tag shapes and mid-prose references remain verbatim.
+    /// The strip treats all whitespace as an inter-prefix separator and runs at every line start
+    /// outside inline or fenced code. Malformed tag shapes and mid-prose references remain verbatim.
     #[test]
-    fn strip_leading_tag_imitations_covers_whitespace_and_preserves_malformed() {
+    fn strip_leading_tag_imitations_strips_at_line_starts_outside_code_and_preserves_malformed() {
         assert_eq!(
             strip_leading_tag_imitations("\u{a7}39\u{a7} \u{a7}40\u{a7} BEAT"),
             "BEAT"
@@ -12911,10 +12860,6 @@ pub(crate) mod tests {
             "\u{a7}39\u{a7}BEAT",
             "a token without a separator is not an imitation"
         );
-    }
-
-    #[test]
-    fn assistant_tag_imitations_strip_on_later_lines_but_not_code() {
         let value = "preamble\n\u{a7}22\u{a7} Delta\n`\u{a7}23\u{a7} inline`\n```rust\n\u{a7}24\u{a7} fenced\n```\n\u{a7}25\u{a7} Echo";
         assert_eq!(
             strip_leading_tag_imitations(value),
@@ -14395,7 +14340,7 @@ pub(crate) mod tests {
         let mutated_projection = project_messages(&mutated_request.messages).unwrap();
         let re_adoptions = enforce_block_identity(
             &before.meta,
-            &mutated_request,
+            &normalize_synthetic_todo_ingress(&mutated_request),
             &mutated_projection,
             &before.core,
             None,
@@ -16182,6 +16127,8 @@ pub(crate) mod tests {
         assert_eq!(parsed.usage.unwrap().context_limit_tokens, 2);
         assert_eq!(parsed.history_budget_tokens, Some(42_000.0));
         assert_eq!(parsed.provider_error.as_deref(), Some("prompt is too long"));
+        assert_eq!(parsed.prev_response_completed_at_ms, None);
+        assert_eq!(parsed.todo_tool_present, None);
     }
 
     #[test]
@@ -16517,39 +16464,60 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reasoning_keep_rule_treats_whitespace_only_text_as_sentinel_invisible() {
-        let mut messages = vec![WireMessage::from_parts(
-            "assistant",
-            vec![
+    fn reasoning_keep_rule_treats_whitespace_text_and_step_metadata_prefixes_as_invisible() {
+        let prefixes = [
+            (
+                "whitespace-first",
                 wire::WireBlock::bare(wire::BlockKind::Text {
                     text: " \t\n".to_string(),
                 }),
-                wire::WireBlock::bare(wire::BlockKind::Reasoning {
-                    text: "signed thinking".to_string(),
-                    signature: Some("sig".to_string()),
-                }),
-            ],
-            None,
-            wire::ProviderExtras::new(),
-            wire::HarnessMeta {
-                harness_id: Some("whitespace-first".to_string()),
-                ..Default::default()
-            },
-        )];
-
-        assert_eq!(
-            apply_serializer_residuals_with_exemption(
-                SerializerProfile::OpencodeAiSdk,
-                &mut messages,
-                None,
-                Some("anthropic"),
             ),
-            0
-        );
-        assert!(matches!(
-            messages[0].content()[1].kind(),
-            wire::BlockKind::Reasoning { text, .. } if text == "signed thinking"
-        ));
+            (
+                "metadata-latest",
+                wire::WireBlock::bare(wire::BlockKind::Opaque(wire::OpaqueBlock {
+                    source: serde_json::json!({"harness": "opencode"}),
+                    kind: "step-start".to_string(),
+                    raw: serde_json::json!({"type": "step-start"}),
+                    arc: None,
+                })),
+            ),
+        ];
+        for (mid, prefix) in prefixes {
+            let mut messages = vec![WireMessage::from_parts(
+                "assistant",
+                vec![
+                    prefix,
+                    wire::WireBlock::bare(wire::BlockKind::Reasoning {
+                        text: "signed thinking".to_string(),
+                        signature: Some("sig".to_string()),
+                    }),
+                ],
+                None,
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
+                    harness_id: Some(mid.to_string()),
+                    ..Default::default()
+                },
+            )];
+
+            assert_eq!(
+                apply_serializer_residuals_with_exemption(
+                    SerializerProfile::OpencodeAiSdk,
+                    &mut messages,
+                    None,
+                    Some("anthropic"),
+                ),
+                0,
+                "{mid}"
+            );
+            assert!(
+                matches!(
+                    messages[0].content()[1].kind(),
+                    wire::BlockKind::Reasoning { text, .. } if text == "signed thinking"
+                ),
+                "{mid}"
+            );
+        }
     }
 
     #[test]
@@ -17430,7 +17398,7 @@ pub(crate) mod tests {
         }];
 
         assert_eq!(
-            latest_assistant_reasoning_mutation_exempt_mid(&ingress),
+            latest_assistant_reasoning_mutation_exempt_mid(&wire::MessageProjection::new(&ingress)),
             Some("msg_text_first")
         );
 
@@ -17550,7 +17518,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             Some(&overlay),
             false,
             None,
@@ -17565,7 +17533,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             Some(&overlay),
             false,
             Some("latest"),
@@ -17609,7 +17577,7 @@ pub(crate) mod tests {
         );
         request.provider_id = Some("anthropic".to_string());
         request.serve_native = true;
-        request.native_messages = Some(raw.clone());
+        request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
 
@@ -17718,7 +17686,7 @@ pub(crate) mod tests {
         );
         request.provider_id = Some("anthropic".to_string());
         request.serve_native = true;
-        request.native_messages = Some(raw.clone());
+        request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
         request.protected_tags = 0;
         let context = pctx("git:proj", "/nonexistent-docs", 0);
         let estimate = |value: &str| value.len();
@@ -17924,7 +17892,7 @@ pub(crate) mod tests {
             &core,
             &ModuleMeta::default(),
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -17972,7 +17940,7 @@ pub(crate) mod tests {
             &CoreState::empty(),
             &ModuleMeta::default(),
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -18614,45 +18582,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reasoning_strip_ignores_opencode_step_metadata_before_thinking() {
-        let mut messages = vec![WireMessage::from_parts(
-            "assistant",
-            vec![
-                wire::WireBlock::bare(wire::BlockKind::Opaque(wire::OpaqueBlock {
-                    source: serde_json::json!({"harness": "opencode"}),
-                    kind: "step-start".to_string(),
-                    raw: serde_json::json!({"type": "step-start"}),
-                    arc: None,
-                })),
-                wire::WireBlock::bare(wire::BlockKind::Reasoning {
-                    text: "signed thinking".to_string(),
-                    signature: Some("sig".to_string()),
-                }),
-            ],
-            None,
-            wire::ProviderExtras::new(),
-            wire::HarnessMeta {
-                harness_id: Some("metadata-latest".to_string()),
-                ..Default::default()
-            },
-        )];
-
-        assert_eq!(
-            apply_serializer_residuals_with_exemption(
-                SerializerProfile::OpencodeAiSdk,
-                &mut messages,
-                None,
-                Some("anthropic"),
-            ),
-            0
-        );
-        assert!(matches!(
-            messages[0].content()[1].kind(),
-            wire::BlockKind::Reasoning { .. }
-        ));
-    }
-
-    #[test]
     fn bootstrap_with_no_compartments_is_empty_baseline_whole_array_is_tail() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -18783,60 +18712,40 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fold_minting_wrong_vocabulary_anchor_fails_loud_instead_of_looping() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments(
-            "ses",
-            &[StoredCompartment {
-                sequence: 0,
-                start_message: 1,
-                end_message: 1,
-                end_message_id: "m1".to_string(), // bare mid — wrong vocabulary
-                title: "C0".to_string(),
-                content: "S".to_string(),
-                p1: Some("S".to_string()),
-                importance: 50,
-                ..Default::default()
-            }],
-        )
-        .unwrap();
-        let live = vec![item("m1", 1, "raw"), item("t2", 2, "tail")];
-        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        let err = transform(&s, &req("ses", "cfg0", live.clone()), &ctx);
-        match err {
-            Err(TransformError::BoundaryNotPresent(_)) => {}
-            other => panic!("expected BoundaryNotPresent, got {other:?}"),
+    fn fold_minting_unpresentable_anchor_fails_loud_instead_of_looping() {
+        // A bare mid uses the wrong vocabulary; an empty id is never presentable. Either one
+        // would re-trigger the first-fold HARD forever, so the minting guard rejects it on every pass.
+        for (label, end_message_id) in [("bare-mid", "m1"), ("empty", "")] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments(
+                "ses",
+                &[StoredCompartment {
+                    sequence: 0,
+                    start_message: 1,
+                    end_message: 1,
+                    end_message_id: end_message_id.to_string(),
+                    title: "C0".to_string(),
+                    content: "S".to_string(),
+                    p1: Some("S".to_string()),
+                    importance: 50,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+            let live = vec![item("m1", 1, "raw"), item("t2", 2, "tail")];
+            let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+            let err = transform(&s, &req("ses", "cfg0", live.clone()), &ctx);
+            assert!(
+                matches!(err, Err(TransformError::BoundaryNotPresent(_))),
+                "{label}: expected BoundaryNotPresent, got {err:?}"
+            );
+            let retry = transform(&s, &req("ses", "cfg0", live), &ctx);
+            assert!(
+                matches!(retry, Err(TransformError::BoundaryNotPresent(_))),
+                "{label}: the retry must fail the same way"
+            );
         }
-        let retry = transform(&s, &req("ses", "cfg0", live), &ctx);
-        assert!(matches!(retry, Err(TransformError::BoundaryNotPresent(_))));
-    }
-
-    #[test]
-    fn fold_minting_empty_anchor_with_coverage_fails_loud() {
-        // An empty minted boundary with compartments present would re-trigger the first-fold HARD.
-        // The minting guard rejects an empty `end_message_id` before it can create the loop.
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments(
-            "ses",
-            &[StoredCompartment {
-                sequence: 0,
-                start_message: 1,
-                end_message: 1,
-                end_message_id: String::new(), // empty — never presentable
-                title: "C0".to_string(),
-                content: "S".to_string(),
-                p1: Some("S".to_string()),
-                importance: 50,
-                ..Default::default()
-            }],
-        )
-        .unwrap();
-        let live = vec![item("m1", 1, "raw")];
-        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        let err = transform(&s, &req("ses", "cfg0", live), &ctx);
-        assert!(matches!(err, Err(TransformError::BoundaryNotPresent(_))));
     }
 
     #[test]
@@ -19243,13 +19152,13 @@ pub(crate) mod tests {
         let ctx = pctx("git:proj", "/nonexistent-docs", 0);
         let first = transform(&s, &req("ses", "cfg0", live.clone()), &ctx);
         assert!(
-            first.is_err(),
-            "first-fold HARD hits the leading-gap fail-loud path"
+            matches!(first, Err(TransformError::CoverageGap(_))),
+            "a leading gap must fail loud instead of silently dropping the early live item: {first:?}"
         );
         let retry = transform(&s, &req("ses", "cfg0", live), &ctx);
         assert!(
-            retry.is_err(),
-            "state unchanged after the failed fold → the HARD retries and stays visible"
+            matches!(retry, Err(TransformError::CoverageGap(_))),
+            "state unchanged after the failed fold → the HARD retries and stays visible: {retry:?}"
         );
     }
 
@@ -19363,7 +19272,7 @@ pub(crate) mod tests {
         request.provider_id = Some("openai".to_string());
         request.model_key = Some("openai/gpt-5.6-sol".to_string());
         request.serve_native = true;
-        request.native_messages = Some(vec![native_tool_message.clone()]);
+        request.native_messages = Some(vec![Arc::new(native_tool_message.clone())]);
         *request
             .messages
             .iter_mut()
@@ -19719,44 +19628,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn permanently_unequal_compartment_revision_escalates_on_third_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let request = seed_astro_divergence(&store, "astro-stale-component", 2_402);
-        let loaded = store.load("astro-stale-component").unwrap();
-        let mut stale = loaded.meta.clone();
-        stale.m1_revision ^= u64::MAX;
-        stale.m1_compartment_seq = Some(1);
-        store
-            .commit(
-                "astro-stale-component",
-                loaded.row_version,
-                &loaded.core,
-                &stale,
-            )
-            .unwrap();
-
-        for _ in 1..BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT {
-            let deferred = run(&store, &request, &spine());
-            assert_eq!(deferred.action, "SOFT+");
-        }
-        let escalated = run(&store, &request, &spine());
-        assert_eq!(escalated.action, "HARD");
-        assert_eq!(
-            escalated.materialize_reason.as_deref(),
-            Some("boundary_divergence_recut")
-        );
-        assert_eq!(
-            store
-                .load("astro-stale-component")
-                .unwrap()
-                .meta
-                .boundary_divergence_pending_count,
-            0
-        );
-    }
-
-    #[test]
     fn active_wrapup_retains_divergence_count_until_the_window_closes() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -19981,30 +19852,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn leading_coverage_gap_fails_loud_not_silent_drop() {
-        // The first compartment starts at ordinal 10 while live items at ordinals 1..9 are uncovered and below coverage_ordinal; build_output would trim them, so the live coverage guard must return TransformError::CoverageGap.
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("ses", &[comp(1, 10, 20, "m20", "S")])
-            .unwrap();
-        let items = vec![
-            item("early", 1, "live before the first compartment"),
-            item("m20", 20, "covered"),
-            item("t21", 21, "tail"),
-        ];
-        let err = transform(
-            &s,
-            &req("ses", "cfg0", items),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, TransformError::CoverageGap(_)),
-            "a leading gap must fail loud, not silently drop the early live item: {err:?}"
-        );
-    }
-
-    #[test]
     fn interior_live_coverage_gap_fails_loud_not_silent_drop() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -20032,26 +19879,6 @@ pub(crate) mod tests {
             err.to_string().contains("m4"),
             "the uncovered live message should be named in the loud failure: {err:?}"
         );
-    }
-
-    #[test]
-    fn leading_coverage_gap_exempts_pinned_system_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("ses", &[comp(1, 1, 2, "m2", "S")])
-            .unwrap();
-        let items = vec![
-            system_item("sys0", 0, "identity lead"),
-            item("m2", 2, "covered"),
-            item("t3", 3, "tail"),
-        ];
-        let out = transform(
-            &s,
-            &req("ses", "cfg0", items),
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        )
-        .unwrap();
-        assert_eq!(out.coverage_ordinal, Some(2));
     }
 
     #[test]
@@ -20309,36 +20136,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn share_nothing_revert_arms_pending_instead_of_reconcile_rematerializing() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("ses", &[comp(1, 1, 10, "m10", "S1")])
-            .unwrap();
-        let before = run(
-            &s,
-            &req("ses", "cfg0", vec![item("m10", 10, "raw")]),
-            &spine(),
-        );
-        assert_eq!(before.action, "HARD");
-        assert_eq!(before.boundary_id, "m10#0");
-
-        let raw = run(
-            &s,
-            &req("ses", "cfg0", vec![item("z", 50, "other")]),
-            &spine(),
-        );
-        assert_eq!(raw.action, "PASSTHROUGH");
-        assert!(!raw.reconcile_pending);
-        assert_eq!(tail_ids(&raw), vec!["z"]);
-        let loaded = s.load("ses").unwrap();
-        assert_eq!(loaded.core.boundary_id, "m10#0");
-        assert!(!loaded.core.reconcile_pending);
-        assert!(loaded.meta.pending_rewrite.is_some());
-        assert_eq!(loaded.meta.revert_epoch, 0);
-        assert_eq!(s.load_compartments("ses").unwrap().len(), 1);
-    }
-
-    #[test]
     fn legacy_baseline_migrates_to_clean_m0_m1() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -20532,7 +20329,16 @@ pub(crate) mod tests {
 
         let request = req("single-anchor", "cfg0", vec![empty_message("anchor", 1)]);
         let projection = project_messages(&request.messages).unwrap();
-        let output = build_output(&core, &meta, &projection, &request, None, true, None).unwrap();
+        let output = build_output(
+            &core,
+            &meta,
+            &projection,
+            &normalize_synthetic_todo_ingress(&request),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
         let count = output
             .iter()
             .flat_map(|message| message.content().iter())
@@ -21062,56 +20868,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn synthetic_todo_aged_out_capture_composes_from_meta_on_bust() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.replace_compartments("aged", &[comp(1, 1, 2, "todo", "SUMMARY")])
-            .unwrap();
-        let todos = json!([{ "content": "Persisted", "status": "pending", "priority": "high" }]);
-        run(
-            &s,
-            &req(
-                "aged",
-                "cfg0",
-                vec![item("a", 1, "raw"), todowrite_call("todo", 2, todos)],
-            ),
-            &spine(),
-        );
-        let loaded = s.load("aged").unwrap();
-        let mut meta = loaded.meta;
-        meta.synthetic_todo = None;
-        meta.last_render_config = "force a hard".to_string();
-        s.commit("aged", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-
-        let aged = run(
-            &s,
-            &req(
-                "aged",
-                "cfg1",
-                vec![
-                    item("a", 1, "raw"),
-                    todowrite_call(
-                        "todo",
-                        2,
-                        json!([{ "content": "Persisted", "status": "pending", "priority": "high" }]),
-                    ),
-                ],
-            ),
-            &spine(),
-        );
-
-        assert_eq!(aged.action, "HARD");
-        assert_eq!(tail_ids(&aged), Vec::<&str>::new());
-        assert_eq!(
-            synthetic_todo_index(&aged),
-            2,
-            "None anchor appends after m0/m1 when no real tail remains"
-        );
-        assert!(s.load("aged").unwrap().meta.synthetic_todo.is_some());
-    }
-
-    #[test]
     fn synthetic_todo_none_anchor_stays_before_grown_tail_on_defer() {
         // Pairs frozen with `anchor_mid = None` remain immediately after `m0`/`m1` when later defers grow the tail.
         // Pairs frozen with `anchor_mid = None` remain immediately after `m0`/`m1`, not at the end of the tail.
@@ -21387,7 +21143,12 @@ pub(crate) mod tests {
             .map(|row| row.block_id.as_str())
             .collect::<HashSet<_>>();
         let legacy = legacy_tag_mint_inputs(&projection, &core, None, &existing_ids);
+        let before = crate::token_cache::local_stats();
         let optimized = tag_mint_inputs(&projection, &core, None, &existing_ids);
+        assert_eq!(
+            crate::token_cache::local_stats().calls - before.calls,
+            NEW_TAG_COUNT as u64
+        );
 
         assert_eq!(optimized.inputs, legacy.inputs);
         assert_eq!(optimized.candidate_count, legacy.candidate_count);
@@ -21407,6 +21168,34 @@ pub(crate) mod tests {
         let mut optimized_rows = mature_rows;
         append_tag_mint_rows(&mut optimized_rows, optimized.inputs, 200);
         assert_eq!(optimized_rows, legacy_rows);
+
+        let meta = ModuleMeta::default();
+        let before = crate::token_cache::local_stats();
+        let stored = active_tags_for_channel2(&core, &meta, &projection, &optimized_rows, None);
+        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
+        let derived = active_tags_for_channel2(&core, &meta, &projection, &[], None);
+        assert_eq!(
+            crate::token_cache::local_stats().calls - before.calls,
+            MESSAGE_COUNT as u64
+        );
+        assert_eq!(stored.len(), derived.len());
+        for (stored, derived) in stored.iter().zip(&derived) {
+            assert_eq!(
+                (stored.tag_number, &stored.kind, stored.token_count),
+                (derived.tag_number, &derived.kind, derived.token_count)
+            );
+        }
+        let existing_ids = optimized_rows
+            .iter()
+            .map(|row| row.block_id.as_str())
+            .collect();
+        let before = crate::token_cache::local_stats();
+        assert!(
+            tag_mint_inputs(&projection, &core, None, &existing_ids)
+                .inputs
+                .is_empty()
+        );
+        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
     }
 
     #[test]
@@ -21490,76 +21279,48 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opencode_surface_flip_folds_once_before_rendering_tags() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let mut request =
-            opencode_req("opencode-flip", "cfg0", vec![item("m1", 1, "stable bytes")]);
-
-        let before = run(&s, &request, &spine());
-        let before_config = s.load("opencode-flip").unwrap().meta.last_render_config;
-        assert_eq!(before.action, "HARD");
-        assert!(!before_config.contains("tfe:"));
-
-        request.tool_present = true;
-        let transition = run(&s, &request, &spine());
-        let transitioned_config = s.load("opencode-flip").unwrap().meta.last_render_config;
-        assert_eq!(transition.action, "HARD");
-        assert_ne!(transitioned_config, before_config);
-        assert!(transitioned_config.contains("tfe:4:tfe3"));
-        assert!(
-            !serde_json::to_string(transition.messages())
-                .unwrap()
-                .contains("§1§")
-        );
-
-        let active = run(&s, &request, &spine());
-        assert_ne!(active.action, "HARD");
-        assert_eq!(
-            s.load("opencode-flip").unwrap().meta.last_render_config,
-            transitioned_config
-        );
-        assert!(
-            serde_json::to_string(active.messages())
-                .unwrap()
-                .contains("§1§ stable bytes")
-        );
-    }
-
-    #[test]
     fn tagger_flip_hards_before_committed_identity_can_render_tags() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let mut request = cc_req("flip", "cfg0", vec![item("m1", 1, "hello")]);
+        // The flip pass folds once with the tagger epoch in the render identity but serves
+        // untagged bytes; tags render only after that identity is durable.
+        type Builder = fn(&str, &str, Vec<IngressMessage>) -> TransformRequest;
+        let builders: [(&str, Builder); 2] = [("opencode-flip", opencode_req), ("flip", cc_req)];
+        for (session, build) in builders {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let mut request = build(session, "cfg0", vec![item("m1", 1, "hello")]);
 
-        let before_flip = run(&s, &request, &spine());
-        assert_eq!(before_flip.action, "HARD");
-        assert_eq!(tail_bytes(&before_flip, "m1"), "hello");
-        assert!(
-            !s.load("flip")
-                .unwrap()
-                .meta
-                .last_render_config
-                .contains("tfe:")
-        );
+            let before_flip = run(&s, &request, &spine());
+            let before_config = s.load(session).unwrap().meta.last_render_config;
+            assert_eq!(before_flip.action, "HARD", "{session}");
+            assert_eq!(tail_bytes(&before_flip, "m1"), "hello", "{session}");
+            assert!(!before_config.contains("tfe:"), "{session}");
 
-        request.tool_present = true;
-        let transition = run(&s, &request, &spine());
-        assert_eq!(transition.action, "HARD");
-        assert_eq!(tail_bytes(&transition, "m1"), "hello");
-        assert!(s.load_tags_for_session("flip").unwrap().is_empty());
-        assert!(
-            s.load("flip")
-                .unwrap()
-                .meta
-                .last_render_config
-                .contains("tfe:4:tfe3")
-        );
+            request.tool_present = true;
+            let transition = run(&s, &request, &spine());
+            let transitioned_config = s.load(session).unwrap().meta.last_render_config;
+            assert_eq!(transition.action, "HARD", "{session}");
+            assert_eq!(tail_bytes(&transition, "m1"), "hello", "{session}");
+            assert!(
+                s.load_tags_for_session(session).unwrap().is_empty(),
+                "{session}"
+            );
+            assert_ne!(transitioned_config, before_config, "{session}");
+            assert!(transitioned_config.contains("tfe:4:tfe3"), "{session}");
 
-        let after_commit = run(&s, &request, &spine());
-        assert_eq!(after_commit.action, "SOFT+");
-        assert_eq!(tail_bytes(&after_commit, "m1"), "§1§ hello");
-        assert_eq!(s.load_tags_for_session("flip").unwrap().len(), 1);
+            let after_commit = run(&s, &request, &spine());
+            assert_eq!(after_commit.action, "SOFT+", "{session}");
+            assert_eq!(
+                s.load(session).unwrap().meta.last_render_config,
+                transitioned_config,
+                "{session}"
+            );
+            assert_eq!(tail_bytes(&after_commit, "m1"), "§1§ hello", "{session}");
+            assert_eq!(
+                s.load_tags_for_session(session).unwrap().len(),
+                1,
+                "{session}"
+            );
+        }
     }
 
     #[test]
@@ -21797,85 +21558,58 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn temporal_gap_trailing_role_system_reminder_keeps_authored_user_eligible() {
+    fn temporal_gap_trailing_transport_reminders_keep_authored_user_eligible() {
         run_active_surface_test(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let s = store(dir.path());
-            let first = active_cc_req(
-                "temporal-system-tail",
-                "cfg0",
-                vec![wire_item("user", "m1", 1, &["start"])],
-            );
-            run(&s, &first, &spine());
-            run(&s, &first, &spine());
-
-            let mut request = active_cc_req(
-                "temporal-system-tail",
-                "cfg0",
-                vec![
-                    first.messages[0].clone(),
-                    wire_item("assistant", "m2", 2, &["answer"]),
-                    wire_item("user", "m3", 3, &["question"]),
+            // Both a role=system reminder and a standalone reminder-shaped user message are transport, so the authored tail stays at m3.
+            for (session, reminder) in [
+                (
+                    "temporal-system-tail",
                     system_item("reminder", 4, "transport reminder"),
-                ],
-            );
-            request.prev_response_completed_at_ms = Some(10_000);
-            request.request_observed_at_ms = Some(730_000);
-            let response = transform(
-                &s,
-                &request,
-                &pctx("git:proj", "/nonexistent-docs", 730_000),
-            )
-            .unwrap();
-            assert_eq!(
-                tail_bytes(&response, "m3"),
-                "<!-- +12m -->\n§3§ question",
-                "role=system reminders are skipped when resolving the authored tail"
-            );
-        });
-    }
-
-    #[test]
-    fn temporal_gap_standalone_system_reminder_user_is_transport() {
-        run_active_surface_test(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let s = store(dir.path());
-            let first = active_cc_req(
-                "temporal-user-reminder",
-                "cfg0",
-                vec![wire_item("user", "m1", 1, &["start"])],
-            );
-            run(&s, &first, &spine());
-            run(&s, &first, &spine());
-
-            let mut request = active_cc_req(
-                "temporal-user-reminder",
-                "cfg0",
-                vec![
-                    first.messages[0].clone(),
-                    wire_item("assistant", "m2", 2, &["answer"]),
-                    wire_item("user", "m3", 3, &["question"]),
+                ),
+                (
+                    "temporal-user-reminder",
                     wire_item(
                         "user",
                         "reminder",
                         4,
                         &["<system-reminder>background work finished</system-reminder>"],
                     ),
-                ],
-            );
-            request.prev_response_completed_at_ms = Some(10_000);
-            request.request_observed_at_ms = Some(730_000);
-            let response = transform(
-                &s,
-                &request,
-                &pctx("git:proj", "/nonexistent-docs", 730_000),
-            )
-            .unwrap();
-            assert_eq!(
-                tail_bytes(&response, "m3"),
-                "<!-- +12m -->\n§3§ question",
-                "a standalone reminder-shaped user message is transport, not an authored tail"
-            );
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = store(dir.path());
+                let first = active_cc_req(
+                    session,
+                    "cfg0",
+                    vec![wire_item("user", "m1", 1, &["start"])],
+                );
+                run(&s, &first, &spine());
+                run(&s, &first, &spine());
+
+                let mut request = active_cc_req(
+                    session,
+                    "cfg0",
+                    vec![
+                        first.messages[0].clone(),
+                        wire_item("assistant", "m2", 2, &["answer"]),
+                        wire_item("user", "m3", 3, &["question"]),
+                        reminder,
+                    ],
+                );
+                request.prev_response_completed_at_ms = Some(10_000);
+                request.request_observed_at_ms = Some(730_000);
+                let response = transform(
+                    &s,
+                    &request,
+                    &pctx("git:proj", "/nonexistent-docs", 730_000),
+                )
+                .unwrap();
+                assert_eq!(
+                    tail_bytes(&response, "m3"),
+                    "<!-- +12m -->\n§3§ question",
+                    "{session}: trailing transport must not displace the authored tail"
+                );
+            }
         });
     }
 
@@ -22068,39 +21802,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn v2_request_tolerates_absent_previous_response_completion() {
-        let parsed: TransformRequest = serde_json::from_value(serde_json::json!({
-            "kind": "transform",
-            "v": 2,
-            "serializer_profile": "claude-code-anthropic",
-            "session_id": "parse-gap",
-            "render_config": "cfg",
-            "messages": []
-        }))
-        .unwrap();
-        assert_eq!(parsed.prev_response_completed_at_ms, None);
-    }
-
-    #[test]
-    fn user_hint_query_strips_transport_markup_and_keeps_full_input() {
-        let long_tail = "x".repeat(600);
-        let message = wire_item(
-            "user",
-            "query",
-            1,
-            &[
-                "§12§ keep <system-reminder>drop <system-reminder>nested</system-reminder> tail</system-reminder> words",
-                &long_tail,
-            ],
-        );
-        let query = user_hint_query(&message);
-        assert_eq!(query, format!("keep words {long_tail}"));
-        assert!(!query.contains("§12§"));
-        assert!(!query.contains("drop"));
-        assert!(query.chars().count() > 500);
-    }
-
-    #[test]
     fn user_hint_query_sanitizes_nested_reminders_comments_markup_and_tags() {
         let cases = [
             (
@@ -22124,6 +21825,27 @@ pub(crate) mod tests {
             let message = wire_item("user", "query-sanitization", 1, &[input]);
             assert_eq!(user_hint_query(&message), expected, "{name}");
         }
+
+        // Multi-block prompts are joined without truncation.
+        let long_tail = "x".repeat(600);
+        let multi_block = wire_item(
+            "user",
+            "query",
+            1,
+            &[
+                "§12§ keep <system-reminder>drop <system-reminder>nested</system-reminder> tail</system-reminder> words",
+                &long_tail,
+            ],
+        );
+        let query = user_hint_query(&multi_block);
+        assert_eq!(query, format!("keep words {long_tail}"));
+        assert!(query.chars().count() > 500);
+
+        let complete_prefix = "word ".repeat(110);
+        let full_prompt = format!("{complete_prefix}discriminatingterm suffix");
+        let query = user_hint_query(&wire_item("user", "m1", 1, &[&full_prompt]));
+        assert_eq!(query, full_prompt.trim());
+        assert!(query.chars().count() > 500);
     }
 
     #[test]
@@ -22161,7 +21883,12 @@ pub(crate) mod tests {
                 tool_result("result-tool", 2, "call", "output"),
             ],
         );
-        assert_eq!(eligible_authored_user_tail(&role_tool).unwrap().mid, "m1");
+        assert_eq!(
+            eligible_authored_user_tail(&normalize_synthetic_todo_ingress(&role_tool))
+                .unwrap()
+                .mid,
+            "m1"
+        );
 
         let role_user = active_cc_req(
             "user-result-tail",
@@ -22175,18 +21902,16 @@ pub(crate) mod tests {
                 ),
             ],
         );
-        assert_eq!(eligible_authored_user_tail(&role_user).unwrap().mid, "m1");
-        assert!(!is_authored_user_message(&role_user.messages[1]));
-    }
-
-    #[test]
-    fn user_hint_query_keeps_terms_beyond_the_old_character_cap() {
-        let complete_prefix = "word ".repeat(110);
-        let full_prompt = format!("{complete_prefix}discriminatingterm suffix");
-        let query = user_hint_query(&wire_item("user", "m1", 1, &[&full_prompt]));
-        assert_eq!(query, full_prompt.trim());
-        assert!(query.contains("discriminatingterm suffix"));
-        assert!(query.chars().count() > 500);
+        assert_eq!(
+            eligible_authored_user_tail(&normalize_synthetic_todo_ingress(&role_user))
+                .unwrap()
+                .mid,
+            "m1"
+        );
+        assert!(
+            !normalize_synthetic_todo_ingress(&role_user)
+                .is_authored_user_message(&role_user.messages[1])
+        );
     }
 
     #[test]
@@ -22716,35 +22441,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn subc_reversibility_full_array_cc_applies_pending_drop_without_an_active_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let messages = (1..=30)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, "old live content"))
-            .collect::<Vec<_>>();
-        let mut inactive = cc_req("false-window", "cfg0", messages.clone());
-        run(&store, &inactive, &spine());
-        store
-            .append_pending_agent_drops("false-window", &["m1#0".to_string()], 1)
-            .unwrap();
-
-        // The first tool-absent emergency pass already applies the drop.
-        inactive.render_config = "cfg1".to_string();
-        let response = run(&store, &with_usage(inactive.clone(), 99, 100), &spine());
-        assert_eq!(response.action, "HARD");
-        assert_eq!(
-            frozen_red_payload(&store.load("false-window").unwrap().core, "m1#0"),
-            Some("[dropped]")
-        );
-        assert!(
-            store
-                .load_pending_agent_drops("false-window")
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn subc_reversibility_true_reduction_stays_canonical_after_false_flip() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -22786,9 +22482,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn latched_execute_without_concrete_work_preserves_supersession_bytes() {
+    fn latched_execute_batches_supersession_on_the_next_concrete_bust() {
         const LATCHED_PASSES: usize = 3;
-        const SESSION: &str = "latched-supersession-idle";
+        const SESSION: &str = "latched-supersession-batch";
 
         let dir = tempfile::tempdir().unwrap();
         let reference_dir = tempfile::tempdir().unwrap();
@@ -22806,6 +22502,7 @@ pub(crate) mod tests {
         ];
         let mut context = smart_pctx();
         context.cache_ttl = "never".to_string();
+        // The reference store never enables smart drops, so its render is the unreduced byte identity.
         let mut reference_context = pctx("git:proj", "/nonexistent-docs", 0);
         reference_context.cache_ttl = "never".to_string();
         let boot_request = with_usage(cc_req(SESSION, "cfg0", messages.clone()), 10, 100);
@@ -22835,7 +22532,7 @@ pub(crate) mod tests {
             next_ordinal += 1;
             for message in 0..crate::selection::RECENT_TOOL_SKELETON_WINDOW {
                 messages.push(item(
-                    &format!("latched-{pass}-tail-{message}"),
+                    &format!("batch-{pass}-tail-{message}"),
                     next_ordinal,
                     "stable tail",
                 ));
@@ -22868,102 +22565,12 @@ pub(crate) mod tests {
             assert_eq!(
                 &rendered[..previous_bytes.len()],
                 previous_bytes.as_slice(),
-                "latched Execute pass {pass} must preserve all previously served bytes"
+                "latched Execute pass {pass} must not rewrite an existing byte"
             );
             let loaded = store.load(SESSION).unwrap();
             assert!(loaded.meta.emergency_drain_active);
             assert!(
                 loaded
-                    .core
-                    .frozen_units
-                    .iter()
-                    .all(|unit| !unit.key.starts_with("red:")),
-                "latched Execute pass {pass} must leave supersession pending"
-            );
-            previous_bytes = rendered;
-        }
-    }
-
-    #[test]
-    fn latched_execute_batches_supersession_on_the_next_concrete_bust() {
-        const LATCHED_PASSES: usize = 3;
-        const SESSION: &str = "latched-supersession-batch";
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        store
-            .replace_compartments(SESSION, &[comp(1, 1, 1, "covered", "summary")])
-            .unwrap();
-        let mut messages = vec![
-            item("covered", 1, "covered source"),
-            assistant_edit_call("edit-call-1", 2, "edit-1", "shared.ts"),
-            edit_result("edit-result-1", 3, "edit-1", "result one"),
-        ];
-        let mut context = smart_pctx();
-        context.cache_ttl = "never".to_string();
-        let boot = transform(
-            &store,
-            &with_usage(cc_req(SESSION, "cfg0", messages.clone()), 10, 100),
-            &context,
-        )
-        .unwrap();
-        let mut previous_bytes = canonical_output(boot.messages());
-
-        let mut next_ordinal = 4u64;
-        for pass in 1..=LATCHED_PASSES {
-            let edit_number = pass + 1;
-            let call_id = format!("edit-{edit_number}");
-            messages.push(assistant_edit_call(
-                &format!("edit-call-{edit_number}"),
-                next_ordinal,
-                &call_id,
-                "shared.ts",
-            ));
-            next_ordinal += 1;
-            messages.push(edit_result(
-                &format!("edit-result-{edit_number}"),
-                next_ordinal,
-                &call_id,
-                &format!("result {edit_number}"),
-            ));
-            next_ordinal += 1;
-            for message in 0..crate::selection::RECENT_TOOL_SKELETON_WINDOW {
-                messages.push(item(
-                    &format!("batch-{pass}-tail-{message}"),
-                    next_ordinal,
-                    "stable tail",
-                ));
-                next_ordinal += 1;
-            }
-
-            let loaded = store.load(SESSION).unwrap();
-            let mut meta = loaded.meta;
-            meta.soft_refresh_pending = false;
-            meta.deferred_execute_state = Some(memory_store::DeferredExecuteState {
-                reason: "execute-none".to_string(),
-            });
-            meta.emergency_drain_active = true;
-            meta.emergency_drain_entered_at_ms = 1;
-            store
-                .commit(SESSION, loaded.row_version, &loaded.core, &meta)
-                .unwrap();
-
-            let latched = transform(
-                &store,
-                &with_usage(cc_req(SESSION, "cfg0", messages.clone()), 60, 100),
-                &context,
-            )
-            .unwrap();
-            let rendered = canonical_output(latched.messages());
-            assert_eq!(
-                &rendered[..previous_bytes.len()],
-                previous_bytes.as_slice(),
-                "latched Execute pass {pass} must not rewrite an existing byte"
-            );
-            assert!(
-                store
-                    .load(SESSION)
-                    .unwrap()
                     .core
                     .frozen_units
                     .iter()
@@ -23554,46 +23161,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn newest_tag_block_set_excludes_stale_provenance_from_slots() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        // m21#0 has stale provenance and cannot occupy a protected slot.
-        // The 20 protected blocks are m20#0 through m1#0, so m1#0's pending drop remains pending.
-        // Skipping the provenance re-check frees m1#0 and applies its drop.
-        let messages = (1..=21)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
-            .collect::<Vec<_>>();
-        let tags = (1..=21)
-            .map(|ordinal| TagMintInput {
-                block_id: format!("m{ordinal}#0"),
-                kind: "message".to_string(),
-                token_count: 1,
-                source_bytes: if ordinal == 21 {
-                    b"stale bytes".to_vec()
-                } else {
-                    format!("text {ordinal}").into_bytes()
-                },
-            })
-            .collect::<Vec<_>>();
-        store.seed_tags_for_test("stale-slot", &tags, 1).unwrap();
-        store
-            .append_pending_agent_drops("stale-slot", &["m1#0".to_string()], 2)
-            .unwrap();
-
-        let response = run(
-            &store,
-            &active_cc_req("stale-slot", "cfg0", messages),
-            &spine(),
-        );
-        assert_eq!(response.action, "HARD");
-        let loaded = store.load("stale-slot").unwrap();
-        assert_eq!(frozen_red_payload(&loaded.core, "m1#0"), None);
-        let pending = store.load_pending_agent_drops("stale-slot").unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].target_id, "m1#0");
-    }
-
-    #[test]
     fn full_array_cc_dormant_forced_hard_applies_pending_drop_directly() {
         // The profile alone gates reclaim.
         // forced HARD applies the drop itself; the active pass then finds nothing pending.
@@ -23776,22 +23343,6 @@ pub(crate) mod tests {
         let durable = store.load("mixed-freezes").unwrap().core;
         assert_eq!(frozen_red_payload(&durable, "m1#0"), Some("[dropped §7§]"));
         assert_eq!(frozen_red_payload(&durable, "m2#0"), Some("[dropped]"));
-    }
-
-    #[test]
-    fn missing_todo_tool_verdict_deserializes_as_fail_closed() {
-        let mut wire = serde_json::to_value(profile_req(
-            SerializerProfile::OpencodeAiSdk,
-            "todo-verdict-default",
-            "cfg0",
-            vec![item("a", 1, "first")],
-        ))
-        .unwrap();
-        wire.as_object_mut().unwrap().remove("todo_tool_present");
-        assert!(wire.get("todo_tool_present").is_none());
-        let request: TransformRequest = serde_json::from_value(wire).unwrap();
-
-        assert_eq!(request.todo_tool_present, None);
     }
 
     #[test]
@@ -24167,16 +23718,307 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn protected_floor_has_no_global_estimator_bypass() {
+    fn production_transform_module_has_no_global_estimator_bypass() {
         let source = include_str!("transform.rs");
-        let helper = source
-            .split_once("fn protected_tail_floor_ordinal(")
-            .and_then(|(_, rest)| rest.split_once("fn post_end_revision_inputs_moved"))
-            .map(|(body, _)| body)
-            .expect("protected-tail floor helper source");
+        let (production, _) = source
+            .split_once("\npub(crate) mod tests {")
+            .expect("test module");
+        for required in [
+            "PassPlan::Soft =>",
+            "fn soft_pressure_refold(",
+            "fn cached_or_serialize_output(",
+            "fn tag_mint_inputs_from(",
+            "fn active_tags_for_channel2(",
+        ] {
+            assert!(
+                production.contains(required),
+                "source scan must cover {required}"
+            );
+        }
+        let bypasses = production
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim_start().starts_with("//"))
+            .filter(|(_, line)| line.contains("tokenizer::"))
+            .collect::<Vec<_>>();
         assert!(
-            !helper.contains("tokenizer::estimate_tokens("),
-            "the floor helper must use the injected estimator interface"
+            bypasses.is_empty(),
+            "production transform module must use the injected or cached estimator: {bypasses:?}"
+        );
+    }
+
+    fn frozen_soft_pressure_refold(
+        core: &CoreState,
+        m1: &crate::m1_compose::M1Composition,
+        history_budget_tokens: f64,
+        memory_update_count: usize,
+    ) -> bool {
+        let m0_tokens = core
+            .frozen_units
+            .iter()
+            .find(|unit| unit.key == "m0")
+            .map(|unit| tokenizer::estimate_tokens(&unit.frozen_payload))
+            .unwrap_or(0);
+        let m1_has_content = m1.body != M1_PLACEHOLDER;
+        let m1_tokens = if m1_has_content {
+            tokenizer::estimate_tokens(&m1.body)
+        } else {
+            0
+        };
+        memory_update_count > 40
+            || (m1_has_content
+                && m1_tokens as f64 > (history_budget_tokens * 0.20)
+                && history_budget_tokens > 0.0)
+            || (m1_has_content && m0_tokens >= 500 && m1_tokens as f64 > m0_tokens as f64 * 0.15)
+    }
+
+    #[test]
+    fn soft_pressure_classification_matches_frozen_thresholds() {
+        let summaries = {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            bootstrap_covering_a(&s);
+            let meta = s.load("ses").unwrap().meta;
+            [74, 75, 76].map(|target| {
+                let n = (0..100)
+                    .find(|&n| {
+                        s.replace_compartments(
+                            "ses",
+                            &[
+                                comp(1, 1, 1, "a", "SUMMARY"),
+                                comp(2, 2, 2, "b", &" x".repeat(n)),
+                            ],
+                        )
+                        .unwrap();
+                        let m1 = compose_m1(
+                            &s,
+                            "git:proj",
+                            "ses",
+                            &meta,
+                            0,
+                            true,
+                            10_000.0,
+                            true,
+                            tokenizer::estimate_tokens,
+                        )
+                        .unwrap();
+                        tokenizer::estimate_tokens(&m1.body) == target
+                    })
+                    .expect("construct exact composed m1 token count");
+                (target, " x".repeat(n))
+            })
+        };
+        let mut witnessed = [false; 3];
+        for m0_tokens in [499, 500] {
+            for (target_m1_tokens, summary) in &summaries {
+                let target_m1_tokens = *target_m1_tokens;
+                for budget in [0.0, -1.0, 365.0, 370.0, 375.0, 380.0, 385.0, 100_000.0] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let s = store(dir.path());
+                    bootstrap_covering_a(&s);
+                    let mut loaded = s.load("ses").unwrap();
+                    let m0 = loaded
+                        .core
+                        .frozen_units
+                        .iter_mut()
+                        .find(|u| u.key == "m0")
+                        .unwrap();
+                    m0.frozen_payload = " x".repeat(m0_tokens);
+                    assert_eq!(tokenizer::estimate_tokens(&m0.frozen_payload), m0_tokens);
+                    s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                        .unwrap();
+                    s.replace_compartments(
+                        "ses",
+                        &[comp(1, 1, 1, "a", "SUMMARY"), comp(2, 2, 2, "b", summary)],
+                    )
+                    .unwrap();
+                    let m1 = compose_m1(
+                        &s,
+                        "git:proj",
+                        "ses",
+                        &loaded.meta,
+                        0,
+                        true,
+                        10_000.0,
+                        true,
+                        tokenizer::estimate_tokens,
+                    )
+                    .unwrap();
+                    assert_eq!(tokenizer::estimate_tokens(&m1.body), target_m1_tokens);
+                    let expected = frozen_soft_pressure_refold(&loaded.core, &m1, budget, 0);
+                    let budget_pressure = budget > 0.0 && target_m1_tokens as f64 > budget * 0.20;
+                    let ratio_pressure =
+                        m0_tokens >= 500 && target_m1_tokens as f64 > m0_tokens as f64 * 0.15;
+                    witnessed[0] |= budget_pressure && !ratio_pressure;
+                    witnessed[1] |= ratio_pressure && !budget_pressure;
+                    witnessed[2] |= !budget_pressure && !ratio_pressure;
+                    s.arm_soft_refresh("ses").unwrap();
+                    let mut context = pctx("git:proj", "/nonexistent-docs", 0);
+                    context.history_budget_tokens = budget;
+                    let request = req(
+                        "ses",
+                        "cfg0",
+                        vec![
+                            item("a", 1, "raw"),
+                            item("b", 2, "new"),
+                            item("c", 3, "tail"),
+                        ],
+                    );
+                    let observed = std::cell::RefCell::new(Vec::new());
+                    let estimate = |text: &str| {
+                        observed.borrow_mut().push(text.to_string());
+                        let cached = crate::token_cache::cached_estimate_tokens(text);
+                        assert_eq!(cached, tokenizer::estimate_tokens(text));
+                        cached
+                    };
+                    let result = apply_once_with_estimator(&s, &request, &context, estimate, None)
+                        .unwrap()
+                        .response;
+                    let observed = observed.borrow();
+                    assert!(
+                        observed.contains(&" x".repeat(m0_tokens)),
+                        "SOFT measures frozen m0 through injection"
+                    );
+                    assert!(
+                        observed.contains(&m1.body),
+                        "SOFT measures composed m1 through injection"
+                    );
+                    assert_eq!(result.action, if expected { "HARD" } else { "SOFT" });
+                    assert_eq!(
+                        result.materialize_reason.as_deref() == Some("pressure_refold"),
+                        expected,
+                        "m0={m0_tokens}, m1={target_m1_tokens}, budget={budget}"
+                    );
+                }
+            }
+        }
+        assert!(
+            witnessed[0],
+            "soft-pressure-refold-thresholds-are-each-crossed-budget-share"
+        );
+        assert!(
+            witnessed[1],
+            "soft-pressure-refold-thresholds-are-each-crossed-m0-ratio"
+        );
+        assert!(
+            witnessed[2],
+            "soft-pressure-refold-thresholds-are-each-crossed-below"
+        );
+    }
+
+    #[test]
+    fn soft_pressure_absence_and_placeholder_preserve_estimator_gates() {
+        let _guard = crate::token_cache::test_cache_guard();
+        for has_m0 in [false, true] {
+            for body in [
+                M1_PLACEHOLDER,
+                "",
+                " x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x",
+            ] {
+                let mut core = CoreState::empty();
+                if has_m0 {
+                    core.frozen_units.push(synth_region("m0", " x".repeat(500)));
+                }
+                let m1 = crate::m1_compose::M1Composition {
+                    body: body.to_string(),
+                    new_coverage: None,
+                    note_deliveries: Vec::new(),
+                    profile_rendered: false,
+                    notes_block: String::new(),
+                };
+                let observed = std::cell::RefCell::new(Vec::new());
+                let estimate = |text: &str| {
+                    observed.borrow_mut().push(text.to_string());
+                    crate::token_cache::cached_estimate_tokens(text)
+                };
+                for budget in [0.0, -1.0, 1.0, 100_000.0] {
+                    observed.borrow_mut().clear();
+                    let before = crate::token_cache::local_stats();
+                    let actual = soft_pressure_refold(&core.frozen_units, body, budget, estimate);
+                    let after = crate::token_cache::local_stats();
+                    assert_eq!(actual, frozen_soft_pressure_refold(&core, &m1, budget, 0));
+                    let expected_calls = usize::from(has_m0) + usize::from(body != M1_PLACEHOLDER);
+                    assert_eq!(observed.borrow().len(), expected_calls);
+                    assert_eq!(after.calls - before.calls, expected_calls as u64);
+                    assert!(!observed.borrow().iter().any(|text| text == M1_PLACEHOLDER));
+                    if has_m0 {
+                        assert_eq!(observed.borrow()[0], core.frozen_units[0].frozen_payload);
+                    }
+                    if body != M1_PLACEHOLDER {
+                        assert_eq!(observed.borrow().last().map(String::as_str), Some(body));
+                    }
+                }
+            }
+        }
+        let core = vec![synth_region("m0", " x".repeat(500))];
+        let body = " y".repeat(76);
+        soft_pressure_refold(
+            &core,
+            &body,
+            100_000.0,
+            crate::token_cache::cached_estimate_tokens,
+        );
+        let before = crate::token_cache::local_stats();
+        assert!(soft_pressure_refold(
+            &core,
+            &body,
+            100_000.0,
+            crate::token_cache::cached_estimate_tokens
+        ));
+        let after = crate::token_cache::local_stats();
+        assert_eq!(after.hits - before.hits, 2);
+    }
+
+    #[test]
+    fn selection_input_shares_projected_wire_value() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../testdata/selection-golden.json")).unwrap();
+        let calls = cases
+            .iter()
+            .flat_map(|case| case["items"].as_array().unwrap())
+            .filter_map(|item| item["kind"].get("ToolCall"));
+        let mut checked = 0;
+        for call in calls {
+            let mut message = assistant_tool_call("call", 1, "call-id");
+            *message.ck.content_mut()[0].kind_mut() = wire::BlockKind::ToolCall {
+                id: "call-id".to_string(),
+                name: call["name"].as_str().unwrap().to_string(),
+                input: call["input"].clone(),
+                provider_executed: false,
+            };
+            let projection = project_messages(&[message]).unwrap();
+            let flat = &projection.blocks[0];
+            let wire::BlockKind::ToolCall {
+                input: original, ..
+            } = flat.wire.kind()
+            else {
+                panic!("tool call")
+            };
+            assert_eq!(original, &call["input"]);
+            // `FlatBlock` holds no input outside `wire`; `wire` itself may retain it twice.
+            let flat_fields = serde_json::to_value(flat).unwrap();
+            assert!(
+                flat_fields.get("tool_input").is_none(),
+                "projection must not retain a tool input copy outside `wire`: {flat_fields}"
+            );
+            let item = sel_item_from_flat(flat, &HashMap::new());
+            let cloned = item.clone();
+            let boundary = crate::sel_kind_for_flat(flat);
+            for kind in [&item.kind, &cloned.kind, &boundary] {
+                let SelKind::ToolCall { input, .. } = kind else {
+                    panic!("selection tool call")
+                };
+                assert_eq!(input.as_ref(), original);
+                assert!(
+                    std::ptr::eq(input.as_ref(), original),
+                    "selection must borrow the projected wire input"
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 48,
+            "every tool call in the frozen corpus is checked"
         );
     }
     fn profile_req(
@@ -24507,7 +24349,7 @@ pub(crate) mod tests {
             &core,
             &ModuleMeta::default(),
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -24545,7 +24387,7 @@ pub(crate) mod tests {
                 &core,
                 &ModuleMeta::default(),
                 &projection,
-                &request,
+                &normalize_synthetic_todo_ingress(&request),
                 None,
                 false,
                 None,
@@ -25542,33 +25384,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn inactive_surface_omits_tagger_epoch_and_keeps_render_identity() {
-        assert_eq!(crate::tagger_feature_epoch(false), 0);
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        let request = cc_req(
-            "inactive-tfe",
-            "pe1/tf1/gfull",
-            vec![wire_item("user", "m1", 1, &["raw bytes"])],
-        );
-        let first = run(&s, &request, &spine());
-        let first_config = s.load("inactive-tfe").unwrap().meta.last_render_config;
-        assert!(!first_config.contains("tfe:"));
-
-        let replay = run(&s, &request, &spine());
-        assert_ne!(replay.action, "HARD");
-        assert_eq!(
-            s.load("inactive-tfe").unwrap().meta.last_render_config,
-            first_config
-        );
-        assert_eq!(
-            serde_json::to_vec(first.messages()).unwrap(),
-            serde_json::to_vec(replay.messages()).unwrap()
-        );
-        assert_eq!(tail_bytes(&replay, "m1"), "raw bytes");
-    }
-
-    #[test]
     fn profile_epoch_fold_hards_epoch_zero_cc_state_once() {
         assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
         let dir = tempfile::tempdir().unwrap();
@@ -26012,7 +25827,7 @@ pub(crate) mod tests {
             &core,
             &ModuleMeta::default(),
             &projection,
-            request,
+            &normalize_synthetic_todo_ingress(request),
             None,
             false,
             None,
@@ -26069,14 +25884,6 @@ pub(crate) mod tests {
         );
     }
 
-    fn assert_fresh_reasoning_adjacency_is_skeletonized(next_has_reasoning: bool) {
-        assert_fresh_reasoning_adjacency_messages_are_skeletonized(reasoning_adjacency_fixture(
-            true,
-            true,
-            next_has_reasoning,
-        ));
-    }
-
     #[test]
     fn reasoning_only_tool_arc_remains_unreduced_and_separated() {
         let request = cc_req(
@@ -26097,19 +25904,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn text_bearing_tool_arc_skeletonizes_between_two_reasoning_assistants() {
-        assert_fresh_reasoning_adjacency_is_skeletonized(true);
-    }
-
-    #[test]
-    fn text_bearing_tool_arc_skeletonizes_when_only_left_assistant_has_reasoning() {
-        assert_fresh_reasoning_adjacency_is_skeletonized(false);
-    }
-
-    #[test]
-    fn text_bearing_tool_arc_skeletonizes_across_redacted_reasoning() {
-        let mut messages = reasoning_adjacency_fixture(false, true, false);
-        let right = messages
+    fn text_bearing_tool_arc_skeletonizes_across_reasoning_adjacency_shapes() {
+        let mut redacted_right = reasoning_adjacency_fixture(false, true, false);
+        let right = redacted_right
             .iter_mut()
             .find(|message| message.mid == "reasoning-adjacency-right")
             .expect("fixture has the right assistant");
@@ -26120,7 +25917,17 @@ pub(crate) mod tests {
             }),
         );
         right.ck.mark_modified();
-        assert_fresh_reasoning_adjacency_messages_are_skeletonized(messages);
+
+        for messages in [
+            // Signed reasoning on both sides of the arc.
+            reasoning_adjacency_fixture(true, true, true),
+            // Signed reasoning only on the left assistant.
+            reasoning_adjacency_fixture(true, true, false),
+            // Redacted reasoning on the right assistant only.
+            redacted_right,
+        ] {
+            assert_fresh_reasoning_adjacency_messages_are_skeletonized(messages);
+        }
     }
 
     #[test]
@@ -26162,7 +25969,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26193,7 +26000,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26297,7 +26104,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26317,7 +26124,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -26369,7 +26176,7 @@ pub(crate) mod tests {
             &damaged.core,
             &damaged.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -26465,7 +26272,7 @@ pub(crate) mod tests {
             &poisoned.core,
             &poisoned.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -26567,7 +26374,7 @@ pub(crate) mod tests {
             &before.core,
             &before.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -26853,7 +26660,7 @@ pub(crate) mod tests {
             &poisoned.core,
             &poisoned.meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             true,
             None,
@@ -27236,7 +27043,7 @@ pub(crate) mod tests {
             core,
             meta,
             projection,
-            request,
+            &normalize_synthetic_todo_ingress(request),
             overlay,
             false,
             None,
@@ -27264,6 +27071,255 @@ pub(crate) mod tests {
             hash.update(bytes);
         }
         format!("{:x}", hash.finalize())
+    }
+
+    #[test]
+    fn synthetic_ingress_matches_flagged_reference() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"preserve replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        for mode in ["fresh", "pending", "lineage"] {
+            let mut messages = vec![item("foreign", 90, "new prompt")];
+            for (mid, ordinal, mut ck) in [
+                ("replayed-call", 91, pair.assistant_msg.clone()),
+                ("replayed-result", 92, pair.tool_msg.clone()),
+            ] {
+                ck.meta.synthetic = false;
+                ck.meta.harness_id = Some(mid.to_string());
+                if mid == "replayed-call" {
+                    ck.content_mut()
+                        .push(WireBlock::bare(wire::BlockKind::Text {
+                            text: "synthetic carrier text".into(),
+                        }));
+                }
+                messages.push(IngressMessage {
+                    mid: mid.into(),
+                    ordinal,
+                    ck,
+                });
+            }
+            let mut original: TransformRequest = serde_json::from_value(
+                serde_json::to_value(active_cc_req("ses", "cfg0", messages)).unwrap(),
+            )
+            .unwrap();
+            original.serializer_profile = "opencode-aisdk".into();
+            original.serve_native = true;
+            if mode == "lineage" {
+                original.lineage_switched = true;
+                original.is_subagent = true;
+            }
+            let before = original.clone();
+            let mut flagged = original.clone();
+            flagged.messages[1].ck.meta.synthetic = true;
+            flagged.messages[2].ck.meta.synthetic = true;
+            let mut observations = Vec::new();
+            for request in [&original, &flagged] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = store(dir.path());
+                if mode == "pending" {
+                    s.replace_compartments("ses", &[comp(1, 1, 2, "boundary", "summary")])
+                        .unwrap();
+                    run(
+                        &s,
+                        &req("ses", "cfg0", vec![item("boundary", 2, "old")]),
+                        &spine(),
+                    );
+                }
+                let mut result = transform_with_projection(&s, request, &smart_pctx()).unwrap();
+                let served = canonical_output(result.response.messages());
+                let fingerprints = served_output_fingerprints(result.response.messages());
+                if mode != "fresh" {
+                    assert_eq!(result.response.action, "PASSTHROUGH");
+                    assert!(
+                        result.response.messages()[1..]
+                            .iter()
+                            .all(|message| message.meta.synthetic)
+                    );
+                    assert!(
+                        original.messages[1..]
+                            .iter()
+                            .all(|message| !message.ck.meta.synthetic)
+                    );
+                    assert_eq!(
+                        serde_json::to_vec(&result.response.messages()[1]).unwrap(),
+                        serde_json::to_vec(&original.messages[1].ck).unwrap()
+                    );
+                    assert_eq!(
+                        fingerprints[1].block_id,
+                        format!("eidnara_todo:{}:call#0", pair.call_id)
+                    );
+                    assert_eq!(
+                        fingerprints[3].block_id,
+                        format!("eidnara_todo:{}:result#0", pair.call_id)
+                    );
+                } else {
+                    assert!(result.response.messages().iter().all(|message| {
+                        !matches!(
+                            message.meta.harness_id.as_deref(),
+                            Some("replayed-call" | "replayed-result")
+                        )
+                    }));
+                }
+                if mode == "pending" {
+                    let overlay = TagOverlayState {
+                        tag_by_block_id: BTreeMap::from([
+                            ("foreign#0".into(), 41),
+                            ("replayed-call#1".into(), 42),
+                        ]),
+                        temporal_by_block_id: BTreeMap::from([(
+                            "replayed-call#1".into(),
+                            "<!-- synthetic overlay must not render -->\n".into(),
+                        )]),
+                        ..Default::default()
+                    };
+                    let overlaid = pending_passthrough_messages(
+                        &result.projection,
+                        &normalize_synthetic_todo_ingress(request),
+                        Some(&overlay),
+                        None,
+                    );
+                    let overlaid_bytes = canonical_output(&overlaid);
+                    assert_ne!(
+                        overlaid_bytes[0], served[0],
+                        "live control must take its overlay"
+                    );
+                    assert_eq!(overlaid_bytes[1..], served[1..]);
+                    assert_eq!(
+                        served_output_fingerprints(&overlaid)[1..],
+                        fingerprints[1..]
+                    );
+                }
+                let boundary = crate::boundary_messages(
+                    &original,
+                    &result.projection,
+                    &Mutex::new(crate::BoundaryTokenCache::new(1024 * 1024)),
+                );
+                assert_eq!(boundary.messages.len(), 3);
+                assert_eq!(boundary.messages[1].message_id, "replayed-call");
+                assert!(boundary.messages[1].blocks.is_empty());
+                assert!(boundary.messages[2].blocks.is_empty());
+                let live = result
+                    .projection
+                    .blocks
+                    .iter()
+                    .filter(|block| !block.synthetic)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let firing_input = crate::historian_chunk::build_historian_chunk(
+                    &original.messages,
+                    &live,
+                    90,
+                    1_000,
+                    91,
+                );
+                assert_eq!(firing_input.chunk.present_ordinals, [90, 91, 92]);
+                assert!(!firing_input.text.is_empty());
+                crate::attach_native_messages_with_tags(
+                    &mut result.response,
+                    &original,
+                    result.reasoning_watermark,
+                    &result.tag_numbers,
+                    result.mutation_exempt_mid.as_deref(),
+                    result.lineage_anchor_mid.as_deref(),
+                    result.transition_consumed,
+                );
+                assert!(
+                    result
+                        .response
+                        .native_messages
+                        .as_ref()
+                        .is_some_and(|messages| !messages.is_empty())
+                );
+                if mode == "fresh" {
+                    assert!(!s.load_tags_for_session("ses").unwrap().is_empty());
+                }
+                let boundary_observation = format!("{:?}", boundary.messages);
+                observations.push((
+                    served,
+                    fingerprints,
+                    result.projection,
+                    serde_json::to_vec(&result.response.native_messages).unwrap(),
+                    s.load_tags_for_session("ses").unwrap(),
+                    firing_input,
+                    boundary_observation,
+                ));
+            }
+            assert_eq!(observations[0], observations[1], "{mode}");
+            assert_eq!(
+                original.messages, before.messages,
+                "normalization must not mutate handler input"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_overlay_guard_uses_the_pass_local_synthetic_view() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"guard replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let mut carrier = pair.assistant_msg.clone();
+        carrier.meta.synthetic = false;
+        carrier.meta.harness_id = Some("replayed-call".into());
+        carrier
+            .content_mut()
+            .push(WireBlock::bare(wire::BlockKind::Text {
+                text: "synthetic carrier text".into(),
+            }));
+        let request = active_cc_req(
+            "ses",
+            "cfg0",
+            vec![
+                item("live", 90, "live prompt"),
+                IngressMessage {
+                    mid: "replayed-call".into(),
+                    ordinal: 91,
+                    ck: carrier,
+                },
+            ],
+        );
+        let ingress = normalize_synthetic_todo_ingress(&request);
+        let projection = ingress.projection.project().unwrap();
+        let blocks_by_mid = projection_blocks_by_mid(&projection);
+        let overlay = TagOverlayState {
+            tag_by_block_id: BTreeMap::from([
+                ("live#0".into(), 41),
+                ("replayed-call#1".into(), 42),
+            ]),
+            temporal_by_block_id: BTreeMap::from([(
+                "replayed-call#1".into(),
+                "<!-- synthetic overlay must not render -->\n".into(),
+            )]),
+            ..Default::default()
+        };
+
+        let mut rendered = Vec::new();
+        for message in &request.messages {
+            assert!(!message.ck.meta.synthetic);
+            let mut rebuilt = message.ck.clone();
+            apply_tag_overlay_to_message(
+                &mut rebuilt,
+                message,
+                ingress.is_synthetic(message),
+                &blocks_by_mid[message.mid.as_str()],
+                Some(&overlay),
+                |_| false,
+                false,
+            );
+            rendered.push(serde_json::to_vec(&rebuilt).unwrap());
+        }
+        assert_ne!(
+            rendered[0],
+            serde_json::to_vec(&request.messages[0].ck).unwrap(),
+            "live control must take its overlay"
+        );
+        assert!(ingress.is_synthetic(&request.messages[1]));
+        assert_eq!(
+            rendered[1],
+            serde_json::to_vec(&request.messages[1].ck).unwrap(),
+            "normalized synthetic message must not take an overlay"
+        );
     }
 
     #[test]
@@ -27425,7 +27481,7 @@ pub(crate) mod tests {
         text.push_str(" changed");
         let cached_projection_started_at = Instant::now();
         let cached_projection =
-            project_messages_incremental(&changed_messages, &projection, MESSAGE_COUNT - 1)
+            wire::project_messages_incremental(&changed_messages, &projection, MESSAGE_COUNT - 1)
                 .unwrap();
         let cached_projection_ms = elapsed_ms(cached_projection_started_at);
         let full_changed_projection = project_messages(&changed_messages).unwrap();
@@ -27512,7 +27568,7 @@ pub(crate) mod tests {
             &core,
             &meta,
             &projection,
-            &request,
+            &normalize_synthetic_todo_ingress(&request),
             None,
             false,
             None,
@@ -27563,7 +27619,11 @@ pub(crate) mod tests {
             build_serialize_misses: replay.timings.serialize_misses,
             build_tail_loop: replay.timings.tail_loop,
             frozen_units: core.frozen_units.len(),
-            tail_units_matched: frozen_units_matched_to_tail(&core, &request, None),
+            tail_units_matched: frozen_units_matched_to_tail(
+                &core,
+                &normalize_synthetic_todo_ingress(&request),
+                None,
+            ),
             projection_blocks: projection.blocks.len(),
             tail_messages_emitted: replay
                 .messages
@@ -27605,6 +27665,7 @@ pub(crate) mod tests {
     #[test]
     fn serialized_output_cache_reuses_steady_state_and_matches_fresh_bytes() {
         let (core, meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
+        let before = crate::token_cache::local_stats();
         let first = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
         let snapshot = SerializedOutputCacheSnapshot {
             entries: first.cache_entries.clone(),
@@ -27619,6 +27680,7 @@ pub(crate) mod tests {
             false,
         );
         let fresh = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+        assert_eq!(crate::token_cache::local_stats().calls, before.calls);
 
         assert_eq!(replay.cache_stats.serialized_items, 0);
         assert_eq!(replay.cache_stats.reused_items, 4);
@@ -28217,65 +28279,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn continued_lineage_survives_post_descent_folds_advancing_past_the_seam() {
-        // The continuation base remains frozen at the descent seam while the successor's historian may fold beyond it.
-        // A `compartment_end` beyond the seam does not fence a successor pass.
-        // Coverage at or beyond the seam is accepted; coverage before the seam is refused.
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_fake_compaction_prior(&store, "A");
-        let summary = continuation_summary("seam");
-        let descent = fake_compaction_request(
-            "B",
-            "A",
-            2,
-            501,
-            true,
-            fake_compaction_messages("2026-08-06", &summary),
-        );
-        let first = run(&store, &descent, &spine());
-        assert_eq!(
-            first.lineage_descent_disposition.as_deref(),
-            Some("descended")
-        );
-        assert_eq!(first.ordinal_continuation_base, Some(10));
-
-        // A successor may fold messages past the seam.
-        store
-            .append_compartments("B", &[comp(4, 12, 14, "successor-14", "successor work")])
-            .unwrap();
-
-        // An ordinary follow-up pass does not fence on an advanced `compartment_end`.
-        // The successor's first live ordinal is `base + 1` to continue the predecessor's numbering.
-        // assigns it.
-        let mut follow_up_messages = vec![
-            wire_item(
-                "user",
-                "summary",
-                11,
-                &[
-                    "<system-reminder>Today's date: 2026-08-06</system-reminder>",
-                    &summary,
-                ],
-            ),
-            wire_item("assistant", "tail", 12, &["continued answer"]),
-        ];
-        follow_up_messages.push(item("succ-13", 13, "successor turn thirteen"));
-        follow_up_messages.push(item("succ-14", 14, "successor turn fourteen"));
-        let follow_up = req("B", "descent-cfg", follow_up_messages);
-        let outcome = transform(
-            &store,
-            &follow_up,
-            &pctx("git:proj", "/nonexistent-docs", 0),
-        );
-        assert!(
-            outcome.is_ok(),
-            "post-descent fold past the seam must not fence: {:?}",
-            outcome.err()
-        );
-    }
-
-    #[test]
     fn continued_lineage_stable_defer_rejects_mutated_anchor_after_post_seam_fold() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -28334,6 +28337,93 @@ pub(crate) mod tests {
             mutated.messages.len(),
             "a mutated continuation anchor must fail closed without trimming live input"
         );
+    }
+
+    #[test]
+    fn lineage_rebase_preserves_unflagged_synthetic_head() {
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"rebase replay","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap();
+        let summary = continuation_summary("synthetic-rebase");
+        let mut observations = Vec::new();
+        for flagged in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_fake_compaction_prior(&store, "A");
+            let descent = fake_compaction_request(
+                "B",
+                "A",
+                2,
+                601,
+                true,
+                fake_compaction_messages("2026-08-06", &summary),
+            );
+            assert_eq!(
+                run(&store, &descent, &spine())
+                    .lineage_descent_disposition
+                    .as_deref(),
+                Some("descended")
+            );
+            let mut head = pair.assistant_msg.clone();
+            head.content_mut()
+                .extend(pair.tool_msg.content().iter().cloned());
+            head.meta.synthetic = false;
+            head.meta.harness_id = Some("synthetic-head".into());
+            let mut messages = vec![IngressMessage {
+                mid: "synthetic-head".into(),
+                ordinal: 1,
+                ck: head,
+            }];
+            messages.extend(fake_compaction_messages("2026-08-06", &summary));
+            messages.push(item("succ-13", 3, "successor turn thirteen"));
+            let mut request: TransformRequest = serde_json::from_value(
+                serde_json::to_value(fake_compaction_request("B", "A", 2, 601, true, messages))
+                    .unwrap(),
+            )
+            .unwrap();
+            request.messages[0].ck.meta.synthetic = flagged;
+            assert!(request.lineage_switched && !request.is_subagent);
+            let result = transform_with_projection(&store, &request, &smart_pctx()).unwrap();
+            assert_eq!(
+                result.response.lineage_descent_disposition.as_deref(),
+                Some("replay")
+            );
+            assert_eq!(result.response.ordinal_continuation_base, Some(10));
+            assert!(!result.response.reconcile_pending);
+            assert_eq!(request.messages[0].ordinal, 1);
+            let reattached = result.projection.reattach_messages_prefix(2).unwrap();
+            assert_eq!(
+                reattached[0].ordinal, 11,
+                "the non-subagent pass must actually rebase"
+            );
+            assert_eq!(
+                reattached[1].ordinal, 11,
+                "synthetic head must not consume a live ordinal"
+            );
+            assert!(reattached[0].ck.meta.synthetic);
+            assert!(!reattached[1].ck.meta.synthetic);
+            assert!(
+                result
+                    .projection
+                    .blocks
+                    .iter()
+                    .filter(|block| block.mid == "synthetic-head")
+                    .all(|block| block.synthetic)
+            );
+            assert!(
+                !result
+                    .projection
+                    .identity_by_mid
+                    .contains_key("synthetic-head")
+            );
+            observations.push((
+                canonical_output(result.response.messages()),
+                served_output_fingerprints(result.response.messages()),
+                result.projection,
+            ));
+        }
+        assert_eq!(observations[0], observations[1]);
     }
 
     #[test]
@@ -28440,6 +28530,33 @@ pub(crate) mod tests {
         assert_ne!(
             channel2_directive_id("ses", 1),
             channel2_directive_id("other", 1)
+        );
+    }
+
+    #[test]
+    fn tag_mint_tokenized_bytes_counts_only_cache_misses_and_bypasses() {
+        // Two new blocks with identical cacheable content: the second lookup is a
+        // cache hit and tokenizes nothing.
+        let _guard = crate::token_cache::test_cache_guard();
+        let source = format!("tag mint duplicate source {}", "payload ".repeat(16));
+        assert!(source.len() >= 64);
+        let messages = vec![item("dup-a", 1, &source), item("dup-b", 2, &source)];
+        let request = req("tag-mint-dup", "cfg0", messages);
+        let projection = project_messages(&request.messages).unwrap();
+        let core = CoreState::empty();
+        let before = crate::token_cache::local_stats();
+        let work = tag_mint_inputs(&projection, &core, None, &HashSet::new());
+        let after = crate::token_cache::local_stats();
+        assert_eq!(work.inputs.len(), 2);
+        assert_eq!(after.calls - before.calls, 2);
+        assert!(
+            after.hits - before.hits >= 1,
+            "the duplicate must hit the cache"
+        );
+        assert_eq!(
+            work.tokenized_bytes as u64,
+            after.tokenized_bytes - before.tokenized_bytes,
+            "tag_mint_tokenized_bytes must equal the bytes the tokenizer received"
         );
     }
 }

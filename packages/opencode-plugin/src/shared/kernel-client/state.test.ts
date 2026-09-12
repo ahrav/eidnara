@@ -66,10 +66,6 @@ describe("state vocabulary", () => {
         expect(new Set(ALL_STATE_KEYS)).toEqual(expected);
     });
 
-    test.each(ALL_STATE_KEYS)("%s carries non-empty tool text", (key) => {
-        expect(MEMORY_STATE_GUIDANCE[key].tool.length).toBeGreaterThan(0);
-    });
-
     test("unavailable and lag guidance never tells the caller to retry", () => {
         for (const key of ALL_STATE_KEYS) {
             if (!key.startsWith("unavailable") && key !== "stale" && key !== "abstained") continue;

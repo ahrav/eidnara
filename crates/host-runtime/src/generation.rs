@@ -1271,44 +1271,73 @@ mod tests {
         assert_eq!(again, digest);
     }
 
-    /// A future-schema generation is preserved by `prune` even when its directory mode is
-    /// rejected by the current schema validator.
     #[test]
-    fn a_quarantined_generation_with_a_foreign_directory_mode_is_still_preserved() {
-        let root = tempfile::tempdir().expect("root");
-        let src = tempfile::tempdir().expect("src");
-        let store = store_at(root.path());
-        let digest = stage_default(&store, src.path());
-        let gen_dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
-        let manifest_path = gen_dir.join(GENERATION_MANIFEST_NAME);
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest_path).expect("read")).expect("json");
-        value["schema"] = 7.into();
-        std::fs::write(&manifest_path, serde_json::to_vec(&value).expect("encode")).expect("write");
-        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o500)).expect("mode");
+    fn undecodable_generations_survive_prune_after_a_successor() {
+        type Tamper = fn(&[u8]) -> Vec<u8>;
+        let future_schema: Tamper = |original| {
+            let mut value: serde_json::Value = serde_json::from_slice(original).expect("json");
+            value["schema"] = 7.into();
+            serde_json::to_vec(&value).expect("encode")
+        };
+        let oversized: Tamper = |_| {
+            // The capped read fails before schema decoding on a manifest past `MAX_MANIFEST_BYTES`.
+            let mut oversized = br#"{"schema":2,"unknown_future_field":true,"pad":""#.to_vec();
+            oversized.resize(oversized.len() + MAX_MANIFEST_BYTES, b'x');
+            oversized.extend_from_slice(br#""}"#);
+            assert!(oversized.len() > MAX_MANIFEST_BYTES);
+            oversized
+        };
+        for (label, tamper, directory_mode) in [
+            (
+                "future schema behind a read-only directory",
+                future_schema,
+                Some(0o500),
+            ),
+            ("oversized manifest", oversized, None),
+        ] {
+            let root = tempfile::tempdir().expect("root");
+            let src = tempfile::tempdir().expect("src");
+            let store = store_at(root.path());
+            let digest = stage_default(&store, src.path());
+            let gen_dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+            let manifest_path = gen_dir.join(GENERATION_MANIFEST_NAME);
+            let tampered = tamper(&std::fs::read(&manifest_path).expect("read"));
+            std::fs::write(&manifest_path, &tampered).expect("write");
+            if let Some(mode) = directory_mode {
+                std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(mode))
+                    .expect("mode");
+            }
 
-        store
-            .stage_and_promote(
-                &[SourceSpec {
-                    rel_path: "bin/eidnara-host".to_owned(),
-                    source: write_source(src.path(), "launcher-b", b"#successor-binary"),
-                    executable: true,
-                    expected_size: None,
-                    expected_sha256: None,
-                }],
-                &meta(),
-                &BTreeSet::new(),
-            )
-            .expect("stage successor");
-        let report = store.prune(&BTreeSet::new()).expect("prune");
-        std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
-            .expect("restore");
-        assert_eq!(report.removed_generations, 0);
-        assert_eq!(report.quarantined, 1);
-        assert!(
-            manifest_path.is_file(),
-            "the unknown-schema generation survives"
-        );
+            store
+                .stage_and_promote(
+                    &[SourceSpec {
+                        rel_path: "bin/eidnara-host".to_owned(),
+                        source: write_source(
+                            src.path(),
+                            "launcher-successor",
+                            b"#successor-binary",
+                        ),
+                        executable: true,
+                        expected_size: None,
+                        expected_sha256: None,
+                    }],
+                    &meta(),
+                    &BTreeSet::new(),
+                )
+                .expect("stage successor");
+            let report = store.prune(&BTreeSet::new()).expect("prune");
+            if directory_mode.is_some() {
+                std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700))
+                    .expect("restore");
+            }
+            assert_eq!(report.removed_generations, 0, "{label}");
+            assert_eq!(report.quarantined, 1, "{label}");
+            assert_eq!(
+                std::fs::read(&manifest_path).expect("manifest still there"),
+                tampered,
+                "{label}: an undecodable manifest must be preserved byte-for-byte"
+            );
+        }
     }
 
     #[test]
@@ -2162,110 +2191,51 @@ mod tests {
         );
     }
 
-    /// An occupied digest with an unknown manifest schema is quarantined; promotion must abandon the mutation rather than exchange and delete the directory.
+    /// The quarantined occupant is excluded from `protected`, so the quarantine rule alone must prevent exchange-repair.
     #[test]
-    fn a_quarantined_digest_occupant_is_never_repaired() {
-        let root = tempfile::tempdir().expect("root");
-        let src = tempfile::tempdir().expect("src");
-        let store = store_at(root.path());
-        let digest = stage_default(&store, src.path());
-        let manifest = store
-            .root()
-            .join(GENERATIONS_DIR_NAME)
-            .join(&digest)
-            .join(GENERATION_MANIFEST_NAME);
-
-        // Schema 2 decodes as an unknown schema: preserved, never repaired.
-        let quarantined = br#"{"schema":2,"unknown_future_field":true}"#;
-        std::fs::write(&manifest, quarantined).expect("quarantine the occupant");
-
-        // The same sources reproduce `digest`, so promotion targets the quarantined generation.
-        // The quarantined occupant is excluded from `protected` so the quarantine rule must prevent repair.
-        let err = match store.stage_and_promote(&sources_in(src.path()), &meta(), &BTreeSet::new())
-        {
-            Ok(_) => panic!("a quarantined occupant must not be repaired"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, GenerationError::UnsupportedStateSchema));
-        assert_eq!(
-            std::fs::read(&manifest).expect("occupant still there"),
-            quarantined,
-            "quarantined bytes must be preserved exactly"
-        );
-    }
-
-    /// A manifest larger than `MAX_MANIFEST_BYTES` cannot have its schema decoded, so pruning must retain it rather than treat it as removable corruption.
-    #[test]
-    fn an_oversized_manifest_is_quarantined_rather_than_pruned() {
-        let root = tempfile::tempdir().expect("root");
-        let src = tempfile::tempdir().expect("src");
-        let store = store_at(root.path());
-        let digest = stage_default(&store, src.path());
-        let manifest_path = store
-            .root()
-            .join(GENERATIONS_DIR_NAME)
-            .join(&digest)
-            .join(GENERATION_MANIFEST_NAME);
-
-        // Padding an unknown-schema manifest past `MAX_MANIFEST_BYTES` makes the capped read fail before schema decoding.
-        let mut oversized = br#"{"schema":2,"unknown_future_field":true,"pad":""#.to_vec();
-        oversized.resize(oversized.len() + MAX_MANIFEST_BYTES, b'x');
-        oversized.extend_from_slice(br#""}"#);
-        assert!(oversized.len() > MAX_MANIFEST_BYTES);
-        std::fs::write(&manifest_path, &oversized).expect("write oversized manifest");
-
-        // Pruning must preserve an oversized generation after a successor replaces it as the current profile target.
-        let successor = vec![SourceSpec {
-            rel_path: "bin/eidnara-host".to_owned(),
-            source: write_source(src.path(), "launcher-successor", b"#successor-binary"),
-            executable: true,
-            expected_size: None,
-            expected_sha256: None,
-        }];
-        store
-            .stage_and_promote(&successor, &meta(), &BTreeSet::new())
-            .expect("stage successor");
-
-        let report = store.prune(&BTreeSet::new()).expect("prune");
-        assert_eq!(report.removed_generations, 0);
-        assert_eq!(report.quarantined, 1);
-        assert_eq!(
-            std::fs::read(&manifest_path).expect("manifest still there"),
-            oversized,
-            "an undecidable manifest must be preserved byte-for-byte"
-        );
-    }
-
-    /// Promotion rejects an occupant whose manifest exceeds the read cap and preserves its bytes.
-    #[test]
-    fn an_oversized_digest_occupant_is_never_repaired() {
-        let root = tempfile::tempdir().expect("root");
-        let src = tempfile::tempdir().expect("src");
-        let store = store_at(root.path());
-        let digest = stage_default(&store, src.path());
-        let manifest_path = store
-            .root()
-            .join(GENERATIONS_DIR_NAME)
-            .join(&digest)
-            .join(GENERATION_MANIFEST_NAME);
+    fn undecodable_digest_occupants_are_never_repaired() {
         let mut oversized = br#"{"schema":2,"pad":""#.to_vec();
         oversized.resize(oversized.len() + MAX_MANIFEST_BYTES, b'x');
         oversized.extend_from_slice(br#""}"#);
-        std::fs::write(&manifest_path, &oversized).expect("write oversized manifest");
+        for (label, occupant) in [
+            (
+                "unknown schema",
+                br#"{"schema":2,"unknown_future_field":true}"#.to_vec(),
+            ),
+            ("oversized manifest", oversized),
+        ] {
+            let root = tempfile::tempdir().expect("root");
+            let src = tempfile::tempdir().expect("src");
+            let store = store_at(root.path());
+            let digest = stage_default(&store, src.path());
+            let manifest = store
+                .root()
+                .join(GENERATIONS_DIR_NAME)
+                .join(&digest)
+                .join(GENERATION_MANIFEST_NAME);
+            std::fs::write(&manifest, &occupant).expect("quarantine the occupant");
 
-        assert!(matches!(
-            store.validate(&digest),
-            Err(GenerationError::UnsupportedStateSchema)
-        ));
-        // The same sources reproduce `digest`, so promotion targets the oversized occupant.
-        let err = store
-            .stage_and_promote(&sources_in(src.path()), &meta(), &BTreeSet::new())
-            .expect_err("an oversized occupant must not be exchange-repaired");
-        assert!(matches!(err, GenerationError::UnsupportedStateSchema));
-        assert_eq!(
-            std::fs::read(&manifest_path).expect("occupant still there"),
-            oversized
-        );
+            assert!(
+                matches!(
+                    store.validate(&digest),
+                    Err(GenerationError::UnsupportedStateSchema)
+                ),
+                "{label}"
+            );
+            // The same sources reproduce `digest`, so promotion targets the quarantined occupant.
+            let err = store
+                .stage_and_promote(&sources_in(src.path()), &meta(), &BTreeSet::new())
+                .expect_err("a quarantined occupant must not be repaired");
+            assert!(
+                matches!(err, GenerationError::UnsupportedStateSchema),
+                "{label}: {err:?}"
+            );
+            assert_eq!(
+                std::fs::read(&manifest).expect("occupant still there"),
+                occupant,
+                "{label}: quarantined bytes must be preserved exactly"
+            );
+        }
     }
 
     fn age_past_stale_threshold(path: &Path) {

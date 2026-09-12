@@ -36,7 +36,7 @@ numbering split; this record covers the cache entry's immutability and the
 - Mint inputs are built at [`:7156-7161`][mint-input] with
   `source_bytes: source.as_bytes().to_vec()` from [`taggable_source`][taggable],
   which returns the text of a user or assistant `Text` block or the first text
-  of a tool result. The active-tag match at [`:7350`][active-match] compares
+  of a tool result. The active-tag match at [`:7353`][active-match] compares
   `row.source_bytes == source.as_bytes()` for the same predicate.
 - The commit takes mint inputs from `tag_rows[tag_mint_start..]`
   ([`:4924-4934`][commit-inputs]). The store numbers each new row from
@@ -52,7 +52,7 @@ numbering split; this record covers the cache entry's immutability and the
 
 A design appends to the shared vector in place. The cache entry now holds mint
 rows numbered by the pass, not the store. On the next pass `snapshot` returns
-them; the active-tag match at [`:7350`][active-match] treats a speculative row
+them; the active-tag match at [`:7353`][active-match] treats a speculative row
 as active, and if the mint commit failed the row never existed. A design that
 stores the pass's `Arc` back before commit has the same window. A design that
 changes the `source_bytes` capture so it no longer equals the projected text
@@ -89,7 +89,7 @@ isolation ([`t-interleave`][t-interleave]); none fails a mint commit.
 - Findings: The store either refuses the insert on a detection or, for an
   existing row, records the refusal and keeps the input bytes. No document
   states that a stored `source_bytes` equals its projected text; the active
-  match at [`:7350`][active-match] depends on it.
+  match at [`:7353`][active-match] depends on it.
 - Missing evidence: A written statement in R1 or here.
 - Conclusion: needs human input.
 
@@ -101,13 +101,13 @@ isolation ([`t-interleave`][t-interleave]); none fails a mint commit.
 [tag-snapshot]: ../../../../../crates/daemon/src/transform.rs#L6827-L6832
 [load-tags]: ../../../../../crates/daemon/src/transform.rs#L6899-L6957
 [mint-input]: ../../../../../crates/daemon/src/transform.rs#L7156-L7161
-[append-mint]: ../../../../../crates/daemon/src/transform.rs#L7261-L7282
-[taggable]: ../../../../../crates/daemon/src/transform.rs#L7286-L7310
-[active-match]: ../../../../../crates/daemon/src/transform.rs#L7350
-[make-mut]: ../../../../../crates/daemon/src/transform.rs#L7883-L7884
-[t-tagcold]: ../../../../../crates/daemon/src/transform.rs#L22418
-[t-poison]: ../../../../../crates/daemon/src/transform.rs#L22487
-[t-interleave]: ../../../../../crates/daemon/src/transform.rs#L22520
+[append-mint]: ../../../../../crates/daemon/src/transform.rs#L7264-L7285
+[taggable]: ../../../../../crates/daemon/src/transform.rs#L7289-L7313
+[active-match]: ../../../../../crates/daemon/src/transform.rs#L7353
+[make-mut]: ../../../../../crates/daemon/src/transform.rs#L7886-L7887
+[t-tagcold]: ../../../../../crates/daemon/src/transform.rs#L22421
+[t-poison]: ../../../../../crates/daemon/src/transform.rs#L22490
+[t-interleave]: ../../../../../crates/daemon/src/transform.rs#L22523
 [store-existed]: ../../../../../crates/memory-store/src/lib.rs#L7140-L7145
 [mint-prepared]: ../../../../../crates/memory-store/src/lib.rs#L7156-L7164
 [store-number]: ../../../../../crates/memory-store/src/lib.rs#L7205-L7209

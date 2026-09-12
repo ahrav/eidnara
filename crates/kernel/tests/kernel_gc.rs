@@ -496,33 +496,17 @@ fn a_fence_raised_before_the_unlink_leaves_the_bytes_in_place() {
 }
 
 #[test]
-fn pending_purge_unlinks_even_when_reference_is_live() {
+fn pending_purge_unlinks_a_live_reference_and_sweeps_its_digest_temps() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
     let handle = store.ingest_artifact(request("purge", b"purge")).unwrap();
-    let connection = Connection::open(root.path().join("kernel.sqlite")).unwrap();
-    let commit_seq: i64 = connection
-        .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    let reference = format!("objects/{}/{}", &handle.digest[..2], &handle.digest[2..]);
-    connection
-        .execute(
-            "INSERT INTO artifact_purge_tombstones(artifact_digest,artifact_reference,operator_id,reason,purged_at,commit_seq)
-             VALUES (?1,?2,'operator','secret',1,?3)",
-            params![handle.digest, reference, commit_seq],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO artifact_pending_unlinks(artifact_digest,artifact_reference,created_at)
-             VALUES (?1,?2,1)",
-            params![handle.digest, reference],
-        )
-        .unwrap();
-    drop(connection);
+    seed_pending_unlink(root.path(), &handle.digest);
+    let leftover = root
+        .path()
+        .join("artifacts/tmp")
+        .join(format!(".artifact-{}-7.tmp", handle.digest));
+    fs::write(&leftover, b"purge").unwrap();
 
     assert_eq!(
         store
@@ -533,6 +517,10 @@ fn pending_purge_unlinks_even_when_reference_is_live() {
         1
     );
     assert!(!object_path(root.path(), &handle.digest).exists());
+    assert!(
+        !leftover.exists(),
+        "resumed purge left plaintext under artifacts/tmp"
+    );
     assert_eq!(
         Connection::open(root.path().join("kernel.sqlite"))
             .unwrap()
@@ -552,13 +540,12 @@ fn reclaim_frees_capacity_for_next_write() {
     let old = store.ingest_artifact(request("full", b"1234")).unwrap();
     invalidate(root.path(), &old.evidence_id, 0);
 
-    assert_eq!(
-        store
-            .ingest_artifact(request("blocked", b"x"))
-            .unwrap_err()
-            .kind(),
-        ArtifactErrorKind::Capacity
-    );
+    let error = store
+        .ingest_artifact(request("cap-blocked", b"x"))
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::Capacity);
+    // Reclamation frees the bytes, so the caller retrying after maintenance succeeds.
+    assert!(error.is_retriable());
     store.run_staging_maintenance(15 * DAY_MS).unwrap();
     store
         .ingest_artifact(request("replacement", b"5678"))
@@ -824,35 +811,6 @@ fn reclaimed_digests_stop_being_gc_candidates() {
 }
 
 #[test]
-fn resumed_purge_sweeps_digest_temps() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let handle = store.ingest_artifact(request("temps", b"temps")).unwrap();
-    seed_pending_unlink(root.path(), &handle.digest);
-    let leftover = root
-        .path()
-        .join("artifacts/tmp")
-        .join(format!(".artifact-{}-7.tmp", handle.digest));
-    fs::write(&leftover, b"temps").unwrap();
-
-    assert_eq!(
-        store
-            .run_staging_maintenance(HOUR_MS)
-            .unwrap()
-            .artifact_gc
-            .reclaimed_objects,
-        1
-    );
-
-    assert!(!object_path(root.path(), &handle.digest).exists());
-    assert!(
-        !leftover.exists(),
-        "resumed purge left plaintext under artifacts/tmp"
-    );
-}
-
-#[test]
 fn released_pin_references_are_pruned_after_the_reclaim_grace() {
     const GRACE_MS: i64 = 14 * 24 * HOUR_MS;
     let root = tempfile::tempdir().unwrap();
@@ -911,24 +869,6 @@ fn released_pin_references_are_pruned_after_the_reclaim_grace() {
 }
 
 #[test]
-fn a_full_artifact_cap_is_reported_as_retriable() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 4).unwrap();
-    seed_domain(&store);
-    let old = store.ingest_artifact(request("cap-full", b"1234")).unwrap();
-    invalidate(root.path(), &old.evidence_id, 0);
-
-    let error = store
-        .ingest_artifact(request("cap-blocked", b"x"))
-        .unwrap_err();
-    assert_eq!(error.kind(), ArtifactErrorKind::Capacity);
-    // Reclamation frees the bytes, so the caller retrying after maintenance succeeds.
-    assert!(error.is_retriable());
-    store.run_staging_maintenance(15 * DAY_MS).unwrap();
-    store.ingest_artifact(request("cap-retry", b"x")).unwrap();
-}
-
-#[test]
 fn ordinary_reclaim_leaves_a_concurrent_ingest_staging_alone() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();
@@ -959,32 +899,4 @@ fn ordinary_reclaim_leaves_a_concurrent_ingest_staging_alone() {
         staged.exists(),
         "ordinary reclaim swept a concurrent ingest's staged bytes"
     );
-}
-
-#[test]
-fn a_resumed_purge_still_sweeps_its_own_temps() {
-    let root = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(root.path()).unwrap();
-    seed_domain(&store);
-    let handle = store
-        .ingest_artifact(request("purge-temps", b"purge-temps"))
-        .unwrap();
-    seed_pending_unlink(root.path(), &handle.digest);
-    let leftover = root
-        .path()
-        .join("artifacts/tmp")
-        .join(format!(".artifact-{}-7.tmp", handle.digest));
-    fs::write(&leftover, b"purge-temps").unwrap();
-
-    assert_eq!(
-        store
-            .run_staging_maintenance(HOUR_MS)
-            .unwrap()
-            .artifact_gc
-            .reclaimed_objects,
-        1
-    );
-
-    assert!(!object_path(root.path(), &handle.digest).exists());
-    assert!(!leftover.exists(), "purge resume left plaintext behind");
 }

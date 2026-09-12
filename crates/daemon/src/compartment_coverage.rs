@@ -207,33 +207,39 @@ mod tests {
         assert_eq!(resolve_coverage(&[]), Ok(None));
     }
 
+    /// A single compartment, a contiguous run, and a run with a sparse
+    /// coordinate gap (retired ordinals are absent from store data) all anchor
+    /// coverage on the last compartment.
     #[test]
-    fn ordered_set_reports_last_as_coverage() {
-        let comps = vec![
-            comp(1, 1, 10, "m10"),
-            comp(2, 11, 20, "m20"),
-            comp(3, 21, 30, "m30"),
+    fn valid_sets_report_the_last_compartment_as_coverage() {
+        let cases: [(Vec<StoredCompartment>, i64, u64, &str); 3] = [
+            (vec![comp(1, 1, 9, "m9")], 1, 9, "m9"),
+            (
+                vec![
+                    comp(1, 1, 10, "m10"),
+                    comp(2, 11, 20, "m20"),
+                    comp(3, 21, 30, "m30"),
+                ],
+                3,
+                30,
+                "m30",
+            ),
+            (
+                vec![comp(1, 1, 10, "m10"), comp(2, 20, 30, "m30")],
+                2,
+                30,
+                "m30",
+            ),
         ];
-        let cov = resolve_coverage(&comps).unwrap().unwrap();
-        assert_eq!(cov.max_sequence, 3);
-        assert_eq!(cov.coverage_end_ordinal, 30);
-        assert_eq!(cov.boundary_id, "m30");
-    }
-
-    #[test]
-    fn single_compartment_is_its_own_coverage() {
-        let cov = resolve_coverage(&[comp(1, 1, 9, "m9")]).unwrap().unwrap();
-        assert_eq!(cov.max_sequence, 1);
-        assert_eq!(cov.coverage_end_ordinal, 9);
-        assert_eq!(cov.boundary_id, "m9");
-    }
-
-    #[test]
-    fn sparse_coordinate_gap_is_store_pure_valid() {
-        let comps = vec![comp(1, 1, 10, "m10"), comp(2, 20, 30, "m30")];
-        let cov = resolve_coverage(&comps).unwrap().unwrap();
-        assert_eq!(cov.coverage_end_ordinal, 30);
-        assert_eq!(cov.boundary_id, "m30");
+        for (comps, max_sequence, coverage_end_ordinal, boundary_id) in cases {
+            let cov = resolve_coverage(&comps).unwrap().unwrap();
+            assert_eq!(cov.max_sequence, max_sequence, "{boundary_id}");
+            assert_eq!(
+                cov.coverage_end_ordinal, coverage_end_ordinal,
+                "{boundary_id}"
+            );
+            assert_eq!(cov.boundary_id, boundary_id);
+        }
     }
 
     #[test]

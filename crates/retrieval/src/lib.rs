@@ -19,11 +19,11 @@ pub mod vectors;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
-use kernel::Sensitivity;
 use kernel::source_identity::{
     EncodedOccurrence, Occurrence, OccurrenceRefusal, Span, derived_lineage_id, encode,
     encode_preserving_span, identity_digest, select,
 };
+use kernel::{MAX_PAYLOAD_BYTES, Sensitivity};
 use rusqlite::{CachedStatement, OptionalExtension, params};
 use storage::GuardedConn;
 
@@ -33,7 +33,7 @@ use storage::GuardedConn;
 pub const BASELINE: &str = include_str!("../baseline.sql");
 
 /// A schema mismatch requires a rebuild from canonical state.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Connection opening does not compare projection identities.
 /// A matching identity does not establish completeness or authorize search.
@@ -771,21 +771,35 @@ pub fn read_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
 ) -> Result<Option<StoredOccurrence>, ProjectionError> {
+    let max_payload_bytes =
+        i64::try_from(MAX_PAYLOAD_BYTES).map_err(|_| ProjectionError::CorruptRow)?;
     // The closure can only fail with a rusqlite error, so corruption is
     // signalled through `InvalidQuery` and mapped back below.
     let corrupt = || rusqlite::Error::InvalidQuery;
     let stored = conn
         .query_row(
             "SELECT o.occurrence_id,o.tuple,o.lineage_id,o.class,o.revision,o.representation,
-                    o.span_start,o.span_end,o.payload_id,p.bytes,o.domain_id,o.sensitivity,
+                    o.span_start,o.span_end,o.payload_id,
+                    CASE WHEN p.byte_length=length(p.bytes)
+                                   AND p.byte_length BETWEEN 0 AND ?2
+                         THEN p.bytes END,
+                    o.domain_id,o.sensitivity,
                     o.source_object_id,o.source_evidence_id,o.source_artifact_digest,
-                    o.created_commit_seq,t.invalidated_commit_seq,t.reason
+                    o.created_commit_seq,t.invalidated_commit_seq,t.reason,
+                    p.byte_length,length(p.bytes)
              FROM occurrences o
              LEFT JOIN payloads p ON p.payload_id=o.payload_id
              LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
              WHERE o.occurrence_id=?1",
-            [occurrence_id],
+            params![occurrence_id, max_payload_bytes],
             |row| {
+                let declared_length = row.get::<_, Option<i64>>(18)?.ok_or_else(corrupt)?;
+                let actual_length = row.get::<_, Option<i64>>(19)?.ok_or_else(corrupt)?;
+                if declared_length != actual_length
+                    || !(0..=max_payload_bytes).contains(&actual_length)
+                {
+                    return Err(corrupt());
+                }
                 let span = match (row.get::<_, Option<i64>>(6)?, row.get::<_, Option<i64>>(7)?) {
                     (None, None) => None,
                     (Some(start), Some(end)) => Some((

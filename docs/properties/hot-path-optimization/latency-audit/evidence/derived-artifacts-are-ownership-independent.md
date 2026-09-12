@@ -25,15 +25,15 @@ never of the allocation or the lane that produced them.
 - [`sel_item_from_flat`][sel-item] reads `input` from `block.wire.kind()`;
   [`sel_kind_for_flat`][sel-kind] reads `block.tool_input`. Both must be built
   from the same block for their consumers to agree.
-- The prefix differential [`assert_prefix_projection_equivalent`][assert-prefix]
+- The prefix differential [`assert_message_projection_equivalent`][assert-prefix]
   compares incremental against full by bytes and by value; it runs at
-  [`:2879-2881`][prefix-call] when a reusable projection exists and
+  [`:2910-2912`][prefix-call] when a reusable projection exists and
   [`prefix_projection_differential_enabled`][gate-prefix] is true, which is
   `cfg!(test) || EIDNARA_PREFIX_PROJECTION_DIFFERENTIAL == "1"`.
 - [`reattach_messages_prefix`][reattach] rebuilds prefix shells from cached
   blocks with `WireMessage::from_parts`, so a rebuilt shell has no `original`;
   its [doc][reattach-doc] says unknown top-level fields are dropped.
-- The native differential at [`:13315-13332`][native-diff] compares
+- The native differential at [`:13325-13342`][native-diff] compares
   `to_vec(incremental)` with `to_vec(encode_full_native_messages(..))` under
   [`native_attachment_differential_enabled`][gate-native], the same gate shape.
 - [`native_ingress_chunks`][ingress-chunks] shares an output chunk for index
@@ -52,8 +52,8 @@ never of the allocation or the lane that produced them.
 - [`Serialize for ServedMessage`][ser-served] re-serializes the inner
   `WireMessage`, not `canonical_bytes`. The handler avoids that path by taking
   `messages` out of the response before `to_value(response)`
-  ([`:14427-14442`][segments-take]) and writing each through
-  [`PreparedSegment::served`][segment-served] ([`:14448-14454`][segments]),
+  ([`:14431-14446`][segments-take]) and writing each through
+  [`PreparedSegment::served`][segment-served] ([`:14452-14458`][segments]),
   whose `bytes()` returns `canonical_bytes`.
 
 ## Failure scenario
@@ -61,7 +61,7 @@ never of the allocation or the lane that produced them.
 A projector that reuses an ingress `Arc<WireBlock>` but computes `bytes` from
 a different serialization breaks `bytes == to_string(wire)` and every digest
 keyed on it. A chunk-sharing decision by pointer identity diverges from the
-value test at [`:13057`][chunk-eq] for a message equal by value but not by
+value test at [`:13065`][chunk-eq] for a message equal by value but not by
 pointer. A sidecar merge that reorders a repeated mid changes `order`. A
 direct `to_vec(&message)` on a typed shell emits struct field order where the
 `to_value` round trip emits sorted keys, so bytes and `canonical_hash` change
@@ -121,30 +121,157 @@ both differentials and fingerprint reuse; none covers the four added oracles.
 - Missing evidence: A two-form sidecar comparison.
 - Conclusion: unresolved, needs a two-form sidecar comparison.
 
+## Implementation evidence
+
+The preceding discovery snapshot is retained at its stated baseline. Current
+checks and decision provenance are in [shared selection and pressure
+accounting](shared-selection-and-pressure-accounting.md).
+
+Both production selection constructors borrow the projected wire input.
+The pointer-identity test fails on the clone-based baseline and passes on
+the borrowed representation, including a selection clone and historian input.
+The unchanged selection reference passes all 18 differential tests. The
+`tool_input` versus `wire.kind()` question from the discovery snapshot is
+resolved by removal: `FlatBlock` no longer carries a separate input copy, so
+there is one projected input and no pair of fields to drift apart.
+
+The sidecar test compares full and incremental order, metadata, and pins over
+three generations with repeated IDs. It also checks sparse prefixes: map
+membership is valid only when every copied order entry has metadata; otherwise
+the original order scan preserves missing-metadata behavior. This resolves
+the two-form pin question for the tested cases. Sorted-key protocol intent
+and the production differential-panic policy remain outside this change.
+
+### Shared native prefix
+
+Verification date: 2026-09-11. Predecessor: `6bc7524b`. The discovery evidence
+above retains its baseline; the links in this subsection identify the shared
+native implementation.
+
+- [Tail expansion][shared-expansion] copies `Arc<Value>` handles from native
+  ingress chunks or the full request snapshot. The request wire decoder also
+  owns `Arc<Value>` values. JSON fields and serialization remain unchanged.
+- [Shared decode][shared-decode] borrows parts and retains each envelope in
+  `HarnessMessageMeta::raw` through an `Arc` clone. It is the only compiled
+  production decoder; the value-slice adapters that wrap owned fixtures in
+  fresh `Arc`s are test-only, so no shipped path can reintroduce that copy.
+  Full-native encoding reads the shared request values without materializing
+  a value array. Pi adapts to the common sidecar field without changing its
+  output.
+- [Ingress accounting][shared-ingress] retains the value-equality test when
+  sharing an encoded chunk. An unequal encoded output cannot become the raw
+  ingress prefix. Request accounting uses request allocation sizes, not the
+  sizes of equal encoded values whose capacities can differ. Reattached
+  prefix charges are reused; only the suffix needs a retained-size walk.
+  Vector capacity, pointed-to values, and strong/weak counters are charged.
+  Sidecar estimates include the raw value's Arc header. Independent cache
+  owners conservatively charge shared values; cache budgets are unchanged.
+  Within a native snapshot, ingress and encoded chunks deduplicate by pointer.
+  Sidecar metadata uses a separate serialized-size heuristic, not an
+  allocation-based raw-value charge; the accounting policy below covers their
+  overlap.
+- [Complex replay][shared-replay-check] constructs synthetic TODO and frozen
+  tool pairs, signed reasoning, a compaction marker, and an appended tail.
+  Fresh input and a real reattached delta produce equal native bytes. Decoded
+  values, sidecars, and projected identity bytes agree. Reattachment and
+  sidecar metadata retain pointers; the incremental encoder handles at most
+  two tail messages. A cloned shared request replays with zero encoded
+  messages. The compiled test setting enables the native differential. The
+  corrupt-frontier and corrupt-sidecar-key negative controls verify detection.
+  The full encoder used by that self-check still traverses the full input.
+- [Ingress-core checks][shared-ingress-check] distinguish equal output reuse
+  from unequal output, prove snapshot-fallback pointer identity after native
+  cache eviction, and compare cached request charges with a full size walk.
+
+Characterization ran before production edits: the complex replay, four
+frozen differential tests, and acknowledged-prefix test passed. Extending
+complex replay to real expansion and fresh/full comparisons also passed.
+The added reattachment pointer assertion then failed on the predecessor's
+deep copy and passed with shared values. The request-accounting assertion
+also caught the use of equal output allocations' smaller capacities.
+
+Focused checks passed with `cargo test -p daemon --lib --locked`: `native`
+(34 tests), `codec::` (40), `differential_goldens` (4), `tail_delta` (7,
+including the giant degraded snapshot), `differential_assert` (2 negative
+controls), the two extended sharing tests, the snapshot generation/LRU test,
+and `snapshot_lease_budget` (2). The frozen
+`crates/daemon/src/differential_goldens.rs` remains byte-identical to the
+predecessor. Scoped all-target/all-feature Clippy and workspace format checks
+pass. Full workspace gates and cross-process campaigns are not claimed here.
+No timing comparison is required or claimed.
+
+### Warm charge and sidecar accounting checks
+
+The complex replay checks the real two-value frontier's warm request charge
+against vector capacity, Arc headers, and a fresh walk of its own values using
+the same size estimator, independently of cached charges. Omitting
+the prefix sum produced 772 instead of 2564 bytes; doubling it produced 4356.
+Both mutations failed the added assertion and were removed.
+
+[Shared-vector accounting][shared-vector-charge] folds supplied pointee sizes
+into the vector and Arc-header charge. Cold requests supply measured sizes;
+warm ingress supplies cached prefix sizes and measures each suffix value
+while constructing its chunk. The helper adds no allocation, deep traversal,
+cache, or optional mode. The sidecar's serialized-size estimate stays separate.
+
+The [raw-allocation regression][raw-allocation-check] constructs 4096 scalar
+values in retained provider data. The raw Arc allocation charge is 131,870
+bytes on the checked target, larger than the sidecar's entire serialized-size
+estimate. The raw pointer is shared by ingress and sidecar. Seeding
+`charged_values` from that pointer, even after checking `sidecar_sizes`,
+removed all 131,870 bytes of its ingress charge and failed the regression.
+
+The cache therefore keeps the allocation-based ingress/chunk charge alongside
+the sidecar estimate, including when they retain the same raw Arc. This is
+intentional conservative overlap within one snapshot, not only across cache
+budgets. A sidecar size entry proves that an estimate exists; it does not prove
+that the estimate covers the raw allocation. Deduplication across these two
+accounting domains requires a sidecar estimate that covers raw storage.
+The regression also verifies that ingress and encoded output count a shared
+pointer once, charge equal-but-distinct allocations separately, and retain
+those rules after optional sidecar trees and sizes are cleared. Independent
+request charges and sidecar-only Arc header/Value costs remain intact. The
+retention guards and cache capacities are unchanged.
+
+Focused reruns passed: `native` (35), `tail_delta` (7), `differential_assert`
+(2), `differential_goldens` (4), `codec::` (40), and `retained_size` (2), all
+with `cargo test -p daemon --lib --locked`. Scoped all-target/all-feature
+Clippy, format, comment-marker, and diff checks passed. Full gates require a
+controller rerun after these edits; earlier execution evidence above remains
+historical.
+
+[shared-expansion]: ../../../../../crates/daemon/src/lib.rs#L4157
+[shared-decode]: ../../../../../crates/daemon/src/codec/opencode.rs#L61
+[shared-ingress]: ../../../../../crates/daemon/src/lib.rs#L13028-L13080
+[shared-replay-check]: ../../../../../crates/daemon/src/lib.rs#L20638
+[shared-ingress-check]: ../../../../../crates/daemon/src/lib.rs#L20857
+[shared-vector-charge]: ../../../../../crates/daemon/src/retained_size.rs#L57-L70
+[raw-allocation-check]: ../../../../../crates/daemon/src/lib.rs#L20968
+
 [tc-g2]: ../../../daemon/transform/portfolio-evaluation.md
-[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L64
-[flatproj]: ../../../../../crates/daemon/src/wire.rs#L115-L128
-[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L142-L145
-[reattach]: ../../../../../crates/daemon/src/wire.rs#L146-L187
-[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L330-L338
-[flatten]: ../../../../../crates/daemon/src/wire.rs#L622-L685
-[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L775-L786
+[flatblock]: ../../../../../crates/daemon/src/wire.rs#L36-L62
+[flatproj]: ../../../../../crates/daemon/src/wire.rs#L112-L125
+[reattach-doc]: ../../../../../crates/daemon/src/wire.rs#L139-L142
+[reattach]: ../../../../../crates/daemon/src/wire.rs#L143-L184
+[diff-bytes]: ../../../../../crates/daemon/src/wire.rs#L322-L330
+[flatten]: ../../../../../crates/daemon/src/wire.rs#L673-L732
+[fp-reuse]: ../../../../../crates/daemon/src/wire.rs#L822-L831
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L216
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L293-L300
-[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2013-L2020
-[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2022-L2037
-[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2879-L2881
-[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6315-L6344
-[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16628-L16643
-[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13026-L13070
-[chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13057
-[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13072-L13079
-[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13315-L13332
-[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14427-L14442
-[segments]: ../../../../../crates/daemon/src/lib.rs#L14448-L14454
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20948
-[sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L293
-[sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L277-L291
+[gate-prefix]: ../../../../../crates/daemon/src/transform.rs#L2004-L2011
+[assert-prefix]: ../../../../../crates/daemon/src/transform.rs#L2021-L2036
+[prefix-call]: ../../../../../crates/daemon/src/transform.rs#L2910-L2912
+[sel-item]: ../../../../../crates/daemon/src/transform.rs#L6352
+[sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16651
+[ingress-chunks]: ../../../../../crates/daemon/src/lib.rs#L13028-L13080
+[chunk-eq]: ../../../../../crates/daemon/src/lib.rs#L13065
+[gate-native]: ../../../../../crates/daemon/src/lib.rs#L13084-L13089
+[native-diff]: ../../../../../crates/daemon/src/lib.rs#L13325-L13342
+[segments-take]: ../../../../../crates/daemon/src/lib.rs#L14431-L14446
+[segments]: ../../../../../crates/daemon/src/lib.rs#L14452-L14458
+[t-astro]: ../../../../../crates/daemon/src/lib.rs#L20956
+[sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L258-L302
+[sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L278-L300
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
 [segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
-[serde-features]: ../../../../../Cargo.toml#L45
+[serde-features]: ../../../../../Cargo.toml#L47

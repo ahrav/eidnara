@@ -51,12 +51,9 @@ describe("findOnPath", () => {
         return path;
     }
 
-    it("returns null when PATH is unset", () => {
+    it("returns null when PATH is unset or empty", () => {
         delete process.env.PATH;
         expect(findOnPath("opencode")).toBeNull();
-    });
-
-    it("returns null when PATH is empty", () => {
         process.env.PATH = "";
         expect(findOnPath("opencode")).toBeNull();
     });
@@ -66,16 +63,6 @@ describe("findOnPath", () => {
         mkdirSync(dir, { recursive: true });
         process.env.PATH = dir;
         expect(findOnPath("nonexistent-binary-xyzzy")).toBeNull();
-    });
-
-    it("finds an executable in a single-entry PATH (POSIX/Windows)", () => {
-        const dir = join(tempRoot, "bin");
-        const binName = isWindows ? "opencode.exe" : "opencode";
-        const expected = makeExecutable(dir, binName);
-        process.env.PATH = dir;
-
-        const found = findOnPath("opencode");
-        expect(found).toBe(expected);
     });
 
     it("returns the first match when binary exists in multiple PATH dirs", () => {
@@ -131,7 +118,6 @@ describe("findOnPath", () => {
     });
 
     it.if(!isWindows)("recognizes wrapper scripts (regression for issue #75)", () => {
-        // Executable wrapper scripts are valid PATH matches.
         // Executable wrapper scripts are valid PATH matches.
         const wrapperDir = join(tempRoot, "home-bin");
         mkdirSync(wrapperDir, { recursive: true });

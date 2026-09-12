@@ -173,15 +173,25 @@ describe("composed gate order", () => {
 });
 
 describe("semver parsing", () => {
-    test("only canonical X.Y.Z parses", () => {
+    test("only canonical X.Y.Z parses; leading zeroes are rejected rather than normalized", () => {
         expect(parseSemverTriple("1.2.3")).toEqual([1, 2, 3]);
-        for (const bad of ["1.2", "1.2.3.4", "v1.2.3", "1.2.x", ""]) {
-            expect(parseSemverTriple(bad)).toBeNull();
-        }
-    });
-    test("leading zeroes are rejected rather than normalized", () => {
         expect(parseSemverTriple("0.1.0")).toEqual([0, 1, 0]);
-        for (const bad of ["00.1.0", "0.01.0", "0.1.00", "00.01.000", "01.2.3"]) {
+        expect(parseSemverTriple("0.0.0")).toEqual([0, 0, 0]);
+        expect(parseSemverTriple("10.20.30")).toEqual([10, 20, 30]);
+        // `00.1.0` and `0.1.0` parse to the same triple.
+        for (const bad of [
+            "1.2",
+            "1.2.3.4",
+            "v1.2.3",
+            "1.2.x",
+            "",
+            "00.1.0",
+            "0.01.0",
+            "0.1.00",
+            "00.01.000",
+            "01.2.3",
+            "0.0.01",
+        ]) {
             expect(parseSemverTriple(bad)).toBeNull();
         }
     });
@@ -197,14 +207,5 @@ describe("semver parsing", () => {
                 "daemon version is not a canonical eidnara-host/X.Y.Z value",
             );
         }
-    });
-
-    test("leading-zero components are not canonical", () => {
-        // `00.1.0` and `0.1.0` parse to the same triple.
-        for (const bad of ["00.1.0", "0.01.0", "0.1.00", "01.2.3", "0.0.01"]) {
-            expect(parseSemverTriple(bad)).toBeNull();
-        }
-        expect(parseSemverTriple("0.0.0")).toEqual([0, 0, 0]);
-        expect(parseSemverTriple("10.20.30")).toEqual([10, 20, 30]);
     });
 });

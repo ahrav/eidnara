@@ -14,15 +14,10 @@ function withTempDir(run: (dir: string) => void): void {
 }
 
 describe("resolveWriteTarget", () => {
-    test("returns an absent path unchanged", () => {
+    test("returns an absent path or a regular file unchanged", () => {
         withTempDir((dir) => {
             const absent = path.join(dir, "nope.jsonc");
             expect(resolveWriteTarget(absent)).toBe(absent);
-        });
-    });
-
-    test("returns a regular file unchanged", () => {
-        withTempDir((dir) => {
             const file = path.join(dir, "tui.jsonc");
             writeFileSync(file, "{}\n");
             expect(resolveWriteTarget(file)).toBe(file);

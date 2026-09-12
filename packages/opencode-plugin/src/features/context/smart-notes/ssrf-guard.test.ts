@@ -194,10 +194,11 @@ describe("createPinnedLookup", () => {
     // Node expects the array callback form when all is true.
     // lookupAndConnectMultiple calls results.sort() on the all:true callback result.
     // A non-array callback result makes `lookupAndConnectMultiple` throw when it calls `results.sort()`.
+    // The hook ignores the hostname, so a rebinding DNS answer cannot replace the validated address.
     test("returns the ARRAY form when Node asks for all candidates", () => {
         const hook = createPinnedLookup({ address: "93.184.216.34", family: 4 });
         let received: unknown;
-        hook("example.test", { all: true }, (err, addresses) => {
+        hook("attacker-rebind.test", { all: true }, (err, addresses) => {
             expect(err).toBeNull();
             received = addresses;
         });
@@ -215,15 +216,6 @@ describe("createPinnedLookup", () => {
         });
         expect(addr).toBe("1.1.1.1");
         expect(fam).toBe(4);
-    });
-
-    test("pins to the validated IP without re-querying DNS", () => {
-        const hook = createPinnedLookup({ address: "203.0.113.7", family: 4 });
-        let received: unknown;
-        hook("attacker-rebind.test", { all: true }, (_err, addresses) => {
-            received = addresses;
-        });
-        expect(received).toEqual([{ address: "203.0.113.7", family: 4 }]);
     });
 });
 

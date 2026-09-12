@@ -18,7 +18,7 @@ use daemon::search_projection::SearchProjection;
 use host_runtime::synapse::PollOutcome;
 use host_runtime::synapse::{SynapseComponent, SynapseLimits};
 use kernel::applicability::EvalBudget;
-use kernel::{CurrentInputExpectation, ProjectScope};
+use kernel::{CurrentInputDescriptor, ProjectScope};
 use retrieval::batch::{VectorGeneration, register_generation};
 use retrieval::identity_sweep::{Candidate, candidates, reclaim};
 use retrieval::vectors::encode;
@@ -877,12 +877,13 @@ async fn a_served_result_page_protects_lost_commit_reconciliation_from_the_sweep
     let generation = generation();
     let project = ProjectScope::new(PROJECT).unwrap();
     let publication = VectorPublication {
-        expectation: CurrentInputExpectation {
+        input: CurrentInputDescriptor {
             object_id: row.object_id.clone(),
             source_revision: row.revision,
-            occurrence_id: row.detail.occurrence_id.clone(),
-            payload_id: row.detail.payload_id.clone(),
-            artifact_digest: row.detail.artifact_digest.clone(),
+            detail: row.detail.clone(),
+            domain_id: row.domain_id.clone(),
+            sensitivity: row.sensitivity,
+            created_commit_seq: row.created_commit_seq,
         },
         generation: &generation,
         vector: &vector,

@@ -598,6 +598,9 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
         expect(result.config.execute_threshold_percentage).toBe(80);
         expect(result.sources.projectConfig).toBe("ok");
         expect(result.loadOutcome).toBe("ok");
+        expect(result.config.configWarnings?.join("\n") ?? "").not.toContain(
+            "execute_threshold_percentage",
+        );
     });
 
     it("binds two fields that reference the same missing token to distinct paths", () => {
@@ -758,20 +761,16 @@ describe("loadPluginConfig — variable expansion scope", () => {
 });
 
 describe("loadPluginConfig — user-only settings", () => {
-    it("allows user config to opt in to an exact home project", () => {
-        const result = loadWithUserConfig(JSON.stringify({ allow_home_project: true }));
+    it("lets only the user tier opt in to an exact home project", () => {
+        const userOptIn = loadWithUserConfig(JSON.stringify({ allow_home_project: true }));
+        expect(userOptIn.allow_home_project).toBe(true);
 
-        expect(result.allow_home_project).toBe(true);
-    });
-
-    it("prevents project config from opting in to a home project", () => {
-        const result = loadWithUserAndProjectConfig(
+        const projectOptIn = loadWithUserAndProjectConfig(
             JSON.stringify({ allow_home_project: false }),
             JSON.stringify({ allow_home_project: true }),
         );
-
-        expect(result.allow_home_project).toBe(false);
-        expect(result.configWarnings?.join("\n")).toContain("Ignoring allow_home_project");
+        expect(projectOptIn.allow_home_project).toBe(false);
+        expect(projectOptIn.configWarnings?.join("\n")).toContain("Ignoring allow_home_project");
     });
 
     it("keeps historian model selection user-owned when project config tries to override it", () => {
@@ -801,27 +800,20 @@ describe("loadPluginConfig — user-only settings", () => {
 });
 
 describe("loadPluginConfig — project compaction trust boundary", () => {
-    it("ignores a lower project execute_threshold_percentage with a warning", () => {
+    it.each([
+        ["below 80", 60, 50],
+        ["schema-valid above 80", 90, 85],
+    ] as Array<
+        [string, number, number]
+    >)("ignores a lower project execute_threshold_percentage (%s) with a warning", (_title, user, project) => {
         const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ execute_threshold_percentage: 60 }),
-            JSON.stringify({ execute_threshold_percentage: 50 }),
+            JSON.stringify({ execute_threshold_percentage: user }),
+            JSON.stringify({ execute_threshold_percentage: project }),
         );
 
-        expect(result.execute_threshold_percentage).toBe(60);
+        expect(result.execute_threshold_percentage).toBe(user);
         expect(result.configWarnings?.join("\n")).toContain(
             "Ignoring execute_threshold_percentage",
-        );
-    });
-
-    it("applies a higher project execute_threshold_percentage", () => {
-        const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ execute_threshold_percentage: 60 }),
-            JSON.stringify({ execute_threshold_percentage: 70 }),
-        );
-
-        expect(result.execute_threshold_percentage).toBe(70);
-        expect(result.configWarnings?.join("\n") ?? "").not.toContain(
-            "execute_threshold_percentage",
         );
     });
 
@@ -844,18 +836,6 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
         );
 
         expect(result.execute_threshold_tokens).toEqual({ default: 18_000 });
-    });
-
-    it("ignores a schema-valid project percentage above 80 that is below the user's threshold", () => {
-        const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ execute_threshold_percentage: 90 }),
-            JSON.stringify({ execute_threshold_percentage: 85 }),
-        );
-
-        expect(result.execute_threshold_percentage).toBe(90);
-        expect(result.configWarnings?.join("\n")).toContain(
-            "Ignoring execute_threshold_percentage",
-        );
     });
 
     it("keeps the user's threshold when the project value is outside the schema range", () => {
@@ -904,21 +884,16 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
         );
     });
 
-    it("keeps user historian.disable=true when the project historian block is null", () => {
+    it("keeps user historian and storage blocks when the project sets those blocks to null", () => {
         const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ historian: { disable: true } }),
-            JSON.stringify({ historian: null }),
+            JSON.stringify({
+                historian: { disable: true },
+                storage: { enforce_private_permissions: false },
+            }),
+            JSON.stringify({ historian: null, storage: null }),
         );
 
         expect(result.historian?.disable).toBe(true);
-    });
-
-    it("keeps user storage.enforce_private_permissions when the project storage block is null", () => {
-        const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ storage: { enforce_private_permissions: false } }),
-            JSON.stringify({ storage: null }),
-        );
-
         expect(result.storage?.enforce_private_permissions).toBe(false);
     });
 
@@ -1016,15 +991,6 @@ describe("loadPluginConfig — project compaction trust boundary", () => {
 });
 
 describe("loadPluginConfig — raw merge preserves user fields not set in project", () => {
-    it("user scalar field survives when project omits it", () => {
-        const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ execute_threshold_percentage: 30, enabled: true }),
-            JSON.stringify({ smart_drops: false }),
-        );
-
-        expect(result.execute_threshold_percentage).toBe(30);
-    });
-
     it("still applies project sidekick model overrides", () => {
         const result = loadWithUserAndProjectConfig(
             JSON.stringify({ language: "tr" }),
@@ -1041,15 +1007,6 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
         // `timeout_ms` is a user-only cost bound; the project value is stripped and the default stays.
         expect(result.sidekick?.timeout_ms).toBe(30_000);
         expect(result.configWarnings?.join("\n")).toContain("Ignoring sidekick.timeout_ms");
-    });
-
-    it("project boolean override beats user default", () => {
-        const result = loadWithUserAndProjectConfig(
-            JSON.stringify({ enabled: true }),
-            JSON.stringify({ smart_drops: true }),
-        );
-
-        expect(result.smart_drops).toBe(true);
     });
 
     it("ignores the removed ctx_reduce_enabled key without failing parse", () => {

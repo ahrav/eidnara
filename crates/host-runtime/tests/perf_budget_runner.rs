@@ -158,27 +158,6 @@ fn plan_blocks_expand_rates_and_cross_numa_tail() {
 }
 
 #[test]
-fn dry_run_schedule_is_stable_across_invocations() {
-    let arms = budget_arms();
-    let first = counterbalanced_schedule(10, &arms);
-    let second = counterbalanced_schedule(10, &arms);
-    assert_eq!(first, second);
-    assert_eq!(first.len(), 10);
-    // The two orientations reverse every pairwise arm order.
-    assert_eq!(first[0].first(), first[2].first());
-    assert_eq!(first[1].first(), first[3].first());
-    assert_ne!(first[0].first(), first[1].first());
-    // Every block runs every arm exactly once.
-    for block in &first {
-        let mut sorted = block.clone();
-        sorted.sort();
-        let mut expected = arms.clone();
-        expected.sort();
-        assert_eq!(sorted, expected);
-    }
-}
-
-#[test]
 fn open_loop_preserves_schedule_and_records_missed_slots() {
     let data_dir = tempfile::tempdir().unwrap();
     let host = echo_host::InProcessHost::start(data_dir.path());

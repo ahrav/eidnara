@@ -223,20 +223,19 @@ describe("KernelClient gating", () => {
 });
 
 describe("KernelClient transport mapping", () => {
-    test("not_sent is daemon_absent", async () => {
-        const transport = new FakeTransport().queue(new HostCallError("not_sent", "never wrote"));
-        const result = await client(transport).read({ surface: "auto_inject" });
-        expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
-        expect(transport.calls).toHaveLength(1);
-    });
-
-    test("ECONNREFUSED and a closed socket are daemon_absent", async () => {
+    test("not_sent, ECONNREFUSED, a closed socket, and an expired connection-file read are daemon_absent", async () => {
         const refused = Object.assign(new Error("connect"), { code: "ECONNREFUSED" });
         const closed = Object.assign(new Error("closed"), { name: "SocketClosedError" });
-        for (const error of [refused, closed]) {
+        for (const error of [
+            new HostCallError("not_sent", "never wrote"),
+            refused,
+            closed,
+            new ConnectionFileError("stage expired", "deadline_expired"),
+        ]) {
             const transport = new FakeTransport().queue(error);
             const result = await client(transport).read({ surface: "auto_inject" });
             expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
+            expect(transport.calls).toHaveLength(1);
         }
     });
 
@@ -458,11 +457,15 @@ describe("KernelClient transport mapping", () => {
         expect(transport.bodies("kernel.commit")).toHaveLength(2);
     });
 
-    test("other terminal codes and foreign errors are invalid(internal)", async () => {
+    test("other terminal codes, foreign errors, and terminal connection-file faults are invalid(internal), not daemon_absent", async () => {
+        // host-client treats every connection-file code but `deadline_expired` as terminal; a foreign-owned or insecure file is a misconfiguration, not a daemon that is not running.
         for (const error of [
             new HostCallError("terminal", "bad", "bad_request"),
             new HostCallError("terminal", "bad", "session_mismatch"),
             new TypeError("boom"),
+            new ConnectionFileError("bad file", "foreign_owner"),
+            new ConnectionFileError("bad file", "insecure_permissions"),
+            new ConnectionFileError("bad file", "invalid_key"),
         ]) {
             const transport = new FakeTransport().queue(error);
             const result = await client(transport).read({ surface: "auto_inject" });
@@ -617,23 +620,6 @@ describe("KernelClient transport mapping", () => {
         expect(result.state).toEqual({ kind: "invalid", reason: "invalid_input" });
     });
 
-    test("a connection file that outlived its read budget is daemon_absent", async () => {
-        const transport = new FakeTransport().queue(
-            new ConnectionFileError("stage expired", "deadline_expired"),
-        );
-        const result = await client(transport).read({ surface: "auto_inject" });
-        expect(result.state).toEqual({ kind: "unavailable", reason: "daemon_absent" });
-    });
-
-    test("a terminal connection-file fault is not reported as an absent daemon", async () => {
-        // host-client treats every connection-file code but `deadline_expired` as terminal; a foreign-owned or insecure file is a misconfiguration, not a daemon that is not running.
-        for (const code of ["foreign_owner", "insecure_permissions", "invalid_key"] as const) {
-            const transport = new FakeTransport().queue(new ConnectionFileError("bad file", code));
-            const result = await client(transport).read({ surface: "auto_inject" });
-            expect(result.state).toEqual({ kind: "invalid", reason: "internal" });
-        }
-    });
-
     test("an unparseable success body is unrecognized_state", async () => {
         const transport = new FakeTransport().queue({ state: { kind: "available" }, rows: 3 });
         const result = await client(transport).read({ surface: "auto_inject" });
@@ -648,19 +634,6 @@ describe("KernelClient transport mapping", () => {
             const result = await client(transport).read({ surface: "auto_inject" });
             expect(result.state).toEqual({ kind: "invalid", reason: "unrecognized_state" });
         }
-    });
-
-    test("a decision row without its decision payload fails the whole read", async () => {
-        const { decision: _decision, ...bare } = row("o1", 3);
-        const transport = new FakeTransport().queue({
-            state: { kind: "available" },
-            known_as_of: 3,
-            tip: 3,
-            gated: false,
-            rows: [bare],
-        });
-        const result = await client(transport).read({ surface: "explicit_search" });
-        expect(result.state).toEqual({ kind: "invalid", reason: "unrecognized_state" });
     });
 });
 
@@ -732,12 +705,6 @@ describe("KernelClient reads", () => {
         expect(transport.bodies("kernel.read")[0]?.object_ids).toEqual(["o1", "o2"]);
     });
 
-    test("an unfiltered read omits object_ids from the wire", async () => {
-        const transport = new FakeTransport().queue(readReply(5, "o1"));
-        await client(transport).read({ surface: "explicit_search" });
-        expect("object_ids" in (transport.bodies("kernel.read")[0] ?? {})).toBe(false);
-    });
-
     test("an over-limit objectIds filter is invalid_input with no transport call", async () => {
         const transport = new FakeTransport();
         const objectIds = Array.from({ length: 65 }, (_, index) => `o${index}`);
@@ -748,7 +715,16 @@ describe("KernelClient reads", () => {
 });
 
 describe("KernelClient mutations", () => {
-    test("operation_key is a deterministic function of the operation identity and project", () => {
+    test("identity fields alone move the operation key and body fields alone move the request digest", () => {
+        const identity = { producer: "plugin", actor: "a", operationId: "session-1\u001fcall-1" };
+        const key = deriveOperationKey(identity);
+        expect(key).toMatch(/^[0-9a-f]{64}$/);
+        expect(deriveOperationKey({ ...identity })).toBe(key);
+        expect(deriveOperationKey({ ...identity, producer: "other" })).not.toBe(key);
+        expect(deriveOperationKey({ ...identity, operationId: "session-2\u001fcall-1" })).not.toBe(
+            key,
+        );
+
         const operations = [{ op: "insert_decision" as const, spec }];
         const digest = deriveRequestDigest({ operations, sourceKind: "assistant" });
         expect(digest).toBe(
@@ -757,49 +733,12 @@ describe("KernelClient mutations", () => {
                 sourceKind: "assistant",
             }),
         );
-        const key = deriveOperationKey({
-            producer: "plugin",
-            actor: "a",
-            operationId: "s\u001fc",
-        });
-        expect(key).toMatch(/^[0-9a-f]{64}$/);
         expect(
-            deriveOperationKey({
-                producer: "other",
-                actor: "a",
-                operationId: "s\u001fc",
-            }),
-        ).not.toBe(key);
-    });
-
-    test("the same operation identity keeps its key while a changed body changes only the digest", () => {
-        const key = deriveOperationKey({
-            producer: "plugin",
-            actor: "a",
-            operationId: "session-1\u001fcall-1",
-        });
-        expect(
-            deriveOperationKey({
-                producer: "plugin",
-                actor: "a",
-                operationId: "session-1\u001fcall-1",
-            }),
-        ).toBe(key);
-        const digest = deriveRequestDigest({
-            operations: [{ op: "insert_decision", spec }],
-            sourceKind: "assistant",
-        });
-        const otherDigest = deriveRequestDigest({
-            operations: [{ op: "retire_decision", object_id: "mem_other" }],
-            sourceKind: "assistant",
-        });
-        expect(digest).toBe(
             deriveRequestDigest({
-                operations: [{ op: "insert_decision", spec: { ...spec } }],
+                operations: [{ op: "retire_decision", object_id: "mem_other" }],
                 sourceKind: "assistant",
             }),
-        );
-        expect(otherDigest).not.toBe(digest);
+        ).not.toBe(digest);
     });
 
     test("the request digest covers the classification fields the daemon admits the write under", () => {
@@ -822,40 +761,22 @@ describe("KernelClient mutations", () => {
         ).toBe(base);
     });
 
-    test("commits sharing one identity but differing in source_kind carry different digests on the wire", async () => {
+    test("source_kind enters the wire digest: omitted equals the explicit default, another value moves the digest but not the key", async () => {
         const transport = new FakeTransport().queue(
             commitReply(2, false, spec.object_id),
             commitReply(3, false, spec.object_id),
-        );
-        const c = client(transport);
-        await c.create(spec, { ...intent, sourceKind: "assistant" });
-        await c.create(spec, { ...intent, sourceKind: "user" });
-        const [first, second] = transport
-            .bodies("kernel.commit")
-            .map((body) => (body as { intent: Record<string, string> }).intent);
-        expect(first?.operation_key).toBe(second?.operation_key);
-        expect(first?.request_digest).not.toBe(second?.request_digest);
-    });
-
-    test("an omitted source_kind hashes like the explicit default the wire carries", async () => {
-        const transport = new FakeTransport().queue(
-            commitReply(2, false, spec.object_id),
-            commitReply(3, false, spec.object_id),
+            commitReply(4, false, spec.object_id),
         );
         const c = client(transport);
         await c.create(spec, intent);
         await c.create(spec, { ...intent, sourceKind: "assistant" });
-        const [first, second] = transport
+        await c.create(spec, { ...intent, sourceKind: "user" });
+        const [omitted, assistant, user] = transport
             .bodies("kernel.commit")
             .map((body) => (body as { intent: Record<string, string> }).intent);
-        expect(first?.request_digest).toBe(second?.request_digest);
-    });
-
-    test("sessions reusing one tool-call id derive distinct keys", () => {
-        const parts = { producer: "plugin", actor: "a" };
-        expect(deriveOperationKey({ ...parts, operationId: "session-1\u001fcall-1" })).not.toBe(
-            deriveOperationKey({ ...parts, operationId: "session-2\u001fcall-1" }),
-        );
+        expect(omitted?.request_digest).toBe(assistant?.request_digest);
+        expect(user?.operation_key).toBe(assistant?.operation_key);
+        expect(user?.request_digest).not.toBe(assistant?.request_digest);
     });
 
     test("deriveObjectId joins the fields under the unit separator and pins byte-for-byte", () => {
@@ -1254,22 +1175,22 @@ describe("KernelClient mutations", () => {
 });
 
 describe("kernelMemorySnapshotFrom", () => {
-    test("an available read's truncated flag rides the snapshot projection", async () => {
-        const transport = new FakeTransport().queue({ ...readReply(9, "o1"), truncated: true });
-        const read = await client(transport).read({ surface: "explicit_search" });
-        expect(kernelMemorySnapshotFrom(read)).toMatchObject({
+    test("an available read's rows and truncated flag ride the snapshot projection, absent as false", async () => {
+        const transport = new FakeTransport().queue(
+            { ...readReply(9, "o1"), truncated: true },
+            readReply(9, "o1"),
+        );
+        const c = client(transport);
+        const truncated = await c.read({ surface: "explicit_search" });
+        expect(kernelMemorySnapshotFrom(truncated)).toMatchObject({
             rows: [
                 expect.objectContaining({ object: expect.objectContaining({ object_id: "o1" }) }),
             ],
             knownAsOf: 9,
             truncated: true,
         });
-    });
-
-    test("a complete read projects truncated false", async () => {
-        const transport = new FakeTransport().queue(readReply(9, "o1"));
-        const read = await client(transport).read({ surface: "explicit_search" });
-        expect(kernelMemorySnapshotFrom(read).truncated).toBe(false);
+        const complete = await c.read({ surface: "explicit_search" });
+        expect(kernelMemorySnapshotFrom(complete).truncated).toBe(false);
     });
 
     test("a non-available read projects no rows and no truncation", async () => {

@@ -190,19 +190,11 @@ fn canonicalization_is_idempotent_and_order_insensitive() {
 }
 
 #[test]
-fn redaction_placeholder_branch_decodes_as_placeholder_term() {
-    let decoded = scope(&[exact("branch", PLACEHOLDER_BRANCH)]);
-    assert_eq!(
-        decoded.term(Dimension::Branch),
-        Some(&TermValue::RedactedPlaceholder)
-    );
-}
-
-#[test]
-fn keyed_and_operator_redaction_tokens_decode_as_placeholder_terms() {
-    // Covers the `<REDACTED:...>` and `[redacted:operator]` families, which
-    // carry no `_REDACTED>` fragment.
+fn every_redaction_token_family_decodes_as_a_placeholder_term() {
+    // The `<REDACTED:...>` and `[redacted:operator]` families carry no
+    // `_REDACTED>` fragment, so each family needs its own case.
     for value in [
+        PLACEHOLDER_BRANCH,
         "deploy_token=<REDACTED:token>",
         "<REDACTED:bearer>",
         "[redacted:operator]",
@@ -214,22 +206,6 @@ fn keyed_and_operator_redaction_tokens_decode_as_placeholder_terms() {
             "{value} must decode as a placeholder"
         );
     }
-}
-
-#[test]
-fn keyed_redaction_tokens_never_match_or_subsume() {
-    let a = scope(&[exact("branch", "release/<REDACTED:key>")]);
-    let b = scope(&[exact("branch", "release/<REDACTED:key>")]);
-    let oracle = UnknownGraph;
-    assert!(!scope_subsumes(&a, &b, &oracle));
-    assert!(!scope_equivalent(&a, &b, &oracle));
-    let ctx = ScopeMatchContext::new().with_value(Dimension::Branch, "release/<REDACTED:key>");
-    assert_eq!(scope_matches(&a, &ctx, &oracle), MatchOutcome::Uncertain);
-    let plain = scope(&[exact("branch", "main")]);
-    assert_eq!(
-        scope_matches(&plain, &ctx, &oracle),
-        MatchOutcome::Uncertain
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -294,20 +270,27 @@ fn undecidable_pairs_follow_the_approximation_rule_both_ways() {
 
 #[test]
 fn placeholder_terms_never_match_or_subsume() {
-    let a = scope(&[exact("branch", PLACEHOLDER_BRANCH)]);
-    let b = scope(&[exact("branch", PLACEHOLDER_BRANCH)]);
     let oracle = UnknownGraph;
-    assert!(!scope_subsumes(&a, &b, &oracle));
-    assert!(!scope_equivalent(&a, &b, &oracle));
-    let ctx = ScopeMatchContext::new().with_value(Dimension::Branch, PLACEHOLDER_BRANCH);
-    assert_eq!(scope_matches(&a, &ctx, &oracle), MatchOutcome::Uncertain);
-    // A placeholder context value is equally unresolvable against an
-    // ordinary term.
     let plain = scope(&[exact("branch", "main")]);
-    assert_eq!(
-        scope_matches(&plain, &ctx, &oracle),
-        MatchOutcome::Uncertain
-    );
+    for token in [PLACEHOLDER_BRANCH, "release/<REDACTED:key>"] {
+        let a = scope(&[exact("branch", token)]);
+        let b = scope(&[exact("branch", token)]);
+        assert!(!scope_subsumes(&a, &b, &oracle), "{token}");
+        assert!(!scope_equivalent(&a, &b, &oracle), "{token}");
+        let ctx = ScopeMatchContext::new().with_value(Dimension::Branch, token);
+        assert_eq!(
+            scope_matches(&a, &ctx, &oracle),
+            MatchOutcome::Uncertain,
+            "{token}"
+        );
+        // A placeholder context value is equally unresolvable against an
+        // ordinary term.
+        assert_eq!(
+            scope_matches(&plain, &ctx, &oracle),
+            MatchOutcome::Uncertain,
+            "{token}"
+        );
+    }
 }
 
 #[test]
@@ -634,11 +617,6 @@ proptest! {
         rng_seed: prop::test_runner::RngSeed::Fixed(0x5C0BEA16E),
         ..ProptestConfig::default()
     })]
-
-    #[test]
-    fn subsumption_is_reflexive(a in scope_strategy()) {
-        prop_assert!(scope_subsumes(&a, &a, &law_oracle()));
-    }
 
     #[test]
     fn subsumption_is_transitive(

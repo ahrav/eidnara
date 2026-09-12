@@ -1721,10 +1721,12 @@ impl TransformRequest {
         );
         let native_messages = native_charge.unwrap_or_else(|| {
             self.native_messages.as_ref().map_or(0, |messages| {
-                messages
-                    .capacity()
-                    .saturating_mul(size_of::<Value>())
-                    .saturating_add(messages.iter().map(value_heap_bytes).sum::<usize>())
+                retained_size::shared_value_vec_retained_bytes(
+                    messages.capacity(),
+                    messages
+                        .iter()
+                        .map(|message| native_value_retained_bytes(message)),
+                )
             })
         });
         let messages = message_charge.unwrap_or_else(|| {
@@ -2360,6 +2362,8 @@ impl NativeAttachmentCacheSnapshot {
                     .map(|chunk| ARC_ALLOCATION_OVERHEAD_BYTES.saturating_add(chunk.retained_bytes))
                     .sum::<usize>(),
             );
+        // The sidecar's serialized-size estimate can be smaller than its raw allocation.
+        // Ingress and chunk charges retain that allocation floor even when the sidecar shares it.
         let mut charged_values = self
             .chunks
             .iter()
@@ -4219,23 +4223,16 @@ impl Handler {
                     let request = fallback_request.as_ref()?;
                     let previous_native = request.native_messages.as_ref()?;
                     (native_replace_from <= previous_native.len()).then(|| {
-                        let prefix = previous_native[..native_replace_from]
-                            .iter()
-                            .cloned()
-                            .map(Arc::new)
-                            .collect::<Vec<_>>();
+                        let prefix = previous_native[..native_replace_from].to_vec();
                         let retained_bytes = previous_native[..native_replace_from]
                             .iter()
-                            .map(native_value_retained_bytes)
+                            .map(|message| native_value_retained_bytes(message))
                             .collect();
                         (prefix, retained_bytes)
                     })
                 })?
         };
-        let mut native_messages = native_prefix
-            .iter()
-            .map(|message| message.as_ref().clone())
-            .collect::<Vec<_>>();
+        let mut native_messages = native_prefix.clone();
         let mut current_native = parsed.native_messages.take()?;
         native_messages.append(&mut current_native);
 
@@ -12881,7 +12878,7 @@ fn validated_native_prefix(
     snapshot: &NativeAttachmentCacheSnapshot,
     frontier: Option<&NativeDeltaFrontier>,
 ) -> usize {
-    let native_len = request.native_messages.as_deref().map_or(0, <[Value]>::len);
+    let native_len = request.native_messages.as_deref().map_or(0, <[_]>::len);
     frontier
         .filter(|frontier| {
             Some(frontier.after.as_str()) == snapshot.full_array_fingerprint.as_deref()
@@ -12898,7 +12895,7 @@ fn native_sidecar(
 ) -> Arc<codec::DecodeSidecar> {
     let native_messages = request.native_messages.as_deref().unwrap_or_default();
     let Some(snapshot) = snapshot else {
-        return Arc::new(codec::decode_opencode(native_messages).sidecar);
+        return Arc::new(codec::opencode::decode_opencode_shared(native_messages, None, 0).sidecar);
     };
     if trusted_prefix == native_messages.len() && trusted_prefix == snapshot.sidecar.order.len() {
         return Arc::clone(&snapshot.sidecar);
@@ -12910,12 +12907,15 @@ fn native_sidecar(
             trusted_prefix,
         ));
     }
-    Arc::new(codec::decode_opencode(native_messages).sidecar)
+    Arc::new(codec::opencode::decode_opencode_shared(native_messages, None, 0).sidecar)
 }
 
 fn native_sidecar_hash_and_size(meta: &codec::sidecar::HarnessMessageMeta) -> ([u8; 32], usize) {
     let bytes = serde_json::to_vec(meta).expect("OpenCode sidecar metadata must serialize");
-    let retained_bytes = std::mem::size_of_val(meta).saturating_add(bytes.len().saturating_mul(2));
+    let retained_bytes = std::mem::size_of_val(meta)
+        .saturating_add(crate::retained_size::ARC_ALLOCATION_OVERHEAD_BYTES)
+        .saturating_add(std::mem::size_of::<Value>())
+        .saturating_add(bytes.len().saturating_mul(2));
     (Sha256::digest(&bytes).into(), retained_bytes)
 }
 
@@ -12997,7 +12997,7 @@ fn encode_full_native_messages(
     let sidecar = request
         .native_messages
         .as_deref()
-        .map(codec::decode_opencode)
+        .map(|messages| codec::opencode::decode_opencode_shared(messages, None, 0))
         .map(|decoded| decoded.sidecar)
         .unwrap_or_else(|| codec::DecodeSidecar::new("opencode"));
     let served_messages = served
@@ -13034,7 +13034,7 @@ fn native_ingress_chunks(
     request: &TransformRequest,
     encoded_chunks: &[NativeEncodedChunk],
     frontier: Option<&NativeDeltaFrontier>,
-) -> (Vec<Arc<Value>>, Vec<usize>) {
+) -> (Vec<Arc<Value>>, Vec<usize>, usize) {
     let native_messages = request.native_messages.as_deref().unwrap_or_default();
     let reusable_prefix = frontier
         .filter(|frontier| {
@@ -13058,22 +13058,30 @@ fn native_ingress_chunks(
         .filter(|chunk| chunk.end_index == chunk.start_index.saturating_add(1))
         .map(|chunk| (chunk.start_index, chunk))
         .collect::<HashMap<_, _>>();
-    for (index, message) in native_messages.iter().enumerate().skip(reusable_prefix) {
-        let shared_output = output_chunks_by_start
-            .get(&index)
-            .filter(|chunk| chunk.value.as_ref() == message);
-        let (value, retained_bytes) = shared_output.map_or_else(
-            || {
-                let value = Arc::new(message.clone());
-                let retained_bytes = native_value_retained_bytes(&value);
-                (value, retained_bytes)
-            },
-            |chunk| (Arc::clone(&chunk.value), chunk.retained_bytes),
-        );
-        ingress_chunks.push(value);
-        ingress_chunk_retained_bytes.push(retained_bytes);
-    }
-    (ingress_chunks, ingress_chunk_retained_bytes)
+    let request_retained_bytes = retained_size::shared_value_vec_retained_bytes(
+        request.native_messages.as_ref().map_or(0, Vec::capacity),
+        native_messages.iter().enumerate().map(|(index, message)| {
+            if index < reusable_prefix {
+                return ingress_chunk_retained_bytes[index];
+            }
+            let request_value_retained_bytes = native_value_retained_bytes(message);
+            let shared_output = output_chunks_by_start
+                .get(&index)
+                .filter(|chunk| chunk.value.as_ref() == message.as_ref());
+            let (value, retained_bytes) = shared_output.map_or_else(
+                || (Arc::clone(message), request_value_retained_bytes),
+                |chunk| (Arc::clone(&chunk.value), chunk.retained_bytes),
+            );
+            ingress_chunks.push(value);
+            ingress_chunk_retained_bytes.push(retained_bytes);
+            request_value_retained_bytes
+        }),
+    );
+    (
+        ingress_chunks,
+        ingress_chunk_retained_bytes,
+        request_retained_bytes,
+    )
 }
 
 static NATIVE_ATTACHMENT_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
@@ -13129,7 +13137,7 @@ fn attach_native_messages_incremental(
         if snapshot.context != context {
             return Some(NativeDeltaFallbackReason::CacheContextMismatch);
         }
-        let native_len = request.native_messages.as_deref().map_or(0, <[Value]>::len);
+        let native_len = request.native_messages.as_deref().map_or(0, <[_]>::len);
         if frontier.native_replace_from > native_len
             || frontier.native_prefix.len() != frontier.native_replace_from
             || frontier.native_prefix_retained_bytes.len() != frontier.native_replace_from
@@ -13316,7 +13324,7 @@ fn attach_native_messages_incremental(
         .iter()
         .map(|chunk| Arc::clone(&chunk.value))
         .collect::<Vec<_>>();
-    let (ingress_chunks, ingress_chunk_retained_bytes) =
+    let (ingress_chunks, ingress_chunk_retained_bytes, request_native_retained_bytes) =
         native_ingress_chunks(request, &chunks, native_delta_frontier);
 
     if native_attachment_differential_enabled() {
@@ -13338,12 +13346,6 @@ fn attach_native_messages_incremental(
         );
     }
 
-    let request_native_retained_bytes = request.native_messages.as_ref().map_or(0, |messages| {
-        messages
-            .capacity()
-            .saturating_mul(std::mem::size_of::<Value>())
-            .saturating_add(ingress_chunk_retained_bytes.iter().copied().sum::<usize>())
-    });
     let mut stats = NativeAttachmentCacheStats {
         reused_messages: suffix_start,
         encoded_messages: message_keys.len().saturating_sub(suffix_start),
@@ -15415,6 +15417,20 @@ impl RequestMethodProbe {
 /// The estimate doubles counted node storage for `Vec` and map growth.
 const VALUE_NODE_SLACK: usize = 2;
 
+/// The decoded `Value` tree and the typed request coexist during `serde_json::from_value`.
+const RETAINED_NODE_COPIES: usize = 2;
+
+const VALUE_NODE_CHARGE_BYTES: usize = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
+
+/// `native_messages` stores `Arc<Value>` handles; their slack charge plus the `Arc` allocation
+/// must not exceed the typed-request node charge.
+const _: () = assert!(
+    std::mem::size_of::<Arc<Value>>() * VALUE_NODE_SLACK
+        + retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+        + std::mem::size_of::<Value>()
+        <= VALUE_NODE_CHARGE_BYTES
+);
+
 /// The fixed headroom covers allocations that do not scale with the body.
 const VALUE_ENVELOPE_BYTES: usize = 4096;
 
@@ -15455,10 +15471,15 @@ fn value_footprint_bound(body: &[u8]) -> Option<usize> {
         }
     }
     nodes
-        .checked_mul(std::mem::size_of::<Value>())?
-        .checked_mul(VALUE_NODE_SLACK)?
+        .checked_mul(VALUE_NODE_CHARGE_BYTES)?
+        .checked_mul(RETAINED_NODE_COPIES)?
         .checked_add(string_bytes.checked_mul(RETAINED_STRING_COPIES)?)?
         .checked_add(VALUE_ENVELOPE_BYTES)
+}
+
+#[cfg(feature = "test-support")]
+pub fn value_footprint_bound_for_test(body: &[u8]) -> Option<usize> {
+    value_footprint_bound(body)
 }
 
 /// The failure is permanent when the tree cannot fit the host's resident ceiling at any load.
@@ -16547,35 +16568,35 @@ fn wrapup_has_remaining_messages(
     })
 }
 
-fn wrapup_boundary_messages(
+fn wrapup_boundary_messages<'a>(
     parsed: &TransformRequest,
-    projection: &crate::wire::FlatProjection,
+    projection: &'a crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
-) -> CachedBoundaryMessages {
+) -> CachedBoundaryMessages<'a> {
     cached_boundary_messages(parsed, projection, token_cache, true)
 }
 
-fn boundary_messages(
+fn boundary_messages<'a>(
     parsed: &TransformRequest,
-    projection: &crate::wire::FlatProjection,
+    projection: &'a crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
-) -> CachedBoundaryMessages {
+) -> CachedBoundaryMessages<'a> {
     cached_boundary_messages(parsed, projection, token_cache, false)
 }
 
-struct CachedBoundaryMessages {
-    messages: Vec<BoundaryMsg>,
+struct CachedBoundaryMessages<'a> {
+    messages: Vec<BoundaryMsg<'a>>,
     token_cache_hits: usize,
     tokenized_blocks: usize,
     token_cache_snapshot: BoundaryTokenCacheSnapshot,
 }
 
-fn cached_boundary_messages(
+fn cached_boundary_messages<'a>(
     parsed: &TransformRequest,
-    projection: &crate::wire::FlatProjection,
+    projection: &'a crate::wire::FlatProjection,
     token_cache: &Mutex<BoundaryTokenCache>,
     include_system: bool,
-) -> CachedBoundaryMessages {
+) -> CachedBoundaryMessages<'a> {
     let mut cache_snapshot = token_cache
         .lock()
         .expect("boundary token cache mutex")
@@ -16632,11 +16653,14 @@ fn cached_boundary_messages(
     }
 }
 
-fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind {
+fn sel_kind_for_flat(block: &crate::wire::FlatBlock) -> SelKind<'_> {
     match block.kind_tag.as_str() {
         "tool_call" => SelKind::ToolCall {
             name: block.name.clone().unwrap_or_default(),
-            input: block.tool_input.as_deref().cloned().unwrap_or(Value::Null),
+            input: std::borrow::Cow::Borrowed(match block.wire.kind() {
+                crate::wire::BlockKind::ToolCall { input, .. } => input,
+                _ => &Value::Null,
+            }),
         },
         "tool_result" => SelKind::ToolResult {
             tool_name: block.name.clone().unwrap_or_default(),
@@ -17340,7 +17364,10 @@ mod tests {
             .collect()
     }
 
-    fn trigger_messages_fixture(message_count: usize, payload_bytes: usize) -> Vec<BoundaryMsg> {
+    fn trigger_messages_fixture(
+        message_count: usize,
+        payload_bytes: usize,
+    ) -> Vec<BoundaryMsg<'static>> {
         (0..message_count)
             .map(|index| {
                 let original = format!("message {index}: {}", "x".repeat(payload_bytes));
@@ -18442,21 +18469,7 @@ mod tests {
     }
 
     #[test]
-    fn route_binding_bind_resolve_unbind() {
-        let h = Handler::new();
-        h.bind_route(test_route(7), binding("/repo/proj", "ses_a"));
-
-        assert_eq!(
-            resolved_root(&h, 7, "ses_a").unwrap(),
-            PathBuf::from("/repo/proj")
-        );
-
-        h.unbind_route(test_route(7));
-        assert_eq!(resolved_root(&h, 7, "ses_a"), Err(BindingError::Unbound));
-    }
-
-    #[test]
-    fn resolve_fails_loud_unbound_and_on_session_mismatch() {
+    fn route_binding_resolves_rejects_mismatch_rebinds_and_unbinds() {
         let h = Handler::new();
         assert_eq!(resolved_root(&h, 3, "ses_x"), Err(BindingError::Unbound));
 
@@ -18469,18 +18482,20 @@ mod tests {
             resolved_root(&h, 3, "ses_own").unwrap(),
             PathBuf::from("/repo/own")
         );
-    }
 
-    #[test]
-    fn rebind_overwrites_stale_channel_entry() {
-        let h = Handler::new();
-        h.bind_route(test_route(5), binding("/a", "s1"));
-        h.bind_route(test_route(5), binding("/b", "s2"));
-        assert_eq!(resolved_root(&h, 5, "s2").unwrap(), PathBuf::from("/b"));
+        // Rebinding a channel replaces its previous binding.
+        h.bind_route(test_route(3), binding("/repo/next", "ses_next"));
         assert_eq!(
-            resolved_root(&h, 5, "s1"),
+            resolved_root(&h, 3, "ses_next").unwrap(),
+            PathBuf::from("/repo/next")
+        );
+        assert_eq!(
+            resolved_root(&h, 3, "ses_own"),
             Err(BindingError::SessionMismatch)
         );
+
+        h.unbind_route(test_route(3));
+        assert_eq!(resolved_root(&h, 3, "ses_next"), Err(BindingError::Unbound));
     }
 
     #[tokio::test]
@@ -18642,7 +18657,7 @@ mod tests {
 
         // An escaped quote does not end the string, so the rest stays inside it.
         let escaped = br#"{"a":"he said \"x,y,z\" ok"}"#;
-        let node_cost = std::mem::size_of::<Value>() * VALUE_NODE_SLACK;
+        let node_cost = VALUE_NODE_CHARGE_BYTES * RETAINED_NODE_COPIES;
         assert!(
             value_footprint_bound(escaped).unwrap()
                 < VALUE_ENVELOPE_BYTES + RETAINED_STRING_COPIES * escaped.len() + 4 * node_cost,
@@ -19886,42 +19901,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn claude_code_response_resolves_per_pass_model_cache_ttl_from_module_config() {
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        config
-            .cache_ttl_by_model
-            .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
-        let route_config = config.clone();
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), config);
-        let mut route = binding(project.to_str().unwrap(), "ses");
-        route.config = route_config;
-        handler.bind_route(test_route(7), route);
-        let mut transform_request = request(vec![ck("a", 1, "alpha")]);
-        transform_request["serializer_profile"] = json!("claude-code-anthropic");
-        transform_request["model_key"] = json!("anthropic/claude-opus-4-1");
+    async fn claude_code_response_cache_ttl_follows_model_config_and_is_omitted_without_one() {
+        type Case<'a> = (fn(&mut DaemonConfig), Option<&'a str>, Option<&'a str>);
+        let cases: [Case<'_>; 2] = [
+            (
+                |config| {
+                    config
+                        .cache_ttl_by_model
+                        .insert("anthropic/claude-opus-4-1".to_string(), "300m".to_string());
+                },
+                Some("anthropic/claude-opus-4-1"),
+                Some("1h"),
+            ),
+            (|config| config.cache_ttl = "90m".to_string(), None, None),
+        ];
+        for (configure, model_key, expected_cache_ttl) in cases {
+            let mut config = default_test_config();
+            config.model_chain.clear();
+            configure(&mut config);
+            let route_config = config.clone();
+            let (handler, _store, _dir, project) =
+                handler_with_store(Arc::new(ProducerState::default()), config);
+            let mut route = binding(project.to_str().unwrap(), "ses");
+            route.config = route_config;
+            handler.bind_route(test_route(7), route);
+            let mut transform_request = request(vec![ck("a", 1, "alpha")]);
+            transform_request["serializer_profile"] = json!("claude-code-anthropic");
+            if let Some(model_key) = model_key {
+                transform_request["model_key"] = json!(model_key);
+            }
 
-        let response = call_transform_request(&handler, transform_request).await;
-        assert_eq!(response["cache_ttl"], "1h");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn claude_code_response_without_model_cache_ttl_inherits_harness_markers() {
-        let mut config = default_test_config();
-        config.model_chain.clear();
-        config.cache_ttl = "90m".to_string();
-        let route_config = config.clone();
-        let (handler, _store, _dir, project) =
-            handler_with_store(Arc::new(ProducerState::default()), config);
-        let mut route = binding(project.to_str().unwrap(), "ses");
-        route.config = route_config;
-        handler.bind_route(test_route(7), route);
-        let mut transform_request = request(vec![ck("a", 1, "alpha")]);
-        transform_request["serializer_profile"] = json!("claude-code-anthropic");
-
-        let response = call_transform_request(&handler, transform_request).await;
-        assert!(response.get("cache_ttl").is_none());
+            let response = call_transform_request(&handler, transform_request).await;
+            match expected_cache_ttl {
+                Some(expected) => assert_eq!(response["cache_ttl"], expected, "{model_key:?}"),
+                None => assert!(response.get("cache_ttl").is_none(), "{response}"),
+            }
+        }
     }
 
     #[test]
@@ -20073,18 +20088,14 @@ mod tests {
     }
 
     #[test]
-    fn transform_health_idle_is_ok_and_empty_queue_is_explicit_null() {
+    fn transform_health_idle_is_ok_and_queue_age_is_null_until_something_is_queued() {
         let health = DispatchHealth::new();
         let report = health.report(10_000);
         assert_eq!(report.status, HealthStatus::Ok);
         let metrics = report.metrics.unwrap();
         assert_eq!(metrics["in_flight_count"], json!(0));
         assert_eq!(metrics["oldest_queued_age_ms"], Value::Null);
-    }
 
-    #[test]
-    fn transform_health_reports_oldest_queue_age_as_a_structured_metric() {
-        let health = DispatchHealth::new();
         health.oldest_queued_at_ms.store(100, Ordering::Relaxed);
         let report = health.report(250);
         let metrics = report.metrics.unwrap();
@@ -20679,10 +20690,22 @@ mod tests {
         let messages = vec![frozen_call, frozen_result, reasoning, user];
         let first_request =
             native_cache_request("native-complex", messages.clone(), native.clone(), "fp-1");
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        handler.bind_route(
+            test_route(7),
+            binding(project.to_str().unwrap(), "native-complex"),
+        );
+        handler.store_projection_cache(
+            &first_request,
+            0,
+            Arc::new(crate::wire::project_messages(&first_request.messages).unwrap()),
+            None,
+        );
+        let cache = &handler.native_attachments;
         let tags = BTreeMap::from([("assistant-old".to_string(), 1)]);
-        let (_first, first_stats) = run_native_cache_pass(
-            &cache,
+        let (first, first_stats) = run_native_cache_pass(
+            cache,
             &first_request,
             served.clone(),
             &tags,
@@ -20692,6 +20715,19 @@ mod tests {
         );
         assert_eq!(first_stats.reused_messages, 0);
 
+        let first_sidecar = Arc::clone(
+            &cache.lock().unwrap().sessions["native-complex"]
+                .snapshot
+                .sidecar,
+        );
+        for (mid, raw) in first_sidecar
+            .order
+            .iter()
+            .zip(first_request.native_messages.as_ref().unwrap())
+        {
+            assert!(Arc::ptr_eq(&first_sidecar.messages[mid].raw, raw));
+        }
+
         let appended = ck("user-two", 5, "second prompt");
         served.push(appended.ck.clone());
         let mut next_messages = messages;
@@ -20700,22 +20736,131 @@ mod tests {
         next_native.push(native_text_message("user-two", "user", "second prompt"));
         let mut second_request =
             native_cache_request("native-complex", next_messages, next_native, "fp-2");
-        second_request.tail_delta = Some(json!({
-            "after": "fp-1",
-            "replace_from": 4,
-            "native_replace_from": 2,
-        }));
-        let (second, second_stats) = run_native_cache_pass(
-            &cache,
+        let (fresh, _) = run_native_cache_pass(
+            &Mutex::new(NativeAttachmentCache::default()),
             &second_request,
-            served,
+            served.clone(),
             &tags,
             false,
             0,
             NativeCacheKeyMode::Normal,
         );
+        let fresh_request = serde_json::to_value(&second_request).unwrap();
+        second_request.messages = second_request.messages.split_off(4);
+        second_request.native_messages =
+            Some(second_request.native_messages.take().unwrap().split_off(2));
+        second_request.tail_delta = Some(json!({
+            "after": "fp-1",
+            "replace_from": 4,
+            "native_replace_from": 2,
+        }));
+        let frontier = handler
+            .expand_transform_tail_delta(&mut second_request)
+            .expect("cached native prefix must reattach");
+        assert_eq!(
+            serde_json::to_value(&second_request).unwrap(),
+            fresh_request
+        );
+        for (reattached, cached) in second_request
+            .native_messages
+            .as_ref()
+            .unwrap()
+            .iter()
+            .zip(&frontier.native_prefix)
+        {
+            assert!(Arc::ptr_eq(reattached, cached));
+        }
+        let decoded_fresh = codec::decode_opencode(
+            &serde_json::from_value::<Vec<Value>>(fresh_request["native_messages"].clone())
+                .unwrap(),
+        );
+        let decoded_shared = codec::opencode::decode_opencode_shared(
+            second_request.native_messages.as_ref().unwrap(),
+            None,
+            0,
+        );
+        assert_eq!(decoded_shared, decoded_fresh);
+        assert_eq!(
+            crate::wire::project_messages(&decoded_shared.messages)
+                .unwrap()
+                .differential_bytes(),
+            crate::wire::project_messages(&decoded_fresh.messages)
+                .unwrap()
+                .differential_bytes(),
+        );
+        let mut second = transform::TransformResponse::passthrough(
+            served,
+            second_request.full_array_fingerprint.clone(),
+        );
+        let second_stats = attach_native_messages_incremental(
+            &mut second,
+            &second_request,
+            1,
+            &tags,
+            None,
+            None,
+            false,
+            Some(&frontier),
+            0,
+            cache,
+            NativeCacheKeyMode::Normal,
+        );
+        assert_eq!(second_stats.delta_fallback_reason, None);
+        assert_eq!(frontier.native_replace_from, 2);
+        let native_values = second_request.native_messages.as_ref().unwrap();
+        let native_charge = native_values.capacity() * std::mem::size_of::<Arc<Value>>()
+            + native_values.len() * retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+            + native_values
+                .iter()
+                .map(|value| retained_size::value_retained_bytes(value))
+                .sum::<usize>();
+        assert_eq!(second_stats.request_native_retained_bytes, native_charge);
+        assert_eq!(
+            second_request.retained_bytes(),
+            second_request.retained_bytes_with_charges(
+                Some(second_stats.request_native_retained_bytes),
+                None,
+            ),
+        );
+        assert_eq!(
+            serde_json::to_vec(&second.native_messages).unwrap(),
+            serde_json::to_vec(&fresh.native_messages).unwrap(),
+        );
+        assert_eq!(second.messages(), fresh.messages());
         assert!(second_stats.reused_messages >= 5, "{second_stats:?}");
         assert!(second_stats.encoded_messages <= 2, "{second_stats:?}");
+        let second_sidecar = Arc::clone(
+            &cache.lock().unwrap().sessions["native-complex"]
+                .snapshot
+                .sidecar,
+        );
+        for mid in &first_sidecar.order {
+            assert!(Arc::ptr_eq(
+                &first_sidecar.messages[mid],
+                &second_sidecar.messages[mid]
+            ));
+        }
+        for (replayed, original) in second.native_messages.as_ref().unwrap()[..4]
+            .iter()
+            .zip(first.native_messages.as_ref().unwrap())
+        {
+            assert!(Arc::ptr_eq(replayed, original));
+        }
+        let (shared_replay, shared_stats) = run_native_cache_pass(
+            cache,
+            &second_request.clone(),
+            second
+                .messages()
+                .iter()
+                .map(|message| message.deref().clone())
+                .collect(),
+            &tags,
+            false,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        assert_eq!(shared_stats.encoded_messages, 0);
+        assert_eq!(shared_replay.native_messages, second.native_messages);
         let native = second.native_messages.expect("incremental native output");
         let encoded = serde_json::to_string(&native).unwrap();
         assert!(encoded.contains("syntheticTodoMarker"));
@@ -20729,7 +20874,7 @@ mod tests {
                 })
             })
         }));
-        assert_eq!(cache.lock().unwrap().stats("native-complex"), second_stats);
+        assert_eq!(cache.lock().unwrap().stats("native-complex"), shared_stats);
     }
 
     #[test]
@@ -20756,9 +20901,15 @@ mod tests {
         if let BlockKind::Text { text } = served[2].content_mut()[0].kind_mut() {
             *text = "changed response tail".to_string();
         }
-        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        run_native_cache_pass(
-            &cache,
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        handler.bind_route(
+            test_route(7),
+            binding(project.to_str().unwrap(), "native-prefix-core"),
+        );
+        seed_handler_delta_snapshot(&handler, &request, 0);
+        let (response, stats) = run_native_cache_pass(
+            &handler.native_attachments,
             &request,
             served,
             &BTreeMap::new(),
@@ -20767,7 +20918,7 @@ mod tests {
             NativeCacheKeyMode::Normal,
         );
 
-        let mut cache = cache.lock().unwrap();
+        let mut cache = handler.native_attachments.lock().unwrap();
         assert_eq!(
             cache.sessions["native-prefix-core"]
                 .snapshot
@@ -20782,8 +20933,132 @@ mod tests {
         assert_eq!(retained_bytes.len(), 3);
         assert_eq!(
             prefix[2].as_ref(),
-            &request.native_messages.as_ref().unwrap()[2]
+            request.native_messages.as_ref().unwrap()[2].as_ref()
         );
+        let output = response.native_messages.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&prefix[0], &output[0]));
+        assert!(!Arc::ptr_eq(&prefix[2], &output[2]));
+        assert!(Arc::ptr_eq(
+            &prefix[2],
+            &request.native_messages.as_ref().unwrap()[2]
+        ));
+        assert_ne!(prefix[2], output[2]);
+
+        let native = request.native_messages.as_ref().unwrap();
+        let native_charge = native.capacity() * std::mem::size_of::<Arc<Value>>()
+            + native
+                .iter()
+                .map(|value| {
+                    retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+                        + retained_size::value_retained_bytes(value)
+                })
+                .sum::<usize>();
+        assert_eq!(stats.request_native_retained_bytes, native_charge);
+        assert_eq!(
+            request.retained_bytes(),
+            request.retained_bytes_with_charges(Some(native_charge), None),
+        );
+        assert_eq!(
+            request.retained_bytes() - request.retained_bytes_with_charges(Some(0), None),
+            native_charge,
+        );
+
+        cache.remove("native-prefix-core");
+        drop(cache);
+        let mut delta = native_cache_request(
+            "native-prefix-core",
+            vec![ck("core-4", 4, "four")],
+            vec![native_text_message("core-4", "user", "four")],
+            "native-prefix-core-next",
+        );
+        delta.tail_delta = Some(json!({
+            "after": "native-prefix-core-fp",
+            "replace_from": 3,
+            "native_replace_from": 3,
+        }));
+        let frontier = handler
+            .expand_transform_tail_delta(&mut delta)
+            .expect("full snapshot must supply the evicted native prefix");
+        let reattached = delta.native_messages.as_ref().unwrap();
+        for (index, original) in native.iter().enumerate() {
+            assert!(Arc::ptr_eq(&reattached[index], original));
+            assert!(Arc::ptr_eq(&frontier.native_prefix[index], original));
+        }
+        assert_eq!(reattached[2]["parts"][0]["text"], "three");
+        assert_eq!(reattached[3]["parts"][0]["text"], "four");
+    }
+
+    #[test]
+    fn native_cache_charge_keeps_raw_allocation_floor_beside_sidecar_estimate() {
+        let ingress = ck("dense-native", 1, "before");
+        let request = native_cache_request(
+            "native-charge-floor",
+            vec![ingress.clone()],
+            vec![json!({
+                "info": { "id": "dense-native", "role": "user" },
+                "parts": [{ "type": "text", "text": "before" }],
+                "provider_data": vec![0; 4096],
+            })],
+            "native-charge-floor-fp",
+        );
+        let mut served = ingress.ck;
+        *served.content_mut()[0].kind_mut() = BlockKind::Text {
+            text: "after".into(),
+        };
+        let cache = Mutex::new(NativeAttachmentCache::default());
+        let (_, stats) = run_native_cache_pass(
+            &cache,
+            &request,
+            vec![served],
+            &BTreeMap::new(),
+            false,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        let mut snapshot = cache
+            .lock()
+            .unwrap()
+            .snapshot("native-charge-floor", 0)
+            .unwrap();
+        let raw = Arc::clone(&snapshot.sidecar.messages["dense-native"].raw);
+        assert!(Arc::ptr_eq(&raw, &snapshot.ingress_chunks[0]));
+        assert!(!Arc::ptr_eq(&raw, &snapshot.chunks[0].value));
+        let raw_charge = retained_size::ARC_ALLOCATION_OVERHEAD_BYTES
+            + retained_size::value_retained_bytes(&raw);
+        assert!(snapshot.sidecar_sizes["dense-native"] < raw_charge);
+        assert_eq!(
+            stats.request_native_retained_bytes,
+            request.native_messages.as_ref().unwrap().capacity()
+                * std::mem::size_of::<Arc<Value>>()
+                + raw_charge,
+        );
+
+        for sidecar_present in [true, false] {
+            if !sidecar_present {
+                assert!(snapshot.discard_optional_sidecar_trees());
+                assert!(snapshot.sidecar_sizes.is_empty());
+                assert!(snapshot.sidecar.messages.is_empty());
+            }
+            let with_raw_ingress = snapshot.retained_bytes(0);
+            let encoded = &snapshot.chunks[0];
+            snapshot.ingress_chunks[0] = Arc::clone(&encoded.value);
+            snapshot.ingress_chunk_retained_bytes[0] = encoded.retained_bytes;
+            let shared_output_charge = snapshot.retained_bytes(0);
+            assert_eq!(with_raw_ingress - shared_output_charge, raw_charge);
+
+            snapshot.ingress_chunks[0] = Arc::new(encoded.value.as_ref().clone());
+            assert_eq!(snapshot.ingress_chunks[0], encoded.value);
+            assert!(!Arc::ptr_eq(&snapshot.ingress_chunks[0], &encoded.value));
+            let distinct_charge = retained_size::value_retained_bytes(&snapshot.ingress_chunks[0]);
+            snapshot.ingress_chunk_retained_bytes[0] = distinct_charge;
+            assert_eq!(
+                snapshot.retained_bytes(0) - shared_output_charge,
+                distinct_charge + retained_size::ARC_ALLOCATION_OVERHEAD_BYTES,
+            );
+            snapshot.ingress_chunks[0] = Arc::clone(&raw);
+            snapshot.ingress_chunk_retained_bytes[0] =
+                raw_charge - retained_size::ARC_ALLOCATION_OVERHEAD_BYTES;
+        }
     }
 
     #[test]
@@ -21300,7 +21575,8 @@ mod tests {
                     tags.insert("m3".to_string(), 7);
                 }
                 "sidecar_meta" => {
-                    request.native_messages.as_mut().unwrap()[2]["info"]["custom"] = json!(true);
+                    Arc::make_mut(&mut request.native_messages.as_mut().unwrap()[2])["info"]["custom"] =
+                        json!(true);
                 }
                 "profile" => request.serializer_profile = "opencode-aisdk-next".to_string(),
                 _ => unreachable!(),
@@ -21503,7 +21779,13 @@ mod tests {
         served.push(user_3.ck.clone());
         let mut generation_3_messages = generation_2.messages.clone();
         generation_3_messages.push(user_3);
-        let mut generation_3_native = generation_2.native_messages.clone().unwrap();
+        let mut generation_3_native = generation_2
+            .native_messages
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|message| message.as_ref().clone())
+            .collect::<Vec<_>>();
         generation_3_native.push(native_text_message("shell-user-3", "user", "third"));
         let mut generation_3 = native_cache_request(
             "native-shell-rematch",
@@ -21711,8 +21993,9 @@ mod tests {
 
         let mut edited_request = baseline_request.clone();
         edited_request.messages[1] = ck("frontier-2", 2, "ccc");
-        edited_request.native_messages.as_mut().unwrap()[1]["info"]["meta"] = json!("ccc");
-        edited_request.native_messages.as_mut().unwrap()[1]["parts"][0]["text"] = json!("ccc");
+        let edited_native = Arc::make_mut(&mut edited_request.native_messages.as_mut().unwrap()[1]);
+        edited_native["info"]["meta"] = json!("ccc");
+        edited_native["parts"][0]["text"] = json!("ccc");
         let mut edited_served = baseline_served;
         edited_served[1] = edited_request.messages[1].ck.clone();
         let (edited, stats) = run_native_cache_pass(
@@ -21781,7 +22064,7 @@ mod tests {
 
         let mut malformed = first_request;
         malformed.full_array_fingerprint = Some("inside-fp-2".to_string());
-        malformed.native_messages.as_mut().unwrap()[0]["info"]["custom"] =
+        Arc::make_mut(&mut malformed.native_messages.as_mut().unwrap()[0])["info"]["custom"] =
             json!("mutated-before-frontier");
         malformed.tail_delta = Some(json!({
             "after": "inside-fp-1",
@@ -21822,7 +22105,8 @@ mod tests {
         );
 
         let mut mutated = request;
-        mutated.native_messages.as_mut().unwrap()[0]["info"]["custom"] = json!("changed");
+        Arc::make_mut(&mut mutated.native_messages.as_mut().unwrap()[0])["info"]["custom"] =
+            json!("changed");
         run_native_cache_pass(
             &cache,
             &mutated,
@@ -22854,6 +23138,273 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn unflagged_synthetic_delta_prepares_historian_and_native_output() {
+        let mut observations = Vec::new();
+        for cached_prefix in [true, false] {
+            let producer = Arc::new(ProducerState::default());
+            producer.block_output.store(true, Ordering::SeqCst);
+            let config = default_test_config();
+            assert!(config.compaction_enabled);
+            assert!(!config.model_chain.is_empty());
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), config);
+            let pair = injection::build_synthetic_todo_pair(
+                r#"[{"content":"preserve delta replay","status":"pending","priority":"high"}]"#,
+            )
+            .unwrap();
+            let mut todo = pair.assistant_msg;
+            todo.meta.synthetic = false;
+            let BlockKind::ToolCall { id, .. } = todo.content_mut()[0].kind_mut() else {
+                panic!("todo call")
+            };
+            *id = "authored-todo".into();
+            let mut result = pair.tool_msg;
+            result.meta.synthetic = false;
+            let BlockKind::ToolResult { id, .. } = result.content_mut()[0].kind_mut() else {
+                panic!("todo result")
+            };
+            *id = "authored-todo".into();
+            let mut boot_request = native_cache_request(
+                "ses",
+                vec![
+                    IngressMessage {
+                        mid: "authored-todo".into(),
+                        ordinal: 1,
+                        ck: todo,
+                    },
+                    IngressMessage {
+                        mid: "authored-result".into(),
+                        ordinal: 2,
+                        ck: result,
+                    },
+                ],
+                Vec::new(),
+                "todo-replay-boot",
+            );
+            boot_request.todo_tool_present = Some(true);
+            let boot =
+                call_transform_request(&handler, serde_json::to_value(&boot_request).unwrap())
+                    .await;
+            assert_eq!(boot["action"], "HARD", "{boot}");
+            let frozen = store
+                .load("ses")
+                .unwrap()
+                .meta
+                .synthetic_todo
+                .expect("prior bust freezes a pair");
+            let mut suffix = big_messages_from(3);
+            for (mid, ordinal, mut ck) in [
+                ("replay-call", 83, frozen.assistant_msg),
+                ("replay-result", 84, frozen.tool_msg),
+            ] {
+                ck.meta.synthetic = false;
+                ck.meta.harness_id = Some(mid.into());
+                if mid == "replay-call" {
+                    ck.content_mut().push(WireBlock::bare(BlockKind::Text {
+                        text: "replayed synthetic carrier sentinel".into(),
+                    }));
+                }
+                ck.mark_modified();
+                suffix.push(IngressMessage {
+                    mid: mid.into(),
+                    ordinal,
+                    ck,
+                });
+            }
+            let mut delta = native_cache_request("ses", suffix, Vec::new(), "todo-replay-delta");
+            delta.todo_tool_present = Some(true);
+            delta.usage = Some(ModuleUsage {
+                current_total_input_tokens: 45_000,
+                context_limit_tokens: 50_000,
+                ..Default::default()
+            });
+            delta.tail_delta = Some(
+                json!({ "after": "todo-replay-boot", "replace_from": 2, "native_replace_from": 0 }),
+            );
+            assert!(
+                delta.messages[80..]
+                    .iter()
+                    .all(|message| !message.ck.meta.synthetic)
+            );
+            assert!(
+                delta.messages[80..]
+                    .iter()
+                    .all(
+                        |message| message.ck.content().iter().any(|block| match block.kind() {
+                            BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } =>
+                                id == &frozen.call_id,
+                            _ => false,
+                        })
+                    )
+            );
+            assert!(delta.serve_native);
+            let mut full_second = boot_request.clone();
+            full_second.messages.extend(delta.messages.iter().cloned());
+            let mut flagged_second: TransformRequest =
+                serde_json::from_value(serde_json::to_value(&full_second).unwrap()).unwrap();
+            flagged_second.messages[82].ck.meta.synthetic = true;
+            flagged_second.messages[83].ck.meta.synthetic = true;
+            let baseline_projection =
+                crate::wire::project_messages(&flagged_second.messages).unwrap();
+            let response =
+                call_transform_request(&handler, serde_json::to_value(&delta).unwrap()).await;
+            assert_eq!(response["status"], "ok", "{response}");
+            assert_eq!(response["timings"]["projection_reused_messages"], 2);
+            assert_eq!(response["historian"]["fired"], true, "{response}");
+            eprintln!("replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn: reached");
+            assert!(
+                response["native_messages"]
+                    .as_array()
+                    .is_some_and(|messages| !messages.is_empty())
+            );
+            wait_for_count(&producer.starts, 1).await;
+            let first_prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
+            assert!(first_prompt.contains("message 3 "));
+            assert!(!first_prompt.contains("replayed synthetic carrier sentinel"));
+            producer.block_output.store(false, Ordering::SeqCst);
+            producer.notify.notify_waiters();
+            wait_for_idle(&store).await;
+
+            producer.block_output.store(true, Ordering::SeqCst);
+            let mut third = native_cache_request(
+                "ses",
+                big_messages_from(85),
+                Vec::new(),
+                "todo-replay-prefix",
+            );
+            third.todo_tool_present = Some(true);
+            third.usage = delta.usage.clone();
+            third.tail_delta = Some(
+                json!({ "after": "todo-replay-delta", "replace_from": 84, "native_replace_from": 0 }),
+            );
+            let mut reference = third.clone();
+            reference.messages = baseline_projection.reattach_messages_prefix(84).unwrap();
+            reference.messages.extend(third.messages.iter().cloned());
+            reference.tail_delta = None;
+            let mut reattached = third.clone();
+            let frontier = handler
+                .expand_transform_tail_delta(&mut reattached)
+                .expect("third delta reattaches");
+            assert!(
+                frontier.projection_cache.is_some(),
+                "must use the cached projection, not the snapshot fallback"
+            );
+            assert_eq!(reattached.messages, reference.messages);
+            assert!(
+                reattached.messages[82..84]
+                    .iter()
+                    .all(|message| message.ck.meta.synthetic)
+            );
+            let projection = crate::wire::project_messages(&reference.messages).unwrap();
+            let boundary = boundary_messages(&reattached, &projection, &handler.boundary_tokens);
+            let reference_boundary =
+                boundary_messages(&reference, &projection, &handler.boundary_tokens);
+            assert_eq!(
+                format!("{:?}", boundary.messages),
+                format!("{:?}", reference_boundary.messages)
+            );
+            assert!(boundary.messages.iter().all(|message| !matches!(
+                message.message_id.as_str(),
+                "replay-call" | "replay-result"
+            )));
+            let mut raw_full = reference.clone();
+            raw_full.messages[82].ck.meta.synthetic = false;
+            raw_full.messages[83].ck.meta.synthetic = false;
+            let raw_boundary = boundary_messages(&raw_full, &projection, &handler.boundary_tokens);
+            assert_eq!(raw_boundary.messages.len(), boundary.messages.len() + 2);
+            assert!(
+                raw_boundary
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(
+                        message.message_id.as_str(),
+                        "replay-call" | "replay-result"
+                    ))
+                    .all(|message| message.blocks.is_empty())
+            );
+            let live = projection
+                .blocks
+                .iter()
+                .filter(|block| !block.synthetic)
+                .cloned()
+                .collect::<Vec<_>>();
+            let chunk = crate::historian_chunk::build_historian_chunk(
+                &reattached.messages,
+                &live,
+                1,
+                100_000,
+                165,
+            );
+            let reference_chunk = crate::historian_chunk::build_historian_chunk(
+                &reference.messages,
+                &live,
+                1,
+                100_000,
+                165,
+            );
+            let raw_chunk = crate::historian_chunk::build_historian_chunk(
+                &raw_full.messages,
+                &live,
+                1,
+                100_000,
+                165,
+            );
+            assert_eq!(chunk, reference_chunk);
+            assert!(
+                !chunk.chunk.present_ordinals.contains(&83)
+                    && !chunk.chunk.present_ordinals.contains(&84)
+            );
+            assert!(
+                raw_chunk.chunk.present_ordinals.contains(&83)
+                    && raw_chunk.chunk.present_ordinals.contains(&84)
+            );
+            let third_response = call_transform_request(
+                &handler,
+                serde_json::to_value(if cached_prefix { third } else { reference }).unwrap(),
+            )
+            .await;
+            assert_eq!(third_response["status"], "ok", "{third_response}");
+            assert_eq!(
+                third_response["timings"]["projection_reused_messages"],
+                if cached_prefix { 84 } else { 0 }
+            );
+            assert_eq!(
+                third_response["historian"]["fired"], true,
+                "{third_response}"
+            );
+            wait_for_count(&producer.starts, 2).await;
+            let third_prompt = producer.prompts.lock().unwrap()[1].clone();
+            assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
+            assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
+            let native = if let Some(suffix) = third_response.get("native_messages_delta") {
+                assert_eq!(suffix["after"], "todo-replay-delta");
+                let replace_from = suffix["replace_from"].as_u64().unwrap() as usize;
+                let mut native =
+                    response["native_messages"].as_array().unwrap()[..replace_from].to_vec();
+                native.extend(suffix["messages"].as_array().unwrap().iter().cloned());
+                native
+            } else {
+                third_response["native_messages"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            };
+            assert!(!native.is_empty());
+            observations.push((
+                first_prompt,
+                third_prompt,
+                third_response["messages"].clone(),
+                serde_json::to_vec(&native).unwrap(),
+            ));
+            producer.block_output.store(false, Ordering::SeqCst);
+            producer.notify.notify_waiters();
+            wait_for_idle(&store).await;
+        }
+        assert_eq!(observations[0], observations[1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_delta_normalization_matches_full_when_reserved_todo_starts_at_frontier() {
         let (cached_handler, cached_store, _cached_dir, _cached_project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
@@ -22864,6 +23415,7 @@ mod tests {
             assistant_tool_call("call-ordinary", 2),
             tool_result("result-ordinary", 3, "ordinary"),
         ];
+        let mut initial_native = Vec::new();
         for handler in [&cached_handler, &control_handler] {
             let request = native_cache_request(
                 "ses",
@@ -22874,6 +23426,7 @@ mod tests {
             let response =
                 call_transform_request(handler, serde_json::to_value(request).unwrap()).await;
             assert_eq!(response["status"], "ok", "{response}");
+            initial_native.push(response["native_messages"].as_array().unwrap().clone());
         }
 
         let pair = injection::build_synthetic_todo_pair(
@@ -22926,6 +23479,15 @@ mod tests {
         assert_eq!(cached["status"], "ok", "{cached}");
         assert_eq!(cached["timings"]["projection_reused_messages"], 1);
         assert_eq!(cached["messages"], full["messages"]);
+        let native_delta = &cached["native_messages_delta"];
+        assert_eq!(native_delta["after"], "todo-normalize-fp-1");
+        let frontier = native_delta["replace_from"].as_u64().unwrap() as usize;
+        let mut expanded_native = initial_native[0][..frontier].to_vec();
+        expanded_native.extend(native_delta["messages"].as_array().unwrap().iter().cloned());
+        assert_eq!(
+            serde_json::to_vec(&expanded_native).unwrap(),
+            serde_json::to_vec(&full["native_messages"]).unwrap()
+        );
         let cached_epoch = cached_store.load("ses").unwrap().meta.revert_epoch;
         let full_epoch = control_store.load("ses").unwrap().meta.revert_epoch;
         let cached_projection = cached_handler
@@ -23453,36 +24015,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn transform_reject_records_trace_without_advancing_row_version() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        let loaded = store.load("ses").unwrap();
-        let seeded_row_version = store
-            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
-
-        let (code, message) = error_frame(
-            call_transform_outcome(
-                &handler,
-                request(vec![ck("m2", 2, "two"), ck("m1", 1, "one")]),
-            )
-            .await,
-        );
-        assert_eq!(code, "transform_failed");
-        assert_eq!(message, "live-source ordinals not strictly increasing");
-
-        let after = store.load("ses").unwrap();
-        assert_eq!(after.row_version, Some(seeded_row_version));
-        let trace = store.load_pass_trace("ses").unwrap().unwrap();
-        assert_eq!(trace.receive_count, 1);
-        assert_eq!(trace.reject_count, 1);
-        assert_eq!(trace.last_reject_error.as_deref(), Some(message.as_str()));
-        assert_eq!(trace.last_completed_at_ms, 0);
-        assert!(trace.last_received_at_ms > 0);
-        assert!(trace.last_reject_at_ms.is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn transform_success_records_received_and_completed_trace() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -23535,7 +24067,7 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
 
-        for _ in 0..4 {
+        for pass in 1..=4u64 {
             let (code, message) = error_frame(
                 call_transform_outcome(
                     &handler,
@@ -23545,6 +24077,13 @@ mod tests {
             );
             assert_eq!(code, "transform_failed");
             assert_eq!(message, "live-source ordinals not strictly increasing");
+
+            let trace = store.load_pass_trace("ses").unwrap().unwrap();
+            assert_eq!(trace.receive_count, pass);
+            assert_eq!(trace.reject_count, pass);
+            assert_eq!(trace.last_reject_error.as_deref(), Some(message.as_str()));
+            assert!(trace.last_received_at_ms > 0);
+            assert!(trace.last_reject_at_ms.is_some());
         }
 
         let after = store.load("ses").unwrap();
@@ -25785,86 +26324,51 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn opencode_facade_lineage_matches_transform_across_symlink_spellings() {
+    async fn opencode_facade_lineage_matches_transform_in_both_symlink_directions() {
         use std::os::unix::fs::symlink;
 
-        let (handler, _store, dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            Arc::new(MissingSessionResolver),
-        );
-        let link = dir.path().join("project-link");
-        symlink(&project, &link).unwrap();
-        let target_text = project.to_str().unwrap();
-        let link_text = link.to_str().unwrap();
+        for transform_binds_link in [true, false] {
+            let (handler, _store, dir, project) = handler_with_store_and_resolver(
+                Arc::new(ProducerState::default()),
+                default_test_config(),
+                Arc::new(MissingSessionResolver),
+            );
+            let link = dir.path().join("project-link");
+            symlink(&project, &link).unwrap();
+            let target_text = project.to_str().unwrap();
+            let link_text = link.to_str().unwrap();
+            let (transform_root, facade_root) = if transform_binds_link {
+                (link_text, target_text)
+            } else {
+                (target_text, link_text)
+            };
 
-        // The transform lane binds through the symlink spelling.
-        // The facade lane binds to the canonical target; both bindings identify the same filesystem lineage.
-        handler.bind_route(
-            test_route(7),
-            binding_with_harness(link_text, OPENCODE_HARNESS, "ses"),
-        );
-        let transformed =
-            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
-        assert_eq!(transformed["action"], "HARD");
-        handler.bind_route(
-            test_route(8),
-            binding_with_harness(target_text, OPENCODE_HARNESS, "ses"),
-        );
+            handler.bind_route(
+                test_route(7),
+                binding_with_harness(transform_root, OPENCODE_HARNESS, "ses"),
+            );
+            let transformed =
+                call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")]))
+                    .await;
+            assert_eq!(transformed["action"], "HARD", "{transform_binds_link}");
+            handler.bind_route(
+                test_route(8),
+                binding_with_harness(facade_root, OPENCODE_HARNESS, "ses"),
+            );
 
-        let outcome = call_facade_on_channel(
-            &handler,
-            8,
-            "ctx_note",
-            json!({
-                "action": "write",
-                "content": "symlink lineage resolves",
-                "memory_project": target_text,
-            }),
-        )
-        .await;
-        assert!(!tool_is_error(outcome));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn opencode_facade_lineage_matches_transform_in_reverse_symlink_direction() {
-        use std::os::unix::fs::symlink;
-
-        let (handler, _store, dir, project) = handler_with_store_and_resolver(
-            Arc::new(ProducerState::default()),
-            default_test_config(),
-            Arc::new(MissingSessionResolver),
-        );
-        let link = dir.path().join("project-link");
-        symlink(&project, &link).unwrap();
-        let target_text = project.to_str().unwrap();
-        let link_text = link.to_str().unwrap();
-
-        handler.bind_route(
-            test_route(7),
-            binding_with_harness(target_text, OPENCODE_HARNESS, "ses"),
-        );
-        let transformed =
-            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
-        assert_eq!(transformed["action"], "HARD");
-        handler.bind_route(
-            test_route(8),
-            binding_with_harness(link_text, OPENCODE_HARNESS, "ses"),
-        );
-
-        let outcome = call_facade_on_channel(
-            &handler,
-            8,
-            "ctx_note",
-            json!({
-                "action": "write",
-                "content": "reverse symlink lineage resolves",
-                "memory_project": link_text,
-            }),
-        )
-        .await;
-        assert!(!tool_is_error(outcome));
+            let outcome = call_facade_on_channel(
+                &handler,
+                8,
+                "ctx_note",
+                json!({
+                    "action": "write",
+                    "content": "symlink lineage resolves",
+                    "memory_project": facade_root,
+                }),
+            )
+            .await;
+            assert!(!tool_is_error(outcome), "{transform_binds_link}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32154,32 +32658,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_full_autonomous_cycle_fires_publishes_and_next_pass_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = big_messages();
+    async fn handler_autonomous_cycle_fires_publishes_and_next_pass_folds_across_start_ordinals() {
+        // A system lead at ordinal zero is skipped: the chunk starts at the first user message.
+        let cases: [(&str, Vec<IngressMessage>, u64); 3] = [
+            ("one_based", big_messages(), 1),
+            ("zero_based", big_messages_from(0), 0),
+            (
+                "zero_based_system_lead",
+                zero_based_messages_with_system_lead(),
+                1,
+            ),
+        ];
+        for (case, messages, expected_start) in cases {
+            let producer = Arc::new(ProducerState::default());
+            let (handler, store, _dir, _project) =
+                handler_with_store(Arc::clone(&producer), default_test_config());
 
-        let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
-        wait_for_count(&producer.starts, 1).await;
-        let prompt = producer.prompts.lock().unwrap()[0].clone();
-        assert_eq!(prompt_ordinal_range(&prompt).unwrap().0, 1);
-        wait_for_idle(&store).await;
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].start_message, 1);
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+            let first = call_transform(&handler, messages.clone()).await;
+            assert_eq!(first["historian"]["fired"], true, "{case}");
+            wait_for_count(&producer.starts, 1).await;
+            let prompt = producer.prompts.lock().unwrap()[0].clone();
+            assert_eq!(
+                prompt_ordinal_range(&prompt).unwrap().0,
+                expected_start,
+                "{case}"
+            );
+            wait_for_idle(&store).await;
+            let compartments = store.load_compartments("ses").unwrap();
+            assert_eq!(compartments.len(), 1, "{case}");
+            assert_eq!(
+                compartments[0].start_message,
+                i64::try_from(expected_start).unwrap(),
+                "{case}"
+            );
+            assert_eq!(producer.starts.load(Ordering::SeqCst), 1, "{case}");
 
-        let second = call_transform(&handler, messages).await;
-        assert_eq!(second["action"], "HARD");
-        assert!(
-            second["boundary_id"]
-                .as_str()
-                .unwrap_or_default()
-                .contains('#')
-        );
-        assert!(m0_text(&second).contains("autonomous summary"));
+            let second = call_transform(&handler, messages).await;
+            assert_eq!(second["action"], "HARD", "{case}");
+            assert!(
+                second["boundary_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains('#'),
+                "{case}: {second}"
+            );
+            assert!(m0_text(&second).contains("autonomous summary"), "{case}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32370,56 +32894,6 @@ mod tests {
         wait_for_count(&producer.starts, 1).await;
         let prompt = producer.prompts.lock().unwrap()[0].clone();
         assert!(!prompt.contains("<project-memory>"), "{prompt}");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_zero_based_autonomous_cycle_covers_ordinal_zero_and_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = big_messages_from(0);
-
-        let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
-        wait_for_count(&producer.starts, 1).await;
-        let prompt = producer.prompts.lock().unwrap()[0].clone();
-        assert_eq!(prompt_ordinal_range(&prompt).unwrap().0, 0);
-        wait_for_idle(&store).await;
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].start_message, 0);
-
-        let second = call_transform(&handler, messages).await;
-        assert_eq!(second["action"], "HARD");
-        assert!(
-            second["boundary_id"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("#")
-        );
-        assert!(m0_text(&second).contains("autonomous summary"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_zero_based_system_lead_starts_chunk_at_first_user_and_folds() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let messages = zero_based_messages_with_system_lead();
-
-        let first = call_transform(&handler, messages.clone()).await;
-        assert_eq!(first["historian"]["fired"], true);
-        wait_for_count(&producer.starts, 1).await;
-        let prompt = producer.prompts.lock().unwrap()[0].clone();
-        assert_eq!(prompt_ordinal_range(&prompt).unwrap().0, 1);
-        wait_for_idle(&store).await;
-        let compartments = store.load_compartments("ses").unwrap();
-        assert_eq!(compartments.len(), 1);
-        assert_eq!(compartments[0].start_message, 1);
-
-        let second = call_transform(&handler, messages).await;
-        assert_eq!(second["action"], "HARD");
-        assert!(m0_text(&second).contains("autonomous summary"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -32886,20 +33360,37 @@ mod tests {
     }
 
     #[test]
-    fn agent_drops_append_rejects_missing_command_id() {
+    fn agent_drops_append_rejects_malformed_command_ids_and_raw_drops() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        // A minted tag makes the field under test the only reason to refuse.
         mint_drop_tag(&store, "a#0");
 
-        let outcome = handler.handle_agent_drops_value(
-            test_route(7),
-            json!({
+        let mut bodies = vec![json!({
+            "method": "agent_drops.append",
+            "session_id": "ses",
+            "drop": "1",
+        })];
+        for command_id in [json!(""), json!(" \t "), json!("x".repeat(129))] {
+            bodies.push(json!({
                 "method": "agent_drops.append",
                 "session_id": "ses",
                 "drop": "1",
-            }),
-        );
-        assert_eq!(error_code(outcome), "bad_request");
+                "command_id": command_id,
+            }));
+        }
+        for drop in [Value::Null, json!(""), json!("  "), json!(["1"])] {
+            bodies.push(json!({
+                "method": "agent_drops.append",
+                "session_id": "ses",
+                "drop": drop,
+                "command_id": "command",
+            }));
+        }
+        for body in bodies {
+            let outcome = handler.handle_agent_drops_value(test_route(7), body.clone());
+            assert_eq!(error_code(outcome), "bad_request", "{body}");
+        }
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
@@ -33101,45 +33592,6 @@ mod tests {
             json!({ "ok": true, "queued": 1, "accepted": [1] })
         );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
-    }
-
-    #[test]
-    fn ctx_reduce_command_rejects_empty_and_oversized_command_ids() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-
-        for command_id in [json!(""), json!(" \t "), json!("x".repeat(129))] {
-            let outcome = handler.handle_agent_drops_value(
-                test_route(7),
-                json!({
-                    "method": "agent_drops.append",
-                    "session_id": "ses",
-                    "drop": "1",
-                    "command_id": command_id,
-                }),
-            );
-            assert_eq!(error_code(outcome), "bad_request");
-        }
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
-    }
-
-    #[test]
-    fn agent_drops_append_rejects_missing_or_empty_raw_drop() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
-        for drop in [Value::Null, json!(""), json!("  "), json!(["1"])] {
-            let outcome = handler.handle_agent_drops_value(
-                test_route(7),
-                json!({
-                    "method": "agent_drops.append",
-                    "session_id": "ses",
-                    "drop": drop,
-                    "command_id": "command"
-                }),
-            );
-            assert_eq!(error_code(outcome), "bad_request");
-        }
-        assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -33518,39 +33970,6 @@ mod tests {
                 .contains("nothing to compact")
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), starts);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn session_wrapup_drains_beyond_five_rounds_to_the_keep_watermark() {
-        let producer = Arc::new(ProducerState::default());
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
-
-        let body = tool_body(
-            handler
-                .dispatch_value(
-                    test_route(7),
-                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
-                )
-                .await,
-        );
-
-        assert_eq!(body["ok"], json!(true), "{body}");
-        assert_eq!(body["disposition"], json!("completed"), "{body}");
-        let starts = producer.starts.load(Ordering::SeqCst);
-        assert!(
-            starts >= 6,
-            "the backlog requires more than five producer rounds: {starts}"
-        );
-        let final_end = store
-            .load_compartments("ses")
-            .unwrap()
-            .iter()
-            .map(|compartment| compartment.end_message)
-            .max()
-            .unwrap();
-        assert_eq!(final_end, 300, "the drain must reach the keep watermark");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -35294,39 +35713,42 @@ mod tests {
         seed_historian_phase(&store, phase.clone());
 
         let recovering = call_transform(&handler, messages.clone()).await;
-        assert_eq!(recovering["historian"]["state"], phase.as_str());
-        assert_eq!(recovering["historian"]["no_fire"], "recovering");
+        assert_eq!(
+            recovering["historian"]["state"],
+            phase.as_str(),
+            "{phase:?}"
+        );
+        assert_eq!(
+            recovering["historian"]["no_fire"], "recovering",
+            "{phase:?}"
+        );
         wait_for_idle(&store).await;
-        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
-        assert_eq!(producer.binds.load(Ordering::SeqCst), 0);
-        assert_eq!(producer.statuses.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0, "{phase:?}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{phase:?}");
+        assert_eq!(producer.binds.load(Ordering::SeqCst), 0, "{phase:?}");
+        assert_eq!(producer.statuses.load(Ordering::SeqCst), 0, "{phase:?}");
 
         let backed_off = call_transform(&handler, messages.clone()).await;
-        assert_eq!(backed_off["historian"]["fired"], false);
-        assert_eq!(backed_off["historian"]["no_fire"], "backoff");
-        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(backed_off["historian"]["fired"], false, "{phase:?}");
+        assert_eq!(backed_off["historian"]["no_fire"], "backoff", "{phase:?}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0, "{phase:?}");
 
         expire_historian_backoff(&store);
         let fresh = call_transform(&handler, messages).await;
-        assert_eq!(fresh["historian"]["fired"], true);
+        assert_eq!(fresh["historian"]["fired"], true, "{phase:?}");
         wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handler_seeded_publishing_recovers_then_refires_after_backoff() {
-        assert_seeded_phase_recovers_then_refires_after_backoff(HistorianPhase::Publishing).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_seeded_firing_recovers_then_refires_after_backoff() {
-        assert_seeded_phase_recovers_then_refires_after_backoff(HistorianPhase::Firing).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn handler_seeded_validating_recovers_then_refires_after_backoff() {
-        assert_seeded_phase_recovers_then_refires_after_backoff(HistorianPhase::Validating).await;
+    async fn handler_seeded_non_idle_phases_recover_then_refire_after_backoff() {
+        for phase in [
+            HistorianPhase::Publishing,
+            HistorianPhase::Firing,
+            HistorianPhase::Validating,
+        ] {
+            assert_seeded_phase_recovers_then_refires_after_backoff(phase).await;
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -36115,5 +36537,123 @@ mod release_contract_tests {
         assert!(!state_sync_epoch_compatible(
             &json!({ "state_sync_epoch": current + 1 })
         ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn compaction_mode_projection_cache_reclassifies_synthetic_prefix() {
+    use test_support::FixtureBuilder;
+
+    let store_fixture = FixtureBuilder::store();
+    let store = Arc::new(store_fixture.store);
+    let handler = Handler::new();
+    handler.install_store_for_test(Arc::clone(&store));
+    let mut fixture = FixtureBuilder::synthetic_todo_armed();
+    fixture.session_id = "compaction-mode-projection-cache".into();
+    for message in &mut fixture.messages {
+        message.ck.meta.synthetic = false;
+        message.ck.meta.harness_id = Some(message.mid.clone());
+        message.ck.mark_modified();
+    }
+    let mut live = FixtureBuilder::session_with_boundary().messages;
+    for message in &mut live {
+        message.ordinal += 2;
+    }
+    fixture.messages.extend(live);
+    let mut request: TransformRequest = serde_json::from_value(fixture.call_transform()).unwrap();
+    request.serializer_profile = "opencode-aisdk".into();
+    request.full_array_fingerprint = Some("compaction-mode-unchanged-input".into());
+    let original = serde_json::to_vec(&request).unwrap();
+    let mut ctx = transform::ProducerContext {
+        project_memory: None,
+        project_path: "git:projection-cache",
+        note_project_path: "git:projection-cache",
+        project_directory: store_fixture.dir.path().to_str().unwrap(),
+        history_budget_tokens: 60_000.0,
+        user_profile_budget_tokens: 4_000.0,
+        memory_enabled: false,
+        inject_docs: false,
+        temporal_awareness: false,
+        now_ms: 0,
+        execute_threshold_percentage: 65.0,
+        compaction_enabled: false,
+        smart_drops: true,
+        cache_ttl: "5m".into(),
+        cache_ttl_provenance: config::CacheTtlProvenance::Default,
+        model_key: None,
+        observed_last_response_at_ms: None,
+        guidance_date: None,
+        historian_active: false,
+        wrapup_active: false,
+        injected_reductions: Vec::new(),
+    };
+
+    // Route-bound compaction settings can differ while the session and ingress stay the same.
+    for (pass, compaction_enabled) in [false, true, true, false, true].into_iter().enumerate() {
+        ctx.compaction_enabled = compaction_enabled;
+        let cached = handler.lookup_full_projection_cache(&request);
+        assert_eq!(cached.is_some(), pass > 0);
+        if let Some(cache) = &cached {
+            assert_eq!(cache.replace_from, request.messages.len());
+        }
+        let result = transform::transform_with_projection_cached(
+            &store,
+            &request,
+            &ctx,
+            &handler.serialized_outputs,
+            cached.as_ref(),
+        )
+        .expect("compaction mode switch must preserve projection correctness");
+        if compaction_enabled {
+            let timings = result.response.timings.as_ref().expect("transform timings");
+            assert_eq!(
+                (
+                    timings.projection_reused_messages,
+                    timings.projection_projected_messages,
+                ),
+                if pass == 2 { (4, 0) } else { (0, 4) },
+                "pass {pass}"
+            );
+        }
+        let mut expected = wire::MessageProjection::new(&request.messages);
+        if compaction_enabled {
+            for message in &request.messages[..2] {
+                expected.mark_synthetic(message);
+            }
+        }
+        assert_eq!(
+            result.projection,
+            expected.project().unwrap(),
+            "pass {pass}"
+        );
+        let reattached = result
+            .projection
+            .reattach_messages_prefix(request.messages.len())
+            .unwrap();
+        assert!(
+            reattached[..2]
+                .iter()
+                .all(|message| message.ck.meta.synthetic == compaction_enabled)
+        );
+        assert!(
+            reattached[2..]
+                .iter()
+                .all(|message| !message.ck.meta.synthetic)
+        );
+        if pass == 2 {
+            let cache = cached.as_ref().unwrap();
+            assert!(Arc::ptr_eq(
+                &result.projection.blocks[0].wire,
+                &cache.projection.blocks[0].wire,
+            ));
+        }
+        handler.store_projection_cache(
+            &request,
+            result.revert_epoch,
+            Arc::new(result.projection),
+            None,
+        );
+        assert_eq!(serde_json::to_vec(&request).unwrap(), original);
     }
 }

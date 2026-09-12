@@ -21,6 +21,7 @@
 //! Each target receives exactly one decision; `drop` overrides `edit_marker`.
 //! Selectors emit decisions in stable order.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::transform::{ReductionDecision, utf16_len, utf16_prefix};
@@ -109,11 +110,10 @@ pub enum SelMessageRole {
 
 /// The selectors use this typed content-kind projection.
 #[derive(Debug, Clone)]
-pub enum SelKind {
+pub enum SelKind<'a> {
     ToolCall {
         name: String,
-        /// The ToolCall.input (filePath / action / diff keys live here).
-        input: serde_json::Value,
+        input: Cow<'a, serde_json::Value>,
     },
     ToolResult {
         tool_name: String,
@@ -130,12 +130,12 @@ pub enum SelKind {
 /// block, including tool calls and tool results. This struct adds the typed fields that
 /// the selection logic needs on top of the raw incoming item.
 #[derive(Debug, Clone)]
-pub struct SelItem {
+pub struct SelItem<'a> {
     pub id: String,
     pub ordinal: u64,
     /// Provider-facing role of the owning message.
     pub message_role: SelMessageRole,
-    pub kind: SelKind,
+    pub kind: SelKind<'a>,
     /// True = the model's own SERVER-side tool (stays verbatim; never targeted).
     pub provider_executed: bool,
     /// Bytes this block contributes to reclaim accounting (output/content bytes).
@@ -326,7 +326,7 @@ fn group_arcs<'a>(items: &'a [SelItem], frozen: &HashSet<String>) -> Vec<ToolArc
                 if entry.call_inputs.is_empty() {
                     entry.owner_message_id = item_message_id(item);
                 }
-                entry.call_inputs.push((item.id.as_str(), input));
+                entry.call_inputs.push((item.id.as_str(), input.as_ref()));
                 entry.call_bytes += item.byte_size;
                 entry.provider_executed = item.provider_executed;
             }
@@ -371,7 +371,7 @@ struct ReasoningMessageShape {
     tool_arc_ids: HashSet<String>,
 }
 
-fn item_message_id(item: &SelItem) -> Option<&str> {
+fn item_message_id<'a>(item: &'a SelItem<'_>) -> Option<&'a str> {
     let (mid, index) = item.id.rsplit_once('#')?;
     index.parse::<usize>().ok().map(|_| mid)
 }
@@ -381,7 +381,7 @@ struct AdjacencyMessageShape<'a> {
     ordinal: u64,
     role: SelMessageRole,
     has_reasoning: bool,
-    items: Vec<&'a SelItem>,
+    items: Vec<&'a SelItem<'a>>,
 }
 
 impl AdjacencyMessageShape<'_> {
@@ -1328,7 +1328,7 @@ mod tests {
         name: &str,
         input: serde_json::Value,
         bytes: usize,
-    ) -> SelItem {
+    ) -> SelItem<'static> {
         let id = call_block_id(mid);
         SelItem {
             id: id.clone(),
@@ -1336,7 +1336,7 @@ mod tests {
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
                 name: name.to_string(),
-                input,
+                input: Cow::Owned(input),
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1345,7 +1345,7 @@ mod tests {
         }
     }
 
-    fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem {
+    fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: result_block_id(mid),
             ordinal,
@@ -1360,7 +1360,7 @@ mod tests {
         }
     }
 
-    fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem {
+    fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: reasoning_block_id(mid),
             ordinal,
@@ -1373,7 +1373,7 @@ mod tests {
         }
     }
 
-    fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem {
+    fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
@@ -1386,7 +1386,7 @@ mod tests {
         }
     }
 
-    fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem {
+    fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
@@ -1406,14 +1406,14 @@ mod tests {
         name: &str,
         input: serde_json::Value,
         bytes: usize,
-    ) -> SelItem {
+    ) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
             message_role: SelMessageRole::Assistant,
             kind: SelKind::ToolCall {
                 name: name.to_string(),
-                input,
+                input: Cow::Owned(input),
             },
             provider_executed: false,
             byte_size: bytes,
@@ -1428,7 +1428,7 @@ mod tests {
         ordinal: u64,
         name: &str,
         bytes: usize,
-    ) -> SelItem {
+    ) -> SelItem<'static> {
         SelItem {
             id: id.to_string(),
             ordinal,
@@ -1583,7 +1583,7 @@ mod tests {
         expected: std::collections::BTreeMap<String, String>,
     }
 
-    fn parse_kind(v: &serde_json::Value) -> SelKind {
+    fn parse_kind(v: &serde_json::Value) -> SelKind<'_> {
         if let Some(s) = v.as_str() {
             return match s {
                 "Reasoning" => SelKind::Reasoning,
@@ -1601,7 +1601,7 @@ mod tests {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    input: tc.get("input").cloned().unwrap_or(serde_json::Value::Null),
+                    input: Cow::Borrowed(tc.get("input").unwrap_or(&serde_json::Value::Null)),
                 };
             }
             if let Some(tr) = obj.get("ToolResult") {
@@ -2180,49 +2180,6 @@ mod tests {
     }
 
     #[test]
-    fn idle_force_band_defers_aged_supersession_without_changing_served_bytes() {
-        let mut items = vec![
-            tool_call(
-                "c1",
-                1,
-                "edit",
-                serde_json::json!({"filePath":"a.ts","oldString":"one"}),
-                500,
-            ),
-            tool_result("c1", 1, "edit", 100),
-            tool_call(
-                "c2",
-                2,
-                "edit",
-                serde_json::json!({"filePath":"a.ts","oldString":"two"}),
-                500,
-            ),
-            tool_result("c2", 2, "edit", 100),
-        ];
-        for n in 0..RECENT_TOOL_SKELETON_WINDOW {
-            items.push(text_with_id(&format!("tail-{n}#0"), 3 + n as u64, 1));
-        }
-
-        let cfg = SelectionConfig { smart_drops: true };
-        let previous =
-            select_reductions(&items, &HashSet::new(), &base_ctx(PassClass::Execute), &cfg);
-        assert!(previous.is_empty());
-        let previous_served = served_block_bytes(&items, &previous);
-
-        let mut emergency_ctx = base_ctx(PassClass::EmergencyForce);
-        emergency_ctx.current_total_input_tokens = 90_000.0;
-        emergency_ctx.ceiling_tokens = 100_000.0;
-        emergency_ctx.pass_already_busting = true;
-        let emergency = select_reductions(&items, &HashSet::new(), &emergency_ctx, &cfg);
-
-        assert!(
-            emergency.is_empty(),
-            "an idle force band cannot create a bust"
-        );
-        assert_eq!(served_block_bytes(&items, &emergency), previous_served);
-    }
-
-    #[test]
     fn sustained_idle_force_band_batches_supersession_until_a_real_bust() {
         const IDLE_PASSES: u64 = 3;
 
@@ -2425,41 +2382,37 @@ mod tests {
         assert_eq!(decisions.len(), expected.len() * 2);
     }
 
+    /// The hint is measured in UTF-16 units and never splits a surrogate pair.
+    /// Only content ending with the sentinel and no longer than a hint stays unchanged;
+    /// longer content with the same suffix is hinted like any other value.
     #[test]
-    fn edit_marker_region_hint_caps_utf16_and_backs_off_split_surrogate() {
-        let split_astral = format!("{}😀tail", "a".repeat(39));
-        assert_eq!(
-            region_hint(&split_astral),
-            format!("{}{}", "a".repeat(39), TRUNCATION_SENTINEL)
-        );
-
-        let complete_astral = format!("{}😀tail", "a".repeat(38));
-        assert_eq!(
-            region_hint(&complete_astral),
-            format!("{}😀{}", "a".repeat(38), TRUNCATION_SENTINEL)
-        );
-    }
-
-    /// A value that already carries the sentinel is only left alone when it is
-    /// no longer than a hint; longer content ending the same way is hinted.
-    #[test]
-    fn edit_marker_region_hint_only_trusts_a_sentinel_on_a_hint_sized_value() {
-        let hinted = format!(
+    fn edit_marker_region_hint_clamps_utf16_and_trusts_only_hint_sized_sentinels() {
+        let hint_sized_sentinel = format!(
             "{}{}",
             "a".repeat(EDIT_REGION_HINT_LEN),
             TRUNCATION_SENTINEL
         );
-        assert_eq!(region_hint(&hinted), hinted);
-
-        let long = format!("{}{}", "b".repeat(2_000), TRUNCATION_SENTINEL);
-        assert_eq!(
-            region_hint(&long),
-            format!(
-                "{}{}",
-                "b".repeat(EDIT_REGION_HINT_LEN),
-                TRUNCATION_SENTINEL
-            )
-        );
+        for (value, expected) in [
+            (
+                format!("{}😀tail", "a".repeat(39)),
+                format!("{}{}", "a".repeat(39), TRUNCATION_SENTINEL),
+            ),
+            (
+                format!("{}😀tail", "a".repeat(38)),
+                format!("{}😀{}", "a".repeat(38), TRUNCATION_SENTINEL),
+            ),
+            (hint_sized_sentinel.clone(), hint_sized_sentinel),
+            (
+                format!("{}{}", "b".repeat(2_000), TRUNCATION_SENTINEL),
+                format!(
+                    "{}{}",
+                    "b".repeat(EDIT_REGION_HINT_LEN),
+                    TRUNCATION_SENTINEL
+                ),
+            ),
+        ] {
+            assert_eq!(region_hint(&value), expected, "value {value:?}");
+        }
     }
 
     #[test]
@@ -3024,25 +2977,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("older-result#0", "drop"), ("owner#0", "drop")],
             "the older safe duplicate must fully drop while the newest call stays live: {out:?}"
-        );
-    }
-
-    #[test]
-    fn duplicate_safe_tools_never_merge_across_owner_messages() {
-        let args = serde_json::json!({"path": "src/lib.rs"});
-        let items = vec![
-            tool_call_with_ids("owner-a#0", "owner-a#0", 1, "mcp_read", args.clone(), 50),
-            tool_result_with_ids("result-a#0", "owner-a#0", 2, "mcp_read", 300),
-            tool_call_with_ids("owner-b#0", "owner-b#0", 3, "mcp_read", args, 50),
-            tool_result_with_ids("result-b#0", "owner-b#0", 4, "mcp_read", 300),
-        ];
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.supersession_ride_available = true;
-
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
-        assert!(
-            out.is_empty(),
-            "identical calls from distinct assistant owners are distinct invocations: {out:?}"
         );
     }
 

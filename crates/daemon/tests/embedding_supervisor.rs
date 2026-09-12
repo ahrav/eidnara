@@ -1327,31 +1327,35 @@ async fn shutdown_waits_the_grace_for_an_admitted_call_to_exit() {
         .unwrap();
 }
 
-/// A submission whose charge rolled back leaves the row pending with no reference to the host job, so the job's result is nothing the census reports as held.
+/// A submission whose row is retired before its charge leaves the host running a job no row will ask for: the charge reports the row as no longer pending, the pass orphans the host job, and the census holds no result for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn a_submission_whose_charge_rolled_back_claims_no_result() {
+async fn a_submission_whose_row_is_retired_before_its_charge_claims_no_result() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     let object = corpus.publish("uncharged", "uncharged text");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object).to_string();
+    let projection = Arc::new(projection);
     let engine = TestEngine::new();
     let gate = engine.block_calls();
     let _release = GateGuard(Arc::clone(&gate));
     let synapse = Arc::new(component(&engine, SynapseLimits::default()));
     let (sender, mut events) = unbounded_channel();
-    // A long idle keeps the next backfill, which would re-admit the row under the same host job, from running before shutdown.
     let supervisor = EmbeddingSupervisor::new(
-        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
-        SliceBounds {
-            idle: Duration::from_secs(10),
-            ..slice_bounds(Duration::from_secs(2))
-        },
+        maintained(&corpus, Arc::clone(&projection), Arc::clone(&synapse)),
+        slice_bounds(Duration::from_secs(2)),
         Arc::new(|| NOW),
         sender,
     );
-    supervisor.inject_dispatch_fault_for_test(DispatchFault::RefuseChargeStatement);
+    // The row is retired on the slice thread between the host's acceptance and the charge, so the charge finds it no longer pending.
+    let retire = Arc::clone(&projection);
+    let retired_occurrence = occurrence.clone();
+    supervisor.tap_dispatch_events_for_test(move |event| {
+        if matches!(event, DispatchEvent::Submitted { .. }) {
+            tombstone(&retire, &retired_occurrence, 50);
+        }
+    });
     let running = tokio::spawn(Arc::clone(&supervisor).run());
     assert_eq!(
         ended(&mut events, SliceKind::Backfill).await,
@@ -1362,10 +1366,10 @@ async fn a_submission_whose_charge_rolled_back_claims_no_result() {
             dispositions: 0,
         }
     );
-    let uncharged = row(dir.path(), &occurrence);
+    let retired = row(dir.path(), &occurrence);
     assert_eq!(
-        (uncharged.0.as_str(), uncharged.1, uncharged.2),
-        ("pending", 0, None)
+        (retired.0.as_str(), retired.1, retired.2),
+        ("obsolete", 0, None)
     );
     // The slice ends as soon as the charge is refused; the host's worker enters the gated call on its own schedule.
     within(Duration::from_secs(10), async {
@@ -1384,7 +1388,7 @@ async fn a_submission_whose_charge_rolled_back_claims_no_result() {
     let report = supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
     assert_eq!(
         report.held_results, 0,
-        "no admitted row expects the uncharged submission's result"
+        "no row expects the orphaned submission's result"
     );
     assert_eq!(supervisor.tracked_host_jobs_for_test(), 0);
     tokio::time::timeout(Duration::from_secs(5), running)

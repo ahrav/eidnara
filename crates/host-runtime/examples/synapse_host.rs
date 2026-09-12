@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use host_runtime::synapse::{SynapseComponent, SynapseConfig, SynapseLimits};
 use host_runtime::{
-    BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostInit,
-    HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx, RequestOutcome,
-    RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
+    BindOutcome, CancellationToken, CompositeComponent, HealthReport, HostConfig, HostHandler,
+    HostInit, HostLimits, InitError, ManifestSnapshot, PrimaryComponent, RequestCtx,
+    RequestOutcome, RouteHandle, RouteIdentity, SecondaryComponent, ShutdownError, StaticComposite,
 };
 
 struct EchoPrimary;
@@ -139,14 +139,22 @@ async fn main() {
     let composite = StaticComposite::new(EchoPrimary, synapse, PlaceholderBroca)
         .expect("composite module IDs are distinct");
 
-    // The lane declares its retained-result cap as retained resident bytes, so the host budget must cover it above the floor plus one inbound body.
+    let retained_resident_bytes = composite
+        .resource_declarations()
+        .iter()
+        .try_fold(0u64, |total, declaration| {
+            total.checked_add(declaration.retained_resident_bytes)
+        })
+        .expect("smoke-host resource declarations fit the resident budget");
     let config = HostConfig {
         data_dir: Some(data_dir.clone()),
         daemon_ver: "eidnara-host/synapse-smoke".to_owned(),
         limits: HostLimits {
-            max_resident_bytes: host_runtime::config::MIN_RESIDENT_BYTES
-                + u64::from(host_runtime::MAX_FRAME_BODY_LEN)
-                + SynapseLimits::default().max_retained_result_bytes,
+            // Component declarations add retained memory to the runtime's default resident budget.
+            max_resident_bytes: HostLimits::default()
+                .max_resident_bytes
+                .checked_add(retained_resident_bytes)
+                .expect("smoke-host declarations fit the default resident budget"),
             ..Default::default()
         },
         ..Default::default()

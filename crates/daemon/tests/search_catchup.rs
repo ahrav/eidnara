@@ -22,7 +22,7 @@ use kernel::source_identity::Occurrence;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
     ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputExpectation, DomainSpec,
+    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputDescriptor, DomainSpec,
     EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress,
     RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission,
     SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourcePageBounds, SourceRow,
@@ -37,7 +37,6 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 const CONSUMER: &str = "search";
-const KERNEL_INCARNATION: &str = "kernel-1";
 const GENERATION: &str = "gen-1";
 const POLICY: &str = "source-policy.v1";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -469,9 +468,16 @@ impl Corpus {
             ExportWindow::Snapshot,
         );
         let projection = SearchProjection::open(data_home).unwrap();
+        let kernel_incarnation_id: String = inspect(&self.kernel_db())
+            .query_row(
+                "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &identity(KERNEL_INCARNATION), 1)?;
+                install_identity(conn, &identity(&kernel_incarnation_id), 1)?;
                 register_generation(conn, &generation(), 1)?;
                 Ok(())
             })
@@ -481,7 +487,7 @@ impl Corpus {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id: kernel_incarnation_id.clone(),
                 hold_id: hold.hold_id.clone(),
                 snapshot_commit_seq: hold.snapshot,
                 through_commit_seq: hold.snapshot,
@@ -496,7 +502,7 @@ impl Corpus {
         let consumer = CatchUpConsumer {
             binding,
             hold_id: hold.hold_id.clone(),
-            kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+            kernel_incarnation_id,
             generation_id: Some(GENERATION.to_string()),
         };
         (projection, consumer, hold)
@@ -556,6 +562,29 @@ fn export_all(
             Some(next) => cursor = Some(next),
             None => return rows,
         }
+    }
+}
+
+fn snapshot_descriptor(
+    kernel: &KernelStore,
+    binding: &SourceHoldBinding,
+    hold: &SourceHold,
+) -> CurrentInputDescriptor {
+    let rows = export_all(
+        kernel,
+        binding,
+        &hold.hold_id,
+        hold.captured_at,
+        ExportWindow::Snapshot,
+    );
+    let row = rows.first().unwrap();
+    CurrentInputDescriptor {
+        object_id: row.object_id.clone(),
+        source_revision: row.revision,
+        detail: row.detail.clone(),
+        domain_id: row.domain_id.clone(),
+        sensitivity: row.sensitivity,
+        created_commit_seq: row.created_commit_seq,
     }
 }
 
@@ -917,7 +946,7 @@ fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
     let empty_home = tempfile::tempdir().unwrap();
     let fresh = SearchProjection::open(empty_home.path()).unwrap();
     fresh
-        .write(|conn| install_identity(conn, &identity(KERNEL_INCARNATION), 1))
+        .write(|conn| install_identity(conn, &identity(&consumer.kernel_incarnation_id), 1))
         .unwrap();
     let mut driver = SearchCatchUp::new(&corpus.kernel, &fresh);
     let report = driver
@@ -1163,7 +1192,7 @@ fn apply_without_acknowledging(
         &rows,
         &identities,
         MutationIdentity {
-            kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+            kernel_incarnation_id: consumer.kernel_incarnation_id.clone(),
             hold_id: consumer.hold_id.clone(),
             snapshot_commit_seq: hold.snapshot,
             through_commit_seq: through,
@@ -1536,6 +1565,42 @@ fn corruption_and_storage_failures_quarantine_the_driver_without_acknowledgement
 }
 
 #[test]
+fn identity_change_during_commit_reconciliation_blocks_without_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let search = search_path(dir.path());
+    let mut changed = false;
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+
+    let report = driver
+        .run_episode_with_fault_for_test(
+            &consumer,
+            &bounds(),
+            3,
+            &mut |event| {
+                if matches!(event, EpisodeEvent::LocalReleased { .. }) && !changed {
+                    mutate(&search)
+                        .execute(
+                            "UPDATE projection_identity SET kernel_incarnation_id='other' WHERE singleton=1",
+                            [],
+                        )
+                        .unwrap();
+                    changed = true;
+                }
+            },
+            EpisodeFault::LoseLocalCommitReply,
+        )
+        .unwrap();
+    assert_eq!(blocked(&report), &Blocked::ProjectionIdentity);
+    assert!(driver.quarantine().is_none());
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
 fn a_negative_episode_clock_is_refused_before_anything_durable_moves() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
@@ -1651,6 +1716,7 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);
     let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let input = snapshot_descriptor(&corpus.kernel, &consumer.binding, &hold);
     grow(&corpus, true);
     mutate(&search_path(dir.path()))
         .execute_batch("DROP TABLE projection_checkpoint")
@@ -1666,18 +1732,11 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
     // The projection quarantine blocks all writers, including `EmbeddingPublisher`.
     let mut publisher = EmbeddingPublisher::new(&corpus.kernel, &projection);
     let project = ProjectScope::new(&"a".repeat(64)).unwrap();
-    let expectation = CurrentInputExpectation {
-        object_id: "srcdesc:never:1".to_string(),
-        source_revision: 1,
-        occurrence_id: "never".to_string(),
-        payload_id: format!("{:x}", Sha256::digest(b"payload")),
-        artifact_digest: format!("{:x}", Sha256::digest(b"artifact")),
-    };
     let generation = generation();
     let mut vector = vec![0.0f32; 8];
     vector[0] = 1.0;
     let publication = VectorPublication {
-        expectation,
+        input,
         generation: &generation,
         vector: &vector,
         input_bytes: 1,
@@ -1712,12 +1771,58 @@ fn a_quarantine_entered_by_one_writer_stops_every_writer_of_the_projection() {
 }
 
 #[test]
+fn quarantine_between_ack_request_and_kernel_write_preserves_the_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let mut quarantined = false;
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |event| {
+            if matches!(event, EpisodeEvent::AcknowledgementRequested { .. }) && !quarantined {
+                projection
+                    .enter_quarantine_for_test(QuarantineKind::Integrity, &"checkpoint doubt");
+                quarantined = true;
+            }
+        })
+        .unwrap_err();
+    assert!(matches!(error, CatchUpError::Quarantined(_)));
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
+fn a_superseded_projection_writer_rejects_catch_up_without_quarantine() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    mutate(&search_path(dir.path()))
+        .execute("UPDATE fence SET epoch=epoch+1 WHERE id=0", [])
+        .unwrap();
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+
+    let error = driver
+        .run_episode(&consumer, &bounds(), 3, &mut |_| {})
+        .unwrap_err();
+    assert!(matches!(error, CatchUpError::ProjectionFenced));
+    assert!(driver.quarantine().is_none());
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
 fn a_quarantine_entered_after_the_local_commit_stops_the_acknowledgement() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed();
     corpus.publish("first", &[("msg-a", "1", "first message")]);
     let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let input = snapshot_descriptor(&corpus.kernel, &consumer.binding, &hold);
     grow(&corpus, true);
     let search = search_path(dir.path());
     let mut quarantined = false;
@@ -1740,13 +1845,7 @@ fn a_quarantine_entered_after_the_local_commit_stops_the_acknowledgement() {
                 vector[0] = 1.0;
                 let refused = publisher.publish(
                     &VectorPublication {
-                        expectation: CurrentInputExpectation {
-                            object_id: "srcdesc:never:1".to_string(),
-                            source_revision: 1,
-                            occurrence_id: "never".to_string(),
-                            payload_id: format!("{:x}", Sha256::digest(b"payload")),
-                            artifact_digest: format!("{:x}", Sha256::digest(b"artifact")),
-                        },
+                        input: input.clone(),
                         generation: &generation,
                         vector: &vector,
                         input_bytes: 1,
@@ -1976,7 +2075,13 @@ fn crash_cuts_recover_to_the_ledger_after_two_reopens_and_never_acknowledge_earl
                     source_policy_version: POLICY.to_string(),
                 },
                 hold_id: hold_id.clone(),
-                kernel_incarnation_id: KERNEL_INCARNATION.to_string(),
+                kernel_incarnation_id: inspect(&dir.path().join("kernel/kernel.sqlite"))
+                    .query_row(
+                        "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
                 generation_id: Some(GENERATION.to_string()),
             };
             let mut driver = SearchCatchUp::new(&kernel, &projection);

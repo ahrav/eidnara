@@ -1672,11 +1672,11 @@ fn id_of(index: usize, spec: &ItemSpec) -> String {
 
 macro_rules! build_inputs {
     ($specs:expr, $ctx_bits:expr, $SelItem:path, $SelKind:path, $SelMessageRole:path,
-     $SelectionContext:path, $PassClass:path, $SelectionConfig:path) => {{
+     $SelectionContext:path, $PassClass:path, $SelectionConfig:path, $input:expr) => {{
         use $PassClass as P;
+        use $SelItem as Item;
         use $SelKind as K;
         use $SelMessageRole as R;
-        type Item = $SelItem;
         type Ctx = $SelectionContext;
         type Cfg = $SelectionConfig;
         let specs = $specs;
@@ -1699,7 +1699,7 @@ macro_rules! build_inputs {
                 let kind = match s.kind {
                     KIND_TOOL_CALL => K::ToolCall {
                         name: TOOLS[usize::from(s.tool)].to_string(),
-                        input: input_value(s.input),
+                        input: ($input)(input_value(s.input)),
                     },
                     KIND_TOOL_RESULT => K::ToolResult {
                         tool_name: TOOLS[usize::from(s.tool)].to_string(),
@@ -1893,7 +1893,8 @@ macro_rules! outcome_pair {
             SelMessageRole,
             SelectionContext,
             PassClass,
-            SelectionConfig
+            SelectionConfig,
+            std::borrow::Cow::Owned
         );
         let (ref_items, ref_frozen, ref_ctx, ref_cfg) = build_inputs!(
             &specs,
@@ -1903,7 +1904,8 @@ macro_rules! outcome_pair {
             reference::SelMessageRole,
             reference::SelectionContext,
             reference::PassClass,
-            reference::SelectionConfig
+            reference::SelectionConfig,
+            std::convert::identity
         );
         let optimized = outcome_rows!(select_reductions_with_outcome(&items, &frozen, &ctx, &cfg));
         let expected = outcome_rows!(reference::select_reductions_with_outcome(
@@ -2566,7 +2568,8 @@ fn reasoning_guard_matches_frozen_reference_on_unfiltered_decisions() {
         SelMessageRole,
         SelectionContext,
         PassClass,
-        SelectionConfig
+        SelectionConfig,
+        std::borrow::Cow::Owned
     );
     let (ref_items, _, _, _) = build_inputs!(
         &specs,
@@ -2576,7 +2579,8 @@ fn reasoning_guard_matches_frozen_reference_on_unfiltered_decisions() {
         reference::SelMessageRole,
         reference::SelectionContext,
         reference::PassClass,
-        reference::SelectionConfig
+        reference::SelectionConfig,
+        std::convert::identity
     );
     let candidates: Vec<_> = items
         .iter()
@@ -2647,7 +2651,8 @@ fn generators_reach_every_decision_class() {
                 SelMessageRole,
                 SelectionContext,
                 PassClass,
-                SelectionConfig
+                SelectionConfig,
+                std::borrow::Cow::Owned
             );
             let outcome = select_reductions_with_outcome(&items, &frozen, &ctx, &cfg);
             for decision in &outcome.decisions {
@@ -2697,7 +2702,7 @@ fn every_production_variant_is_generated() {
     for kind in [
         SelKind::ToolCall {
             name: "edit".to_string(),
-            input: serde_json::json!({}),
+            input: std::borrow::Cow::Owned(serde_json::json!({})),
         },
         SelKind::ToolResult {
             tool_name: "edit".to_string(),

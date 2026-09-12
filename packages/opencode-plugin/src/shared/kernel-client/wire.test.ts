@@ -103,19 +103,12 @@ describe("parseReadResponse", () => {
         rows: [readRow("o1", 7)],
     };
 
-    test("a well-formed read yields typed rows", () => {
+    test("a well-formed read yields typed rows and carries the truncated flag, absent as false", () => {
         const parsed = parseReadResponse(good);
         expect(parsed.state.kind).toBe("available");
         expect(parsed.payload?.rows[0]?.token).toEqual({ object_id: "o1", known_as_of: 7 });
-    });
-
-    test("a read without the truncated field parses as not truncated", () => {
-        expect(parseReadResponse(good).payload?.truncated).toBe(false);
-    });
-
-    test("a truncated read carries the flag through", () => {
-        const parsed = parseReadResponse({ ...good, truncated: true });
-        expect(parsed.payload?.truncated).toBe(true);
+        expect(parsed.payload?.truncated).toBe(false);
+        expect(parseReadResponse({ ...good, truncated: true }).payload?.truncated).toBe(true);
     });
 
     test("a decision row is typed and a non-decision object carries no decision", () => {

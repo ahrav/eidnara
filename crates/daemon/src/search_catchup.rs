@@ -24,7 +24,9 @@ use retrieval::batch::{
     batch_from_rows, read_checkpoint, row_identities,
 };
 
-use crate::search_projection::{SearchProjection, SearchProjectionError};
+use crate::search_projection::{
+    SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
+};
 pub use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The registered consumer, its capture hold, and the projection identity an episode acts under.
@@ -152,6 +154,8 @@ pub struct EpisodeReport {
 pub enum CatchUpError {
     #[error("the search projection is quarantined: {}", .0.detail)]
     Quarantined(Quarantine),
+    #[error("the search projection writer was fenced before catch-up")]
+    ProjectionFenced,
     #[error(transparent)]
     Kernel(#[from] KernelError),
 }
@@ -407,7 +411,7 @@ impl<'a> SearchCatchUp<'a> {
             Err(SearchProjectionError::Projection(ProjectionError::IdentityMismatch)) => {
                 return Err(Blocked::ProjectionIdentity.into());
             }
-            Err(error) => return Err(self.quarantine_from(error).into()),
+            Err(error) => return Err(self.stop_from_projection_error(error)),
         };
         if checkpoint.hold_id != consumer.hold_id {
             return Err(Blocked::BaselineMismatch {
@@ -474,11 +478,29 @@ impl<'a> SearchCatchUp<'a> {
                     .enter_quarantine(QuarantineKind::Storage, &error)
                     .into(),
             }),
+            Err(SearchProjectionError::Quarantined(quarantine)) => {
+                Err(CatchUpError::Quarantined(quarantine).into())
+            }
+            Err(SearchProjectionError::Connection(error)) => Err(self
+                .enter_quarantine(QuarantineKind::Integrity, &error)
+                .into()),
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Integrity =>
+            {
+                Err(self
+                    .enter_quarantine(QuarantineKind::Integrity, &error)
+                    .into())
+            }
+            Err(SearchProjectionError::Store(error))
+                if classify_store_failure(&error) == StoreFailure::Rejected =>
+            {
+                Err(CatchUpError::ProjectionFenced.into())
+            }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
-            Err(_) => match self.projection.batch_status(&batch) {
+            Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(&batch) {
                 Ok(BatchStatus::Applied) => Ok(()),
                 Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
-                Err(error) => Err(self.quarantine_from(error).into()),
+                Err(error) => Err(self.stop_from_projection_error(error)),
             },
         }
     }
@@ -565,17 +587,27 @@ impl<'a> SearchCatchUp<'a> {
     ) -> Result<(), Stop> {
         self.refuse_if_quarantined()?;
         observer(EpisodeEvent::AcknowledgementRequested { through });
-        let mut acknowledged = self.kernel.acknowledge_through_source_hold(
+        let mut acknowledged = self.kernel.acknowledge_through_source_hold_if(
             &consumer.binding,
             &consumer.hold_id,
             through,
             now,
+            || self.projection.acknowledgement_guard(),
         );
-        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply) && acknowledged.is_ok() {
+        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply)
+            && matches!(acknowledged, Ok(true))
+        {
             acknowledged = Err(SourceHoldError::Kernel(KernelError::Io));
         }
         match acknowledged {
-            Ok(()) => {}
+            Ok(true) => {}
+            Ok(false) => {
+                let quarantine = self
+                    .projection
+                    .quarantine()
+                    .expect("quarantine intent must record its cause before publication");
+                return Err(CatchUpError::Quarantined(quarantine).into());
+            }
             Err(SourceHoldError::Kernel(error)) if outcome_unknown(error) => {
                 let kernel_checkpoint = self
                     .kernel
@@ -595,14 +627,36 @@ impl<'a> SearchCatchUp<'a> {
         Ok(())
     }
 
-    fn quarantine_from(&mut self, error: SearchProjectionError) -> CatchUpError {
+    fn stop_from_projection_error(&mut self, error: SearchProjectionError) -> Stop {
+        if let SearchProjectionError::Quarantined(quarantine) = &error {
+            return CatchUpError::Quarantined(quarantine.clone()).into();
+        }
+        if matches!(
+            &error,
+            SearchProjectionError::Projection(error) if classify(error) == Refusal::Identity
+        ) {
+            return Blocked::ProjectionIdentity.into();
+        }
+        if matches!(
+            &error,
+            SearchProjectionError::Store(error)
+                if classify_store_failure(error) == StoreFailure::Rejected
+        ) {
+            return CatchUpError::ProjectionFenced.into();
+        }
         let kind = match &error {
             SearchProjectionError::Projection(error) if classify(error) == Refusal::Integrity => {
                 QuarantineKind::Integrity
             }
+            SearchProjectionError::Connection(_) => QuarantineKind::Integrity,
+            SearchProjectionError::Store(error)
+                if classify_store_failure(error) == StoreFailure::Integrity =>
+            {
+                QuarantineKind::Integrity
+            }
             _ => QuarantineKind::Storage,
         };
-        self.enter_quarantine(kind, &error)
+        self.enter_quarantine(kind, &error).into()
     }
 
     /// Another writer can quarantine the projection while an episode runs, so

@@ -34,31 +34,10 @@ describe("extractRecentErrors", () => {
         expect(matches).not.toContain("2026-05-20 12:00:07 some other info line");
     });
 
-    it("matches lowercase error records such as `[rpc] handler error:`", () => {
-        const log = [
-            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
-            "[2026-05-11T12:00:01.000Z] processed 0 errors: fine",
-            "[2026-05-11T12:00:02.000Z] all good",
-        ].join("\n");
-        expect(extractRecentErrors(log)).toEqual([
-            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
-        ]);
-    });
-
-    it("matches V8 stack-trace frames", () => {
-        const log = [
-            "Error: thing broke",
-            "    at SomeFn (file:///foo.ts:42:5)",
-            "    at processTransform (file:///bar.ts:13:9)",
-            "    at file:///baz.ts:7:1",
-        ].join("\n");
-
-        const matches = extractRecentErrors(log, 20);
-        expect(matches.length).toBe(4);
-    });
-
-    it("matches async, constructor, and aliased V8 frames", () => {
+    it("matches plain, async, constructor, aliased, and bare-location V8 frames", () => {
         const frames = [
+            "    at SomeFn (file:///foo.ts:42:5)",
+            "    at file:///baz.ts:7:1",
             "    at async runCommand (file:///x.ts:1:2)",
             "    at new Historian (file:///y.ts:3:4)",
             "    at Server.emit [as emit] (node:events:1:2)",
@@ -107,32 +86,26 @@ describe("extractRecentErrors", () => {
         expect(extractRecentErrors(lines.join("\n"), 20)).toEqual(lines);
     });
 
-    it("matches lowercase `error:` labels", () => {
+    it("matches lowercase `error:` labels and skips zero-count telemetry", () => {
         const lines = [
+            "[2026-05-11T12:00:00.000Z] [rpc] handler error: boom",
             "[rpc] handler error: ctx.status => boom",
             "[rpc] sidebar-snapshot error: Error: nope",
             "TypeError: cannot read property 'foo' of undefined",
         ];
-        const noise = "SQLITE_ERROR is the code name, not an error label";
+        const noise = [
+            "[2026-05-11T12:00:01.000Z] processed 0 errors: fine",
+            "SQLITE_ERROR is the code name, not an error label",
+            "all good",
+        ];
 
-        expect(extractRecentErrors([...lines, noise].join("\n"), 20)).toEqual(lines);
+        expect(extractRecentErrors([...lines, ...noise].join("\n"))).toEqual(lines);
     });
 
-    it("returns matches in chronological order", () => {
-        const log = [
-            "transform failed: first error",
-            "info noise",
-            "transform failed: second error",
-            "info noise",
-            "transform failed: third error",
-        ].join("\n");
-
-        const matches = extractRecentErrors(log, 10);
-        expect(matches).toEqual([
-            "transform failed: first error",
-            "transform failed: second error",
-            "transform failed: third error",
-        ]);
+    it("returns an empty array for empty input or when no line matches", () => {
+        expect(extractRecentErrors("", 20)).toEqual([]);
+        const log = ["info line 1", "info line 2", "transform completed in 42ms"].join("\n");
+        expect(extractRecentErrors(log, 20)).toEqual([]);
     });
 
     it("caps at the requested limit (newest-first selection, oldest-first output)", () => {
@@ -144,15 +117,6 @@ describe("extractRecentErrors", () => {
         expect(matches.length).toBe(5);
         expect(matches[0]).toBe("transform failed: error 45");
         expect(matches[4]).toBe("transform failed: error 49");
-    });
-
-    it("returns empty array when no errors found", () => {
-        const log = ["info line 1", "info line 2", "transform completed in 42ms"].join("\n");
-        expect(extractRecentErrors(log, 20)).toEqual([]);
-    });
-
-    it("handles empty input gracefully", () => {
-        expect(extractRecentErrors("", 20)).toEqual([]);
     });
 });
 
@@ -217,7 +181,7 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).not.toContain("LINE000000");
     });
 
-    it("truncates the main log section when body exceeds budget", () => {
+    it("truncates the main log section oldest-first with a marker and keeps every other section", () => {
         const body = makeBody({ logLineCount: 5000, lineSize: 200 });
         const originalBytes = Buffer.byteLength(body, "utf8");
 
@@ -226,33 +190,17 @@ describe("capBodyToGithubLimit", () => {
 
         expect(cappedBytes).toBeLessThanOrEqual(60_000);
         expect(cappedBytes).toBeLessThan(originalBytes);
-    });
-
-    it("preserves the Recent errors section after truncation", () => {
-        const body = makeBody({ logLineCount: 5000, lineSize: 200 });
-        const capped = capBodyToGithubLimit(body, 60_000);
-
-        // The errors section survives truncation.
+        expect(capped).toContain("[truncated for GitHub 64KB limit");
+        // The newest line survives; the oldest is the first to go.
+        expect(capped).toContain("LINE004999:");
+        expect(capped).not.toContain("LINE000000:");
+        expect(capped).toContain("## Description");
+        expect(capped).toContain("Test description for the cap helper.");
+        expect(capped).toContain("## Environment");
+        expect(capped).toContain("- Plugin: v0.21.5");
         expect(capped).toContain("## Recent errors (last 20, sanitized)");
         expect(capped).toContain("transform failed: critical error 1");
         expect(capped).toContain("transform failed: critical error 2");
-    });
-
-    it("inserts the truncation marker when log lines are dropped", () => {
-        const body = makeBody({ logLineCount: 5000, lineSize: 200 });
-        const capped = capBodyToGithubLimit(body, 60_000);
-
-        expect(capped).toContain("[truncated for GitHub 64KB limit");
-    });
-
-    it("drops oldest log lines first (keeps newest)", () => {
-        const body = makeBody({ logLineCount: 5000, lineSize: 200 });
-        const capped = capBodyToGithubLimit(body, 60_000);
-
-        expect(capped).toContain("LINE004999:");
-
-        // The first log line (LINE000000) should be gone — it's the oldest.
-        expect(capped).not.toContain("LINE000000:");
     });
 
     it("treats a log line that begins with a fence as content, not as the closing fence", () => {
@@ -291,21 +239,6 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).toContain("old pasted line");
         expect(capped).toContain("LINE004999:");
         expect(capped).not.toContain("LINE000000:");
-    });
-
-    it("ignores a Log heading that appears inside the main log content", () => {
-        // A logged Error message can carry a copied report, heading included.
-        const body = makeBody({ logLineCount: 5000, lineSize: 200 }).replace(
-            "LINE004990: ",
-            "## Log (last 400 lines, sanitized)\nLINE004990: ",
-        );
-        const capped = capBodyToGithubLimit(body, 60_000);
-
-        expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(60_000);
-        expect(capped).toContain("LINE004999:");
-        expect(capped).not.toContain("LINE000000:");
-        expect(capped).toContain("[truncated for GitHub 64KB limit — older log lines dropped]");
-        expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
     });
 
     it("ignores a copied Log heading with its own fence inside the main log content", () => {
@@ -390,16 +323,6 @@ describe("capBodyToGithubLimit", () => {
         expect(capped).toContain("NEWEST: yyyy");
         expect(capped).not.toContain("older 1");
         expect(capped).not.toContain("[truncated further to fit GitHub body limit]");
-    });
-
-    it("preserves the Description and Environment sections", () => {
-        const body = makeBody({ logLineCount: 5000, lineSize: 200 });
-        const capped = capBodyToGithubLimit(body, 60_000);
-
-        expect(capped).toContain("## Description");
-        expect(capped).toContain("Test description for the cap helper.");
-        expect(capped).toContain("## Environment");
-        expect(capped).toContain("- Plugin: v0.21.5");
     });
 
     it("uses MAX_GITHUB_BODY_BYTES as the default budget", () => {

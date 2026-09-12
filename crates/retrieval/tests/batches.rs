@@ -332,6 +332,7 @@ fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_ba
         [
             "index:idx_embedding_jobs_dispatch",
             "index:idx_embedding_jobs_generation",
+            "index:idx_embedding_jobs_open_order",
             "index:idx_occurrence_vectors_generation",
             "index:idx_occurrences_lineage",
             "index:idx_occurrences_payload",
@@ -1398,7 +1399,7 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
     use retrieval::batch::{batch_from_rows, row_identities};
     use retrieval::dispatch::{
         Admission, Disposition, EpisodeGrant, LaneBinding, Recovery, authorize_recovery,
-        charge_admission, eligible_jobs, job_ledger, record_retry, stop_job,
+        charge_admission, dispatch_job, job_ledger, open_job_candidates, record_retry, stop_job,
     };
     use std::num::NonZeroU32;
 
@@ -1423,7 +1424,16 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
     let jobs = store
         .with_conn_fenced(|conn| {
             apply_batch(conn, &batch, bounds(), 3).unwrap();
-            let jobs = eligible_jobs(conn, NonZeroUsize::new(2).unwrap(), 3).unwrap();
+            let candidates =
+                open_job_candidates(conn, None, NonZeroUsize::new(2).unwrap(), 3).unwrap();
+            let job_ids: Vec<_> = candidates
+                .iter()
+                .map(|candidate| candidate.job_id.clone())
+                .collect();
+            let jobs: Vec<_> = job_ids
+                .iter()
+                .map(|job_id| dispatch_job(conn, job_id, 3).unwrap().unwrap())
+                .collect();
             assert_eq!(jobs.len(), 2);
             assert_eq!(
                 authorize_recovery(conn, "unknown", "A", grant, 4).unwrap(),
@@ -1463,14 +1473,16 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
     for authorization in ["A", "B"] {
         store
             .with_conn_fenced(|conn| {
+                let episode_id = format!("{job_id}/auth/{authorization}");
                 assert_eq!(
                     authorize_recovery(conn, job_id, authorization, grant, 5).unwrap(),
                     Recovery::Granted {
-                        episode_id: format!("{job_id}/auth/{authorization}")
+                        episode_id: episode_id.clone()
                     }
                 );
                 assert_eq!(
-                    charge_admission(conn, job_id, &host, authorization, grant, 6).unwrap(),
+                    charge_admission(conn, job_id, &episode_id, &host, authorization, grant, 6,)
+                        .unwrap(),
                     Admission::Charged { attempts: 1 }
                 );
                 assert_eq!(
@@ -1499,7 +1511,7 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
             );
             assert_eq!(job_ledger(conn, job_id).unwrap().unwrap(), stopped);
             assert!(
-                eligible_jobs(conn, NonZeroUsize::new(2).unwrap(), 8)
+                open_job_candidates(conn, None, NonZeroUsize::new(2).unwrap(), 8)
                     .unwrap()
                     .is_empty()
             );
@@ -1521,6 +1533,282 @@ fn recovery_authorizations_remember_all_consumed_references_across_reopen() {
                 "consumed history is checked before the non-stopped state"
             );
             assert_eq!(job_ledger(conn, job_id).unwrap(), pending);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn admission_charge_is_fenced_to_the_submitted_episode() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{
+        Admission, EpisodeGrant, LaneBinding, Recovery, authorize_recovery, charge_admission,
+        dispatch_job, job_ledger, open_job_candidates, stop_job,
+    };
+    use std::num::NonZeroU32;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "episode-fence",
+        1,
+        Some("input"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    let grant = EpisodeGrant {
+        allowance: NonZeroU32::new(2).unwrap(),
+        deadline: 100,
+    };
+    let host = LaneBinding {
+        embedding_model: "model-a".to_owned(),
+        bundle_fingerprint: "fp-a".to_owned(),
+        vector_dimension: 8,
+        table_epoch: 1,
+        host_incarnation: "host".to_owned(),
+    };
+
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let candidates =
+                open_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+            let job_ids = [candidates[0].job_id.clone()];
+            let job = dispatch_job(conn, &job_ids[0], 3).unwrap().unwrap();
+            let submitted_episode = job.item_id();
+            assert!(stop_job(conn, &job.job_id, "operator_recovery", 4).unwrap());
+            let Recovery::Granted { episode_id } =
+                authorize_recovery(conn, &job.job_id, "B", grant, 5).unwrap()
+            else {
+                panic!("recovery did not open episode B");
+            };
+            let before = job_ledger(conn, &job.job_id).unwrap().unwrap();
+
+            assert_eq!(
+                charge_admission(
+                    conn,
+                    &job.job_id,
+                    &submitted_episode,
+                    &host,
+                    "host-job-A",
+                    grant,
+                    6,
+                )
+                .unwrap(),
+                Admission::EpisodeChanged
+            );
+            let after = job_ledger(conn, &job.job_id).unwrap().unwrap();
+            assert_eq!(after, before, "a stale submission cannot mutate episode B");
+            assert_eq!(after.episode_id.as_deref(), Some(episode_id.as_str()));
+            assert_eq!((after.state.as_str(), after.attempts), ("pending", 0));
+            assert_eq!(after.host_job_id, None);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn dispatch_job_rejects_same_length_utf8_payload_corruption() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{dispatch_job, open_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "integrity",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let candidates =
+                open_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+            let job_ids = [candidates[0].job_id.clone()];
+            let job = dispatch_job(conn, &job_ids[0], 3).unwrap().unwrap();
+            assert_eq!(job.text, "hello");
+            conn.execute("UPDATE payloads SET bytes=?1", [b"jello".as_slice()])?;
+            assert!(matches!(
+                dispatch_job(conn, &job_ids[0], 3),
+                Err(ProjectionError::CorruptRow)
+            ));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn selected_job_that_closes_before_hydration_is_skipped() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{dispatch_job, open_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "hydrate-race",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let candidates =
+                open_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+            let job_ids = [candidates[0].job_id.clone()];
+            conn.execute(
+                "UPDATE embedding_jobs SET state='obsolete' WHERE job_id=?1",
+                [&job_ids[0]],
+            )?;
+            assert!(dispatch_job(conn, &job_ids[0], 3).unwrap().is_none());
+            conn.execute("DELETE FROM embedding_jobs WHERE job_id=?1", [&job_ids[0]])?;
+            assert!(dispatch_job(conn, &job_ids[0], 3).unwrap().is_none());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn open_candidate_page_reports_deferred_and_ready_rows() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{CandidateReadiness, open_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [
+        exported_row("deferred", 1, Some("first"), None, 3, None, None),
+        exported_row("ready", 1, Some("second"), None, 3, None, None),
+    ];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            let deferred = &rows[0].detail.occurrence_id;
+            let ready = &rows[1].detail.occurrence_id;
+            conn.execute(
+                "UPDATE embedding_jobs SET created_at=0,next_attempt_at=10 WHERE occurrence_id=?1",
+                [deferred],
+            )?;
+            conn.execute(
+                "UPDATE embedding_jobs SET created_at=1 WHERE occurrence_id=?1",
+                [ready],
+            )?;
+
+            let candidates =
+                open_job_candidates(conn, None, NonZeroUsize::new(2).unwrap(), 3).unwrap();
+            assert_eq!(candidates.len(), 2);
+            assert_eq!(
+                candidates[0].readiness,
+                CandidateReadiness::Deferred { until: 10 }
+            );
+            assert_eq!(candidates[1].readiness, CandidateReadiness::Ready);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn selected_job_with_a_corrupt_generation_relationship_is_rejected() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::{dispatch_job, open_job_candidates};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "hydrate-corrupt",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    let rolled_back: Result<(), _> = store.with_conn_fenced(|conn| {
+        apply_batch(conn, &batch, bounds(), 3).unwrap();
+        let candidates = open_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3).unwrap();
+        let job_ids = [candidates[0].job_id.clone()];
+        conn.execute("PRAGMA defer_foreign_keys=ON", [])?;
+        conn.execute(
+            "UPDATE embedding_jobs SET generation_id='missing' WHERE job_id=?1",
+            [&job_ids[0]],
+        )?;
+        assert!(matches!(
+            dispatch_job(conn, &job_ids[0], 3),
+            Err(ProjectionError::CorruptRow)
+        ));
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    });
+    assert!(rolled_back.is_err());
+}
+
+#[test]
+fn open_job_with_a_missing_occurrence_is_rejected_during_discovery() {
+    use retrieval::batch::{batch_from_rows, row_identities};
+    use retrieval::dispatch::open_job_candidates;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let rows = [exported_row(
+        "orphaned-job",
+        1,
+        Some("hello"),
+        None,
+        3,
+        None,
+        None,
+    )];
+    let occurrence_id = rows[0].detail.occurrence_id.clone();
+    let identities = row_identities(&rows);
+    let batch = batch_from_rows(&rows, &identities, mutation(3, 3), Some(GENERATION)).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            apply_batch(conn, &batch, bounds(), 3).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+
+    let path = dir.path().join("search").join("search.sqlite");
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    conn.execute(
+        "DELETE FROM occurrences WHERE occurrence_id=?1",
+        [&occurrence_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = open(dir.path());
+    store
+        .with_conn_fenced(|conn| {
+            assert!(matches!(
+                open_job_candidates(conn, None, NonZeroUsize::new(1).unwrap(), 3),
+                Err(ProjectionError::CorruptRow)
+            ));
             Ok(())
         })
         .unwrap();

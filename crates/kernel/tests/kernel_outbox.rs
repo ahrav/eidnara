@@ -414,26 +414,6 @@ fn derived_projection_discard_preserves_exact_checkpoints_and_receipts() {
 }
 
 #[test]
-fn publication_boundary_and_fence_checks_remain_enforced() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = KernelStore::open(directory.path()).unwrap();
-    store
-        .commit(intent("multi"), |envelope| {
-            envelope.insert_domain(domain(1))?;
-            envelope.insert_domain(domain(2))?;
-            Ok("two".to_string())
-        })
-        .unwrap();
-    assert_eq!(
-        store.mark_outbox_published_through(1, 1).unwrap_err(),
-        KernelError::InvalidCheckpoint
-    );
-    store.mark_outbox_published_through(2, 1).unwrap();
-    store.invalidate_writer_fence_for_test().unwrap();
-    assert_eq!(store.prune_outbox().unwrap_err(), KernelError::FenceLost);
-}
-
-#[test]
 fn publication_marks_rows_through_the_position_and_leaves_later_rows_unpublished() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();

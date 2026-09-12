@@ -2,6 +2,8 @@
 
 Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation sections describe that baseline. Their source
+links are pinned to it. The executed witness below supplements that history.
 
 ## Discovery trigger
 
@@ -85,19 +87,95 @@ a shared-view design as well.
 - Conclusion: unresolved, needs a captured plugin body; the catalog's
   `medium` confidence stands.
 
-[normalize]: ../../../../../crates/daemon/src/transform.rs#L2083-L2100
-[t-collapsed]: ../../../../../crates/daemon/src/transform.rs#L27269-L27270
-[expand]: ../../../../../crates/daemon/src/lib.rs#L4151-L4245
-[reattach-call]: ../../../../../crates/daemon/src/lib.rs#L4188-L4190
-[native-deep]: ../../../../../crates/daemon/src/lib.rs#L4228-L4231
-[historian-fire]: ../../../../../crates/daemon/src/lib.rs#L4994
-[no-models]: ../../../../../crates/daemon/src/lib.rs#L5189-L5196
-[native-profile]: ../../../../../crates/daemon/src/lib.rs#L7946-L7947
-[prepare-a]: ../../../../../crates/daemon/src/lib.rs#L8245-L8247
-[prepare-b]: ../../../../../crates/daemon/src/lib.rs#L8336-L8338
-[native-gate]: ../../../../../crates/daemon/src/lib.rs#L8406
+[normalize]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L2083-L2100
+[t-collapsed]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L27269-L27270
+[expand]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4151-L4245
+[reattach-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4188-L4190
+[native-deep]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4228-L4231
+[historian-fire]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L4994
+[no-models]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L5189-L5196
+[native-profile]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L7946-L7947
+[prepare-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8245-L8247
+[prepare-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8336-L8338
+[native-gate]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8406
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
 [cfg-models]: ../../../../../crates/daemon/src/config.rs#L119
 [cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L121
-[plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
+[plugin]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
+
+## Executed delta witness
+
+Implementation base: `bf6b9d5fad969fa29da852a1dd9f1de569732197`.
+Execution date: 2026-09-11.
+
+[`unflagged_synthetic_delta_prepares_historian_and_native_output`][witness]
+uses the handler entry, fixture memory store and existing scripted producer.
+It establishes these independent conditions on one delta pass:
+
+1. Compaction is enabled and the configured model chain is nonempty.
+2. A real todowrite call/result boot pass returns HARD and freezes a pair.
+3. The delta names the boot fingerprint and reattaches two prefix messages.
+   The response reports two reused projection messages.
+4. Both suffix carriers arrive with `meta.synthetic == false` and carry the
+   frozen pair's call ID. Eighty ordinary messages precede the pair, placing
+   its ordinals 83 and 84 in the protected tail.
+5. The profile is `opencode-aisdk`, `serve_native` is true, and the handler
+   reports `historian.fired == true` on that pass.
+
+After those assertions the test emits the constant marker
+`replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn: reached`.
+It also checks nonempty native output, waits for the producer to start, then
+releases the scripted output block and waits for the historian to become idle.
+Observer equivalence is checked separately by the
+[B2 reference and delta comparisons](synthetic-normalization-is-scoped-to-the-pass.md#pass-local-view-evidence).
+
+### Characterization and limitations
+
+`cargo test -p daemon --lib --locked unflagged_synthetic_delta_prepares_historian_and_native_output -- --nocapture`
+passed before the production refactor (1 test); its marker was reached and
+the historian completed. The post-refactor `synthetic` filter passed all 20
+matching tests, including this witness.
+
+Fixture development first omitted the authored tool result and hit the
+tool-adjacency assertion. Adding that result fixed the fixture. A second
+attempt placed the replay inside the selected chunk; the baseline refused
+assembly with `MissingBlockIdentity { message_id: "replay-call" }`. Moving
+the replay into the protected tail makes the required firing reachable.
+Neither refusal is changed by the optimization.
+
+This is a constructed handler witness, not a captured production plugin body.
+The default-production reachability class and medium confidence remain.
+Test adequacy remains unaudited. No benchmark or measurement campaign ran;
+parent measurement and whole-repository landing gates remain separate.
+
+[witness]: ../../../../../crates/daemon/src/lib.rs#L22857
+
+## Third-turn prefix and production-prompt checks
+
+The [witness][witness] also sends a third delta after the second turn's
+historian completes. The third turn reuses all 84 prefix messages, including
+the replay at ordinals 83 and 84. It asserts that expansion uses the projection
+cache rather than snapshot fallback and restores both normalized flags.
+
+The reference prefix comes from full projection of the same second-turn
+messages with only the replay carriers' typed flags set, followed by the
+existing prefix-reattachment function. This matches the clone-era mechanism.
+The actual expanded ingress equals that reference. Its boundary messages omit
+the pair and its chunk input ordinals omit 83 and 84. A full raw observer input
+with those two flags cleared retains two empty boundary messages and both
+ordinals instead. That baseline difference is asserted, not erased.
+
+Two independent fixture handlers run the same first two turns. One receives
+the third delta; the other receives the full reference with the same
+reattached observer shape. The scripted producer captures both actual firing
+prompts. The first prompt contains ordinary message 3 and excludes the replay
+carrier's unique text. The third prompt advances the chunk start and also
+excludes that text. Both captured prompts, third-turn served messages and
+native bytes agree across the handlers. Native suffix responses are expanded
+against the prior native output before comparison.
+
+The extended witness passed individually before the scan/helper cleanup and
+again in the post-cleanup `synthetic` filter (21 matching tests). The original
+execution record above remains the two-turn characterization result. This
+follow-up adds no production trace or performance claim.

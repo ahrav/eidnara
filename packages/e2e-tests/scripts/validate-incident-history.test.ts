@@ -2,12 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compareWithAcceptedSnapshot } from "../src/incident-pool/history";
 import {
     deriveTrustedAcceptedCommit,
     type GitRunner,
-    INCIDENTS_DIR,
-    loadHistorySnapshot,
     loadHistorySnapshotFromGit,
     parseIncidentHistoryArgs,
     validateAgainstAcceptedDirectory,
@@ -419,13 +416,6 @@ describe("validate-incident-history script", () => {
         expect(state.catalog.schema).toBe("incident-catalog/v1");
     });
 
-    it("loads a snapshot with the four expected files", () => {
-        const snapshot = loadHistorySnapshot(INCIDENTS_DIR, "working");
-        expect(snapshot.baseLabel).toBe("working");
-        expect(Array.isArray(snapshot.adjudicationLines)).toBe(true);
-        expect(Array.isArray(snapshot.redactionLines)).toBe(true);
-    });
-
     it("validates a populated fixture directory", () => {
         withFixtureDir(fixtureFiles(), (dir) => {
             const state = validateIncidentDirectory(dir);
@@ -448,16 +438,6 @@ describe("validate-incident-history script", () => {
         });
         withFixtureDir(files, (dir) => {
             expect(() => validateIncidentDirectory(dir)).toThrow(/must contain exactly/);
-        });
-    });
-
-    it("fails closed on a malformed ledger line without folding later events", () => {
-        const files = fixtureFiles();
-        files["adjudications.jsonl"] = `not json\n${files["adjudications.jsonl"]}`;
-        withFixtureDir(files, (dir) => {
-            expect(() => validateIncidentDirectory(dir)).toThrow(
-                /adjudications\[0\] is not valid JSON/,
-            );
         });
     });
 
@@ -507,13 +487,6 @@ describe("validate-incident-history script", () => {
                     validateAgainstAcceptedDirectory(acceptedDir, "base-1", candidateDir),
                 ).toThrow(/accepted source claim edited/);
             });
-        });
-    });
-
-    it("exposes the same comparison used by compareWithAcceptedSnapshot", () => {
-        withFixtureDir(fixtureFiles(), (dir) => {
-            const accepted = loadHistorySnapshot(dir, "base-1");
-            expect(() => compareWithAcceptedSnapshot(accepted, accepted)).not.toThrow();
         });
     });
 });

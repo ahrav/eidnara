@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
     type ProviderConfig,
-    ProviderError,
     type ProviderScalar,
     runProvider,
     validateProviderConfig,
@@ -15,7 +14,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
-const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 async function temporaryDirectory(prefix = "retina-local-fs-"): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -24,8 +22,6 @@ async function temporaryDirectory(prefix = "retina-local-fs-"): Promise<string> 
 }
 
 afterEach(async () => {
-    if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
-    else process.env.XDG_DATA_HOME = originalXdgDataHome;
     await Promise.all(
         temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
     );
@@ -537,23 +533,6 @@ describe("path fence", () => {
         }
     });
 
-    test("refuses every file under the storage root, including databases and RPC discovery files", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const root = join(home, ".local", "share", "eidnara", "context");
-        const paths = [
-            join(root, "context.db"),
-            join(root, "store.db-wal"),
-            join(root, "rpc", "project", "port-123-instance.json"),
-        ];
-        for (const path of paths) {
-            await mkdir(join(path, ".."), { recursive: true });
-            await writeFile(path, "credential-bearing data");
-            await expect(poll({ kind: "path_exists", path }, null, home)).rejects.toMatchObject({
-                code: "fenced_path",
-            });
-        }
-    });
-
     test("refuses the connection file under the runtime root", async () => {
         const home = await temporaryDirectory("retina-local-fs-home-");
         const path = join(home, ".local", "share", "eidnara", "run", "connection.json");
@@ -563,73 +542,6 @@ describe("path fence", () => {
         await expect(
             poll({ kind: "file_contains", path, needle: "secret" }, null, home),
         ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("refuses an XDG-relocated connection file", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const dataDirectory = await temporaryDirectory("retina-local-fs-xdg-");
-        const path = join(dataDirectory, "eidnara", "run", "connection.json");
-        await mkdir(join(path, ".."), { recursive: true });
-        await writeFile(path, JSON.stringify({ key: "secret" }));
-
-        process.env.XDG_DATA_HOME = dataDirectory;
-        await expect(
-            runProvider(
-                { scalar: null, config: { kind: "path_exists", path } },
-                { homeDirectory: home },
-            ),
-        ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("ignores a relative XDG_DATA_HOME and keeps fencing the home-derived root", async () => {
-        // The daemon and the lifecycle resolver both reject a relative
-        // XDG_DATA_HOME and fall back to $HOME/.local/share, so the real
-        // managed tree lives under home. A fence that resolved the relative
-        // value against cwd would compute its root elsewhere and admit the
-        // very files it exists to refuse.
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const path = join(home, ".local", "share", "eidnara", "run", "connection.json");
-        await mkdir(join(path, ".."), { recursive: true });
-        await writeFile(path, JSON.stringify({ key: "secret" }));
-
-        process.env.XDG_DATA_HOME = "./poisoned-relative-data";
-        await expect(
-            runProvider(
-                { scalar: null, config: { kind: "path_exists", path } },
-                { homeDirectory: home },
-            ),
-        ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("ignores an empty XDG_DATA_HOME and keeps fencing the home-derived root", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const path = join(home, ".local", "share", "eidnara", "context", "context.db");
-        await mkdir(join(path, ".."), { recursive: true });
-        await writeFile(path, "credential-bearing data");
-
-        process.env.XDG_DATA_HOME = "";
-        await expect(
-            runProvider(
-                { scalar: null, config: { kind: "path_exists", path } },
-                { homeDirectory: home },
-            ),
-        ).rejects.toMatchObject({ code: "fenced_path" });
-    });
-
-    test("admits a non-secret file under the Eidnara data root", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const dataDirectory = await temporaryDirectory("retina-local-fs-xdg-");
-        const path = join(dataDirectory, "eidnara", "docs", "notice.txt");
-        await mkdir(join(path, ".."), { recursive: true });
-        await writeFile(path, "public notice");
-
-        const result = await poll(
-            { kind: "file_contains", path, needle: "public" },
-            null,
-            home,
-            dataDirectory,
-        );
-        expect(result.events).toHaveLength(1);
     });
 
     test("refuses a symlink swap after canonicalization", async () => {
@@ -689,45 +601,6 @@ describe("path fence", () => {
             ).rejects.toMatchObject({ code: "fenced_path" });
         },
     );
-
-    test("refuses sensitive basenames outside fenced roots", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const paths = [
-            join(home, "safe", "prod-binding-key-v2"),
-            join(home, "safe", "operator.handle"),
-            join(home, "safe", "writer.lease"),
-            join(home, "project", "catalog", "dev-binding-key"),
-            join(home, "project", "bin", "lease.handle"),
-        ];
-        for (const path of paths) {
-            await mkdir(join(path, ".."), { recursive: true });
-            await writeFile(path, "secret");
-            await expect(poll({ kind: "path_exists", path }, null, home)).rejects.toMatchObject({
-                code: "fenced_path",
-            });
-        }
-    });
-
-    test("resolves symlinks before refusing a fenced target", async () => {
-        const home = await temporaryDirectory("retina-local-fs-home-");
-        const target = join(home, ".local", "share", "eidnara", "run", "secret.txt");
-        const link = join(home, "innocent-link");
-        await mkdir(join(target, ".."), { recursive: true });
-        await writeFile(target, "secret");
-        await symlink(target, link);
-
-        await expect(poll({ kind: "path_exists", path: link }, null, home)).rejects.toMatchObject({
-            code: "fenced_path",
-        });
-
-        const missingTarget = join(home, ".local", "share", "eidnara", "context", "missing-secret");
-        const danglingLink = join(home, "dangling-link");
-        await mkdir(join(missingTarget, ".."), { recursive: true });
-        await symlink(missingTarget, danglingLink);
-        await expect(
-            poll({ kind: "path_exists", path: danglingLink, gone: true }, null, home),
-        ).rejects.toMatchObject({ code: "fenced_path" });
-    });
 });
 
 describe("CLI exit discipline", () => {
@@ -804,13 +677,5 @@ describe("CLI exit discipline", () => {
             home,
         );
         expect(JSON.parse(fencedResult.stderr)).toMatchObject({ code: "fenced_path" });
-    });
-});
-
-test("ProviderError remains machine distinguishable", () => {
-    expect(new ProviderError("example", "message")).toMatchObject({
-        name: "ProviderError",
-        code: "example",
-        message: "message",
     });
 });

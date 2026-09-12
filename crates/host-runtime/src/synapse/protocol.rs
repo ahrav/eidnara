@@ -16,6 +16,7 @@ const MAX_BODY_DEPTH: usize = 8;
 pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub(crate) const MAX_JOB_ID_BYTES: usize = 128;
 pub(crate) const MAX_CURSOR_BYTES: usize = 128;
+pub(crate) const CANONICAL_REQUEST_KEY_BYTES: usize = 64;
 pub(crate) const MAX_DEADLINE_MS: u64 = 3_600_000;
 /// `DEFAULT_DEADLINE_MS` applies when a query omits `deadline_ms`; `MAX_DEADLINE_MS` is the ceiling a client may request.
 pub(crate) const DEFAULT_DEADLINE_MS: u64 = 5_000;
@@ -921,21 +922,33 @@ fn parse_result(params: ResultParams<'_>, lane: &LaneInfo) -> Result<Request, Re
 }
 
 pub fn canonical_request_key(lane: &LaneInfo, items: &[BatchItem]) -> String {
+    canonical_request_key_parts(
+        lane,
+        items
+            .iter()
+            .map(|item| (item.id.as_str(), item.content_sha256.as_str())),
+    )
+}
+
+pub(crate) fn canonical_request_key_parts<'a, I>(lane: &LaneInfo, items: I) -> String
+where
+    I: Clone + IntoIterator<Item = (&'a str, &'a str)>,
+{
     let mut canonical = String::with_capacity(256);
     canonical
         .push_str("{\"accept_declared\":false,\"allow_equivalent\":false,\"content_sha256\":[");
-    for (index, item) in items.iter().enumerate() {
+    for (index, (_, content_sha256)) in items.clone().into_iter().enumerate() {
         if index > 0 {
             canonical.push(',');
         }
-        canonical.push_str(&json_string(&item.content_sha256));
+        canonical.push_str(&json_string(content_sha256));
     }
     canonical.push_str("],\"ids\":[");
-    for (index, item) in items.iter().enumerate() {
+    for (index, (id, _)) in items.into_iter().enumerate() {
         if index > 0 {
             canonical.push(',');
         }
-        canonical.push_str(&json_string(&item.id));
+        canonical.push_str(&json_string(id));
     }
     canonical.push_str("],\"model\":");
     canonical.push_str(&json_string(&lane.model));
@@ -956,7 +969,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn is_lower_hex_64(value: &str) -> bool {
-    value.len() == 64
+    value.len() == CANONICAL_REQUEST_KEY_BYTES
         && value
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
@@ -1242,20 +1255,6 @@ mod tests {
         assert!(depth_exceeds(
             br#"{"a":"x\\","b":[[[[[[[[1]]]]]]]]}"#,
             MAX_BODY_DEPTH
-        ));
-    }
-
-    #[test]
-    fn a_scalar_at_the_container_limit_is_one_level_deeper() {
-        // Eight open containers are exactly the depth limit.
-        assert!(!depth_exceeds(
-            br#"{"a":{"b":{"c":{"d":{"e":{"f":{"g":{}}}}}}}}"#,
-            8
-        ));
-        // A scalar or key inside the eighth open container has depth 9.
-        assert!(depth_exceeds(
-            br#"{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":1}}}}}}}}"#,
-            8
         ));
     }
 

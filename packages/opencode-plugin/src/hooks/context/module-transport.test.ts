@@ -193,13 +193,10 @@ describe("waiter detach is not a connection failure", () => {
     // invalidate the shared connection and bump the generation, and the still-connecting
     // owner's candidate would be evicted -- one caller's deadline would abort the connect for
     // every caller waiting on the same flight.
-    test("a deadline detach does not classify as a connection failure", () => {
+    test("a deadline or abort detach does not classify as a connection failure", () => {
         const detached = new WaiterDetachedError("deadline");
         expect(detached.code).toBe("ETIMEDOUT");
         expect(__moduleTransportTest.isConnectionFailure(detached)).toBe(false);
-    });
-
-    test("an abort detach does not classify as a connection failure", () => {
         expect(__moduleTransportTest.isConnectionFailure(new WaiterDetachedError("aborted"))).toBe(
             false,
         );
@@ -220,18 +217,8 @@ describe("module identity and send deadline", () => {
         expect(__moduleTransportTest.DEFAULT_MODULE_ID).toBe("context");
     });
 
-    test("a transform send has one effective deadline of five seconds", async () => {
+    test("a caller-supplied timeout shortens but never lifts the five-second transform cap", async () => {
         expect(__moduleTransportTest.TRANSFORM_SEND_TIMEOUT_MS).toBe(5_000);
-        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
-        transport.connectionPromise = new Promise<never>(() => {});
-        const outcome = await Promise.race([
-            transport.ensureConnected(Deadline.start(5)).catch((error: unknown) => error),
-            Bun.sleep(50).then(() => "still_waiting"),
-        ]);
-        expect(outcome).toMatchObject({ code: "ETIMEDOUT" });
-    });
-
-    test("a caller-supplied timeout shortens but never lifts the transform cap", async () => {
         const observed = new Map<string, number>();
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         transport.ensureRoute = async (sessionId, _projectRoot, deadline) => {
@@ -1056,26 +1043,20 @@ describe("managed startup envelope harness closures", () => {
         });
     });
 
-    test("@eidnara/cli carries neither harness closure and raises no error", () => {
-        const envelope = buildManagedStartupEnvelope(
-            "@eidnara/cli",
-            {},
-            "/opt/anything/bin/eidnara",
-            undefined,
-            (path) => path,
-        );
-        expect(envelope).toEqual({ schema: 1 });
-    });
-
-    test("an anchor that does not resolve leaves the harness absent rather than guessing", () => {
-        const envelope = buildManagedStartupEnvelope(
-            "@eidnara/opencode",
-            {},
-            "/somewhere/else/binary",
-            undefined,
-            (path) => path,
-        );
-        expect(envelope).toEqual({ schema: 1 });
+    test("a parent without a harness, or an anchor that does not resolve, yields a bare envelope rather than a guess", () => {
+        for (const [parent, executable] of [
+            ["@eidnara/cli", "/opt/anything/bin/eidnara"],
+            ["@eidnara/opencode", "/somewhere/else/binary"],
+        ] as const) {
+            const envelope = buildManagedStartupEnvelope(
+                parent,
+                {},
+                executable,
+                undefined,
+                (path) => path,
+            );
+            expect(envelope, parent).toEqual({ schema: 1 });
+        }
     });
 
     test("the lock's anchors name the manifest's executable, interpreter, or entrypoint node", () => {

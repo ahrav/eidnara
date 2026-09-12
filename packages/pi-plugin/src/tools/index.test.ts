@@ -16,55 +16,57 @@ const kernelClient = fakeKernelResolver().kernelClient;
 const baseOptions = { kernelClient, rustToolBackends: {} };
 
 describe("registerEidnaraTools", () => {
-    it("can omit ctx_memory for retrieval-only sidekick subagents", () => {
-        const registered: string[] = [];
-        const commands: string[] = [];
-        const pi = {
-            registerTool: (tool: { name: string }) => {
-                registered.push(tool.name);
+    it("registers exactly the tool and command set each registration option selects", () => {
+        const cases: Array<{
+            options: Partial<Parameters<typeof registerEidnaraTools>[1]>;
+            tools: string[];
+            commands: string[];
+        }> = [
+            {
+                options: {},
+                tools: ["ctx_search", "ctx_memory", "ctx_note", "todowrite", "ctx_reduce"],
+                commands: ["todos"],
             },
-            registerCommand: (name: string) => {
-                commands.push(name);
+            {
+                options: { compactionOff: true },
+                tools: ["ctx_search", "ctx_memory", "ctx_note", "todowrite"],
+                commands: ["todos"],
             },
-        } as never;
+            {
+                options: { todowriteEnabled: false },
+                tools: ["ctx_search", "ctx_memory", "ctx_note", "ctx_reduce"],
+                commands: [],
+            },
+            // Lean subagent entries keep the tool but not the slash command.
+            {
+                options: { todowriteCommandEnabled: false },
+                tools: ["ctx_search", "ctx_memory", "ctx_note", "todowrite", "ctx_reduce"],
+                commands: [],
+            },
+            // Retrieval-only sidekick subagents drop memory and session-scoped tools.
+            {
+                options: {
+                    memoryToolEnabled: false,
+                    sessionScopedToolsDisabled: true,
+                    todowriteCommandEnabled: false,
+                },
+                tools: ["ctx_search", "todowrite"],
+                commands: [],
+            },
+        ];
+        for (const { options, tools, commands: expectedCommands } of cases) {
+            const registered: string[] = [];
+            const commands: string[] = [];
+            const pi = {
+                registerTool: (tool: { name: string }) => registered.push(tool.name),
+                registerCommand: (name: string) => commands.push(name),
+            } as never;
 
-        registerEidnaraTools(pi, {
-            ...baseOptions,
-            memoryToolEnabled: false,
-            sessionScopedToolsDisabled: true,
-            todowriteCommandEnabled: false,
-        });
+            registerEidnaraTools(pi, { ...baseOptions, ...options });
 
-        expect(registered).toEqual(["ctx_search", "todowrite"]);
-        expect(commands).not.toContain("todos");
-    });
-
-    it("removes only ctx_reduce in compaction-off mode", () => {
-        const registered: string[] = [];
-        const pi = {
-            registerTool: (tool: { name: string }) => registered.push(tool.name),
-            registerCommand: () => undefined,
-        } as never;
-        registerEidnaraTools(pi, { ...baseOptions, compactionOff: true });
-
-        expect(registered).toEqual(["ctx_search", "ctx_memory", "ctx_note", "todowrite"]);
-    });
-
-    it("registers exactly the daemon-backed tool set by default", () => {
-        const registered: string[] = [];
-        const pi = {
-            registerTool: (tool: { name: string }) => registered.push(tool.name),
-            registerCommand: () => undefined,
-        } as never;
-        registerEidnaraTools(pi, baseOptions);
-
-        expect(registered).toEqual([
-            "ctx_search",
-            "ctx_memory",
-            "ctx_note",
-            "todowrite",
-            "ctx_reduce",
-        ]);
+            expect(registered).toEqual(tools);
+            expect(commands).toEqual(expectedCommands);
+        }
     });
 
     it("advertises only real ctx_* fields and allows additional properties", () => {
@@ -167,49 +169,6 @@ describe("registerEidnaraTools", () => {
                 projectRoot: "/tmp/project-b",
             }),
         ]);
-    });
-
-    it("registers todowrite and /todos by default", () => {
-        const registered: string[] = [];
-        const commands: string[] = [];
-        const pi = {
-            registerTool: (tool: { name: string }) => registered.push(tool.name),
-            registerCommand: (name: string) => commands.push(name),
-        } as never;
-
-        registerEidnaraTools(pi, baseOptions);
-
-        expect(registered).toContain("todowrite");
-        expect(commands).toContain("todos");
-    });
-
-    it("omits todowrite and /todos when todowrite is disabled", () => {
-        const registered: string[] = [];
-        const commands: string[] = [];
-        const pi = {
-            registerTool: (tool: { name: string }) => registered.push(tool.name),
-            registerCommand: (name: string) => commands.push(name),
-        } as never;
-
-        registerEidnaraTools(pi, { ...baseOptions, todowriteEnabled: false });
-
-        expect(registered).toContain("ctx_search");
-        expect(registered).not.toContain("todowrite");
-        expect(commands).not.toContain("todos");
-    });
-
-    it("can keep /todos off for lean subagent entries", () => {
-        const registered: string[] = [];
-        const commands: string[] = [];
-        const pi = {
-            registerTool: (tool: { name: string }) => registered.push(tool.name),
-            registerCommand: (name: string) => commands.push(name),
-        } as never;
-
-        registerEidnaraTools(pi, { ...baseOptions, todowriteCommandEnabled: false });
-
-        expect(registered).toContain("todowrite");
-        expect(commands).not.toContain("todos");
     });
 });
 
