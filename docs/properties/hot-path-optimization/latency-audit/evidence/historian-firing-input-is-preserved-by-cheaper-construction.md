@@ -226,10 +226,10 @@ only the five values asserted by the retained tests.
 [trunc]: ../../../../../crates/daemon/src/historian_chunk.rs#L744-L777
 [t-golden]: ../../../../../crates/daemon/src/historian_chunk.rs#L1773-L1859
 [t-marker]: ../../../../../crates/daemon/src/historian_chunk.rs#L1744-L1757
-[boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16630-L16690
-[construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17615
-[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23911
-[frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16737-L16795
+[boundary-view]: ../../../../../crates/daemon/src/lib.rs#L16657-L16717
+[construction-corpus]: ../../../../../crates/daemon/src/lib.rs#L17642
+[firing-capture]: ../../../../../crates/daemon/src/lib.rs#L23938
+[frozen-lookup]: ../../../../../crates/daemon/src/lib.rs#L16764-L16822
 [normalize]: ../../../../../crates/daemon/src/transform.rs#L2129-L2145
 [apply-normalized]: ../../../../../crates/daemon/src/transform.rs#L2898-L2911
 [handler-observers]: ../../../../../crates/daemon/src/lib.rs#L8413-L8425

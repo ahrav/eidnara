@@ -114,8 +114,8 @@ not a runtime assertion.
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
 [h-timings]: ../../../../../crates/daemon/src/lib.rs#L8549-L8573
 [prepare]: ../../../../../crates/daemon/src/lib.rs#L5052-L5382
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14499
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14580-L14602
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14501
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14582-L14604
 [pass-state-load]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042

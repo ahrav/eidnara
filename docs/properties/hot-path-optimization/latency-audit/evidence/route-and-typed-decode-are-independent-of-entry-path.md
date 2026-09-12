@@ -146,7 +146,7 @@ an escaped discriminator takes the tree lane whatever else its bytes spell. The 
 one body-proportional cost is serde_json's unescape buffer for a long escaped
 key or discriminator; with the resident charge taken inside the decode rather
 than before it, that buffer sits outside the meter on every body, bounded by
-the byte cap, as the walk's does. The probe's
+the byte cap. The probe's
 [map visitor][probe-visitor] mirrors the tree dispatch rather than a derived
 struct: a repeated key keeps its last value, a page key counts when present
 whatever its value, `null` included, each key is [classified in place][probe-key]
@@ -203,9 +203,10 @@ which decodes to the same value wherever the typed decode succeeds, and
 the span. The `handler_total` timing starts before the typed decode on both
 lanes; on the direct lane that decode reads the body bytes, so the direct lane's
 `handler_total` includes the byte parse that the tree lane's `Value` parse
-precedes. The walk's only body-proportional cost is serde_json's scratch buffer
-for one escaped string at a time, released with the walk; it runs before the
-metered decode, so that buffer is outside the meter, bounded by the byte cap.
+precedes. The walk runs through the meter, so a held pool refuses it at its
+first value and its one body-proportional cost, serde_json's scratch buffer for
+the escaped string being visited, is taken only for a body the pool is
+admitting; the typed decode then restarts the count on the bytes the walk holds.
 The direct decode retains at most what the tree lane retains
 ([one node-copy count][copies-live] covers both lanes), but serde_json
 unescapes a string holding an escape into a scratch buffer that the direct
@@ -332,18 +333,18 @@ accepted it where the tree did not parse it. The rule and the split were added
 against those failures.
 
 [handle-live]: ../../../../../crates/daemon/src/lib.rs#L11921-L11936
-[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12676-L12716
-[route-name]: ../../../../../crates/daemon/src/lib.rs#L15718-L15732
-[lane-probe]: ../../../../../crates/daemon/src/lib.rs#L15501-L15509
-[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15491-L15499
-[witness]: ../../../../../crates/daemon/src/lib.rs#L15511-L15514
+[dispatch-body]: ../../../../../crates/daemon/src/lib.rs#L12676-L12718
+[route-name]: ../../../../../crates/daemon/src/lib.rs#L15745-L15759
+[lane-probe]: ../../../../../crates/daemon/src/lib.rs#L15503-L15511
+[probe-live]: ../../../../../crates/daemon/src/lib.rs#L15493-L15501
+[witness]: ../../../../../crates/daemon/src/lib.rs#L15513-L15518
 [raw-token]: ../../../../../crates/daemon/src/metered_decode.rs#L428-L435
-[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15527-L15560
-[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15572-L15596
-[skipped]: ../../../../../crates/daemon/src/lib.rs#L15599-L15686
-[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15690-L15695
-[class-live]: ../../../../../crates/daemon/src/lib.rs#L15705-L15712
-[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15844-L15867
+[probe-visitor]: ../../../../../crates/daemon/src/lib.rs#L15554-L15587
+[probe-key]: ../../../../../crates/daemon/src/lib.rs#L15599-L15623
+[skipped]: ../../../../../crates/daemon/src/lib.rs#L15626-L15713
+[route-resolve]: ../../../../../crates/daemon/src/lib.rs#L15717-L15722
+[class-live]: ../../../../../crates/daemon/src/lib.rs#L15732-L15739
+[cap-live]: ../../../../../crates/daemon/src/lib.rs#L15871-L15894
 [direct-lane]: ../../../../../crates/daemon/src/lib.rs#L7985-L7997
 [tree-lane]: ../../../../../crates/daemon/src/lib.rs#L8001-L8021
 [typed-entry]: ../../../../../crates/daemon/src/lib.rs#L8028
@@ -351,14 +352,14 @@ against those failures.
 [copies-live]: ../../../../../crates/daemon/src/metered_decode.rs#L38
 [decode-live]: ../../../../../crates/daemon/src/metered_decode.rs#L308-L330
 [test-entry]: ../../../../../crates/daemon/src/lib.rs#L8615-L8627
-[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19354-L19412
-[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19417-L19447
-[t-token]: ../../../../../crates/daemon/src/lib.rs#L19452-L19464
-[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19467-L19670
-[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19691-L19822
-[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19844-L19887
-[t-observed]: ../../../../../crates/daemon/src/lib.rs#L21804-L21832
-[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19274-L19351
+[t-probe]: ../../../../../crates/daemon/src/lib.rs#L19381-L19439
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19444-L19474
+[t-token]: ../../../../../crates/daemon/src/lib.rs#L19479-L19491
+[t-corpus]: ../../../../../crates/daemon/src/lib.rs#L19494-L19697
+[t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19718-L19849
+[t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19871-L19914
+[t-observed]: ../../../../../crates/daemon/src/lib.rs#L21831-L21859
+[t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19301-L19378
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L102-L163
 [t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
 [t-cap-alloc]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222

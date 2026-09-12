@@ -355,10 +355,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L786
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L970
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1067
-[request-cap]: ../../../crates/daemon/src/lib.rs#L18556
+[request-cap]: ../../../crates/daemon/src/lib.rs#L18583
 [parse-nodes]: ../../../crates/daemon/src/lib.rs#L18676
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L18666
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L18689
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L18693
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L18696
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -429,7 +429,7 @@ that no related check exists anywhere in the repository.
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5228-L5287
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L15582-L15609
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L15616-L15641
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L24933-L25084
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L24960-L25111
 [rescan-flush-test]: ../../../crates/storage/src/lib.rs#L5616-L5655
 [foreign-wal-test]: ../../../crates/storage/src/lib.rs#L5579-L5609
 [unretained-policy-test]: ../../../crates/storage/src/lib.rs#L5700-L5746
