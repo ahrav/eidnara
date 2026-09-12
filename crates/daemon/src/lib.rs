@@ -2893,7 +2893,13 @@ impl ProjectionCache {
 /// An `Err` fails `initialize`, which the host treats as fatal before publication.
 pub type ConnectionKeyHook = Box<dyn FnOnce([u8; 32]) -> Result<(), &'static str> + Send + 'static>;
 
-pub struct Handler {
+/// The daemon's state and behavior. [`Handler`] owns one behind an `Arc` and derefs to it.
+/// Every field is behind a `Mutex`, an `Arc`, or an atomic and no method takes `&mut self`, so
+/// the state is shared through the `Arc` rather than borrowed; `Handler` has no `DerefMut`, so
+/// a `&mut self` method here would be uncallable through it. Per-pass state does not belong
+/// here.
+#[doc(hidden)]
+pub struct HandlerCore {
     /// Runs once with the incarnation bearer key when the host installs it, before publication; the daemon binary commits its harness selection here so the file exists before the daemon is reachable.
     connection_key_hook: Mutex<Option<ConnectionKeyHook>>,
     /// Failure the connection-key hook reported; `initialize` surfaces it so the host never publishes an incarnation whose startup commit did not land.
@@ -3527,6 +3533,20 @@ impl<'a> PassState<'a> {
     }
 }
 
+/// The host's handle on the daemon: the component the host wires in, with the daemon's state
+/// held in [`HandlerCore`].
+pub struct Handler {
+    core: Arc<HandlerCore>,
+}
+
+impl Deref for Handler {
+    type Target = HandlerCore;
+
+    fn deref(&self) -> &HandlerCore {
+        &self.core
+    }
+}
+
 impl Handler {
     /// Creates a handler without a host connection file.
     pub fn new() -> Self {
@@ -3553,7 +3573,7 @@ impl Handler {
             None => Arc::new(MissingProducerFactory),
         };
         let kernel = Arc::new(kernel_routes::KernelOpenCoordinator::new());
-        Handler {
+        let core = HandlerCore {
             connection_key_hook: Mutex::new(None),
             connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
@@ -3616,9 +3636,14 @@ impl Handler {
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
+        };
+        Handler {
+            core: Arc::new(core),
         }
     }
+}
 
+impl HandlerCore {
     fn store(&self) -> Option<Arc<MemoryStore>> {
         self.store.lock().expect("store slot mutex").clone()
     }
@@ -3874,8 +3899,10 @@ impl Handler {
             .lock()
             .expect("store open policy mutex") = policy;
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl Handler {
     fn with_producer_factory_and_config(
         factory: Arc<dyn HistorianProducerFactory>,
         config: DaemonConfig,
@@ -3887,14 +3914,13 @@ impl Handler {
         )
     }
 
-    #[cfg(test)]
     fn with_producer_factory_config_resolver(
         factory: Arc<dyn HistorianProducerFactory>,
         config: DaemonConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
         let kernel = Arc::new(kernel_routes::KernelOpenCoordinator::new());
-        Handler {
+        let core = HandlerCore {
             connection_key_hook: Mutex::new(None),
             connection_key_hook_failure: Mutex::new(None),
             store: Arc::new(Mutex::new(None)),
@@ -3948,9 +3974,14 @@ impl Handler {
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
+        };
+        Handler {
+            core: Arc::new(core),
         }
     }
+}
 
+impl HandlerCore {
     /// The daemon emits `route.gone` before reusing a channel.
     /// A reused channel can overwrite only a stale entry that survived after `route.gone`.
     fn bind_route(&self, channel: RouteHandle, binding: SessionBinding) {
@@ -10311,7 +10342,7 @@ impl DreamerRuntime {
     }
 }
 
-impl Handler {
+impl HandlerCore {
     async fn handle_facade_value(&self, channel: RouteHandle, request: Value) -> PreparedOutcome {
         let Some(name) = request.get("name").and_then(Value::as_str) else {
             return unrecognized_request_error(&request);
@@ -11836,6 +11867,8 @@ impl Handler {
     }
 }
 
+/// `Handler` must not be `Clone`: this drop cancels state shared through the `Arc`, so a second
+/// owner's drop would cancel a live daemon.
 impl Drop for Handler {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -12566,7 +12599,7 @@ pub mod kernel_route_fixtures {
     }
 }
 
-impl Handler {
+impl HandlerCore {
     /// `RequestCtx` is transport-private, so this helper lets unit tests exercise routing arms without constructing one.
     #[cfg(test)]
     async fn dispatch_value(&self, route: RouteHandle, request: Value) -> PreparedOutcome {

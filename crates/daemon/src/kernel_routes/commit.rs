@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::project::{IntentRequest, ProjectBinding, ScopeFilter};
 use super::{ConflictReason, InvalidReason, KernelOutcome, blocking, kernel_response, state_only};
-use crate::Handler;
+use crate::HandlerCore;
 use crate::dispatch::PreparedOutcome;
 
 const OPERATION: &str = "kernel.commit";
@@ -934,7 +934,7 @@ fn run(store: &KernelStore, plan: CommitPlan) -> Result<CommitReceipt, CommitFai
     }
 }
 
-impl Handler {
+impl HandlerCore {
     pub(crate) async fn handle_kernel_commit(
         &self,
         channel: RouteHandle,
