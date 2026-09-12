@@ -88,10 +88,21 @@ pub struct GitSelection {
     pub dispositions: Vec<GitDisposition>,
 }
 
+/// `gix::hash::Kind` is non-exhaustive, so the wildcard refuses a hash kind this build does not read.
 fn object_format(hash: gix::hash::Kind) -> Result<&'static str, GitRefusal> {
     match hash {
         gix::hash::Kind::Sha1 => Ok("sha1"),
         _ => Err(GitRefusal::UnsupportedObjectFormat),
+    }
+}
+
+/// gix reports an `extensions.objectFormat` value this build does not read as a typed-string error on that key rather than a dedicated variant, so the refusal is recognized by the key it names.
+fn declares_unsupported_object_format(error: &gix::open::Error) -> bool {
+    match error {
+        gix::open::Error::Config(gix::config::Error::ConfigTypedString(error)) => {
+            error.key == "extensions.objectFormat"
+        }
+        _ => false,
     }
 }
 
@@ -103,7 +114,13 @@ fn open(path: &Path, bounds: GitReadBounds) -> Result<gix::Repository, GitRefusa
         "gitoxide.objects.allocLimit={}",
         bounds.max_object_bytes
     )]);
-    let mut repo = gix::open_opts(path, options).map_err(|_| GitRefusal::Open)?;
+    let mut repo = gix::open_opts(path, options).map_err(|error| {
+        if declares_unsupported_object_format(&error) {
+            GitRefusal::UnsupportedObjectFormat
+        } else {
+            GitRefusal::Open
+        }
+    })?;
     repo.objects.ignore_replacements = true;
     Ok(repo)
 }

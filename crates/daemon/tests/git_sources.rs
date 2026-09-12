@@ -863,6 +863,17 @@ fn refused_selections_publish_nothing_and_encodings_are_dispositions() {
         read_selection(&unopenable, std::slice::from_ref(&good), bounds()),
         Err(GitRefusal::Open)
     );
+    // A repository declaring an object format this build does not read is refused by its format, not as unopenable; a SHA-256 id is the same shape the caller supplies for any repository.
+    let sha256 = Repo::init(&dir.path().join("sha256"));
+    std::fs::write(
+        sha256.root.join(".git/config"),
+        "[core]\n\trepositoryformatversion = 1\n\tbare = false\n[extensions]\n\tobjectformat = sha256\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read_selection(&sha256.binding("repo-sha256"), &["0".repeat(64)], bounds()),
+        Err(GitRefusal::UnsupportedObjectFormat)
+    );
     // A malformed entry is named by its position; the refusal never repeats the caller's bytes.
     let junk = format!("{}\n\u{1b}[31m{}", "j".repeat(200), "k".repeat(200));
     let malformed = read_selection(&binding, &[good.clone(), junk.clone()], bounds()).unwrap_err();
