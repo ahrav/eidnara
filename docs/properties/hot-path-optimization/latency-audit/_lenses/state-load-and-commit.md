@@ -346,7 +346,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Guarantee: No byte reaches the `meta` column that the scanner did not walk,
   and the audit receipt matches the bytes stored.
 - Rationale: `commit_transform` serializes `meta` and hands the text to
-  `json_content` at [lib.rs:8306-8315][commit-meta]. The [comment][unique-doc]
+  `json_content` at [lib.rs:8608-8617][commit-meta]. The [comment][unique-doc]
   on [`parse_json_with_unique_names`][unique] states the security invariant:
   `serde_json::Value` keeps only the last duplicate name, so an earlier
   secret-bearing value would bypass `prepare_value` and persist when the
@@ -572,17 +572,17 @@ Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
 [pass-trace-sql]: ../../../../../crates/memory-store/baseline.sql#L83-L91
 
 [commit]: ../../../../../crates/memory-store/src/lib.rs#L8362-L8822
-[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8496-L8505
+[commit-meta]: ../../../../../crates/memory-store/src/lib.rs#L8608-L8617
 [commit-trace]: ../../../../../crates/memory-store/src/lib.rs#L8617-L8684
-[json-content]: ../../../../../crates/memory-store/src/lib.rs#L2110-L2120
-[record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2127-L2137
+[json-content]: ../../../../../crates/memory-store/src/lib.rs#L2201-L2211
+[record-scan]: ../../../../../crates/memory-store/src/lib.rs#L2218-L2228
 [prepare-field]: ../../../../../crates/memory-store/src/lib.rs#L2198-L2237
-[policy]: ../../../../../crates/memory-store/src/lib.rs#L3071-L3092
+[policy]: ../../../../../crates/memory-store/src/lib.rs#L3162-L3183
 [prepare-collecting]: ../../../../../crates/memory-store/src/lib.rs#L3201-L3211
-[keys]: ../../../../../crates/memory-store/src/lib.rs#L3151-L3164
+[keys]: ../../../../../crates/memory-store/src/lib.rs#L3267-L3280
 [prepare-value]: ../../../../../crates/memory-store/src/lib.rs#L3291-L3392
-[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3302-L3306
-[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3309-L3310
+[clean-branch]: ../../../../../crates/memory-store/src/lib.rs#L3403-L3408
+[unique-doc]: ../../../../../crates/memory-store/src/lib.rs#L3411-L3412
 [unique]: ../../../../../crates/memory-store/src/lib.rs#L3413-L3494
 [recomp]: ../../../../../crates/memory-store/src/lib.rs#L10247-L10340
 [serde-feat]: ../../../../../Cargo.toml#L45

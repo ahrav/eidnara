@@ -189,10 +189,12 @@ refused by [`parse_json_with_unique_names`][unique-live] and its
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p memory-store --locked` passed 177 tests including the three
-above; `cargo test -p daemon --locked` passed 1012, the two
-`dreamer_run_task_bounds_*` tests failing under full-suite load on the base
-branch as well and passing in isolation.
+At the merged tree `39f706b6`, `cargo test -p memory-store --locked` passed
+every test in each binary: 144 in the library, 5 in `baseline.rs`, 8 in
+`dreamer_ledger.rs`, and 22 in `production_redaction.rs`, the three above
+among them. `cargo test -p daemon --locked` passed 1021; the two
+`dreamer_run_task_bounds_*` tests fail under full-suite load on the base
+branch as well and pass in isolation.
 
 [single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3217-L3409
 [changed]: ../../../../../crates/memory-store/src/lib.rs#L3372-L3375
