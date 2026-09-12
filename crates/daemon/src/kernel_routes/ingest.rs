@@ -32,7 +32,7 @@ use super::{
     kernel_response, parse_request_body, state_only,
 };
 use crate::dispatch::PreparedOutcome;
-use crate::{Handler, sha256_hex};
+use crate::{HandlerCore, sha256_hex};
 
 const BEGIN: &str = "kernel.artifact.ingest.begin";
 pub(crate) const PAGE: &str = "kernel.artifact.ingest.page";
@@ -583,7 +583,7 @@ fn finish_upload(store: &KernelStore, upload: Upload) -> FinishOutcome {
     }
 }
 
-impl Handler {
+impl HandlerCore {
     pub(crate) async fn handle_kernel_ingest_begin(
         &self,
         channel: RouteHandle,

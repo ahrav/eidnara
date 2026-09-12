@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::project::ProjectBinding;
 use super::{KernelOpenCoordinator, KernelOutcome, blocking, kernel_response, state_only};
-use crate::Handler;
+use crate::HandlerCore;
 use crate::dispatch::PreparedOutcome;
 
 const OPERATION: &str = "kernel.eligibility.batch";
@@ -300,7 +300,7 @@ fn evaluate_with(
     })
 }
 
-impl Handler {
+impl HandlerCore {
     pub(crate) async fn handle_kernel_eligibility_batch(
         &self,
         channel: RouteHandle,

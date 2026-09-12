@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::project::{ProjectBinding, ScopeFilter, stored_terms};
 use super::serving;
 use super::{InvalidReason, KernelOutcome, blocking, kernel_response, state_only};
-use crate::Handler;
+use crate::HandlerCore;
 use crate::dispatch::PreparedOutcome;
 
 const OPERATION: &str = "kernel.read";
@@ -261,7 +261,7 @@ fn row_json(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) 
     })
 }
 
-impl Handler {
+impl HandlerCore {
     pub(crate) async fn handle_kernel_read(
         &self,
         channel: RouteHandle,
