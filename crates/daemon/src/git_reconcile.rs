@@ -82,7 +82,7 @@ pub enum ReconcileEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileReport {
-    /// The kernel sequence the retained inventory was read at.
+    /// The kernel sequence the retained inventory was read at; `0` when the episode was cancelled before reading it.
     pub snapshot: i64,
     /// Retained commits of the repository at `snapshot`, under any git policy version.
     pub retained: usize,
@@ -184,9 +184,8 @@ impl<'a> GitReconciler<'a> {
         bounds: InventoryBounds,
         budget: &EvalBudget,
     ) -> Result<ReconcileReport, KernelError> {
-        let snapshot = self.kernel.tip()?;
         let mut report = ReconcileReport {
-            snapshot,
+            snapshot: 0,
             retained: 0,
             reachable: None,
             preserved: 0,
@@ -216,6 +215,10 @@ impl<'a> GitReconciler<'a> {
                 .map_err(|_| Stop::Blocked(ReconcileBlocked::Cancelled(phase)))
         };
         check(ReconcilePhase::Inventory)?;
+        report.snapshot = self
+            .kernel
+            .tip_within_budget(budget)
+            .map_err(|error| cancelled_or_failed(error, ReconcilePhase::Inventory))?;
         let repo = git_sources::open(&scope.binding.path, bounds.max_object_bytes)?;
         let format = git_sources::object_format(repo.object_hash())?;
         // The walk stops at a shallow boundary while the store may still hold the ancestors beyond it, so the traversal cannot certify those ancestors' descriptors as absent.
@@ -270,12 +273,16 @@ impl<'a> GitReconciler<'a> {
             let allowance = NonZeroUsize::new(bounds.max_scanned.get() - scanned)
                 .ok_or_else(exceeded)?
                 .min(bounds.page_rows);
-            let page = self.kernel.live_source_descriptors(
-                OccurrenceClass::GitCommits,
-                snapshot,
-                after.as_deref(),
-                allowance,
-            )?;
+            let page = self
+                .kernel
+                .live_source_descriptors(
+                    OccurrenceClass::GitCommits,
+                    snapshot,
+                    after.as_deref(),
+                    allowance,
+                    budget,
+                )
+                .map_err(|error| cancelled_or_failed(error, ReconcilePhase::Inventory))?;
             self.probe(Probe::AfterInventoryPage);
             for descriptor in page.rows {
                 scanned += 1;
@@ -357,6 +364,14 @@ impl<'a> GitReconciler<'a> {
                 error => ReconcileBlocked::Retire(error),
             })?;
         Ok(if receipt.replayed { 0 } else { retired })
+    }
+}
+
+/// A kernel read that could not take a pooled connection within the budget ends the episode as a cancellation of `phase`; any other kernel error is the episode's failure.
+fn cancelled_or_failed(error: KernelError, phase: ReconcilePhase) -> Stop {
+    match error {
+        KernelError::Deadline => Stop::Blocked(ReconcileBlocked::Cancelled(phase)),
+        error => Stop::Failed(error),
     }
 }
 

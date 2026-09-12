@@ -550,19 +550,20 @@ pub struct LiveDescriptor {
 }
 
 impl KernelStore {
-    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`. The page uses the export's liveness predicate, so a descriptor whose cited evidence was deleted is absent here as it is from every export snapshot. A row whose stored identity does not re-encode to itself, or whose lineage and revision do not name its own object id, is refused rather than handed to a caller that may retire it.
+    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`. The page uses the export's liveness predicate, so a descriptor whose cited evidence was deleted is absent here as it is from every export snapshot. A row whose stored identity does not re-encode to itself, or whose lineage and revision do not name its own object id, is refused rather than handed to a caller that may retire it. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when a stored descriptor does not decode or re-encode to its stored identity.
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when a stored descriptor does not decode or re-encode to its stored identity.
     pub fn live_source_descriptors(
         &self,
         class: OccurrenceClass,
         requested: i64,
         after: Option<&str>,
         max_rows: std::num::NonZeroUsize,
+        budget: &crate::applicability::EvalBudget,
     ) -> Result<LiveDescriptorPage, KernelError> {
-        let mut reader = self.lock_reader()?;
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         let tx = reader
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(map_sqlite)?;

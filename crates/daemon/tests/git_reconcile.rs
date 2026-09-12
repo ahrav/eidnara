@@ -821,6 +821,7 @@ fn inventory_refuses_a_payload_bound_to_another_object_id() {
         corpus.kernel.tip().unwrap(),
         None,
         NonZeroUsize::new(64).unwrap(),
+        &unbounded(),
     );
     assert!(
         matches!(page, Err(KernelError::CorruptCanonicalRow)),
@@ -912,6 +913,65 @@ fn retirement_stops_waiting_for_the_writer_when_the_budget_is_cancelled() {
     );
     assert_eq!(report.retired, 0);
     assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
+}
+
+/// The inventory's reads acquire pooled readers under the budget: an episode cancelled while every reader is held returns `Cancelled(Inventory)` while they are still held.
+#[test]
+fn inventory_stops_waiting_for_a_reader_when_the_budget_is_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    corpus.publish(&repo, std::slice::from_ref(&c1));
+    let budget = EvalBudget::new(None, Arc::new(AtomicBool::new(false)));
+    // The kernel's read pool holds two connections; both are occupied for the whole test.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let kernel = &corpus.kernel;
+    let (report, waited) = std::thread::scope(|scope| {
+        for _ in 0..2 {
+            let held_tx = held_tx.clone();
+            let release_rx = &release_rx;
+            scope.spawn(move || {
+                kernel
+                    .preview(Instant::now() + Duration::from_secs(30), |_| {
+                        held_tx.send(()).unwrap();
+                        let _ = release_rx.lock().unwrap().recv();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+        }
+        held_rx.recv().unwrap();
+        held_rx.recv().unwrap();
+        let cancel = &budget;
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            cancel.cancel();
+        });
+        // The readers are released only long after the cancellation; an episode that returns sooner did not wait for one.
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_secs(5));
+            drop(release_tx);
+        });
+        let started = Instant::now();
+        let report = GitReconciler::new(&corpus.kernel)
+            .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+            .unwrap();
+        (report, started.elapsed())
+    });
+    assert_eq!(
+        report.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Inventory)),
+        "{report:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(4),
+        "waited {waited:?} for a reader"
+    );
+    assert_eq!((report.retained, report.retired), (0, 0));
 }
 
 /// AC2, AC3, AC6: a missing permitted ref, an unopenable repository, an unreadable commit in the traversal, an exhausted budget, an exceeded traversal bound, and an exceeded inventory bound each end the episode without retiring any commit, and the report claims no coverage for the phase that did not complete.
@@ -1207,6 +1267,7 @@ fn inventory_is_bounded_and_agrees_with_the_export() {
             corpus.kernel.tip().unwrap(),
             None,
             NonZeroUsize::new(64).unwrap(),
+            &unbounded(),
         )
         .unwrap();
     assert_eq!(page.rows.len(), 3, "two alpha rows and the beta row");
