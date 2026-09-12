@@ -173,7 +173,6 @@ not performance measurements or a full-workspace gate.
 | [`transform_snapshot_keeps_row_version_and_overlays_from_one_commit`][t-snap-keeps] | The snapshot `row_version` matches overlays from the same commit. | unaudited |
 | [`transform_cas_conflict_leaves_every_overlay_table_empty`][t-cas-empty] | The CAS loser commits no overlay rows. | unaudited |
 | [`competing_pass_counter_survives_direct_primary_lifecycle_and_reopen`][t-counter] | The CAS loser is rejected; state survives reopen. | unaudited |
-| [`transform_reject_records_trace_without_advancing_row_version`][t-reject] | Reject: `receive_count == 1`, `reject_count == 1`, `row_version` unchanged. | unaudited |
 | [`transform_success_records_received_and_completed_trace`][t-success] | Success: received then completed timestamps. | unaudited |
 | [`repeated_rejects_increment_trace_and_overwrite_last_error`][t-repeat] | Counters increment per pass; the last error is overwritten. | unaudited |
 | [`sequential_failing_passes_trace_every_reject_while_cache_state_stays_frozen`][t-frozen] | Four rejects: `receive_count == 4`, `row_version` frozen. | unaudited |
@@ -466,7 +465,7 @@ not a claim that no related check exists anywhere in the repository.
 [assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031
 [t-inc]: ../../../../crates/daemon/src/wire.rs#L1520
 [t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1817
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L37274
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L37310
 [t-reattach]: ../../../../crates/daemon/src/wire.rs#L1707
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1746
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1793
@@ -527,15 +526,14 @@ not a claim that no related check exists anywhere in the repository.
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8303-L8308
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5510
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36850
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L36057
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L36886
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L36093
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L23413
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L17186
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L17240
 [t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L17309
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-reject]: ../../../../crates/daemon/src/lib.rs#L24253
-[t-success]: ../../../../crates/daemon/src/lib.rs#L24550
+[t-success]: ../../../../crates/daemon/src/lib.rs#L24562
 [t-repeat]: ../../../../crates/daemon/src/lib.rs#L24578
 [t-frozen]: ../../../../crates/daemon/src/lib.rs#L24594
 [t-status]: ../../../../crates/daemon/src/lib.rs#L24809
@@ -545,7 +543,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-secret]: ../../../../crates/memory-store/src/lib.rs#L16109
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L19519
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L19314
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36714
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L36750
 [t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L19637
 [t-truncate]: ../../../../crates/memory-store/src/lib.rs#L21099
 [t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L15845
@@ -554,7 +552,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-preserved]: ../../../../crates/memory-store/src/lib.rs#L15899
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L728
 [t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16042
-[t-sync]: ../../../../crates/storage/src/lib.rs#L4278-L4343
+[t-sync]: ../../../../crates/storage/src/lib.rs#L4286-L4351
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249

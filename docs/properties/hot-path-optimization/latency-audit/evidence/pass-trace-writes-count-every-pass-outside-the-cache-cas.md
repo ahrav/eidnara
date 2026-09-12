@@ -75,7 +75,7 @@ unchanged; `first_divergence` is NULL after a reject; `scheduler_history`
 gains one observation per accepted pass; and the cache-state row commits when
 the trace write fails. The
 [state checks](../existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-list seven pass-trace tests ([`t-reject`][t-reject], [`t-success`][t-success],
+list six pass-trace tests ([`t-success`][t-success],
 [`t-repeat`][t-repeat], [`t-frozen`][t-frozen], [`t-status`][t-status],
 [`t-upserts`][t-upserts], [`t-sched`][t-sched]) and the identity gate
 ([`t-secret`][t-secret]); none covers `first_divergence` after a reject,
@@ -93,8 +93,7 @@ channel, the authority route read, and dreamer tasks only.
 ### Q: Is under-counting rejected passes an acceptable semantic change?
 
 - Sources examined: [`trace_pass_received`][received], the
-  [`PassTrace` doc][passtrace-doc], [`t-reject`][t-reject],
-  [`t-frozen`][t-frozen].
+  [`PassTrace` doc][passtrace-doc], [`t-frozen`][t-frozen].
 - Findings: The doc states the reject-trail purpose; the tests encode
   `receive_count == reject_count` after rejects. A fold cannot preserve that
   without a second write on the reject path.
@@ -129,7 +128,6 @@ channel, the authority route read, and dreamer tasks only.
 [status-read]: ../../../../../crates/daemon/src/lib.rs#L6246-L6296
 [age]: ../../../../../crates/daemon/src/lib.rs#L6287
 [health-read]: ../../../../../crates/daemon/src/lib.rs#L7875-L7923
-[t-reject]: ../../../../../crates/daemon/src/lib.rs#L23857
 [t-success]: ../../../../../crates/daemon/src/lib.rs#L23887
 [t-repeat]: ../../../../../crates/daemon/src/lib.rs#L23903
 [t-frozen]: ../../../../../crates/daemon/src/lib.rs#L23935
