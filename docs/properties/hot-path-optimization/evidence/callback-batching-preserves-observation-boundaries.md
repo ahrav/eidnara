@@ -89,5 +89,5 @@ maintenance flush moved into a drop guard on the branch merged with
 [caller]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L5532-L5563
 [live-read]: ../../../../crates/storage/src/lib.rs#L305-L321
 [live-write]: ../../../../crates/storage/src/lib.rs#L369-L433
-[live-test]: ../../../../crates/storage/src/lib.rs#L4783-L4820
-[live-rollback]: ../../../../crates/storage/src/lib.rs#L4953-L4979
+[live-test]: ../../../../crates/storage/src/lib.rs#L4796-L4833
+[live-rollback]: ../../../../crates/storage/src/lib.rs#L4966-L4992

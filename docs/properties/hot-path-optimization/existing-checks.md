@@ -139,7 +139,7 @@ Checks added with the mode-gated authorizer (implementation base
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [Statement reuse probe][reuse-probe] | A warm fenced statement reports zero re-prepares across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, the callback reads the new table, and a temp-shadow statement cached before the DDL is refused. | unaudited |
+| [Statement reuse probe][reuse-probe] | A warm fenced statement reports zero re-prepares across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, the callback reads the new table, and a temp-shadow statement cached valid before the DDL is refused and creates no temp object. | unaudited |
 | [Read-path expiry witness][read-witness] | The `query_only` toggle expires cached statements on each read callback; two fenced callbacks in a row re-prepare nothing. | unaudited |
 | [Temp-database write barrier][temp-write-test] | Temp DDL and temp DML are refused in a read callback and allowed in a fenced one. | unaudited |
 | [Mode restoration after panic][mode-restore-test] | Maintenance regains pragma writes after a panicking read and a panicking fenced callback; `query_only` is restored, the partial write is rolled back, and the next fenced write re-pins `synchronous=FULL`. | unaudited |
@@ -148,13 +148,13 @@ Checks added with the mode-gated authorizer (implementation base
 | [Maintenance flush survives a panic][flush-unwind-test] | A `CREATE TEMP TABLE late (x)` cached by a fenced callback is refused `not authorized` after a maintenance callback creates main `late` and panics before returning; no temp `late` is created. Failed with `Ok(())` before the flush moved into a drop guard. | unaudited |
 | [Unrestricted statements do not reach guarded callbacks][gate-tests] | A fence upsert prepared unrestricted is reused without re-authorization until the cache is flushed, then refused; every `deny_baseline_escapes` denial is reachable; nested mode entry is an assertion in every build. | unaudited |
 
-[reuse-probe]: ../../../crates/storage/src/lib.rs#L4472-L4549
-[read-witness]: ../../../crates/storage/src/lib.rs#L4551-L4585
-[temp-write-test]: ../../../crates/storage/src/lib.rs#L4587-L4615
-[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4617-L4673
-[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4675-L4709
-[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4711-L4736
-[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L4738-L4780
+[reuse-probe]: ../../../crates/storage/src/lib.rs#L4472-L4562
+[read-witness]: ../../../crates/storage/src/lib.rs#L4564-L4598
+[temp-write-test]: ../../../crates/storage/src/lib.rs#L4600-L4628
+[mode-restore-test]: ../../../crates/storage/src/lib.rs#L4630-L4686
+[baseline-gate-test]: ../../../crates/storage/src/lib.rs#L4688-L4722
+[surface-guard-test]: ../../../crates/storage/src/lib.rs#L4724-L4749
+[flush-unwind-test]: ../../../crates/storage/src/lib.rs#L4751-L4793
 [gate-tests]: ../../../crates/storage/src/lib.rs#L1985-L2087
 
 ## History render

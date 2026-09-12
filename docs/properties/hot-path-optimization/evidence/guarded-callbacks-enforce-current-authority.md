@@ -100,12 +100,13 @@ the cache is not re-authorized. The gate keeps that safe by construction:
 - The only verdict that depends on the entry snapshot is the temp-shadow
   denial. A temp object can shadow a main name only after main gained that
   name; any temp DDL on the connection expires every prepared statement, and a
-  foreign main-schema change stales each cached statement's schema cookie so
-  its next run re-prepares under the current callback's snapshot. The
-  [statement-reuse probe][probe] warms `CREATE TEMP TABLE late (x)` before a
-  second connection creates main `late`, then shows the cached statement is
-  refused `not authorized` in the next callback, which also reads the new
-  table.
+  foreign main-schema change is seen by the next callback's entry snapshot,
+  whose stale main cookie resets the temp schema as well, so every cached
+  statement re-prepares under that callback's snapshot. The
+  [statement-reuse probe][probe] prepares `CREATE TEMP TABLE late (x)` after
+  its own temp DDL and never runs it, so the cached program is valid when a
+  second connection creates main `late`; the next callback refuses it
+  `not authorized`, creates no temp `late`, and reads the new table.
 - Main DDL on the store's own connection is the case the cookie does not
   cover. `sqlite3EndTable` emits `ChangeCookie` and `ParseSchema` but no
   `OP_Expire`, and it keeps the in-memory main cookie equal to the file's, so
@@ -172,11 +173,11 @@ the live tree at that state.
 [mode-hold]: ../../../../crates/storage/src/lib.rs#L770-L779
 [apply]: ../../../../crates/storage/src/lib.rs#L1824-L1862
 [gate-tests]: ../../../../crates/storage/src/lib.rs#L1985-L2087
-[probe]: ../../../../crates/storage/src/lib.rs#L4472-L4549
-[read-witness]: ../../../../crates/storage/src/lib.rs#L4551-L4585
-[temp-write]: ../../../../crates/storage/src/lib.rs#L4587-L4615
-[restore-test]: ../../../../crates/storage/src/lib.rs#L4617-L4673
-[baseline-test]: ../../../../crates/storage/src/lib.rs#L4675-L4709
-[surface-test]: ../../../../crates/storage/src/lib.rs#L4711-L4736
-[flush-test]: ../../../../crates/storage/src/lib.rs#L4738-L4780
+[probe]: ../../../../crates/storage/src/lib.rs#L4472-L4562
+[read-witness]: ../../../../crates/storage/src/lib.rs#L4564-L4598
+[temp-write]: ../../../../crates/storage/src/lib.rs#L4600-L4628
+[restore-test]: ../../../../crates/storage/src/lib.rs#L4630-L4686
+[baseline-test]: ../../../../crates/storage/src/lib.rs#L4688-L4722
+[surface-test]: ../../../../crates/storage/src/lib.rs#L4724-L4749
+[flush-test]: ../../../../crates/storage/src/lib.rs#L4751-L4793
 [cached-test]: ../../../../crates/storage/src/lib.rs#L4418-L4460
