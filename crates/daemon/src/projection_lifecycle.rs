@@ -157,6 +157,8 @@ pub enum ControlState {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IntentRefusal {
+    #[error("the consumer binding names no consumer")]
+    InvalidConsumer,
     #[error("an authorized recovery needs an operator authorization reference")]
     MissingAuthorization,
     #[error(
@@ -358,6 +360,9 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
+        if request.consumer.consumer_id.trim().is_empty() {
+            return Err(IntentRefusal::InvalidConsumer);
+        }
         check_authorization(
             request.transition,
             request.authorization_ref.as_deref(),
@@ -464,7 +469,7 @@ impl ProjectionLifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], [`IntentRefusal::DeadlineExpired`], [`IntentRefusal::AllowanceExhausted`], or [`IntentRefusal::FamilyHeld`] before removing anything, and [`IntentRefusal::Io`] for a removal that failed for a reason other than the file being absent.
+    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], [`IntentRefusal::DeadlineExpired`], [`IntentRefusal::AllowanceExhausted`], or [`IntentRefusal::FamilyHeld`] before removing anything, [`IntentRefusal::Io`] for a removal that failed for a reason other than the file being absent, and [`IntentRefusal::DurabilityUnknown`] when the family was removed and the directory sync after it failed.
     pub fn delete_disposable_family(
         &self,
         gate: &HookGate,
@@ -569,6 +574,9 @@ fn io_refusal(error: io::Error) -> IntentRefusal {
 fn store_refusal(error: StoreError) -> IntentRefusal {
     match error {
         StoreError::Lease(lease::LeaseError::Held { .. }) => IntentRefusal::FamilyHeld,
+        StoreError::DurabilityUnknown(error) => {
+            IntentRefusal::DurabilityUnknown(error.kind().to_string())
+        }
         other => IntentRefusal::Io(other.to_string()),
     }
 }

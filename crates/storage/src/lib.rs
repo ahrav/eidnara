@@ -43,6 +43,9 @@ pub enum StoreError {
     /// An io failure preparing the store location.
     #[error("storage io: {0}")]
     Io(#[source] std::io::Error),
+    /// The family's files were removed and the directory sync after the removal failed, so the removal is visible but may not survive power loss.
+    #[error("family removed but its directory sync failed: {0}")]
+    DurabilityUnknown(#[source] std::io::Error),
     /// A fenced (epoch-checked) write was rejected because the database has already
     /// been claimed by a newer writer. `db_epoch` (the epoch stamped in the
     /// database) is greater than `holder_epoch` (this store's lease epoch), so this
@@ -1869,7 +1872,7 @@ mod sqlite_backend {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::UnsupportedBackend`] for non-SQLite descriptors, [`StoreError::Lease`] when a live holder has the lease or the lease sidecar cannot be used, and [`StoreError::Io`] for a relative path or a removal that failed for a reason other than the file being absent.
+    /// Returns [`StoreError::UnsupportedBackend`] for non-SQLite descriptors, [`StoreError::Lease`] when a live holder has the lease or the lease sidecar cannot be used, [`StoreError::Io`] for a relative path, an unreadable parent, or a removal that failed for a reason other than the file being absent, and [`StoreError::DurabilityUnknown`] when the files were removed and the directory sync after them failed.
     pub fn delete_sqlite_family(descriptor: &StorageDescriptor) -> Result<(), StoreError> {
         let path = match &descriptor.backend {
             StorageBackend::Sqlite { path } => Path::new(path),
@@ -1913,7 +1916,7 @@ mod sqlite_backend {
         }
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
-            .map_err(StoreError::Io)
+            .map_err(StoreError::DurabilityUnknown)
     }
 
     /// Opens `path` for reading without following a final symlink and without waiting on a
@@ -2849,6 +2852,32 @@ mod tests {
         let (root, d) = tmp();
         delete_sqlite_family(&d).expect("nothing to delete");
         assert!(!root.exists());
+    }
+
+    /// A parent that can be written but not opened for reading lets the removals through and fails the directory sync after them.
+    #[cfg(unix)]
+    #[test]
+    fn delete_sqlite_family_reports_a_failed_post_removal_sync_as_durability_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o300))
+            .expect("make the directory unreadable but writable");
+        let outcome = delete_sqlite_family(&d);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the directory");
+        assert!(
+            !Path::new(path).exists(),
+            "the family was removed: {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, Err(StoreError::DurabilityUnknown(_))),
+            "a removal whose directory sync failed is reported as such: {outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A parent whose metadata cannot be read is not an absent family.

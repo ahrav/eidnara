@@ -68,7 +68,8 @@ pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
         StoreError::Lease(_)
         | StoreError::UnsupportedBackend(_)
         | StoreError::Backend(_)
-        | StoreError::Io(_) => StoreFailure::Unknown,
+        | StoreError::Io(_)
+        | StoreError::DurabilityUnknown(_) => StoreFailure::Unknown,
     }
 }
 

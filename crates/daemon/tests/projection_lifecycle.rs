@@ -336,6 +336,20 @@ fn replays_reconcile_to_one_intent_and_conflicts_change_nothing() {
         lifecycle.record(
             &gate,
             &LifecycleRequest {
+                consumer: ConsumerBinding {
+                    consumer_id: " ".to_owned(),
+                    generation_id: "gen-2".to_owned(),
+                },
+                ..rebuild_request()
+            },
+            NOW
+        ),
+        Err(IntentRefusal::InvalidConsumer)
+    );
+    assert_eq!(
+        lifecycle.record(
+            &gate,
+            &LifecycleRequest {
                 authorization_ref: None,
                 ..recovery_request()
             },
