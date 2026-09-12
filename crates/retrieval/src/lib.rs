@@ -12,6 +12,7 @@
 //! Payloads are never logged; refusals name identities and sizes, not content.
 
 pub mod batch;
+pub mod coverage;
 pub mod dispatch;
 pub mod eligibility;
 pub mod identity_sweep;
