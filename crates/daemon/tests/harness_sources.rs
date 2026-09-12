@@ -1096,6 +1096,35 @@ fn publication_refuses_another_projects_scope_before_retention() {
 }
 
 #[test]
+fn publication_refuses_a_project_unit_without_a_scope_before_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let unscoped = SourcePublisher {
+        scope_id: None,
+        ..corpus.publisher()
+    };
+    let mut units = pi_units(&pi_session(), &pi_user("pi-u1", "no scope", 100)).unwrap();
+    units.extend(pi_units(&pi_session(), &pi_tool_result("pi-t1", "pi-a1", false, 200)).unwrap());
+    let tip = corpus.tip();
+    for unit in units {
+        let result = unscoped.publish(&unit, NOW);
+        assert!(
+            matches!(
+                result,
+                Err(PublishError::Kernel {
+                    error: kernel::KernelError::InvalidInput,
+                    evidence: None,
+                })
+            ),
+            "a project-bound unit has no route without a scope: {result:?}"
+        );
+        assert_eq!(corpus.tip(), tip, "nothing committed");
+        assert!(inventory(&corpus).is_empty());
+    }
+}
+
+#[test]
 fn publication_rechecks_project_scope_after_retention() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());

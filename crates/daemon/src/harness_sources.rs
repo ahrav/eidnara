@@ -419,7 +419,7 @@ const RECEIPT_WAIT: Duration = Duration::from_secs(30);
 pub struct SourcePublisher<'a> {
     pub kernel: &'a KernelStore,
     pub domain_id: &'a str,
-    /// `None` publishes unscoped rows that no project route serves.
+    /// `None` permits only units whose identities do not name a project: no project route serves unscoped rows.
     pub scope_id: Option<&'a str>,
     pub egress: ProviderEgress,
     pub sensitivity: Sensitivity,
@@ -473,17 +473,21 @@ impl SourcePublisher<'_> {
         let request_digest = self.request_digest(unit);
         let origin = unit.origin().to_owned();
         let evidence_object_id = format!("srcev-object:{key}");
-        // Only a unit that names a project has a scope term to check; a canonical unit's scope is the decision's own.
-        let project = match unit.identity_value("project_id") {
-            Some(project_id) => {
-                Some(
-                    ProjectScope::new(project_id).map_err(|error| PublishError::Kernel {
-                        error,
-                        evidence: None,
-                    })?,
-                )
+        // Reject project-bound units without a scope before retention: no project route serves unscoped rows.
+        let project = match (unit.identity_value("project_id"), self.scope_id) {
+            (Some(project_id), Some(_)) => Some(ProjectScope::new(project_id).map_err(
+                |error| PublishError::Kernel {
+                    error,
+                    evidence: None,
+                },
+            )?),
+            (Some(_), None) => {
+                return Err(PublishError::Kernel {
+                    error: KernelError::InvalidInput,
+                    evidence: None,
+                });
             }
-            None => None,
+            (None, _) => None,
         };
         let check_scope = |envelope: &kernel::Envelope<'_>| {
             if let (Some(project), Some(scope_id)) = (&project, self.scope_id)
