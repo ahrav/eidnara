@@ -174,7 +174,7 @@ pub(super) fn load_slice(
 }
 
 /// Returns the transaction-visible tip after validating `requested` against the commit range.
-pub(super) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, KernelError> {
+pub(crate) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, KernelError> {
     if requested < 0 {
         return Err(KernelError::InvalidInput);
     }

@@ -101,8 +101,9 @@ pub use slice::{
     RetirementOutcome, SliceSnapshot,
 };
 pub use source_descriptor::{
-    MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
-    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
+    LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,
+    SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, SourceDescriptorDetail,
+    SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
     SourceDescriptorRequest, descriptor_object_id,
 };
 pub use source_export::{

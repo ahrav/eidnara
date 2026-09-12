@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
+use super::KernelStore;
 use super::envelope::{Envelope, Sensitivity};
 use super::redaction::{identity, redact};
 use super::slice::{ObservationPayload, ObservationSpec};
@@ -529,5 +530,87 @@ impl Envelope<'_> {
             return Err(SourceDescriptorError::DomainMismatch);
         }
         Ok(predecessor)
+    }
+}
+
+/// One page of live descriptors of one class at a fixed sequence, in object id order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDescriptorPage {
+    pub rows: Vec<LiveDescriptor>,
+    /// The object id to continue after, or `None` when this page ends the inventory.
+    pub next: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveDescriptor {
+    pub object_id: String,
+    pub domain_id: String,
+    pub detail: SourceDescriptorDetail,
+}
+
+impl KernelStore {
+    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`, read through the registry's descriptor page index. Every row is re-encoded from its stored identity before it is returned, so a row whose identity does not round-trip is refused rather than handed to a caller that may retire it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] when a stored descriptor does not decode or re-encode to its stored identity.
+    pub fn live_source_descriptors(
+        &self,
+        class: OccurrenceClass,
+        requested: i64,
+        after: Option<&str>,
+        max_rows: std::num::NonZeroUsize,
+    ) -> Result<LiveDescriptorPage, KernelError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+            .map_err(map_sqlite)?;
+        crate::slice::snapshot_tip(&tx, requested)?;
+        let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
+        let mut statement = tx
+            .prepare_cached(
+                "SELECT o.object_id,o.domain_id,b.observation_payload
+                 FROM object_registry o
+                 JOIN observations b ON b.object_id=o.object_id
+                 WHERE o.source_kind=?1 AND o.object_id GLOB 'srcdesc:*'
+                   AND o.object_kind='observation' AND b.observation_kind=?2
+                   AND o.created_commit_seq<=?3
+                   AND (o.invalidated_commit_seq IS NULL OR o.invalidated_commit_seq>?3)
+                   AND o.object_id>?4
+                 ORDER BY o.object_id
+                 LIMIT ?5",
+            )
+            .map_err(map_sqlite)?;
+        let raw: Vec<(String, String, Vec<u8>)> = statement
+            .query_map(
+                rusqlite::params![
+                    class.code(),
+                    SOURCE_DESCRIPTOR_KIND,
+                    requested,
+                    after.unwrap_or(""),
+                    limit.saturating_add(1)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(map_sqlite)?;
+        let next = (raw.len() > max_rows.get()).then(|| raw[max_rows.get() - 1].0.clone());
+        let rows = raw
+            .into_iter()
+            .take(max_rows.get())
+            .map(|(object_id, domain_id, payload)| {
+                let detail = stored_detail(&payload)?;
+                if detail.class != class.code() || reencoded_identity(&detail).is_none() {
+                    return Err(KernelError::CorruptCanonicalRow);
+                }
+                Ok(LiveDescriptor {
+                    object_id,
+                    domain_id,
+                    detail,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(LiveDescriptorPage { rows, next })
     }
 }
