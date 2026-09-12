@@ -350,7 +350,7 @@ every prepared text is bounded by [`MAX_DURABLE_TEXT_BYTES`][max-text].
 - Guarantee: No byte reaches the `meta` column that the scanner did not walk,
   and the audit receipt matches the bytes stored.
 - Rationale: `commit_transform` serializes `meta` and hands the text to
-  `json_content` at [lib.rs:8618-8627][commit-meta]. The [comment][unique-doc]
+  `json_content` at [lib.rs:8934-8943][commit-meta]. The [comment][unique-doc]
   on [`parse_json_with_unique_names`][unique] states the security invariant:
   `serde_json::Value` keeps only the last duplicate name, so an earlier
   secret-bearing value would bypass `prepare_value` and persist when the
@@ -488,12 +488,13 @@ with `let _ =` in the handler, so a regression in either surfaces only through
 - Sibling catalog anchors are stale against this HEAD. The memory-store
   record [preserved-identity-name-does-not-exempt-its-value][ms-preserved]
   cites `lib.rs:4027-4036` and `lib.rs:17258`; the preparation code is at
-  [3201-3211][prepare-collecting] and the test is at [15899][t-preserved]
+  [3396-3406][prepare-collecting] and the test is at [16337][t-preserved]
   here. Not edited by this lens.
 
 ## Anchors
 
-Corrections to the supplied anchors: `MemoryStore::load` closes at 6223, not
+Corrections to the anchors supplied at the discovery baseline, in that
+tree's line numbers: `MemoryStore::load` closes at 6223, not
 6222. The daemon call at 4170 is inside `expand_transform_tail_delta`
 (4151), not `lookup_full_projection_cache` (4271-4289, load at 4278).
 `prepare_json_content_collecting` spans 3109-3287, not 3276-3290;
