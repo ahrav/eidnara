@@ -15,7 +15,7 @@ use retrieval::batch::{
 };
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, ProjectionError, ProjectionIdentity, Tombstone,
-    TombstoneReason, install_identity, read_occurrence,
+    TombstoneReason, install_identity, message_cleanup, read_occurrence,
 };
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
@@ -884,6 +884,76 @@ fn replay_and_old_prefixes_never_resurrect_tombstones_or_duplicate_work_and_conf
                 register_generation(conn, &changed, 9),
                 Err(ProjectionError::IdentityMismatch)
             );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Once the identity sweep and cleanup have removed an older window's rows, that window's records look like new work; its replay is still a no-op, not an admission refusal against the queue and generation state that superseded it.
+#[test]
+fn an_older_prefix_replays_as_a_no_op_after_cleanup_reclaimed_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let sources = vec![Source {
+        class: "messages",
+        key: "a".into(),
+        revision: 1,
+        text: "a1".into(),
+        created: 3,
+    }];
+    let arena = Arena::new(&sources);
+    let borrowed = borrow(&arena);
+    let first_records = records(&sources, &arena, &borrowed);
+    let a1 = occurrence_id(&first_records[0]);
+    let batch1 = ProjectionBatch {
+        identity: mutation(3, 3),
+        records: first_records,
+        invalidations: vec![],
+        generation_id: Some(GENERATION),
+    };
+    apply(&store, &batch1, 1).unwrap();
+    let batch2 = ProjectionBatch {
+        identity: mutation(3, 5),
+        records: vec![],
+        invalidations: vec![Invalidation {
+            occurrence_id: a1.clone(),
+            tombstone: Tombstone {
+                invalidated_commit_seq: 5,
+                reason: TombstoneReason::Retired,
+            },
+        }],
+        generation_id: Some(GENERATION),
+    };
+    apply(&store, &batch2, 2).unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute("DELETE FROM embedding_jobs WHERE occurrence_id=?1", [&a1])?;
+            let reclaimed = message_cleanup::reclaim(
+                conn,
+                "kernel-1",
+                &[message_cleanup::Candidate {
+                    occurrence_id: a1.clone(),
+                    invalidated_commit_seq: 5,
+                }],
+                5,
+            )
+            .unwrap();
+            assert_eq!(reclaimed.occurrences, 1);
+            conn.execute(
+                "UPDATE vector_generations SET state='retired' WHERE generation_id=?1",
+                [GENERATION],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let settled = store.with_conn(|conn| Ok(durable(conn))).unwrap();
+    let replay = apply(&store, &batch1, 3).unwrap();
+    assert!(replay.older_prefix, "{replay:?}");
+    assert_eq!((replay.rows_inserted, replay.pending_created), (0, 0));
+    store
+        .with_conn(|conn| {
+            assert_eq!(durable(conn), settled, "the old prefix moved nothing");
             Ok(())
         })
         .unwrap();

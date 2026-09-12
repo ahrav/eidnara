@@ -468,6 +468,34 @@ fn admit<'a>(
         .iter()
         .map(|invalidation| invalidation.occurrence_id.as_str())
         .collect();
+    // A checkpoint for kernel_incarnation_id retains hold_id and snapshot_commit_seq; checkpoint_commit_seq never decreases.
+    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
+    if let Some(stored) = &stored
+        && (stored.hold_id != identity.hold_id
+            || stored.snapshot_commit_seq != identity.snapshot_commit_seq)
+    {
+        return Err(ProjectionError::MutationConflict);
+    }
+    let checkpoint_commit_seq = stored
+        .as_ref()
+        .map_or(identity.through_commit_seq, |stored| {
+            stored
+                .checkpoint_commit_seq
+                .max(identity.through_commit_seq)
+        });
+    let admission = Admission {
+        occurrence_ids,
+        tombstoned,
+        already_applied: stored
+            .as_ref()
+            .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
+        older_prefix: checkpoint_commit_seq > identity.through_commit_seq,
+        checkpoint_commit_seq,
+    };
+    // Older prefixes skip queue and generation validation because cleanup can remove their rows, making a replay appear new.
+    if admission.older_prefix {
+        return Ok(admission);
+    }
     if let Some(generation) = batch.generation_id {
         let outstanding: i64 = conn.query_row(
             "SELECT COUNT(*) FROM embedding_jobs WHERE state IN ('pending','admitted')",
@@ -477,7 +505,7 @@ fn admit<'a>(
         let outstanding = usize::try_from(outstanding).map_err(|_| ProjectionError::CorruptRow)?;
         // The pending bound excludes queued work invalidated by this batch.
         let mut obsoleting = 0usize;
-        for occurrence_id in &tombstoned {
+        for occurrence_id in &admission.tombstoned {
             let queued: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM embedding_jobs
                  WHERE occurrence_id=?1 AND state IN ('pending','admitted')",
@@ -487,8 +515,13 @@ fn admit<'a>(
             obsoleting += usize::try_from(queued).map_err(|_| ProjectionError::CorruptRow)?;
         }
         let mut new_jobs = HashSet::new();
-        for (record, occurrence_id) in batch.records.iter().zip(&occurrence_ids) {
-            if !queues_work(conn, record.occurrence.class, occurrence_id, &tombstoned)? {
+        for (record, occurrence_id) in batch.records.iter().zip(&admission.occurrence_ids) {
+            if !queues_work(
+                conn,
+                record.occurrence.class,
+                occurrence_id,
+                &admission.tombstoned,
+            )? {
                 continue;
             }
             if !has_job(conn, occurrence_id, generation)? {
@@ -516,31 +549,7 @@ fn admit<'a>(
             });
         }
     }
-    // The projection this batch belongs to: same incarnation, same hold and
-    // snapshot as every earlier batch, never a checkpoint moving backward.
-    let stored = read_checkpoint(conn, &identity.kernel_incarnation_id)?;
-    if let Some(stored) = &stored
-        && (stored.hold_id != identity.hold_id
-            || stored.snapshot_commit_seq != identity.snapshot_commit_seq)
-    {
-        return Err(ProjectionError::MutationConflict);
-    }
-    let checkpoint_commit_seq = stored
-        .as_ref()
-        .map_or(identity.through_commit_seq, |stored| {
-            stored
-                .checkpoint_commit_seq
-                .max(identity.through_commit_seq)
-        });
-    Ok(Admission {
-        occurrence_ids,
-        tombstoned,
-        already_applied: stored
-            .as_ref()
-            .is_some_and(|stored| stored.checkpoint_commit_seq == identity.through_commit_seq),
-        older_prefix: checkpoint_commit_seq > identity.through_commit_seq,
-        checkpoint_commit_seq,
-    })
+    Ok(admission)
 }
 
 fn apply_batch_inner(
