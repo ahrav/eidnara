@@ -483,9 +483,9 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [evlog]: ../../../../../packages/opencode-plugin/src/hooks/context/event-handler.ts#L121-L240
 [redaction]: ../../../../../packages/opencode-plugin/src/shared/redaction.ts#L1-L20
 [injection]: ../../../../../crates/daemon/src/injection.rs#L195-L230
-[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15364-L15538
+[hostcap]: ../../../../../crates/daemon/src/lib.rs#L15369-L15543
 [hostpage]: ../../../../../crates/daemon/src/lib.rs#L742-L743
-[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9370-L9376
+[hostpagecheck]: ../../../../../crates/daemon/src/lib.rs#L9375-L9381
 [t377]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L377
 [t440]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L440
 [t466]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L466

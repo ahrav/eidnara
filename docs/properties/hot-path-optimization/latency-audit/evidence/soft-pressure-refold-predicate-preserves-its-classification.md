@@ -134,6 +134,6 @@ a writer or treating an unreachable condition as covered.
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
 [assemble]: ../../../../../crates/daemon/src/memory_render.rs#L206-L231
-[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8207-L8210
+[budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8212-L8223
 [h1]: ../../catalog.md#history-budget-selection-preserves-reference-bytes
 [h2]: ../../catalog.md#history-budget-boundaries-remain-distinct

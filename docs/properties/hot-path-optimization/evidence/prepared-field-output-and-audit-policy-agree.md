@@ -63,6 +63,6 @@ No six-policy experiment runs here; this record is not exercised.
 [prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
 [audit]: ../../../../crates/memory-store/src/lib.rs#L2435-L2509
 [units]: ../../../../crates/memory-store/src/lib.rs#L3550-L3616
-[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8608
-[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L9223-L9233
-[test]: ../../../../crates/memory-store/src/lib.rs#L18813-L18854
+[durable-call]: ../../../../crates/memory-store/src/lib.rs#L8618
+[transaction-call]: ../../../../crates/memory-store/src/lib.rs#L9233-L9243
+[test]: ../../../../crates/memory-store/src/lib.rs#L18826-L18867

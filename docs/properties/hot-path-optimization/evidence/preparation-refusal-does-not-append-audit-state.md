@@ -58,6 +58,6 @@ The bound and rollback tests are [unaudited][checks]; no new experiment runs.
 [bound]: ../../../../crates/memory-store/src/lib.rs#L550
 [prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
 [execute]: ../../../../crates/memory-store/src/lib.rs#L2330-L2356
-[refusal]: ../../../../crates/memory-store/src/lib.rs#L9223-L9233
-[test]: ../../../../crates/memory-store/src/lib.rs#L23204-L23235
+[refusal]: ../../../../crates/memory-store/src/lib.rs#L9233-L9243
+[test]: ../../../../crates/memory-store/src/lib.rs#L23217-L23248
 [checks]: ../existing-checks.md#redaction-ownership

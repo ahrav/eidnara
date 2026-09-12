@@ -112,11 +112,11 @@ not a runtime assertion.
 [snap-add]: ../../../../../crates/daemon/src/transform.rs#L2384
 [snap-once]: ../../../../../crates/daemon/src/transform.rs#L2863
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
-[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8540-L8564
+[h-timings]: ../../../../../crates/daemon/src/lib.rs#L8520-L8546
+[prepare]: ../../../../../crates/daemon/src/lib.rs#L5043-L5373
+[respond]: ../../../../../crates/daemon/src/lib.rs#L14462
+[emit]: ../../../../../crates/daemon/src/lib.rs#L14543-L14565
 [pass-state-load]: ../../../../../crates/daemon/src/transform.rs#L1033-L1034
-[prepare]: ../../../../../crates/daemon/src/lib.rs#L5038-L5368
-[respond]: ../../../../../crates/daemon/src/lib.rs#L14457
-[emit]: ../../../../../crates/daemon/src/lib.rs#L14538-L14560
 [ts-read]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L999-L1012
 [ts-stages]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1013-L1042
 [ts-stage-fn]: ../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L1019-L1024

@@ -4722,11 +4722,14 @@ impl CacheStateSelect {
 }
 /// One `meta` field by SQL JSON extraction. `json_valid(meta, 1)` is the strict RFC 8259
 /// check: SQLite's parser accepts JSON5 that serde refuses, so a lenient parse must not
-/// stand in for the full load's failure. `json_type` distinguishes an absent path (SQL NULL,
-/// the serde default) from a JSON `null` (the type text `null`); `->>` yields the unquoted
-/// SQL value. Text that is not JSON at all fails the statement.
-const CACHE_STATE_META_SCALAR_SELECT: &str = "SELECT json_valid(meta, 1), json_type(meta, ?2), \
-     meta ->> ?2 FROM cache_state WHERE session_id = ?1";
+/// stand in for the full load's failure. `json_type(meta)` is the top-level type: strict JSON
+/// that is not an object (`null`, a number, an array) deserializes to no `ModuleMeta`, and
+/// every path into it reads as absent, so it is refused before any field default applies.
+/// `json_type(meta, path)` distinguishes an absent path (SQL NULL, the serde default) from a
+/// JSON `null` (the type text `null`); `->>` yields the unquoted SQL value. Text that is not
+/// JSON at all fails the statement.
+const CACHE_STATE_META_SCALAR_SELECT: &str = "SELECT json_valid(meta, 1), json_type(meta), \
+     json_type(meta, ?2), meta ->> ?2 FROM cache_state WHERE session_id = ?1";
 
 /// Column list every `stored_compartment_from_row` reader selects, in the
 /// positional order that mapper reads. All compartment SELECTs interpolate
@@ -6431,7 +6434,7 @@ impl MemoryStore {
     /// One `meta` field read by SQL JSON extraction, decoded by `decode` from the JSON type
     /// text and the unquoted SQL value. An absent row or an absent path passes `None`, so
     /// `decode` applies the serde default; a JSON `null` passes `Some(("null", Null))`.
-    /// `meta` that is not strict JSON is refused before `decode` runs, as the full load
+    /// `meta` that is not a strict JSON object is refused before `decode` runs, as the full load
     /// refuses it.
     ///
     /// A scalar read is per field where the full load is per row: a row whose other fields
@@ -6448,20 +6451,27 @@ impl MemoryStore {
             conn.prepare_cached(CACHE_STATE_META_SCALAR_SELECT)?
                 .query_row(params![session_id, path], |row| {
                     let strict: bool = row.get(0)?;
-                    let field = match row.get::<_, Option<String>>(1)? {
-                        Some(kind) => Some((kind, row.get::<_, rusqlite::types::Value>(2)?)),
+                    let top: Option<String> = row.get(1)?;
+                    let field = match row.get::<_, Option<String>>(2)? {
+                        Some(kind) => Some((kind, row.get::<_, rusqlite::types::Value>(3)?)),
                         None => None,
                     };
-                    Ok((strict, field))
+                    Ok((strict, top, field))
                 })
                 .optional()
         })?;
         match row {
             None => decode(None),
-            Some((false, _)) => Err(MemoryStoreError::Serde(
+            Some((false, _, _)) => Err(MemoryStoreError::Serde(
                 "meta is not strict JSON; the full load refuses this row".to_string(),
             )),
-            Some((true, field)) => decode(field),
+            Some((true, top, _)) if top.as_deref() != Some("object") => {
+                Err(MemoryStoreError::Serde(format!(
+                    "meta is a JSON {}, not an object; the full load refuses this row",
+                    top.unwrap_or_default()
+                )))
+            }
+            Some((true, _, field)) => decode(field),
         }
     }
 
@@ -15306,7 +15316,8 @@ mod tests {
     /// Every scalar read agrees with the full deserialization on the rows the full load
     /// accepts, and fails on its own field where the full load fails: absent keys take the
     /// serde default, a JSON `null`, boolean, string, or negative under an unsigned field
-    /// is refused, an unknown enum variant is refused, JSON5 and malformed text fail. The
+    /// is refused, an unknown enum variant is refused, JSON5, malformed text, and strict JSON
+    /// that is not an object fail. The
     /// recorded divergences: a corrupt `core_state` and a sibling field's corruption fail
     /// only the full load; a `historian` that is not an object reads as absent; an epoch
     /// above `i64::MAX` fails only the scalar read.
@@ -15424,6 +15435,9 @@ mod tests {
                 empty_core.clone(),
                 "{not json".to_string(),
             ),
+            ("meta-null", empty_core.clone(), "null".to_string()),
+            ("meta-array", empty_core.clone(), "[]".to_string()),
+            ("meta-number", empty_core.clone(), "5".to_string()),
             (
                 "core-malformed",
                 "{not json".to_string(),
@@ -15503,9 +15517,8 @@ mod tests {
                             assert_eq!(phase.unwrap(), HistorianPhase::Idle, "{session}");
                             true
                         }
-                        "meta-json5" | "meta-malformed" => {
-                            epoch.is_err() && phase.is_err() && floor.is_err()
-                        }
+                        "meta-json5" | "meta-malformed" | "meta-null" | "meta-array"
+                        | "meta-number" => epoch.is_err() && phase.is_err() && floor.is_err(),
                         other => panic!("unexpected full-load failure for {other}"),
                     };
                     assert!(
