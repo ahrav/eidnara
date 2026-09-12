@@ -647,7 +647,7 @@ mod sqlite_backend {
         ///
         /// Only a guarded callback may populate the cache: [`MaintenanceConn`] exposes no
         /// cached preparation, the store's own statements are uncached, and the cache is
-        /// flushed when a maintenance callback returns.
+        /// flushed when a maintenance callback ends, whether it returns or panics.
         pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
             self.conn.set_prepared_statement_cache_capacity(capacity);
         }
@@ -866,7 +866,7 @@ mod sqlite_backend {
         /// enters a mode only from the rest state.
         fn enter(&self, mode: ConnectionMode) -> ModeHold<'_> {
             let mut state = self.lock();
-            debug_assert!(
+            assert!(
                 matches!(state.mode, ConnectionMode::Unrestricted),
                 "a mode was entered while another mode was held"
             );
@@ -5179,6 +5179,50 @@ mod tests {
             );
         }
         drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Main DDL on the store's own connection leaves a cached temp-DDL statement valid, so
+    /// the maintenance flush is the only step that forces its re-authorization, and a
+    /// panicking maintenance callback must not skip that flush. The warm-up prepares without
+    /// executing so no temp object exists for the entry scan to notice and no temp DDL
+    /// expires the cache.
+    #[test]
+    fn a_panicking_maintenance_callback_still_flushes_the_statement_cache() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement without running it");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_unfenced(|c| -> rusqlite::Result<()> {
+                c.execute_batch("CREATE TABLE late (x)")?;
+                panic!("maintenance panics after main DDL")
+            })
+        }));
+        assert!(panicked.is_err());
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the cached temp-shadow statement must be re-authorized against the new \
+             main-schema names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
         let _ = std::fs::remove_dir_all(&root);
     }
 
