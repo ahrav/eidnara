@@ -784,9 +784,13 @@ mod sqlite_backend {
         /// Heap the snapshot retains: hashbrown holds seven entries per eight buckets and
         /// sizes to a power of two, each bucket an inline `String` plus one control byte.
         fn retained_bytes(&self) -> usize {
+            const ARC_COUNTS: usize = 2 * std::mem::size_of::<usize>();
+            const HASHBROWN_TRAILING_GROUP_AND_PADDING_BOUND: usize = 32;
             let buckets = (self.main_names.capacity() * 8 / 7).next_power_of_two();
-            std::mem::size_of::<Self>()
+            ARC_COUNTS
+                + std::mem::size_of::<Self>()
                 + buckets * (std::mem::size_of::<String>() + 1)
+                + HASHBROWN_TRAILING_GROUP_AND_PADDING_BOUND
                 + self.main_names.iter().map(String::capacity).sum::<usize>()
                 + self.infrastructure.capacity() * std::mem::size_of::<String>()
                 + self
@@ -880,10 +884,17 @@ mod sqlite_backend {
         fn schema_snapshot(&self, conn: &Connection) -> Result<Arc<SchemaSnapshot>, StoreError> {
             let key = SchemaKey::read(conn)?;
             let retained = self.lock().schema.clone();
-            if let Some(snapshot) = retained.filter(|snapshot| snapshot.key == key) {
-                return Ok(snapshot);
+            if let Some(snapshot) = retained.as_ref().filter(|snapshot| snapshot.key == key) {
+                return Ok(Arc::clone(snapshot));
             }
             let snapshot = Arc::new(SchemaSnapshot::scan(conn)?);
+            // SQLite expires cached statements only when the schema cookie changes.
+            if retained.is_none_or(|retained| {
+                retained.key.schema_version == key.schema_version
+                    && retained.main_names != snapshot.main_names
+            }) {
+                conn.flush_prepared_statement_cache();
+            }
             if snapshot.retained_bytes() <= SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND {
                 self.lock().schema = Some(Arc::clone(&snapshot));
             }
@@ -5211,6 +5222,89 @@ mod tests {
         assert!(
             matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
             "the cached temp-shadow statement must be re-authorized against the new \
+             main-schema names and denied, got {shadow:?}"
+        );
+        let temp_late: i64 = store
+            .with_conn_unfenced(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM temp.sqlite_schema WHERE name = 'late'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count temp objects");
+        assert_eq!(temp_late, 0, "no temp shadow of `late` was created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Leaving WAL takes an exclusive lock on the database file, and a WAL-mode connection
+    /// keeps its shared lock between transactions, so a second connection cannot switch the
+    /// journal mode while the store holds the database open. The once-per-connection pin
+    /// relies on this.
+    #[test]
+    fn a_second_connection_cannot_leave_wal_while_the_store_holds_the_database_open() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('a', '1')", []))
+            .expect("fenced write pins the connection");
+
+        let raw = rusqlite::Connection::open(sqlite_path(&d)).expect("second connection");
+        raw.busy_timeout(Duration::from_millis(200))
+            .expect("short wait");
+        let attempt = raw.query_row("PRAGMA journal_mode = DELETE", [], |r| {
+            r.get::<_, String>(0)
+        });
+        assert!(
+            matches!(&attempt, Ok(mode) if mode.eq_ignore_ascii_case("wal"))
+                || matches!(&attempt, Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy),
+            "the second connection left WAL: {attempt:?}"
+        );
+        drop(raw);
+
+        store
+            .with_conn_fenced(|tx| tx.execute("INSERT INTO kv VALUES ('b', '2')", []))
+            .expect("fenced write without re-running the pin");
+        let mode: String = store
+            .with_conn(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get(0)))
+            .expect("read journal_mode");
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode is {mode}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A foreign connection can add a main table and write the old schema version back, so
+    /// every cached statement's schema cookie still matches and SQLite reuses it without a
+    /// re-prepare. The data version still moves the key, so the rescan that installs the
+    /// new policy must discard the statements prepared under the old one.
+    #[test]
+    fn a_rescan_under_an_unchanged_schema_version_discards_cached_statements() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        store
+            .with_conn_fenced(|tx| tx.prepare_cached(CACHED_TEMP_SHADOW).map(|_| ()))
+            .expect("warm the temp-shadow statement without running it");
+
+        let raw = rusqlite::Connection::open(&path).expect("second connection");
+        let version: i64 = raw
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .expect("schema version");
+        raw.execute_batch(&format!(
+            "CREATE TABLE late (x); PRAGMA schema_version = {version};"
+        ))
+        .expect("DDL, then write the old schema version back");
+        drop(raw);
+
+        let shadow = store.with_conn_fenced(|tx| {
+            tx.prepare_cached(CACHED_TEMP_SHADOW)?
+                .execute([])
+                .map(|_| ())
+        });
+        assert!(
+            matches!(&shadow, Err(StoreError::Backend(m)) if m.contains("not authorized")),
+            "the cached temp-shadow statement must be re-authorized against the rescanned \
              main-schema names and denied, got {shadow:?}"
         );
         let temp_late: i64 = store
