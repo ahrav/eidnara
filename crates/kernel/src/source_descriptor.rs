@@ -550,7 +550,7 @@ pub struct LiveDescriptor {
 }
 
 impl KernelStore {
-    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`. The page uses the export's liveness predicate, so a descriptor whose cited evidence was deleted is absent here as it is from every export snapshot. A row whose stored identity does not re-encode to itself is refused rather than handed to a caller that may retire it.
+    /// The descriptors of `class` live at `requested`, keyset-paged by object id from `after`. The page uses the export's liveness predicate, so a descriptor whose cited evidence was deleted is absent here as it is from every export snapshot. A row whose stored identity does not re-encode to itself, or whose lineage and revision do not name its own object id, is refused rather than handed to a caller that may retire it.
     ///
     /// # Errors
     ///
@@ -599,7 +599,10 @@ impl KernelStore {
             .take(max_rows.get())
             .map(|(object_id, domain_id, payload)| {
                 let detail = stored_detail(&payload)?;
-                if detail.class != class.code() || reencoded_identity(&detail).is_none() {
+                if detail.class != class.code()
+                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
+                    || reencoded_identity(&detail).is_none()
+                {
                     return Err(KernelError::CorruptCanonicalRow);
                 }
                 Ok(LiveDescriptor {

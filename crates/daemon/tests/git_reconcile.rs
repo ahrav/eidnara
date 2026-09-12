@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use daemon::git_reconcile::{
     GitReconciler, InventoryBounds, Probe, ReconcileBlocked, ReconcileEnd, ReconcilePhase,
@@ -21,9 +21,9 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, CommitIntent,
-    Dimension, DomainSpec, ExportWindow, KernelStore, ProviderEgress, ScopeSpec, ScopeTermSpec,
-    Sensitivity, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourcePageBounds, SourceRow,
+    Dimension, DomainSpec, ExportWindow, KernelError, KernelStore, ProviderEgress, ScopeSpec,
+    ScopeTermSpec, Sensitivity, SourceHold, SourceHoldAdmission, SourceHoldBinding,
+    SourceHoldBounds, SourcePageBounds, SourceRow,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
@@ -734,6 +734,90 @@ fn reconciliation_retires_exactly_the_unreachable_commits() {
     );
     assert_eq!(corpus.evidence_counts(), (6, 0));
     assert_eq!(corpus.live_classes(), foreign);
+}
+
+/// A retirement page that waits for the kernel writer past its budget's deadline is cancelled, not committed once the writer frees: the page's commit is bounded by the same deadline and rechecks the budget under the writer.
+#[test]
+fn retirement_does_not_wait_out_its_budget_behind_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    let c2 = repo.commit(MAIN, &[&c1], "two\n", 2);
+    corpus.publish(&repo, &[c1.clone(), c2.clone()]);
+    repo.point_ref(MAIN, &c1);
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_millis(400)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let kernel = &corpus.kernel;
+    let report = std::thread::scope(|scope| {
+        // Holds the kernel writer until released, well after the episode's deadline.
+        scope.spawn(move || {
+            let _ = kernel.commit(intent("hold-writer"), |_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(KernelError::Fault)
+            });
+        });
+        held_rx.recv().unwrap();
+        scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(900));
+            release_tx.send(()).unwrap();
+        });
+        GitReconciler::new(&corpus.kernel)
+            .run_episode(&repo.scope(&[MAIN]), bounds(), &budget)
+            .unwrap()
+    });
+    assert_eq!(
+        report.end,
+        ReconcileEnd::Blocked(ReconcileBlocked::Cancelled(ReconcilePhase::Retirement)),
+        "{report:?}"
+    );
+    assert_eq!(report.retired, 0);
+    assert_eq!(corpus.live_oids(), set(&[&c1, &c2]));
+}
+
+/// A stored descriptor payload that is internally consistent but belongs to another descriptor's object id is refused by the inventory: the reconciler would otherwise judge one commit's reachability and retire another commit's row.
+#[test]
+fn inventory_refuses_a_payload_bound_to_another_object_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let repo = Repo::init(&dir.path().join("repo"));
+    let c1 = repo.commit(MAIN, &[], "one\n", 1);
+    let c2 = repo.commit(MAIN, &[&c1], "two\n", 2);
+    let published = corpus.publish(&repo, &[c1.clone(), c2.clone()]);
+    // Overwrite c2's stored payload with c1's, which is valid on its own and names c1's oid under c2's object id.
+    let db = Connection::open(dir.path().join("kernel/kernel.sqlite")).unwrap();
+    db.execute(
+        "UPDATE observations SET observation_payload=(SELECT observation_payload FROM observations WHERE object_id=?1) WHERE object_id=?2",
+        [&published[0].object_id, &published[1].object_id],
+    )
+    .unwrap();
+    drop(db);
+    let page = corpus.kernel.live_source_descriptors(
+        OccurrenceClass::GitCommits,
+        corpus.kernel.tip().unwrap(),
+        None,
+        NonZeroUsize::new(64).unwrap(),
+    );
+    assert!(
+        matches!(page, Err(KernelError::CorruptCanonicalRow)),
+        "{page:?}"
+    );
+    let episode = GitReconciler::new(&corpus.kernel).run_episode(
+        &repo.scope(&[MAIN]),
+        bounds(),
+        &unbounded(),
+    );
+    assert!(
+        matches!(episode, Err(KernelError::CorruptCanonicalRow)),
+        "{episode:?}"
+    );
 }
 
 /// AC2, AC3, AC6: a missing permitted ref, an unopenable repository, an unreadable commit in the traversal, an exhausted budget, an exceeded traversal bound, and an exceeded inventory bound each end the episode without retiring any commit, and the report claims no coverage for the phase that did not complete.

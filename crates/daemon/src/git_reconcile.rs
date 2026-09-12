@@ -7,7 +7,9 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{OccurrenceClass, identity_digest};
-use kernel::{CommitIntent, KernelError, KernelStore, LiveDescriptor, SourceDescriptorPolicy};
+use kernel::{
+    CommitIntent, Envelope, KernelError, KernelStore, LiveDescriptor, SourceDescriptorPolicy,
+};
 
 use crate::git_sources::{self, GitRefusal, RepositoryBinding};
 
@@ -240,7 +242,7 @@ impl<'a> GitReconciler<'a> {
             if ref_tips(&repo, &scope.permitted_refs)? != traversal.tips {
                 return Err(ReconcileBlocked::RefsChanged.into());
             }
-            report.retired += self.retire(scope, report.snapshot, page)?;
+            report.retired += self.retire(scope, budget, report.snapshot, page)?;
         }
         Ok(())
     }
@@ -308,36 +310,50 @@ impl<'a> GitReconciler<'a> {
     }
 
     /// One receipt-keyed commit that invalidates the page's live descriptors; returns how many it invalidated, which excludes descriptors another writer invalidated first and every replayed receipt.
-    fn retire(&self, scope: &ReconcileScope, snapshot: i64, ids: &[String]) -> Result<usize, Stop> {
+    ///
+    /// The wait for the kernel writer is bounded by the budget's deadline, and the budget is checked again once the writer is held, so a page whose budget ran out behind another writer is cancelled rather than committed.
+    fn retire(
+        &self,
+        scope: &ReconcileScope,
+        budget: &EvalBudget,
+        snapshot: i64,
+        ids: &[String],
+    ) -> Result<usize, Stop> {
         let digest = identity_digest(ids.join("\u{1f}").as_bytes());
         let mut retired = 0usize;
-        let receipt = self
-            .kernel
-            .commit(
-                CommitIntent {
-                    producer: PRODUCER.to_owned(),
-                    operation_key: format!(
-                        "git-retire:{}:{snapshot}:{digest}",
-                        scope.binding.repository_id
-                    ),
-                    request_digest: digest,
-                    actor: scope.binding.repository_id.clone(),
-                    cause: "git inventory reconciliation".to_owned(),
-                },
-                |envelope| {
-                    for id in ids {
-                        if envelope
-                            .object_state(id)?
-                            .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
-                        {
-                            envelope.retire_observation(id)?;
-                            retired += 1;
-                        }
-                    }
-                    Ok(String::new())
-                },
-            )
-            .map_err(|error| Stop::Blocked(ReconcileBlocked::Retire(error)))?;
+        let intent = CommitIntent {
+            producer: PRODUCER.to_owned(),
+            operation_key: format!(
+                "git-retire:{}:{snapshot}:{digest}",
+                scope.binding.repository_id
+            ),
+            request_digest: digest,
+            actor: scope.binding.repository_id.clone(),
+            cause: "git inventory reconciliation".to_owned(),
+        };
+        let operation = |envelope: &mut Envelope<'_>| {
+            if budget.is_exhausted() {
+                return Err(KernelError::Deadline);
+            }
+            for id in ids {
+                if envelope
+                    .object_state(id)?
+                    .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
+                {
+                    envelope.retire_observation(id)?;
+                    retired += 1;
+                }
+            }
+            Ok(String::new())
+        };
+        let receipt = match budget.deadline() {
+            Some(deadline) => self.kernel.commit_before(deadline, intent, operation),
+            None => self.kernel.commit(intent, operation),
+        }
+        .map_err(|error| match error {
+            KernelError::Deadline => ReconcileBlocked::Cancelled(ReconcilePhase::Retirement),
+            error => ReconcileBlocked::Retire(error),
+        })?;
         Ok(if receipt.replayed { 0 } else { retired })
     }
 }
