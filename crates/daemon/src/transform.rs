@@ -6033,7 +6033,7 @@ fn system_content_for_m0(message: &WireMessage) -> String {
     {
         return text.clone();
     }
-    serde_json::to_string(message.content()).unwrap_or_default()
+    crate::served_json::canonical_blocks_text(message.content()).unwrap_or_default()
 }
 
 fn covered_system_messages_for_coverage(
@@ -26174,6 +26174,50 @@ pub(crate) mod tests {
         assert!(
             matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "sys0"),
             "covered system content drift must fail via IdentityDrift, got {drift:?}"
+        );
+    }
+
+    /// A multi-block covered system message reaches m0 as the canonical, key-sorted block
+    /// array rather than serde's declaration order.
+    #[test]
+    fn multi_block_covered_system_message_reaches_m0_as_canonical_block_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
+            .unwrap();
+        let ck: WireMessage = serde_json::from_value(json!({
+            "role": "system",
+            "content": [
+                {"kind": {"type": "text", "text": "alpha"}},
+                {
+                    "kind": {"type": "text", "text": "beta"},
+                    "provider_extras": {"opencode": {"z": 1, "a": 2}}
+                }
+            ],
+            "meta": {"harness_id": "sys0"},
+        }))
+        .unwrap();
+        let system = IngressMessage {
+            mid: "sys0".to_string(),
+            ordinal: 0,
+            ck,
+        };
+        let first = run(
+            &s,
+            &cc_req(
+                "ses",
+                "cfg0",
+                vec![system, item("m1", 1, "covered"), item("t2", 2, "tail")],
+            ),
+            &spine(),
+        );
+        assert_eq!(first.action, "HARD");
+        assert_eq!(
+            covered_system_entries(m0_bytes(&first)),
+            vec![
+                r#"[{"kind":{"text":"alpha","type":"text"}},{"kind":{"text":"beta","type":"text"},"provider_extras":{"opencode":{"a":2,"z":1}}}]"#
+                    .to_string()
+            ]
         );
     }
 
