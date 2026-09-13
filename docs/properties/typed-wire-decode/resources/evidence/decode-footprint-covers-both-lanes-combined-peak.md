@@ -110,3 +110,39 @@ decision does not become an additional runtime predicate.
 - Missing evidence: Candidate disposition of the three-copy assertion.
 - Conclusion: resolved for discovery. Link restored; adequacy stays unaudited.
   See independent finding 4 in [portfolio-evaluation.md](../portfolio-evaluation.md).
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`. `RETAINED_STRING_COPIES` is 1 and
+`RETAINED_NODE_COPIES` stays 2. `cargo test -p daemon --locked --features
+test-support --test parse_charge_covers_typed_decode` passes ten tests. Peaks
+are requested layout bytes from the test's counting allocator, measured from
+before the parse through the returned value or the failure cleanup.
+
+| Case | Lane | Result |
+| --- | --- | --- |
+| 4 MiB plain text, 4 MiB escaped, 64 KiB escaped | direct and tree, upfront scratch charge taken | `peak <= needed` (`parse_charge_covers_text_heavy_peaks_on_both_lanes`) |
+| dense native values, 65,536 / 65,537 / 262,144 elements | tree then direct, metered ignored field | `peak <= charge` (`parse_charge_covers_dense_native_typed_decode_peak`) |
+| 4 MiB text then a duplicate `mid` in the last message, plain and escaped | walk, typed failure, restart, tree, conversion | `peak <= max(footprint, typed needed, tree needed)` (`parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`) |
+| 64 and 4,096 tool-call blocks with nested input and extras | direct | `peak <= needed`: 216,033 <= 239,675 at 64 blocks (`parse_charge_covers_payload_heavy_direct_decode_peak`) |
+| same bodies | tree | exceeds: 309,426 against 239,675 at 64 blocks; 19,645,338 against 14,930,339 at 4,096 blocks |
+
+The tree-lane excess on payload-heavy bodies is container storage: every small
+object becomes a `BTreeMap` leaf node (eleven slots) before conversion, and the
+per-value node charge does not cover a one-entry map. The bodies carry 3,643 and
+243,619 string bytes, so no string coefficient closes the gap (it would need
+about twenty copies). The gap predates this change: at three copies the charge
+was 245,000 and 15,400,000 for the same peaks. The direct lane, which is the
+production lane for these bodies, fits. Coefficient selection therefore stops at
+one: raising it would not make the tree lane fit and would only narrow the
+admitted set.
+
+Open question retained: the tree lane's per-object charge for map-dense bodies
+needs an owner decision outside KTD4, which fixes node copies at two.
+
+Text-heavy ceiling witnesses at an 8 MiB pool
+(`text_heavy_admission_ceiling_witnesses`): plain text of 8 MiB minus 64 KiB is
+admitted and 8 MiB plus 64 KiB refused as too large; escaped text of one third
+of the pool minus 64 KiB is admitted and plus 64 KiB refused. Under the three-copy
+charge the same pool admitted one third and one fifth of the pool. At the
+default pool the 32 MiB transform length cap binds first.

@@ -10,10 +10,16 @@ its instrumentation validity rules do not create a second evidence gate.
 
 ## EG1: decode-projection payoff
 
-Status: required; before leg collected in
-[`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md)
-at production revision `85accd89` with the retained harness patch; after leg
-and verdict pending the typed-wire U1 ticket.
+Status: required; both legs collected in
+[`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md).
+The before leg was taken at production revision `85accd89` with the retained
+harness patch; the after leg at `1e95407b` on the typed-wire U1 branch, paired
+with a byte-identical rebuild of the before binary in five alternating process
+pairs over the frozen corpus bytes. The predeclared rule clears on all four
+cells (median per-pair after/before mean ratios 0.55 and 0.47 for decode, 0.76
+and 0.75 for decode plus projection, five of five pairs each), so the verdict
+is `proceed` and the whole-plan stop does not fire. The result is the narrow
+decode-plus-projection operation on one host, not a production latency claim.
 
 Origin: P:L18, P:L57, and P:L213. The record
 [`decode-projection-payoff-has-comparable-evidence`](catalog.md#decode-projection-payoff-has-comparable-evidence)
@@ -89,9 +95,13 @@ plan-local evidence requirements without silently reactivating that record.
 
 ### Open owner questions
 
-- Who owns the raw artifact and predeclared noise/uncertainty rule for both
-  sizes? (needs human input)
-- How does the owner reconcile P:L213's W1 update with W1's invalidated status?
-  Retain plan-local evidence until resolved. (needs human input)
-- Final binaries, raw records, and a valid measurement schedule remain missing.
-  They are prospective work, not findings that this documentation can close.
+- The raw artifacts and the predeclared noise rule are owned plan-locally under
+  `evidence/eg1-decode-projection/`; the rule was fixed in the before-leg
+  manifest before any after-leg result existed.
+- W1 stays invalidated. The after leg is recorded under this gate as the plan's
+  single W1 grouping, with a pointer from W1's evidence file, and does not
+  reactivate W1's handler-level record; P:L213's requested W1 update is
+  satisfied by that grouping and nothing more. (owner may revisit)
+- Both binaries, all raw records, and the executed schedule are retained; the
+  after leg reads the frozen bodies through `EIDNARA_DECODE_CORPUS` because the
+  after tree's own generator omits the false `provider_executed` members.

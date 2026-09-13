@@ -89,3 +89,7 @@ Do not set a marker because an assertion passed or because a branch name ran.
   and threshold-sensitive seams identified by the completed fresh evaluation.
 - Conclusion: unresolved implementation evidence goes to `/testing:test-strategy`.
   The four-lens evaluation is complete as supplied; no rerun is claimed.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. Markers constructed by the executed tests: typed-only false flags, explicit-false ingress, signed zeros, positional mismatch, repeated candidates, two provider namespaces, changed stamps (transform.rs and sidecar.rs tests), unknown-envelope normalization on decode, and a copy-on-write edit with an untouched sibling. Not constructed: a persisted old-row replay with cold caches and a durable hygiene or lineage anchor reload under the owned model.

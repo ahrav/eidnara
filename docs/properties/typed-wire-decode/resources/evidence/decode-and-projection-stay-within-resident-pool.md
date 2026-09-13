@@ -112,3 +112,35 @@ local alias accounting; introduce no new global deduplication or RSS policy.
 - Missing evidence: Candidate logical-pool and requested-layout observations only.
 - Conclusion: resolved. R4 uses the existing declared logical budget and keeps
   the full decode-plus-projection interval, without an exact RSS promise.
+
+## Typed-wire U1 execution, 2026-09-13
+
+`decode_and_projection_fit_the_declared_pool` in
+`crates/daemon/tests/typed_wire_decode_allocations.rs` derives the declared
+scratch pool from public constants (`MIN_RESIDENT_BYTES` less two
+`MAX_BODY_LEN` and one `HEADER_LEN`: 184,878,336 bytes) and records one window
+from the metered direct decode through `project_messages`, with the request and
+projection live at the close and every projection block checked to share the
+request's shell:
+
+| Body | Decode charge | Decode + projection peak | Live at handoff |
+| --- | --- | --- | --- |
+| frozen 40 messages (75,628 B) | 223,024 | 252,996 | 246,760 |
+| frozen 200 messages (372,397 B) | 1,047,156 | 1,226,090 | 1,212,801 |
+| one 31 MiB text block (32,506,018 B) | 32,513,498 | 130,025,153 | 65,014,966 |
+
+All fit the pool. The 31 MiB case is the text ceiling under the 32 MiB length
+cap; its projection peak is the decoded text plus the canonical block string
+grown to twice the text plus the `Arc<str>` copy.
+
+Observation for the egress plan: constructing one served message per ingress
+message over the live request and projection adds a further 162,530,100 peak
+bytes on the 31 MiB body (65,012,492 retained), so request, projection, and
+served output together reach about 227.5 MB of requested layout bytes, above
+the declared pool. The excess is the served canonicalizer's serialization
+buffer, its exact-size reorder copy, and the `Arc<[u8]>` copy. Response
+encoding is outside this specification (canonical-output egress plan), and
+requested layout bytes are not an RSS bound, so this is recorded, not gated.
+
+Not measured: concurrent requests, an eviction with an active lease, and the
+above-cap probe's own allocation.

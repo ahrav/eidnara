@@ -79,3 +79,7 @@ ordinary plugin metadata require no testing flag, although todo state is needed.
 - Missing evidence: explicit reconciliation with older exact-replay promises.
 - Conclusion: needs human input from the specification owner. Test strategy
   receives the bounded omission oracle; no benchmark result is implied.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `served_canonical_shell_bytes_and_segments_are_frozen` pins the served bytes of a decoded message: unknown envelope keys (`z`, `future`, a block's `unknown`) are absent, false `synthetic` is omitted, true is kept, and an edit serializes immediately. `typed_only_blocks_canonicalize_by_field_selection_and_sorted_order` pins explicit-false `provider_executed` on ingress to the omitted default, the accepted false-default omission. Unknown-envelope discard is the R3 normalization domain, separate from the two R5 omissions; no persisted synthetic-pair replay ran.

@@ -62,7 +62,12 @@ retained rather than deleted. Its obligation lives in
 [EG1: decode-projection payoff](resources/evidence-gates.md); this does not
 reactivate the separately invalidated latency-audit W1 record.
 
-All replacement properties are unexercised. Existing checks are unaudited.
+The typed-wire U1 branch (`perf/typed-wire-u1-owned-decode`) exercised the
+portfolio: each catalog's `Exercised:` line names the tests that ran, and the
+per-record evidence files carry a "Typed-wire U1 execution, 2026-09-13" section
+with the measured values. EG1 holds both legs and a `proceed` verdict. Records
+marked partial name what remains unconstructed. Existing checks beyond the
+named tests are unaudited.
 No new liveness deadline is justified by this synchronous decode and
 serialization change. Every fixed situation marker has an independent result;
 aggregate reports are summaries only. The evidence receipt for four benchmark

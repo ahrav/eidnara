@@ -77,3 +77,7 @@ plugin's JSON.stringify emits negative zero.
 - Missing evidence: none for the contract; new field-set coverage is missing.
 - Conclusion: resolved. `/testing:invariant-test-review` audits the existing
   test; `/testing:test-strategy` designs the prospective replacement oracle.
+
+## Typed-wire U1 execution, 2026-09-13
+
+Branch `perf/typed-wire-u1-owned-decode`; replay envelopes removed. `receipt_reuse_is_separate_from_fresh_hashing`: `typed`, `unknown`, and both `raw` candidates are equal typed values with equal `block_identity_digest`s, so the first equal candidate (index 1) is reused; signed-zero reuse keeps `-0.0` in served bytes; positional mismatch falls to the equality index. `served_canonical_frozen_corpus_matches_value_reference` covers the frozen corpus.

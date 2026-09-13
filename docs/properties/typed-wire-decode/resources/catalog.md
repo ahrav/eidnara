@@ -15,8 +15,9 @@ and raw measurement artifacts are missing. No interview fills those gaps.
 
 Six records are active discovery obligations. R6 remains as an invalidated
 record because payoff evidence is an acceptance gate, not a system property.
-None is exercised by this task. Existing source checks remain unaudited;
-historical reports do not prove the proposed tree-free model. See
+The typed-wire U1 implementation exercised R3 and R5 fully and R1, R2, R4, and
+R7 in part; each record states what ran and what remains. Existing source
+checks remain unaudited beyond the named tests. See
 [checks](existing-checks.md), [fault mapping](fault-map.md), and
 [handoffs](handoff.md).
 
@@ -89,8 +90,12 @@ Each active record repeats its own reachability evidence.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - The final typed model and combined text-heavy, failure,
-fallback, and escaped-string peak traces are missing.
+Exercised: partial - `crates/daemon/tests/parse_charge_covers_typed_decode.rs`
+holds `P_decode <= F_1` on both lanes for 4 MiB plain and escaped text, 64 KiB
+escaped text, dense native values, a typed prefix that fails at a late duplicate
+key followed by its tree fallback, and payload-heavy blocks on the direct lane;
+the tree lane's payload-heavy peak exceeds `F_1` by container storage that no
+string coefficient covers (see the [evidence](evidence/decode-footprint-covers-both-lanes-combined-peak.md#typed-wire-u1-execution-2026-09-13)).
 Guarantee: The selected decode estimate covers the complete simultaneous
 decode heap on both lanes.
 Check: `always` - For every corpus case and lane, assert `P_decode <= F_k_max`,
@@ -126,8 +131,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No tree-free model or revised independent ownership ledger
-is evaluated against the retained holders.
+Exercised: partial - `crates/daemon/tests/typed_wire_decode_allocations.rs`
+(`source_has_no_envelope_tree_or_replay_entry`) checks that neither wire struct
+holds a `Value` field and that no replay entry remains; `retained_size.rs`
+(`decoded_envelope_charges_only_typed_fields`) and the independent ledgers in
+`wire.rs` and `transform.rs` charge decoded and constructed shells equally.
 Guarantee: Retained-size accounting removes only original-envelope ownership
 and continues charging every surviving allocation under its holder policy.
 Check: `always` - Assert that wire message/block objects retain no original
@@ -164,8 +172,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - Original A1-A3 bytes, numeric capacities, pressure
-schedules, and outcomes lack a candidate replay; new ceiling evidence is absent.
+Exercised: yes - `frozen_corpus_footprints_replay_with_only_string_charge_changes`
+in `crates/daemon/src/lib.rs` replays all 46 A2 bodies on both lanes against
+their frozen three-copy footprints and terminals; the only changes are frozen
+too-large terminals on bodies with string bytes, each admitted to its
+unbounded-pool terminal, with the footprint difference equal to the removed
+copies. Ceiling witnesses at an 8 MiB pool are in
+`text_heavy_admission_ceiling_witnesses`; length caps and the node floor are
+untouched.
 Guarantee: Original A1-A3 cases and fixed admission rules remain stable while
 KTD4 permits the live string-charge ceiling to expand outside those cases.
 Check: `always` - Replay each original frozen A1-A3 fixture
@@ -204,8 +218,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - A continuous allocation-to-reservation ledger spanning
-entry probes, decode, projection, cleanup, and retained-owner handoff is missing.
+Exercised: partial - `decode_and_projection_fit_the_declared_pool` holds
+decode plus projection, with shared shells checked, under the declared scratch
+pool for the frozen 40/200 corpora and a 31 MiB text body (peak 130.0 MB
+against 184.9 MB); served-output construction on top of the live request and
+projection is recorded as an observation for the egress plan (see the
+[evidence](evidence/decode-and-projection-stay-within-resident-pool.md#typed-wire-u1-execution-2026-09-13)).
+The above-cap probe remains outside the meter.
 Guarantee: Full decode plus projection fits the existing declared logical
 resident budget without omitting transient demand or changing ownership policy.
 Check: `always` - Throughout entry, decode, projection, cleanup, and existing
@@ -248,8 +267,11 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - The final production decoder has no isolated messages-scope
-allocation result on the frozen 40-message corpus.
+Exercised: yes - `message_decode_stays_within_the_allocation_budget` decodes
+the frozen 40-message body's `messages` array bytes (J = 74,934) into
+`IngressMessages`: 434 events and a 109,432-byte peak against 640 and
+224,802; `a_restored_envelope_tree_fails_the_gate` is the negative control
+(2,185 events, 313,025-byte peak).
 Guarantee: Decoding the fixed 40-message corpus uses at most 640 attributable
 allocation events and strictly less than three times its messages JSON bytes.
 Check: `always` - For each valid observation of the fixed plugin-shaped
@@ -286,8 +308,10 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: invalidated
-Exercised: not yet - No comparable 40/200 before/after run, raw samples, or
-predeclared noise rule is produced; W1 remains invalidated.
+Exercised: n/a (invalidated) - EG1 holds the executed obligation: both legs,
+raw samples, and the predeclared rule are in
+[`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md)
+with a `proceed` verdict; W1 remains invalidated.
 Guarantee: A typed-wire decode payoff claim requires comparable evidence for
 the complete decode-plus-projection operation and stops when the gain is noise.
 Check: `always` - The historical record checked whether a payoff verdict had
@@ -319,8 +343,8 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: not yet - Existing partial witnesses do not cover the final model's
-twelve independent resource situation markers.
+Exercised: partial - the fault map records which of the twelve markers the
+executed tests construct independently and which remain unfired.
 Guarantee: A resource campaign constructs every required risky situation and
 records its preconditions independently of the candidate's success verdict.
 Check: `sometimes` - Evaluate one independent `sometimes(preconditions_m)`

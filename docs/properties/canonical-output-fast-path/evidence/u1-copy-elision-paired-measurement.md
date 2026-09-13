@@ -206,3 +206,18 @@ comparison.
   host latency is unmeasured.
 - Missing evidence: a retained real-host driver.
 - Conclusion: unresolved, needs HP1's host driver; no speedup claim is made.
+
+## Interaction with typed-wire U1, 2026-09-13
+
+On branch `perf/typed-wire-u1-owned-decode` the wire types no longer retain a
+parsed `Value`; every `WireMessage` is an owned typed value whose declaration
+order (`role` before `content`, a block's `type` tag before its payload) is not
+canonical order. The served-output fixture populations that previously replayed
+retained originals now decode to typed shells, and
+`every_population_takes_the_reorder_copy_path` in
+`crates/daemon/tests/served_json_passthrough_allocations.rs` asserts that none of
+them serializes canonically. The A-return path keeps its unit coverage in
+`served_json.rs` (`canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not`),
+but no production `WireMessage` shape reaches it after this change. The live
+canonicalization evidence in this file was measured before that change and is
+retained as recorded; response-envelope egress work owns the follow-up.
