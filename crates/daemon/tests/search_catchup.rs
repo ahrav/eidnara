@@ -23,12 +23,12 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
-    ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputDescriptor, DomainSpec,
-    EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceExportError, SourceHold,
-    SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourcePageBounds,
-    SourceRow,
+    ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, BackupRequest,
+    CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest, CommitReadTarget,
+    CurrentInputDescriptor, DomainSpec, EligibilityBinding, ExportWindow, KernelStore,
+    ProjectScope, ProviderEgress, RepositoryProvenance, Sensitivity, SourceDescriptorRequest,
+    SourceExportError, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourceHoldError, SourcePageBounds, SourceRow,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
@@ -538,6 +538,37 @@ impl Corpus {
     fn kernel_checkpoint(&self) -> i64 {
         kernel_checkpoint(&self.root)
     }
+
+    /// A target fixed at `through` under the current incarnation.
+    fn fixed(&self, through: i64) -> CommitReadTarget {
+        CommitReadTarget {
+            through_commit: through,
+            incarnation: self
+                .kernel
+                .capture_commit_read_target()
+                .unwrap()
+                .incarnation,
+        }
+    }
+
+    /// Publishes a backup of the current history; the returned directory keeps it alive.
+    fn backup(&self) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let manifest = self
+            .kernel
+            .backup(BackupRequest {
+                destination_directory: dir.path().to_path_buf(),
+                deadline: Instant::now() + Duration::from_secs(10),
+                capture_pin_expires_at: None,
+            })
+            .unwrap();
+        let path = manifest.destination_path;
+        (dir, path)
+    }
 }
 
 fn export_all(
@@ -849,9 +880,15 @@ fn fixed_target_rejects_invalid_ranges_before_reconciling_a_lost_ack() {
     ] {
         let mut events = Vec::new();
         let report = driver
-            .run_episode_toward(&consumer, &bounds(), target, 3, &mut |event| {
-                events.push(event);
-            })
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                3,
+                &mut |event| {
+                    events.push(event);
+                },
+            )
             .unwrap();
         assert_eq!(blocked(&report), &Blocked::Read(error));
         assert_eq!(report.target, target);
@@ -863,7 +900,7 @@ fn fixed_target_rejects_invalid_ranges_before_reconciling_a_lost_ack() {
         assert_eq!(durable(dir.path()), before);
     }
     let report = driver
-        .run_episode_toward(&consumer, &bounds(), local, 4, &mut |_| {})
+        .run_episode_toward(&consumer, &bounds(), corpus.fixed(local), 4, &mut |_| {})
         .unwrap();
     reached(&report);
     assert_eq!(corpus.kernel_checkpoint(), local);
@@ -887,7 +924,7 @@ fn fixed_target_excludes_later_commits_and_replay_does_not_chase_the_tip() {
     let mut events = Vec::new();
     let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
     let report = driver
-        .run_episode_toward(&consumer, &limits, target, 3, &mut |event| {
+        .run_episode_toward(&consumer, &limits, corpus.fixed(target), 3, &mut |event| {
             events.push(event);
             if !grown && matches!(event, EpisodeEvent::HoldExtensionRequested { .. }) {
                 corpus.publish(
@@ -909,9 +946,15 @@ fn fixed_target_excludes_later_commits_and_replay_does_not_chase_the_tip() {
     let before = durable(dir.path());
     let mut events = Vec::new();
     let replay = driver
-        .run_episode_toward(&consumer, &bounds(), target, 4, &mut |event| {
-            events.push(event);
-        })
+        .run_episode_toward(
+            &consumer,
+            &bounds(),
+            corpus.fixed(target),
+            4,
+            &mut |event| {
+                events.push(event);
+            },
+        )
         .unwrap();
     reached(&replay);
     assert_eq!(replay.commits_consumed, 0);
@@ -1169,9 +1212,13 @@ fn aggregate_source_admission_precedes_decode_and_accepts_the_exact_terminal_pag
         KernelStore::take_source_export_row_reads_for_test();
         let mut events = Vec::new();
         let report = SearchCatchUp::new(&corpus.kernel, &projection)
-            .run_episode_toward(&consumer, &limits, target, hold.captured_at, &mut |event| {
-                events.push(event)
-            })
+            .run_episode_toward(
+                &consumer,
+                &limits,
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |event| events.push(event),
+            )
             .unwrap();
         assert_eq!(blocked(&report), &expected, "{dimension}");
         assert_eq!(
@@ -1200,7 +1247,13 @@ fn aggregate_source_admission_precedes_decode_and_accepts_the_exact_terminal_pag
     exact.max_source_encoded_bytes = NonZeroU64::new(12).unwrap();
     KernelStore::take_source_export_row_reads_for_test();
     let report = SearchCatchUp::new(&corpus.kernel, &projection)
-        .run_episode_toward(&consumer, &exact, target, hold.captured_at, &mut |_| {})
+        .run_episode_toward(
+            &consumer,
+            &exact,
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |_| {},
+        )
         .unwrap();
     reached(&report);
     assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 5);
@@ -1227,7 +1280,7 @@ fn cancellation_at_write_boundaries_never_quarantines_or_acknowledges() {
             .run_episode_toward(
                 &consumer,
                 &bounds(),
-                target,
+                corpus.fixed(target),
                 hold.captured_at,
                 &mut |event| {
                     probe.observe(&search_path(dir.path()), event);
@@ -1262,13 +1315,23 @@ fn cancellation_at_write_boundaries_never_quarantines_or_acknowledges() {
             assert_eq!(durable(dir.path()), before);
         }
         let again = driver
-            .run_episode_toward(&consumer, &bounds(), target, hold.captured_at, &mut |_| {
-                panic!("cancelled budget was renewed")
-            })
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |_| panic!("cancelled budget was renewed"),
+            )
             .unwrap();
         assert_eq!(blocked(&again), &Blocked::Cancelled);
         let replay = SearchCatchUp::new(&corpus.kernel, &projection)
-            .run_episode_toward(&consumer, &bounds(), target, hold.captured_at, &mut |_| {})
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |_| {},
+            )
             .unwrap();
         reached(&replay);
         assert_eq!(
@@ -1505,7 +1568,7 @@ fn cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix() {
         .run_episode_toward(
             &consumer,
             &two_commit_windows(),
-            target,
+            corpus.fixed(target),
             hold.captured_at,
             &mut |event| {
                 events.push(event);
@@ -1530,7 +1593,7 @@ fn cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix() {
         .run_episode_toward(
             &consumer,
             &two_commit_windows(),
-            target,
+            corpus.fixed(target),
             hold.captured_at,
             &mut |_| {},
         )
@@ -1557,7 +1620,7 @@ fn cancellation_before_lost_ack_reconciliation_preserves_both_prefixes() {
         .run_episode_toward(
             &consumer,
             &bounds(),
-            target,
+            corpus.fixed(target),
             hold.captured_at,
             &mut |event| {
                 events.push(event);
@@ -1582,7 +1645,7 @@ fn cancellation_before_lost_ack_reconciliation_preserves_both_prefixes() {
         .run_episode_toward(
             &consumer,
             &bounds(),
-            target,
+            corpus.fixed(target),
             hold.captured_at,
             &mut |event| events.push(event),
         )
@@ -1656,6 +1719,73 @@ fn cancellation_during_export_stops_before_the_next_page() {
             through: corpus.tip()
         }]
     );
+    assert_eq!(durable(dir.path()), before);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+}
+
+#[test]
+fn exhausted_budget_is_refused_before_kernel_readers_are_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    corpus.publish("next", &[("a", "1", "next message")]);
+    let budget = EvalBudget::unbounded();
+    budget.cancel();
+    let before = durable(dir.path());
+    let held = std::sync::Barrier::new(2);
+    let waited = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            corpus
+                .kernel
+                .hold_readers_for_test(&held, Duration::from_secs(3))
+        });
+        held.wait();
+        let started = Instant::now();
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .with_budget(budget.clone())
+            .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {
+                panic!("exhausted budget admitted work")
+            })
+            .unwrap();
+        assert_eq!(blocked(&report), &Blocked::Cancelled);
+        started.elapsed()
+    });
+    assert!(
+        waited < Duration::from_secs(1),
+        "an exhausted episode waited {waited:?} for a kernel reader"
+    );
+    assert_eq!(durable(dir.path()), before);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
+fn target_fixed_before_a_restore_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let (_backup_dir, backup) = corpus.backup();
+    let target = corpus.publish("displaced", &[("a", "1", "displaced message")]);
+    let fixed = corpus.fixed(target);
+    corpus.kernel.restore(&backup).unwrap();
+    let reused = corpus.publish("reused", &[("b", "1", "restored message")]);
+    assert_eq!(
+        reused, target,
+        "the restore let a later commit reuse the fixed sequence"
+    );
+    let before = durable(dir.path());
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode_toward(&consumer, &bounds(), fixed, hold.captured_at, &mut |_| {
+            panic!("a target from the displaced history admitted work")
+        })
+        .unwrap();
+    assert_eq!(
+        blocked(&report),
+        &Blocked::Read(CommitReadError::IncarnationMismatch)
+    );
+    assert_eq!(report.target, target);
     assert_eq!(durable(dir.path()), before);
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
     assert!(projection.quarantine().is_none());

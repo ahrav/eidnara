@@ -155,6 +155,7 @@ pub enum EpisodeEnd {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpisodeReport {
+    /// `target` is `0` when the episode is refused before capture.
     pub target: i64,
     /// The kernel consumer checkpoint when the episode ended.
     pub acknowledged_through: i64,
@@ -282,13 +283,12 @@ impl<'a> SearchCatchUp<'a> {
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
         self.fault = None;
-        let captured = self.capture_target()?;
-        let through = captured.through_commit;
-        self.run_episode_inner(consumer, bounds, now, observer, captured, through)
+        self.run_episode_inner(consumer, bounds, now, observer, None)
     }
 
     /// [`Self::run_episode`] toward `target`, a commit fixed before the episode instead of the tip captured by it.
     /// Commits after `target` are neither applied nor acknowledged, whatever the tip has moved to.
+    /// A target whose incarnation differs from the captured tip's is refused with [`CommitReadError::IncarnationMismatch`].
     ///
     /// # Errors
     ///
@@ -297,13 +297,12 @@ impl<'a> SearchCatchUp<'a> {
         &mut self,
         consumer: &CatchUpConsumer,
         bounds: &EpisodeBounds,
-        target: i64,
+        target: kernel::CommitReadTarget,
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
     ) -> Result<EpisodeReport, CatchUpError> {
         self.fault = None;
-        let captured = self.capture_target()?;
-        self.run_episode_inner(consumer, bounds, now, observer, captured, target)
+        self.run_episode_inner(consumer, bounds, now, observer, Some(target))
     }
 
     /// [`Self::run_episode`] under one injected fault.
@@ -317,9 +316,7 @@ impl<'a> SearchCatchUp<'a> {
         fault: EpisodeFault,
     ) -> Result<EpisodeReport, CatchUpError> {
         self.fault = Some(fault);
-        let captured = self.capture_target()?;
-        let through = captured.through_commit;
-        self.run_episode_inner(consumer, bounds, now, observer, captured, through)
+        self.run_episode_inner(consumer, bounds, now, observer, None)
     }
 
     fn capture_target(&mut self) -> Result<kernel::CommitReadTarget, CatchUpError> {
@@ -336,17 +333,16 @@ impl<'a> SearchCatchUp<'a> {
         bounds: &EpisodeBounds,
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
-        captured: kernel::CommitReadTarget,
-        through: i64,
+        fixed: Option<kernel::CommitReadTarget>,
     ) -> Result<EpisodeReport, CatchUpError> {
         let mut report = EpisodeReport {
-            target: through,
+            target: fixed.map_or(0, |target| target.through_commit),
             acknowledged_through: 0,
             batches_applied: 0,
             commits_consumed: 0,
             end: EpisodeEnd::ReachedTarget,
         };
-        match self.drive(consumer, bounds, now, observer, captured, &mut report) {
+        match self.drive(consumer, bounds, now, observer, fixed, &mut report) {
             Ok(()) => Ok(report),
             Err(Stop::Blocked(blocked)) => {
                 report.end = EpisodeEnd::Blocked(blocked);
@@ -363,12 +359,16 @@ impl<'a> SearchCatchUp<'a> {
         bounds: &EpisodeBounds,
         now: i64,
         observer: &mut dyn FnMut(EpisodeEvent),
-        captured: kernel::CommitReadTarget,
+        fixed: Option<kernel::CommitReadTarget>,
         report: &mut EpisodeReport,
     ) -> Result<(), Stop> {
         if now < 0 {
             return Err(Blocked::NegativeTime { now }.into());
         }
+        self.check_budget()?;
+        let captured = self.capture_target()?;
+        let target = fixed.unwrap_or(captured);
+        report.target = target.through_commit;
         report.acknowledged_through = self
             .kernel
             .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?
@@ -379,6 +379,9 @@ impl<'a> SearchCatchUp<'a> {
         }
         if report.target > captured.through_commit {
             return Err(Blocked::Read(CommitReadError::TargetBeyondTip).into());
+        }
+        if target.incarnation != captured.incarnation {
+            return Err(Blocked::Read(CommitReadError::IncarnationMismatch).into());
         }
         let checkpoint = self.local_prefix(consumer)?;
         let local = checkpoint.checkpoint_commit_seq;
