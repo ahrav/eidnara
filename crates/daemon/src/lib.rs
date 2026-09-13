@@ -1243,8 +1243,16 @@ impl TransformPageCoordinator {
         self.completed_bytes = self.completed_bytes.saturating_sub(completed.bytes);
     }
 
-    /// Removes the session entry, releasing its staged phase and retained response.
+    /// Removes the session entry, releasing its staged phase and retained response. An
+    /// `Applying` phase is left in place; only [`Self::release_applying`] ends it.
     fn discard(&mut self, session_id: &str) -> Option<usize> {
+        if self
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| matches!(session.phase, TransformPagePhase::Applying { .. }))
+        {
+            return None;
+        }
         let session = self.sessions.remove(session_id)?;
         let staged_pages = match &session.phase {
             TransformPagePhase::Collecting(pending) => Some(pending.pages.len()),
@@ -9984,7 +9992,11 @@ impl HandlerCore {
                 let assembled = match assemble_transform_pages(pages) {
                     Ok(assembled) => assembled,
                     Err(message) => {
-                        self.discard_transform_pages(&binding.session);
+                        self.transform_pages
+                            .lock()
+                            .expect("transform page mutex")
+                            .release_applying(&binding.session, &transform_id);
+                        self.refresh_oldest_queued_at_ms();
                         return transform_page_error(lane, "protocol_mismatch", message);
                     }
                 };

@@ -73,7 +73,6 @@ are unaudited, and no new physical-completion trace runs here.
   covers existing callbacks only; it does not establish an off-worker proof or
   prescribe a new route-reuse epoch mechanism.
 
-
 ## Request-work join evidence
 
 Implementation base: `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the units
@@ -193,7 +192,7 @@ exclusion.
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L784
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915-L951
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
 [close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1290-L1313

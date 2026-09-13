@@ -379,6 +379,59 @@ fn stale_apply_release_preserves_newer_attempt_and_matching_release_runs_once() 
     assert!(pages.sessions.is_empty());
 }
 
+#[test]
+fn discard_leaves_an_applying_phase_to_its_guard() {
+    let mut pages = TransformPageCoordinator::default();
+    let staged = pages
+        .stage(
+            "ses",
+            "t-1".to_string(),
+            1,
+            0,
+            1,
+            "d0".to_string(),
+            json!({"messages": []}),
+            37,
+            true,
+            1,
+            Instant::now(),
+        )
+        .unwrap();
+    assert!(matches!(staged, TransformPageStageAction::Apply { .. }));
+    assert_eq!(pages.total_staged_bytes, 37);
+    assert_eq!(pages.pending_transform_count, 1);
+
+    assert_eq!(pages.discard("ses"), None);
+    assert!(matches!(
+        &pages.sessions["ses"].phase,
+        TransformPagePhase::Applying { transform_id, bytes }
+            if transform_id == "t-1" && *bytes == 37
+    ));
+    assert_eq!(pages.total_staged_bytes, 37);
+    assert_eq!(pages.pending_transform_count, 1);
+    assert!(matches!(
+        pages.stage(
+            "ses",
+            "t-2".to_string(),
+            1,
+            0,
+            1,
+            "d1".to_string(),
+            json!({"messages": []}),
+            5,
+            true,
+            2,
+            Instant::now(),
+        ),
+        Err(TransformPageStageError::InProgress)
+    ));
+
+    assert!(pages.release_applying("ses", "t-1"));
+    assert_eq!(pages.total_staged_bytes, 0);
+    assert_eq!(pages.pending_transform_count, 0);
+    assert!(pages.sessions.is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn four_parked_units_keep_fifth_waiter_off_the_blocking_pool() {
     assert_eq!(TRANSFORM_UNITS_AT_ONCE, 4);
