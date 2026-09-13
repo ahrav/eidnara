@@ -1770,25 +1770,33 @@ fn target_fixed_before_a_restore_is_refused() {
     let target = corpus.publish("displaced", &[("a", "1", "displaced message")]);
     let fixed = corpus.fixed(target);
     corpus.kernel.restore(&backup).unwrap();
-    let reused = corpus.publish("reused", &[("b", "1", "restored message")]);
-    assert_eq!(
-        reused, target,
-        "the restore let a later commit reuse the fixed sequence"
-    );
     let before = durable(dir.path());
-    let report = SearchCatchUp::new(&corpus.kernel, &projection)
-        .run_episode_toward(&consumer, &bounds(), fixed, hold.captured_at, &mut |_| {
-            panic!("a target from the displaced history admitted work")
-        })
-        .unwrap();
-    assert_eq!(
-        blocked(&report),
-        &Blocked::Read(CommitReadError::IncarnationMismatch)
-    );
-    assert_eq!(report.target, target);
-    assert_eq!(durable(dir.path()), before);
-    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
-    assert!(projection.quarantine().is_none());
+    // The restored tip is below the fixed sequence first, then a later commit reuses it.
+    for phase in ["below tip", "reused"] {
+        if phase == "reused" {
+            let reused = corpus.publish("reused", &[("b", "1", "restored message")]);
+            assert_eq!(
+                reused, target,
+                "the restore let a later commit reuse the fixed sequence"
+            );
+        } else {
+            assert!(corpus.tip() < target);
+        }
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode_toward(&consumer, &bounds(), fixed, hold.captured_at, &mut |_| {
+                panic!("a target from the displaced history admitted work")
+            })
+            .unwrap();
+        assert_eq!(
+            blocked(&report),
+            &Blocked::Read(CommitReadError::IncarnationMismatch),
+            "{phase}"
+        );
+        assert_eq!(report.target, target);
+        assert_eq!(durable(dir.path()), before);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert!(projection.quarantine().is_none());
+    }
 }
 
 #[test]

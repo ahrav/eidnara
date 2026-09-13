@@ -374,14 +374,14 @@ impl<'a> SearchCatchUp<'a> {
             .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?
             .ok_or(Blocked::Read(CommitReadError::UnknownConsumer))?;
         self.check_budget()?;
+        if target.incarnation != captured.incarnation {
+            return Err(Blocked::Read(CommitReadError::IncarnationMismatch).into());
+        }
         if report.target < 0 {
             return Err(Blocked::Read(CommitReadError::InvalidRequest).into());
         }
         if report.target > captured.through_commit {
             return Err(Blocked::Read(CommitReadError::TargetBeyondTip).into());
-        }
-        if target.incarnation != captured.incarnation {
-            return Err(Blocked::Read(CommitReadError::IncarnationMismatch).into());
         }
         let checkpoint = self.local_prefix(consumer)?;
         let local = checkpoint.checkpoint_commit_seq;
