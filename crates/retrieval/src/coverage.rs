@@ -172,7 +172,8 @@ const VALID_VECTOR: &str = "EXISTS(SELECT 1 FROM occurrence_vectors v
 
 /// Durable work that still stands for the observed generation.
 const CURRENT_PENDING: &str = "EXISTS(SELECT 1 FROM embedding_jobs j
-    WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.state IN ('pending','admitted'))";
+    WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.state IN ('pending','admitted')
+      AND j.stop_reason IS NULL)";
 
 fn class_coverage(
     conn: &GuardedConn<'_>,

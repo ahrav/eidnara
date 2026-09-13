@@ -800,7 +800,10 @@ impl GenerationStore {
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
             _ => {}
         }
-        let _pin = lock_for_reclamation(&self.generations_fd, digest)?;
+        let _pin = lock_for_reclamation(&self.generations_fd, digest).map_err(|err| match err {
+            Reclamation::Pinned => invalid("corrupt generation is pinned"),
+            Reclamation::Unopenable(err) => err,
+        })?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
         fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
         self.validate(digest)?;
@@ -1033,8 +1036,13 @@ impl GenerationStore {
             if search_quarantined || protected.contains(&name) {
                 continue;
             }
-            let Ok(_pin) = lock_for_reclamation(&self.generations_fd, &name) else {
-                continue;
+            let _pin = match lock_for_reclamation(&self.generations_fd, &name) {
+                Ok(pin) => pin,
+                Err(Reclamation::Pinned) => continue,
+                Err(Reclamation::Unopenable(err)) => {
+                    first_error.get_or_insert(err);
+                    continue;
+                }
             };
             // An unprotected generation's contents affect pruning only through its manifest schema.
             if self.is_quarantined_schema(&name) {
@@ -1257,17 +1265,29 @@ fn open_child_dir(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
     Some(fd)
 }
 
+/// Why an existing generation could not be locked for reclamation.
+enum Reclamation {
+    /// A reader holds the shared pin; the entry is retained without error.
+    Pinned,
+    /// The entry could not be opened for locking; `prune` reports it as its first failure.
+    Unopenable(GenerationError),
+}
+
 /// Takes the exclusive reclamation lock on `name` whatever its mode bits, so a reader's shared
 /// pin is honored on a directory whose mode no longer validates. `Ok(None)` only when `name` is
-/// absent; an existing entry that cannot be opened or locked fails closed.
-fn lock_for_reclamation(parent: &OwnedFd, name: &str) -> Result<Option<OwnedFd>, GenerationError> {
+/// absent.
+fn lock_for_reclamation(parent: &OwnedFd, name: &str) -> Result<Option<OwnedFd>, Reclamation> {
     let fd = match crate::store_fs::open_dir_for_removal(parent, name) {
         Ok(fd) => fd,
         Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(_) => return Err(invalid("generation cannot be locked for reclamation")),
+        Err(_) => {
+            return Err(Reclamation::Unopenable(invalid(
+                "generation cannot be opened for reclamation",
+            )));
+        }
     };
     rustix::fs::flock(&fd, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| invalid("corrupt generation is pinned"))?;
+        .map_err(|_| Reclamation::Pinned)?;
     Ok(Some(fd))
 }
 
@@ -2606,6 +2626,37 @@ mod tests {
             store.prune(&BTreeSet::new()).unwrap().removed_generations,
             1
         );
+    }
+
+    #[test]
+    fn prune_reports_an_unopenable_generation_and_still_removes_the_others() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+        let mut staged = Vec::new();
+        for (name, bytes) in [("first", b"one".as_slice()), ("second", b"two".as_slice())] {
+            let sources = [SourceSpec {
+                rel_path: "search.sqlite".to_owned(),
+                source: write_source(src.path(), name, bytes),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }];
+            staged.push(store.stage(&sources, &meta(), &BTreeSet::new()).unwrap());
+        }
+        let generations = store.root().join(GENERATIONS_DIR_NAME);
+        let unopenable = generations.join(&staged[0]);
+        std::fs::set_permissions(&unopenable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = store.prune(&BTreeSet::new());
+        std::fs::set_permissions(&unopenable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "{result:?}");
+        assert!(unopenable.join("search.sqlite").is_file());
+        assert!(!generations.join(&staged[1]).exists());
     }
 
     #[test]

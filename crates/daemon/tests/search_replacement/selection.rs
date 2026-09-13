@@ -278,6 +278,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE occurrences SET tuple=x'00'",
         "UPDATE occurrences SET sensitivity='secret'",
         "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
+        "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -322,6 +323,11 @@ fn tampered_certificate_intent_never_becomes_available_after_reopen() {
     for (field, value) in [
         ("schema", serde_json::json!(999)),
         ("authorization_ref", serde_json::json!("op:1")),
+        (
+            "kernel_incarnation_id",
+            serde_json::json!("other-incarnation"),
+        ),
+        ("recovery_target", serde_json::json!({"commit_seq": 999})),
     ] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());

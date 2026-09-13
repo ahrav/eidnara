@@ -368,6 +368,18 @@ impl SearchSelection {
             || certificate.seed.stage_manifest().digest() != digest
             || certificate.intent.staged_seed_digest.as_deref() != Some(digest)
             || certificate.intent.consumer.generation_id != certificate.seed.generation_id
+            || certificate.intent.kernel_incarnation_id != certificate.seed.kernel_incarnation_id
+            || certificate
+                .intent
+                .recovery_target
+                .map(|target| target.commit_seq)
+                != Some(certificate.seed.checkpoint_commit_seq)
+            || certificate
+                .intent
+                .replacement_capture
+                .as_deref()
+                .and_then(|capture| capture.stage.as_deref())
+                != Some(&certificate.seed)
         {
             return Err(BuildError::Invalid("bootstrap binding mismatch"));
         }
