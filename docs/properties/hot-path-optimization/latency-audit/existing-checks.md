@@ -69,18 +69,18 @@ duration measurements, or a kernel-route worker-panic test. The transform
 redaction evidence does not repair `kernel_routes::blocking`. The W2 note
 documents timer placement only and leaves W2 invalidated.
 
-[u-abort]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
-[u-spent-admission]: ../../../../crates/daemon/src/transform_unit/tests.rs#L11-L25
-[u-emergency]: ../../../../crates/daemon/src/transform_unit/tests.rs#L504-L570
-[u-host-close]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L367
-[u-host-cancel]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
-[u-panic]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L402
-[u-child]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L404-L439
-[u-failure]: ../../../../crates/daemon/src/transform_unit/tests.rs#L572-L662
-[u-inline]: ../../../../crates/daemon/src/lib.rs#L37901-L37914
-[u-busy]: ../../../../crates/daemon/src/lib.rs#L37916-L37972
-[u-foreign]: ../../../../crates/daemon/src/lib.rs#L37974-L38076
-[u-failed]: ../../../../crates/daemon/src/lib.rs#L38078-L38134
+[u-abort]: ../../../../crates/daemon/src/transform_unit/tests.rs#L144
+[u-spent-admission]: ../../../../crates/daemon/src/transform_unit/tests.rs#L12
+[u-emergency]: ../../../../crates/daemon/src/transform_unit/tests.rs#L505
+[u-host-close]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L365
+[u-host-cancel]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L370
+[u-panic]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L375
+[u-child]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L406
+[u-failure]: ../../../../crates/daemon/src/transform_unit/tests.rs#L600
+[u-inline]: ../../../../crates/daemon/src/lib.rs#L37902
+[u-busy]: ../../../../crates/daemon/src/lib.rs#L37917
+[u-foreign]: ../../../../crates/daemon/src/lib.rs#L37975
+[u-failed]: ../../../../crates/daemon/src/lib.rs#L38079
 
 ## Ingress admission and decode
 
@@ -118,9 +118,9 @@ documents timer placement only and leaves W2 invalidated.
 | [`transform_request_parses_full_flat_wire_envelope`][t-envelope] | `from_value::<TransformRequest>` accepts one full envelope. | unaudited |
 | [`first_hard_pass_meta_respects_the_store_durable_text_bound`][t-meta] | `from_value::<TransformRequest>` accepts a `kind`-only body under `bench-internals`; 1_000 messages commit and 1_400 fail with `InputLimit`. | unaudited |
 | [`readiness_permissions_catalog_and_real_unary_transform`][directhost] | One small `kind`-only transform is admitted through the real host. | unaudited |
-| [`typed_errors_and_stream_markers_have_no_prepared_body`][t-prep] | Error outcomes settle without an output reservation. | unaudited |
+| [`typed_errors_and_stream_markers_have_no_prepared_body`][t-prep] (historical) | Error outcomes settle without an output reservation. | unaudited |
 | [`capacity_separates_permanent_from_transient_exhaustion`][t-budget] | `try_charge` above capacity is permanent and consumes nothing. | unaudited |
-| [`try_charge_is_exact_and_all_or_none`][t-budget] | Over-capacity acquisition leaves the budget unchanged; `u32` overflow refuses. | unaudited |
+| [`try_charge_is_exact_and_all_or_none`][t-budget-charge] | Over-capacity acquisition leaves the budget unchanged; `u32` overflow refuses. | unaudited |
 | [`the_resident_cap_splits_into_three_non_overlapping_pools`][t-pools] | Ingress, egress, and scratch pools sum to the floor. | unaudited |
 
 None found: a ring-level test that drains the scratch pool and asserts
@@ -450,8 +450,8 @@ would change.
 
 | Check | Source condition or assertion | Status |
 | --- | --- | --- |
-| [`cap_error_reports_usage_and_cap_without_poisoning_reads`][t-cap-cas] | `Capacity` carries `usage` and `cap`; reads still work. | unaudited |
-| [`invalidated_retained_object_still_consumes_cap`][t-retained] | Invalidated bytes count against the cap. | unaudited |
+| [`cap_error_reports_usage_and_cap_and_counts_an_invalidated_retained_object`][t-cap-cas] | `Capacity` carries `usage` and `cap`; reads still work. | unaudited |
+| [`cap_error_reports_usage_and_cap_and_counts_an_invalidated_retained_object`][t-retained] | Invalidated bytes count against the cap. | unaudited |
 | [`reclaim_frees_capacity_for_next_write`][t-reclaim] | GC reclaim lowers usage so the next ingest fits. | unaudited |
 | [`payload_limit_is_inclusive_at_the_artifact_cap`][t-payload] | 64 MiB is accepted; 64 MiB + 1 is refused with no reservation or temp. | unaudited |
 | [`ingest_route_accepts_a_payload_at_the_artifact_cap`][t-route-cap] | The daemon route at and over `MAX_PAYLOAD_BYTES`. | unaudited |
@@ -483,7 +483,7 @@ delta in any fault table.
 | [`timings_are_present_and_old_responses_deserialize_without_them`][t-timings] | Absent `timings` deserializes to the default. | unaudited |
 | [`emits discriminating pass and stage logs from ordinary Rust transforms`][t244] | The plugin logs `rust module stages:` from response timings. | unaudited |
 | [`cached_counts_match_the_tokenizer`][t-tc-match] | The cached count equals the tokenizer count on hit and miss for four inputs. | unaudited |
-| [`digest_keyed_hits_skip_retokenization`][t-tc-hits] | The second lookup is a hit, not a miss. | unaudited |
+| [`digest_keyed_hits_skip_retokenization`][t-tc-hits] (historical) | The second lookup is a hit, not a miss. | unaudited |
 | [`insert_current_rotates_at_capacity`][t-tc-rotate] | `current` never exceeds `GENERATION_CAP`. | unaudited |
 | [`stats_partition_calls_into_hits_misses_and_bypassed`][t-tc-stats] | `calls == hits + misses + bypassed`. | unaudited |
 | [`kind_prefixed_and_raw_content_keys_do_not_alias`][t-tc-alias] | The tail-hygiene and raw key domains are disjoint. | unaudited |
@@ -549,63 +549,62 @@ Production guards go to
 categories above mean no check was identified in the stated inspected scope,
 not a claim that no related check exists anywhere in the repository.
 
-[testentry]: ../../../../crates/daemon/src/lib.rs#L12604-L12611
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
-[t-cap]: ../../../../crates/daemon/src/lib.rs#L19336-L19413
-[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L29097-L29152
-[t-shape]: ../../../../crates/daemon/src/lib.rs#L33116-L33133
-[t-shape2]: ../../../../crates/daemon/src/lib.rs#L33136-L33176
-[t-envelope]: ../../../../crates/daemon/src/transform.rs#L16470-L16497
-[t-probe]: ../../../../crates/daemon/src/lib.rs#L19416-L19474
-[t-witness]: ../../../../crates/daemon/src/lib.rs#L19479-L19509
-[t-token]: ../../../../crates/daemon/src/lib.rs#L19514-L19526
-[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L19753-L19884
-[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L19906-L19949
-[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103-L163
-[t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199
-[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L310-L333
-[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L284-L308
-[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L237-L261
-[t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L201-L222
-[t-observed]: ../../../../crates/daemon/src/lib.rs#L21875-L21903
-[bodyentry]: ../../../../crates/daemon/src/lib.rs#L12678-L12719
-[t-footprint]: ../../../../crates/daemon/src/lib.rs#L20047-L20082
-[t-meter]: ../../../../crates/daemon/src/lib.rs#L20088-L20121
-[t-small]: ../../../../crates/daemon/src/lib.rs#L20125-L20142
-[t-acquire]: ../../../../crates/daemon/src/lib.rs#L20147-L20175
-[t-count]: ../../../../crates/daemon/src/metered_decode.rs#L1063-L1091
-[t-footprint-oracle]: ../../../../crates/daemon/src/metered_decode.rs#L1093-L1114
-[t-floor]: ../../../../crates/daemon/src/metered_decode.rs#L1116-L1154
-[t-floor-corpus]: ../../../../crates/daemon/src/lib.rs#L20283-L20295
-[t-doomed]: ../../../../crates/daemon/src/lib.rs#L20243-L20278
-[t-drain]: ../../../../crates/daemon/src/lib.rs#L20181-L20238
-[t-effect]: ../../../../crates/daemon/src/lib.rs#L20300-L20348
-[t-lanes]: ../../../../crates/daemon/src/lib.rs#L19954-L20000
-[t-direct-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L558
-[t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
-[directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49-L128
-[t-prep]: ../../../../crates/daemon/tests/prepared_output.rs#L103-L115
-[t-budget]: ../../../../crates/host-runtime/src/wire.rs#L825-L865
-[t-pools]: ../../../../crates/host-runtime/src/config.rs#L480-L503
+[t-cap]: ../../../../crates/daemon/src/lib.rs#L19815
+[t-dispatch]: ../../../../crates/daemon/src/lib.rs#L29629
+[t-shape]: ../../../../crates/daemon/src/lib.rs#L35463
+[t-shape2]: ../../../../crates/daemon/src/lib.rs#L35483
+[t-envelope]: ../../../../crates/daemon/src/transform.rs#L16470
+[t-probe]: ../../../../crates/daemon/src/lib.rs#L19895
+[t-witness]: ../../../../crates/daemon/src/lib.rs#L19958
+[t-token]: ../../../../crates/daemon/src/lib.rs#L19993
+[t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L20232
+[t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L20386
+[t-peak]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L103
+[t-peak-escaped]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L179
+[t-probe-pool]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L311
+[t-prefix]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L285
+[t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L238
+[t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L202
+[t-observed]: ../../../../crates/daemon/src/lib.rs#L22395
+[t-footprint]: ../../../../crates/daemon/src/lib.rs#L20546
+[t-meter]: ../../../../crates/daemon/src/lib.rs#L20586
+[t-small]: ../../../../crates/daemon/src/lib.rs#L20623
+[t-acquire]: ../../../../crates/daemon/src/lib.rs#L20645
+[t-count]: ../../../../crates/daemon/src/metered_decode.rs#L1098
+[t-footprint-oracle]: ../../../../crates/daemon/src/metered_decode.rs#L1129
+[t-floor]: ../../../../crates/daemon/src/metered_decode.rs#L1151
+[t-floor-corpus]: ../../../../crates/daemon/src/lib.rs#L20788
+[t-doomed]: ../../../../crates/daemon/src/lib.rs#L20741
+[t-drain]: ../../../../crates/daemon/src/lib.rs#L20679
+[t-effect]: ../../../../crates/daemon/src/lib.rs#L20805
+[t-lanes]: ../../../../crates/daemon/src/lib.rs#L20447
+[t-direct-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437
+[t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21
+[directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49
+[t-prep]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/tests/prepared_output.rs#L104
+[t-budget]: ../../../../crates/host-runtime/src/wire.rs#L839
+[t-budget-charge]: ../../../../crates/host-runtime/src/wire.rs#L863
+[t-pools]: ../../../../crates/host-runtime/src/config.rs#L481
 
-[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2016-L2021
-[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031-L2046
-[t-inc]: ../../../../crates/daemon/src/wire.rs#L1520
-[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1817
-[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L38620-L38737
-[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1707
+[gate-prefix]: ../../../../crates/daemon/src/transform.rs#L2016
+[assert-prefix]: ../../../../crates/daemon/src/transform.rs#L2031
+[t-inc]: ../../../../crates/daemon/src/wire.rs#L1521
+[t-synthetic-status]: ../../../../crates/daemon/src/wire.rs#L1818
+[t-compaction-cache]: ../../../../crates/daemon/src/lib.rs#L39238
+[t-reattach]: ../../../../crates/daemon/src/wire.rs#L1708
 [shell-sharing]: ../../../../crates/daemon/src/wire.rs#L1749
 [shell-decode]: ../../../../crates/daemon/src/wire.rs#L1796
 [shell-charge]: ../../../../crates/daemon/src/wire.rs#L958
-[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L24297-L24338
-[t-astro]: ../../../../crates/daemon/src/lib.rs#L23014-L23075
-[t-pending]: ../../../../crates/daemon/src/transform.rs#L19406
+[t-projdiff]: ../../../../crates/daemon/src/lib.rs#L24826
+[t-astro]: ../../../../crates/daemon/src/lib.rs#L23542
+[t-pending]: ../../../../crates/daemon/src/transform.rs#L19407
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25212-L25321
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25739
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [synthetic-overlay-guard]: ../../../../crates/daemon/src/transform.rs#L27889
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L24929-L25209
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L25456
 [t-parked]: ../../../../crates/daemon/src/transform.rs#L13993
 [served-shells]: ../../../../crates/daemon/src/transform.rs#L13714
 [served-corpus]: ../../../../crates/daemon/src/transform.rs#L13760
@@ -614,24 +613,24 @@ not a claim that no related check exists anywhere in the repository.
 [served-key-order]: ../../../../crates/daemon/src/served_json.rs#L218
 [served-allocations]: ../../../../crates/daemon/tests/served_json_passthrough_allocations.rs#L68
 [served-source]: ../../../../crates/daemon/src/transform.rs#L13942
-[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13604
-[t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L32-L52
-[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L22334-L22650
-[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L22652-L22772
-[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L22774-L22845
-[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L23824-L23871
-[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L23754-L23822
-[t-dup]: ../../../../crates/daemon/src/lib.rs#L24340-L24384
+[t-fpids]: ../../../../crates/daemon/src/transform.rs#L13605
+[t-segments]: ../../../../crates/daemon/tests/prepared_output.rs#L33
+[t-native-inc]: ../../../../crates/daemon/src/lib.rs#L22862
+[t-native-ingress]: ../../../../crates/daemon/src/lib.rs#L23180
+[t-native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23302
+[t-native-reject]: ../../../../crates/daemon/src/lib.rs#L24353
+[t-vacuity]: ../../../../crates/daemon/src/lib.rs#L24282
+[t-dup]: ../../../../crates/daemon/src/lib.rs#L24870
 [t-sidecar]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
-[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22515
-[t-poison]: ../../../../crates/daemon/src/transform.rs#L22651
-[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22686
-[t-tag-sharing]: ../../../../crates/daemon/src/transform.rs#L22733
-[t-tag-rollback]: ../../../../crates/daemon/src/transform.rs#L22770
-[t-tag-charge]: ../../../../crates/daemon/src/transform.rs#L11902
-[t-tag-refusal]: ../../../../crates/daemon/src/transform.rs#L11865
-[t-tag-bootstrap]: ../../../../crates/daemon/src/transform.rs#L21716
-[t-tag-protection]: ../../../../crates/daemon/src/transform.rs#L23617
+[t-tagcold]: ../../../../crates/daemon/src/transform.rs#L22516
+[t-poison]: ../../../../crates/daemon/src/transform.rs#L22652
+[t-interleave]: ../../../../crates/daemon/src/transform.rs#L22687
+[t-tag-sharing]: ../../../../crates/daemon/src/transform.rs#L22734
+[t-tag-rollback]: ../../../../crates/daemon/src/transform.rs#L22771
+[t-tag-charge]: ../../../../crates/daemon/src/transform.rs#L11903
+[t-tag-refusal]: ../../../../crates/daemon/src/transform.rs#L11866
+[t-tag-bootstrap]: ../../../../crates/daemon/src/transform.rs#L21717
+[t-tag-protection]: ../../../../crates/daemon/src/transform.rs#L23618
 [t-hyg-cold]: ../../../../crates/daemon/src/tail_hygiene.rs#L1148
 [t-hyg-golden]: ../../../../crates/daemon/src/tail_hygiene.rs#L2290
 [t-hyg-iterator]: ../../../../crates/daemon/src/tail_hygiene.rs#L2386
@@ -645,41 +644,41 @@ not a claim that no related check exists anywhere in the repository.
 [t-hyg-poison]: ../../../../crates/daemon/src/tail_hygiene.rs#L1855
 [t-hyg-overlap]: ../../../../crates/daemon/src/tail_hygiene.rs#L1905
 [t-hyg-pool-bound]: ../../../../crates/daemon/src/tail_hygiene.rs#L1970
-[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L21592-L21731
-[t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22584
+[t-hyg-status]: ../../../../crates/daemon/src/lib.rs#L22110
+[t-hyg-production]: ../../../../crates/daemon/src/transform.rs#L22585
 [hyg-bench-input]: ../../../../crates/daemon/benches/hot_path.rs#L83-L97
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
 [hook]: ../../../../crates/daemon/src/lib.rs#L8884-L8897
-[no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5520-L5534
-[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38196-L38240
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37974-L38076
-[t-cas]: ../../../../crates/daemon/src/lib.rs#L24684-L24755
-[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18542
-[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18596
-[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18665
+[no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5724
+[t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38815
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37975
+[t-cas]: ../../../../crates/daemon/src/lib.rs#L25212
+[t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18554
+[t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18608
+[t-cas-empty]: ../../../../crates/memory-store/src/lib.rs#L18677
 [t-counter]: ../../../../crates/daemon/tests/boundary_counter_durability.rs#L12
-[t-success]: ../../../../crates/daemon/src/lib.rs#L25821-L25835
-[t-repeat]: ../../../../crates/daemon/src/lib.rs#L25837-L25863
-[t-frozen]: ../../../../crates/daemon/src/lib.rs#L25865-L25903
-[t-status]: ../../../../crates/daemon/src/lib.rs#L26119-L26164
-[t-divergence]: ../../../../crates/daemon/src/lib.rs#L34170-L34263
-[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19556
+[t-success]: ../../../../crates/daemon/src/lib.rs#L26354
+[t-repeat]: ../../../../crates/daemon/src/lib.rs#L26370
+[t-frozen]: ../../../../crates/daemon/src/lib.rs#L26398
+[t-status]: ../../../../crates/daemon/src/lib.rs#L26652
+[t-divergence]: ../../../../crates/daemon/src/lib.rs#L34703
+[t-upserts]: ../../../../crates/memory-store/src/lib.rs#L19568
 [t-sched]: ../../../../crates/daemon/src/transform.rs#L13549
-[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16547
-[t-restart]: ../../../../crates/memory-store/src/lib.rs#L21046
-[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20670
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38060-L38118
-[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21164
-[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22626
-[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16283
-[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L16200
-[t-container]: ../../../../crates/memory-store/src/lib.rs#L16300
-[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L16337
+[t-secret]: ../../../../crates/memory-store/src/lib.rs#L16559
+[t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
+[t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38679
+[t-publish-cas]: ../../../../crates/memory-store/src/lib.rs#L21176
+[t-truncate]: ../../../../crates/memory-store/src/lib.rs#L22638
+[t-dup-json]: ../../../../crates/memory-store/src/lib.rs#L16295
+[t-keydir]: ../../../../crates/memory-store/src/lib.rs#L16212
+[t-container]: ../../../../crates/memory-store/src/lib.rs#L16312
+[t-preserved]: ../../../../crates/memory-store/src/lib.rs#L16349
 [t-cache-redact]: ../../../../crates/memory-store/tests/production_redaction.rs#L728
-[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16480
-[t-sync]: ../../../../crates/storage/src/lib.rs#L4286-L4351
+[t-identity-tx]: ../../../../crates/memory-store/src/lib.rs#L16492
+[t-sync]: ../../../../crates/storage/src/lib.rs#L4513
 
 [tpaged]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L540
 [t244]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L249
@@ -707,88 +706,88 @@ not a claim that no related check exists anywhere in the repository.
 [log-hook-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L519
 [tevent]: ../../../../packages/opencode-plugin/src/hooks/context/event-handler.test.ts#L272
 
-[t-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L1052-L1074
-[t-batch]: ../../../../crates/shm-transport/src/backend/ring.rs#L4018-L4046
-[t-abort]: ../../../../crates/shm-transport/src/backend/ring.rs#L3667-L3685
-[t-reuse]: ../../../../crates/shm-transport/src/backend/ring.rs#L4075-L4091
-[t-subpage]: ../../../../crates/shm-transport/src/backend/ring.rs#L4093-L4118
-[t-trim-order]: ../../../../crates/shm-transport/src/backend/ring.rs#L3319-L3335
-[t-trim-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L4138-L4164
-[t-punchfail]: ../../../../crates/shm-transport/src/backend/ring.rs#L4245-L4261
-[t-fifo]: ../../../../crates/shm-transport/tests/ring.rs#L124-L174
-[t-sparse]: ../../../../crates/shm-transport/tests/ring.rs#L230-L273
+[t-limits]: ../../../../crates/host-runtime/src/ring_transport.rs#L1052
+[t-batch]: ../../../../crates/shm-transport/src/backend/ring.rs#L4019
+[t-abort]: ../../../../crates/shm-transport/src/backend/ring.rs#L3668
+[t-reuse]: ../../../../crates/shm-transport/src/backend/ring.rs#L4076
+[t-subpage]: ../../../../crates/shm-transport/src/backend/ring.rs#L4094
+[t-trim-order]: ../../../../crates/shm-transport/src/backend/ring.rs#L3320
+[t-trim-res]: ../../../../crates/shm-transport/src/backend/ring.rs#L4139
+[t-punchfail]: ../../../../crates/shm-transport/src/backend/ring.rs#L4246
+[t-fifo]: ../../../../crates/shm-transport/tests/ring.rs#L124
+[t-sparse]: ../../../../crates/shm-transport/tests/ring.rs#L231
 [t-syscall]: ../../../../crates/shm-transport/src/backend/ring.rs#L3086-L3087
-[t-roundtrip]: ../../../../crates/shm-transport/src/lease.rs#L475-L506
-[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L581-L619
+[t-roundtrip]: ../../../../crates/shm-transport/src/lease.rs#L475
+[t-concurrent]: ../../../../crates/shm-transport/src/lease.rs#L581
 [t-readbyte]: ../../../../crates/shm-transport/src/lease.rs#L543
 [ci-miri]: ../../../../.github/workflows/ci.yml#L597-L635
 [ci-valgrind]: ../../../../.github/workflows/ci.yml#L637-L669
-[t-deadline]: ../../../../crates/host-runtime/src/ring_transport.rs#L1849-L1879
-[t-commitq]: ../../../../crates/shm-transport/src/backend/ring.rs#L3198
-[t-parts]: ../../../../crates/host-runtime/src/handler.rs#L596-L626
-[t-parts2]: ../../../../crates/host-runtime/src/handler.rs#L628-L645
-[t-parts3]: ../../../../crates/host-runtime/src/handler.rs#L647-L673
+[t-deadline]: ../../../../crates/host-runtime/src/ring_transport.rs#L1850
+[t-commitq]: ../../../../crates/shm-transport/src/backend/ring.rs#L3199
+[t-parts]: ../../../../crates/host-runtime/src/handler.rs#L1006
+[t-parts2]: ../../../../crates/host-runtime/src/handler.rs#L1038
+[t-parts3]: ../../../../crates/host-runtime/src/handler.rs#L1057
 [bench]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L296-L306
 
-[t-cap-cas]: ../../../../crates/kernel/tests/kernel_cas.rs#L418-L433
-[t-retained]: ../../../../crates/kernel/tests/kernel_cas.rs#L436-L450
-[t-reclaim]: ../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
-[t-payload]: ../../../../crates/kernel/tests/kernel_cas.rs#L214-L234
-[t-route-cap]: ../../../../crates/daemon/tests/kernel_routes.rs#L3600-L3629
-[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L593-L634
-[t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L556-L591
-[t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350-L382
-[t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384-L389
-[t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426-L494
-[t-gcfaults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L497-L582
-[t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L902-L969
-[t-gone]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L838
+[t-cap-cas]: ../../../../crates/kernel/tests/kernel_cas.rs#L355
+[t-retained]: ../../../../crates/kernel/tests/kernel_cas.rs#L355
+[t-reclaim]: ../../../../crates/kernel/tests/kernel_gc.rs#L536
+[t-payload]: ../../../../crates/kernel/tests/kernel_cas.rs#L214
+[t-route-cap]: ../../../../crates/daemon/tests/kernel_routes.rs#L3601
+[t-orphan]: ../../../../crates/kernel/tests/kernel_gc.rs#L594
+[t-cancel]: ../../../../crates/kernel/tests/kernel_gc.rs#L557
+[t-oracle]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L350
+[t-recover-twice]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L384
+[t-faults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L426
+[t-gcfaults]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L497
+[t-crash]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L903
+[t-gone]: ../../../../crates/kernel/tests/cas_fault_injection.rs#L839
 [ci-bench]: ../../../../.github/workflows/ci.yml#L514-L518
 [evidence]: ../../../../crates/host-runtime/benches/support/evidence.rs#L1-L8
 [t-line]: ../../../../crates/daemon/src/transform.rs#L12373
 [t-timings]: ../../../../crates/daemon/src/transform.rs#L12323
 [t-tc-match]: ../../../../crates/daemon/src/token_cache.rs#L188
-[t-tc-hits]: ../../../../crates/daemon/src/token_cache.rs#L209
-[t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L208
-[t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L224
-[t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L241
+[t-tc-hits]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/token_cache.rs#L209
+[t-tc-rotate]: ../../../../crates/daemon/src/token_cache.rs#L209
+[t-tc-stats]: ../../../../crates/daemon/src/token_cache.rs#L225
+[t-tc-alias]: ../../../../crates/daemon/src/token_cache.rs#L242
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24332
-[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24583
+[selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24584
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24387
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24521
 [tag-accounting-check]: ../../../../crates/daemon/src/transform.rs#L21486
 [serialization-gate-check]: ../../../../crates/daemon/src/transform.rs#L28295
-[t-preselect]: ../../../../crates/secret-scanner/src/rules.rs#L685-L722
+[t-preselect]: ../../../../crates/secret-scanner/src/rules.rs#L685
 [t-canaries]: ../../../../crates/secret-scanner/tests/rule_canaries.rs#L4
-[t-qual]: ../../../../crates/secret-scanner/tests/qualification.rs#L49-L63
-[t-pinned]: ../../../../crates/secret-scanner/src/evaluator.rs#L1660-L1683
-[t-windows]: ../../../../crates/context-core/src/redaction.rs#L827-L856
+[t-qual]: ../../../../crates/secret-scanner/tests/qualification.rs#L50
+[t-pinned]: ../../../../crates/secret-scanner/src/evaluator.rs#L1660
+[t-windows]: ../../../../crates/context-core/src/redaction.rs#L827
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
 [t-chunk-fp]: ../../../../crates/daemon/src/historian.rs#L3925
-[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L17948-L18275
-[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L24928-L25209
-[diff-prod]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L102-L112
-[diff-exact]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L117-L128
-[diff-small]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L133-L140
-[t-golden]: ../../../../crates/daemon/src/historian_chunk.rs#L1773-L1859
-[t-marker]: ../../../../crates/daemon/src/historian_chunk.rs#L1744-L1757
-[t-vixie]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1584
-[t-extreme]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1570-L1582
+[t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L18428
+[t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L25456
+[diff-prod]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L103
+[diff-exact]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L118
+[diff-small]: ../../../../crates/daemon/tests/historian_truncate_differential.rs#L134
+[t-golden]: ../../../../crates/daemon/src/historian_chunk.rs#L1773
+[t-marker]: ../../../../crates/daemon/src/historian_chunk.rs#L1744
+[t-vixie]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1585
+[t-extreme]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1571
 [t-golden-cron]: ../../../../crates/daemon/src/smart_note_evaluation.rs#L1126
-[t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L680
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2117-L2155
+[t-sched-cron]: ../../../../crates/daemon/src/dreamer_scheduler.rs#L721
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2118
 [t-raise]: ../../../../crates/daemon/src/config.rs#L1314
-[t-gate]: ../../../../crates/daemon/src/config.rs#L1649
-[t-hostile]: ../../../../crates/daemon/src/config.rs#L1715
+[t-gate]: ../../../../crates/daemon/src/config.rs#L1650
+[t-hostile]: ../../../../crates/daemon/src/config.rs#L1718
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
-[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643-L673
-[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15763-L15982
-[t-counters]: ../../../../crates/memory-store/src/lib.rs#L15989-L16017
-[t-load-count]: ../../../../crates/daemon/src/lib.rs#L25952-L26004
-[t-timing]: ../../../../crates/daemon/src/lib.rs#L26008-L26024
-[t-phase]: ../../../../crates/daemon/src/lib.rs#L26028-L26041
-[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L26096-L26117
+[t-panic-child]: ../../../../crates/host-runtime/tests/dispatch.rs#L643
+[t-scalar]: ../../../../crates/memory-store/src/lib.rs#L15775
+[t-counters]: ../../../../crates/memory-store/src/lib.rs#L16001
+[t-load-count]: ../../../../crates/daemon/src/lib.rs#L26486
+[t-timing]: ../../../../crates/daemon/src/lib.rs#L26544
+[t-phase]: ../../../../crates/daemon/src/lib.rs#L26562
+[t-phase-reread]: ../../../../crates/daemon/src/lib.rs#L26631
 
 The five checks above were added with the single-load pass (implementation
 base `96709d0ef54bcfad2327878ab96e118fb8ba4969` plus the preceding storage
@@ -797,22 +796,22 @@ units); their links are to the live tree.
 The three preparation checks were added with the single-pass `meta`
 preparation; their links are to the live tree.
 
-[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L16108-L16156
-[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16161-L16195
-[t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
-[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16659-L16816
-[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16821-L16850
-[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16877-L16919
-[t-first-receive]: ../../../../crates/memory-store/src/lib.rs#L16855-L16872
-[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16986-L17085
-[t-ring]: ../../../../crates/memory-store/src/lib.rs#L17471-L17534
-[t-root]: ../../../../crates/memory-store/src/lib.rs#L17090-L17135
-[t-parse-first]: ../../../../crates/memory-store/src/lib.rs#L17436-L17465
-[t-fingerprint]: ../../../../crates/memory-store/src/lib.rs#L17140-L17187
-[t-fingerprint-evict]: ../../../../crates/memory-store/src/lib.rs#L17192-L17241
-[t-fingerprint-bound]: ../../../../crates/memory-store/src/lib.rs#L17246-L17306
-[t-two-writers]: ../../../../crates/memory-store/src/lib.rs#L17311-L17360
-[t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17365-L17432
-[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24780-L24803
-[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20883-L21043
-[t-outcome]: ../../../../crates/daemon/src/lib.rs#L26050-L26094
+[t-single-pass]: ../../../../crates/memory-store/src/lib.rs#L16120
+[t-refusal-order]: ../../../../crates/memory-store/src/lib.rs#L16173
+[t-meta-bytes]: ../../../../crates/memory-store/tests/production_redaction.rs#L611
+[t-retire]: ../../../../crates/memory-store/src/lib.rs#L16671
+[t-seq-conflict]: ../../../../crates/memory-store/src/lib.rs#L16833
+[t-receive]: ../../../../crates/memory-store/src/lib.rs#L16889
+[t-first-receive]: ../../../../crates/memory-store/src/lib.rs#L16867
+[t-retained-pass]: ../../../../crates/memory-store/src/lib.rs#L16998
+[t-ring]: ../../../../crates/memory-store/src/lib.rs#L17483
+[t-root]: ../../../../crates/memory-store/src/lib.rs#L17102
+[t-parse-first]: ../../../../crates/memory-store/src/lib.rs#L17448
+[t-fingerprint]: ../../../../crates/memory-store/src/lib.rs#L17152
+[t-fingerprint-evict]: ../../../../crates/memory-store/src/lib.rs#L17204
+[t-fingerprint-bound]: ../../../../crates/memory-store/src/lib.rs#L17258
+[t-two-writers]: ../../../../crates/memory-store/src/lib.rs#L17323
+[t-key-reuse]: ../../../../crates/memory-store/src/lib.rs#L17377
+[t-reassign]: ../../../../crates/memory-store/src/lib.rs#L24792
+[t-side-channel-crash]: ../../../../crates/memory-store/src/lib.rs#L20895
+[t-outcome]: ../../../../crates/daemon/src/lib.rs#L26582

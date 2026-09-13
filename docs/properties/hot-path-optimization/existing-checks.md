@@ -205,7 +205,7 @@ already-admitted body. No new negative-control run, benchmark, or all-runtime
 coverage is claimed for this rebase.
 
 [u-meter-upstream]: ../../../crates/daemon/src/metered_decode.rs#L1097-L1186
-[u-spent-admission]: ../../../crates/daemon/src/transform_unit/tests.rs#L11-L25
+[u-spent-admission]: ../../../crates/daemon/src/transform_unit/tests.rs#L12
 
 ### Transform-unit execution receipt, 2026-09-13
 
@@ -231,8 +231,8 @@ receipt above records which checks have run again.
 | `bun run check:repo` | Exited 0 with Node 22.23.2 and Bun 1.3.14. Typecheck, lint, test, and build passed. Five unchanged capability-gated tests were skipped: three CLI and two e2e tests. This does not establish every runtime variant. |
 
 The controller also reports an executed W8 negative control: replacing
-`forget_guidance_pin_on_commit`'s `.remove` with `.get` made the aborted-waiter
-test fail at `tests.rs:189`, where it requires the guidance pin to be absent.
+`forget_guidance_pin_on_commit`'s `.remove` with `.get` made the
+[aborted-waiter regression][u-abort] fail at its guidance-pin absence assertion.
 The removal was restored before the subsequent workspace runs. Those runs
 exercise the restored implementation but still fail on the two baseline
 deadlines; the negative control does not establish every derived-cache oracle.
@@ -243,19 +243,19 @@ approves late cancellation after durable commit and skipped later Emergency95
 units with recomputed or superseded derived state. Neither decision asserts
 that every duration, fault, or recovery path has been tested.
 
-[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
-[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L248-L334
-[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L336-L380
-[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L382-L480
-[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L482-L502
-[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L504-L570
-[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L367
-[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
-[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L402
-[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L404-L439
-[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L572-L662
-[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1188-L1229
-[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1231-L1310
+[u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L144
+[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L249
+[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L337
+[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L383
+[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L483
+[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L505
+[u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L365
+[u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L370
+[u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L375
+[u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L406
+[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L600
+[u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1189
+[u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1232
 
 ## Guarded store
 
@@ -490,8 +490,8 @@ that no related check exists anywhere in the repository.
 [shape-test]: ../../../crates/daemon/src/decay_render.rs#L644
 [tight-test]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/decay_render.rs#L765-L800
 [cache-test]: ../../../crates/daemon/src/token_cache.rs#L188-L205
-[preparation]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
-[audit-tx]: ../../../crates/memory-store/src/lib.rs#L2330-L2356
+[preparation]: ../../../crates/memory-store/src/lib.rs#L2339-L2377
+[audit-tx]: ../../../crates/memory-store/src/lib.rs#L2380-L2407
 [receipt-test]: ../../../crates/memory-store/src/lib.rs#L18826-L18867
 [bound-test]: ../../../crates/memory-store/src/lib.rs#L23217-L23248
 [scan-rollback-test]: ../../../crates/memory-store/src/lib.rs#L23044-L23129
@@ -503,33 +503,33 @@ that no related check exists anywhere in the repository.
 [project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1847
 [historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1919
 [object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2060
-[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2122-L2152
+[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2031
 [render-category]: ../../../crates/daemon/src/memory_render.rs#L257
 [render-markup]: ../../../crates/daemon/src/memory_render.rs#L284
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L11920-L11938
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L16302-L16315
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
-[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1078-L1134
+[route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1079
 [stream-cancel]: ../../../crates/host-runtime/tests/dispatch.rs#L503
 [handler-panic]: ../../../crates/host-runtime/tests/dispatch.rs#L551
-[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725-L776
-[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781-L825
-[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830-L866
-[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L179-L205
-[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L149-L177
-[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L872-L906
-[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610-L612
+[t-cancel-work]: ../../../crates/host-runtime/tests/dispatch.rs#L725
+[t-close-work]: ../../../crates/host-runtime/tests/dispatch.rs#L781
+[t-detached-work]: ../../../crates/host-runtime/tests/dispatch.rs#L830
+[t-fatal-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L180
+[t-late-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L150
+[t-panic-work]: ../../../crates/host-runtime/tests/dispatch.rs#L872
+[t-stderr-work]: ../../../crates/host-runtime/tests/dispatch.rs#L610
 [output-reservation]: ../../../crates/host-runtime/tests/dispatch.rs#L956
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1032
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1216
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1313
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19336
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20048
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20048
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20048
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19815
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20547-L20553
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20554-L20563
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20564-L20575
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -567,7 +567,7 @@ that no related check exists anywhere in the repository.
 [cache-capacity]: ../../../crates/daemon/src/token_cache.rs#L233
 [cache-stats]: ../../../crates/daemon/src/token_cache.rs#L249
 [cache-domains]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/token_cache.rs#L266
-[audit-complete]: ../../../crates/memory-store/tests/production_redaction.rs#L68-L184
+[audit-complete]: ../../../crates/memory-store/tests/production_redaction.rs#L68
 [audit-expiry]: ../../../crates/memory-store/tests/production_redaction.rs#L187
 [audit-last-owner]: ../../../crates/memory-store/tests/production_redaction.rs#L248
 [audit-lineage]: ../../../crates/memory-store/tests/production_redaction.rs#L327

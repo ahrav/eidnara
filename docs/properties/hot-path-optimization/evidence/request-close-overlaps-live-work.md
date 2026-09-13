@@ -112,7 +112,7 @@ full-cap paged request on slow storage are not equivalent tested schedules.
 The [execution receipt][receipt] reports the focused run, not a full-gate pass.
 
 [e1]: route-cleanup-waits-for-request-owned-physical-work.md#implementation-evidence-2026-09-13
-[close-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L367
-[cancel-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
+[close-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L365
+[cancel-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L370
 [raw]: route-cleanup-waits-for-request-owned-physical-work.md#request-work-join-evidence
 [receipt]: ../existing-checks.md#transform-unit-execution-receipt-2026-09-13

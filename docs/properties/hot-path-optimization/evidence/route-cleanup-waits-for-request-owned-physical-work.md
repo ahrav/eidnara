@@ -187,17 +187,17 @@ Tokio time and an abort-drop signal; they do not claim to execute real blocking
 threads. Separate integration tests exercise held physical work and instance
 exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L593-L657
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L606
 [work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L458-L462
 [work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L660-L673
 [failed]: ../../../../crates/host-runtime/src/handler.rs#L467-L475
 [cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L502-L537
-[redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52-L55
-[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915
+[redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52
+[ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L784
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
 [close-gate-live]: ../../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
 [close-fallback]: ../../../../crates/host-runtime/src/dispatch.rs#L1290-L1313
-[daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468
+[daemon-blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [ingest-detached]: ../../../../crates/daemon/src/kernel_routes/ingest.rs#L793-L797
 [t-hold]: ../../../../crates/host-runtime/tests/support/mod.rs#L617-L665
 [t-cancel]: ../../../../crates/host-runtime/tests/dispatch.rs#L725-L776

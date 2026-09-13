@@ -230,11 +230,11 @@ that path remains a human question. The transform child is not a kernel-route
 panic test, a destructor-panic matrix, or a proof covering arbitrary panics.
 
 [runner-live]: ../../../../../crates/daemon/src/transform_unit.rs#L23-L49
-[blocking-live]: ../../../../../crates/host-runtime/src/handler.rs#L606-L673
-[mapping]: ../../../../../crates/daemon/src/lib.rs#L16346-L16355
-[panic-test]: ../../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
-[failure-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L572-L662
-[kernel-live]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L460-L468
+[blocking-live]: ../../../../../crates/host-runtime/src/handler.rs#L606
+[mapping]: ../../../../../crates/daemon/src/lib.rs#L16350
+[panic-test]: ../../../../../crates/daemon/src/transform_unit/host_tests.rs#L375
+[failure-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L600
+[kernel-live]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13
 
 ## Upstream redaction evidence, e451a2b4

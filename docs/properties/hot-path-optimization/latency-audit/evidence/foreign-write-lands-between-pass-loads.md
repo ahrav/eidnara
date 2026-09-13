@@ -173,7 +173,7 @@ completion, the foreign publish, and inline failure. They do not establish
 every possible publication schedule or a global freshness theorem. The
 [execution receipt][receipt] reports four passes, separately from full gates.
 
-[first-live]: ../../../../../crates/daemon/src/lib.rs#L8846-L8903
+[first-live]: ../../../../../crates/daemon/src/lib.rs#L8847
 [rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8806-L8844
 [settle-live]: ../../../../../crates/daemon/src/lib.rs#L8934-L8952
 [emergency-tests]: ../../../../../crates/daemon/src/lib.rs#L37901-L38134

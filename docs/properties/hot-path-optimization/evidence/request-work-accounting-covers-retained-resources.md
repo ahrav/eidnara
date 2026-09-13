@@ -178,9 +178,9 @@ tests, not actual runtime-stop or route-closing races.
 [tests]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L570
 [meter-tests]: ../../../../crates/daemon/src/metered_decode.rs#L1188-L1310
 [host-tests]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L439
-[ingress-observer]: ../../../../crates/host-runtime/src/handler.rs#L299-L303
-[pool-observer]: ../../../../crates/host-runtime/src/wire.rs#L467-L478
-[failed-unit-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L572-L662
+[ingress-observer]: ../../../../crates/host-runtime/src/handler.rs#L301
+[pool-observer]: ../../../../crates/host-runtime/src/wire.rs#L468
+[failed-unit-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L600
 
 ## Upstream accounting correction, e451a2b4
 
@@ -213,6 +213,6 @@ charges restores the exact pool capacity. The [rebased receipt][rebased-receipt]
 reports five meter passes, eleven blocking passes, and a final Bun pass. The
 earlier full workspace still has three failures; no workspace pass is claimed.
 
-[body-admission]: ../../../../crates/daemon/src/lib.rs#L16297-L16315
-[direct-gate]: ../../../../crates/daemon/src/lib.rs#L15972-L15996
+[body-admission]: ../../../../crates/daemon/src/lib.rs#L16302
+[direct-gate]: ../../../../crates/daemon/src/lib.rs#L15976
 [rebased-receipt]: ../existing-checks.md#rebased-working-tree-verification-2026-09-13

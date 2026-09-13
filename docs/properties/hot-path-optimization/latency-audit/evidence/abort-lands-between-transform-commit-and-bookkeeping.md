@@ -153,7 +153,7 @@ focused results, workspace exit 101 from the two known baseline deadline
 failures, their passing isolated reruns, and the passing Bun repository gate;
 checks remain unaudited.
 
-[first-live]: ../../../../../crates/daemon/src/lib.rs#L8856-L8883
-[abort-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
+[first-live]: ../../../../../crates/daemon/src/lib.rs#L8847
+[abort-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L144
 [host-tests]: ../../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
 [receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13

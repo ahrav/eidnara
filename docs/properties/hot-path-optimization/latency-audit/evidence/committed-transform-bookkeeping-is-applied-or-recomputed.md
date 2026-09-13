@@ -232,8 +232,8 @@ slow-disk durations remain unmeasured.
 [rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8806-L8837
 [emergency-live]: ../../../../../crates/daemon/src/lib.rs#L8494-L8609
 [settle-live]: ../../../../../crates/daemon/src/lib.rs#L8925-L9068
-[abort-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
-[emergency-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L504-L570
+[abort-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L144
+[emergency-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L505
 [admission-live]: ../../../../../crates/daemon/src/lib.rs#L8357-L8418
 [page-accept]: ../../../../../crates/daemon/src/lib.rs#L9941-L10006
 [negative-control]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L205-L212
