@@ -244,9 +244,21 @@ impl ServedMessage {
         &self.canonical_bytes
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn canonical_bytes_for_test(&self) -> &[u8] {
+        self.canonical_bytes()
+    }
+
     fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+}
+
+/// Out-of-crate allocation-observer tests need this constructor because the daemon
+/// crate forbids unsafe code.
+#[cfg(feature = "test-support")]
+pub fn served_message_for_test(message: WireMessage) -> ServedMessage {
+    ServedMessage::from_message(message)
 }
 
 fn served_message_retained_bytes(

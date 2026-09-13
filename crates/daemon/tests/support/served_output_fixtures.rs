@@ -1,0 +1,191 @@
+use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
+
+const KEYS_PER_EXTRA_OBJECT: usize = 8;
+
+/// The fixture orders keys by decoded strings, not JSON escape sequences.
+const ESCAPED_KEYS: &[&str] = &[
+    r#""\u0001""#,
+    r#""\n""#,
+    r#"" ""#,
+    r#""!""#,
+    r#""a""#,
+    r#""a b""#,
+    r#""a\"""#,
+    r#""é""#,
+    r#""😀""#,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnProvenance {
+    /// One `alloc` of exactly the output length that never grew: the reorder buffer.
+    FreshExactSizeAllocation,
+    /// The serialization buffer's own alloc/realloc chain.
+    SerializationGrowthChain,
+}
+
+/// Retained-original shells replay parsed `Value` maps, whose keys are already in
+/// decoded order. Typed shells serialize fields in declaration order and need reordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Population {
+    RetainedAscii { blocks: usize },
+    RetainedEscaped { blocks: usize },
+    RetainedLargePayload { blocks: usize, payload_bytes: usize },
+    TypedShell { blocks: usize },
+    OneEditedBlock { blocks: usize },
+}
+
+pub fn populations() -> impl Iterator<Item = Population> {
+    [1usize, 65].into_iter().flat_map(|blocks| {
+        [
+            Population::RetainedAscii { blocks },
+            Population::RetainedEscaped { blocks },
+            Population::RetainedLargePayload {
+                blocks,
+                payload_bytes: 64 * 1024,
+            },
+            Population::TypedShell { blocks },
+            Population::OneEditedBlock { blocks },
+        ]
+    })
+}
+
+impl Population {
+    pub fn label(&self) -> String {
+        match self {
+            Self::RetainedAscii { blocks } => format!("retained_ascii/{blocks}blocks"),
+            Self::RetainedEscaped { blocks } => format!("retained_escaped/{blocks}blocks"),
+            Self::RetainedLargePayload {
+                blocks,
+                payload_bytes,
+            } => format!("retained_large_payload/{blocks}blocks_{payload_bytes}B"),
+            Self::TypedShell { blocks } => format!("typed_shell/{blocks}blocks"),
+            Self::OneEditedBlock { blocks } => format!("one_edited_block/{blocks}blocks"),
+        }
+    }
+
+    pub fn expects_canonical_miss(&self) -> bool {
+        matches!(
+            self,
+            Self::RetainedAscii { .. }
+                | Self::RetainedEscaped { .. }
+                | Self::RetainedLargePayload { .. }
+        )
+    }
+
+    pub fn expected_return_provenance(&self) -> ReturnProvenance {
+        ReturnProvenance::FreshExactSizeAllocation
+    }
+
+    pub fn observes_full_constructor(&self) -> bool {
+        true
+    }
+
+    pub fn build(&self) -> WireMessage {
+        match *self {
+            Self::RetainedAscii { blocks } => retained_ascii_message(blocks),
+            Self::RetainedEscaped { blocks } => retained_escaped_message(blocks),
+            Self::RetainedLargePayload {
+                blocks,
+                payload_bytes,
+            } => retained_large_payload_message(blocks, payload_bytes),
+            Self::TypedShell { blocks } => typed_shell_message(blocks),
+            Self::OneEditedBlock { blocks } => one_edited_block_message(blocks),
+        }
+    }
+}
+
+fn retained(body: &str) -> WireMessage {
+    let message: WireMessage = serde_json::from_str(body).expect("fixture body parses");
+    assert!(
+        message.original().is_some(),
+        "retained fixtures must carry their original JSON"
+    );
+    message
+}
+
+fn passthrough_body(block_count: usize, mut extra_object: impl FnMut(&mut String)) -> String {
+    let mut body = String::from(r#"{"role":"user","content":["#);
+    for block in 0..block_count {
+        if block != 0 {
+            body.push(',');
+        }
+        body.push_str(r#"{"extra":{"#);
+        extra_object(&mut body);
+        body.push_str(r#"},"kind":{"text":"t","type":"text"}}"#);
+    }
+    body.push_str("]}");
+    body
+}
+
+/// Every key is unescaped ASCII, so no object needs the escape-aware decode path.
+pub fn retained_ascii_message(block_count: usize) -> WireMessage {
+    retained(&passthrough_body(block_count, |body| {
+        for key in 0..KEYS_PER_EXTRA_OBJECT {
+            if key != 0 {
+                body.push(',');
+            }
+            body.push_str(&format!(r#""k{key:02}":{key}"#));
+        }
+    }))
+}
+
+pub fn retained_escaped_message(block_count: usize) -> WireMessage {
+    retained(&passthrough_body(block_count, |body| {
+        for (index, key) in ESCAPED_KEYS.iter().enumerate() {
+            if index != 0 {
+                body.push(',');
+            }
+            body.push_str(key);
+            body.push(':');
+            body.push_str(&index.to_string());
+        }
+    }))
+}
+
+pub fn retained_large_payload_message(block_count: usize, payload_bytes: usize) -> WireMessage {
+    let payload = "x".repeat(payload_bytes);
+    let mut body = String::from(r#"{"role":"user","content":["#);
+    for block in 0..block_count {
+        if block != 0 {
+            body.push(',');
+        }
+        body.push_str(r#"{"kind":{"text":""#);
+        body.push_str(&payload);
+        body.push_str(r#"","type":"text"}}"#);
+    }
+    body.push_str("]}");
+    retained(&body)
+}
+
+pub fn typed_shell_message(block_count: usize) -> WireMessage {
+    let blocks = (0..block_count)
+        .map(|index| {
+            WireBlock::bare(BlockKind::Text {
+                text: format!("typed block {index}"),
+            })
+        })
+        .collect();
+    let message = WireMessage::from_parts(
+        "user",
+        blocks,
+        None,
+        ProviderExtras::new(),
+        HarnessMeta::default(),
+    );
+    assert!(message.original().is_none());
+    message
+}
+
+pub fn one_edited_block_message(block_count: usize) -> WireMessage {
+    let mut message = retained_ascii_message(block_count);
+    *message.content_mut()[0].kind_mut() = BlockKind::Text {
+        text: "edited".to_string(),
+    };
+    assert!(message.original().is_none());
+    assert!(message.content()[0].original().is_none());
+    assert!(
+        block_count == 1 || message.content()[1].original().is_some(),
+        "untouched sibling blocks keep their originals"
+    );
+    message
+}

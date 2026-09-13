@@ -14,6 +14,11 @@ name = "direct_host_fixture"
 path = "examples/direct_host_fixture.rs"
 required-features = ["direct-host-fixture"]
 
+[[example]]
+name = "canonical_output_evidence"
+path = "examples/canonical_output_evidence.rs"
+required-features = ["bench-internals", "test-support"]
+
 [[bin]]
 name = "eidnara-host"
 path = "src/bin/eidnara-host.rs"

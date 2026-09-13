@@ -11,20 +11,21 @@
 
 #[path = "support/corpus.rs"]
 mod corpus;
+#[path = "support/transform_fixture.rs"]
+mod transform_fixture;
 
 use std::collections::HashSet;
 use std::time::Duration;
 
 use cache_stability::CoreState;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use daemon::bench_internals::{self, CacheTtlProvenance, transform_cached};
-use daemon::canonical_memory::{CanonicalMemory, CanonicalMemoryRead, CanonicalMemorySnapshot};
-use daemon::transform::{ProducerContext, TransformRequest};
+use daemon::bench_internals::{self, transform_cached};
+use daemon::canonical_memory::CanonicalMemory;
 use daemon::wire::{IngressMessage, IngressMessages, project_messages};
-use memory_store::MemoryStore;
 use std::hint::black_box;
 
 use corpus::{CORPUS_SEED, ContentClass, Rng};
+use transform_fixture::{fresh_store, producer_ctx, request, steady_state};
 
 const MESSAGE_COUNTS: &[usize] = &[100, 1_400, 2_500];
 /// Counts whose first HARD pass the store commits. The pass's `meta` field grows
@@ -230,55 +231,6 @@ fn bench_m0_trim_memories(c: &mut Criterion) {
     group.finish();
 }
 
-fn request(session: &str, messages: &[IngressMessage], caveman: bool) -> TransformRequest {
-    // The serde path is the production wire: absent fields take the same
-    // defaults every harness sender gets.
-    serde_json::from_value(serde_json::json!({
-        "kind": "transform",
-        "v": 2,
-        "serializer_profile": "owned-llmrunner",
-        "session_id": session,
-        "render_config": "bench-config",
-        "caveman_enabled": caveman,
-        "messages": messages,
-    }))
-    .expect("bench transform request")
-}
-
-fn producer_ctx(dir: &str) -> ProducerContext<'_> {
-    ProducerContext {
-        project_memory: Some(CanonicalMemoryRead::Available(
-            CanonicalMemorySnapshot::new(0, false, Vec::new()),
-        )),
-        project_path: "git:bench",
-        note_project_path: "git:bench",
-        project_directory: dir,
-        history_budget_tokens: 60_000.0,
-        user_profile_budget_tokens: 4_000.0,
-        memory_enabled: true,
-        inject_docs: true,
-        temporal_awareness: true,
-        now_ms: 1_700_000_000_000,
-        execute_threshold_percentage: 65.0,
-        compaction_enabled: true,
-        smart_drops: false,
-        cache_ttl: "5m".to_string(),
-        cache_ttl_provenance: CacheTtlProvenance::Default,
-        model_key: None,
-        observed_last_response_at_ms: None,
-        guidance_date: Some("Today's date: Thu Jan 01 2026".to_string()),
-        historian_active: false,
-        wrapup_active: false,
-    }
-}
-
-fn fresh_store() -> (tempfile::TempDir, MemoryStore) {
-    let dir = tempfile::tempdir().expect("bench store dir");
-    let descriptor = daemon::store_descriptor_in(dir.path());
-    let store = MemoryStore::open(&descriptor).expect("bench store");
-    (dir, store)
-}
-
 fn bench_e2e_first_hard(c: &mut Criterion) {
     warm_tokenizer();
     let mut group = c.benchmark_group("e2e/first_hard");
@@ -312,22 +264,6 @@ fn bench_e2e_first_hard(c: &mut Criterion) {
         );
     }
     group.finish();
-}
-
-/// One materializing pass through the production entry, then the measured loop
-/// repeats the same request: the repeated pass is a stable (non-committing) pass.
-/// The primed output cache is discarded, so each measured cell chooses whether it
-/// runs warm-cache (`steady_output_cache`) or cold-cache (`steady`, `steady_caveman`).
-fn steady_state(
-    messages: &[IngressMessage],
-    caveman: bool,
-) -> (tempfile::TempDir, MemoryStore, TransformRequest) {
-    let (dir, store) = fresh_store();
-    let req = request("bench-steady", messages, caveman);
-    let ctx = producer_ctx(dir.path().to_str().expect("utf8 dir"));
-    let cache = bench_internals::OutputCache::default();
-    transform_cached(&store, &req, &ctx, &cache).expect("materializing pass");
-    (dir, store, req)
 }
 
 fn bench_e2e_steady(c: &mut Criterion) {
