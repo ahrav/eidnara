@@ -240,6 +240,89 @@ async fn default_disable_uses_certified_retirement_then_preserves_the_selected_p
     }
 }
 
+/// A manifest too small for the retirement obligation transaction refuses disabled cleanup before any retirement write, and the selected projection and consumer checkpoint stay unchanged.
+#[tokio::test]
+async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
+    use daemon::projection_gates::Denial;
+    use daemon::projection_lifecycle::MAX_RECORD_BYTES;
+    for (name, max) in [
+        ("local_transaction_rows", 5_000),
+        ("local_transaction_bytes", 4 << 20),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut case = RetirementCase::new(root.path());
+        let mut evaluator = super::disable::cleanup_evaluator(root.path());
+        evaluator.manifest.limits.insert(name.to_owned(), max);
+        case.gate.install(evaluator);
+        let mut config = spec(root.path());
+        config.retirement.max_obligations = NonZeroUsize::new(10_000).unwrap();
+        config.retirement.max_obligation_bytes = NonZeroU64::new(8 << 20).unwrap();
+        let expected = match name {
+            "local_transaction_rows" => 10_001,
+            _ => (8 << 20) + MAX_RECORD_BYTES,
+        };
+        let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
+        let selected_path = case
+            .selection
+            .pin(
+                &case.corpus.kernel,
+                &case.gate,
+                &budget(Duration::from_secs(10)),
+            )
+            .unwrap()
+            .projection()
+            .path()
+            .to_owned();
+        drop(case.old.take());
+        case.selection
+            .begin_disable(&case.gate, &mut |_| {})
+            .unwrap();
+        let mut ledger = Vec::new();
+        let result = case
+            .selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &config,
+                &budget(Duration::from_secs(20)),
+                &mut |event| ledger.push(event),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Denied(Denial::LimitExceeded {
+                    limit: ref denied,
+                    observed,
+                    max: cap,
+                })) if denied == name && observed == expected && cap == max
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(ledger.iter().all(|event| !matches!(
+            event,
+            daemon::search_replacement::selection::disable::DisableEvent::Retirement(_)
+        )));
+        assert!(old_path.exists());
+        let raw = Connection::open(selected_path).unwrap();
+        for table in ["retirement_receipts", "retirement_dispositions"] {
+            assert_eq!(
+                raw.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            case.corpus
+                .kernel
+                .outbox_consumer_checkpoint(CONSUMER)
+                .unwrap(),
+            Some(case.old_checkpoint)
+        );
+    }
+}
+
 #[tokio::test]
 async fn disabled_receipt_refusal_retains_the_selected_owner_and_original_target() {
     let root = tempfile::tempdir().unwrap();
@@ -498,6 +581,28 @@ fn native_worker_cancellation_and_cleanup_failure_do_not_certify_removal() {
 }
 
 #[test]
+fn a_stale_inspection_copy_of_the_old_database_is_owned_residue_not_a_permanent_wedge() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    let database = case.old.as_ref().unwrap().projection().path().to_owned();
+    drop(case.old.take());
+    let scratch = database.parent().unwrap().join(".inspect-4242-1");
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::copy(&database, scratch.join(database.file_name().unwrap())).unwrap();
+    case.retire(root.path(), &mut |_| {}).unwrap();
+    case.assert_receipt();
+    assert!(!scratch.exists());
+    assert!(!database.exists());
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn ownership_certificate_survives_a_missing_database_before_replacement_selection() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
@@ -713,7 +818,7 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
                 NonZeroUsize::new(rows).unwrap(),
                 NonZeroU64::new(bytes).unwrap(),
             ),
-            Err(kernel::KernelError::InvalidInput)
+            Err(kernel::ConsumerObligationError::InventoryBound)
         );
     }
     let cancelled = budget(Duration::from_secs(10));
@@ -733,6 +838,82 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
             .outbox_consumer_checkpoint(CONSUMER)
             .unwrap(),
         Some(case.old_checkpoint)
+    );
+}
+
+#[test]
+fn a_maximal_obligation_bound_is_refused_before_the_gate_is_charged() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let mut config = spec(root.path());
+    config.retirement.max_obligations = NonZeroUsize::MAX;
+    let result = case.selection.retire(
+        &case.corpus.kernel,
+        &case.gate,
+        &config,
+        &budget(Duration::from_secs(30)),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(result, Err(BuildError::InventoryBound)),
+        "{result:?}"
+    );
+    case.assert_no_receipt();
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint)
+    );
+}
+
+#[test]
+fn census_bound_is_independent_of_the_per_batch_persist_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    assert!(case.expected.len() > 1);
+    let mut config = spec(root.path());
+    config.retirement.max_obligations = NonZeroUsize::new(case.expected.len() - 1).unwrap();
+    let error = case
+        .selection
+        .retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &config,
+            &budget(Duration::from_secs(30)),
+            &mut |event| panic!("premature effect {event:?}"),
+        )
+        .unwrap_err();
+    assert!(matches!(error, BuildError::InventoryBound), "{error:?}");
+    case.assert_no_receipt();
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint)
+    );
+    config.retirement.max_obligations = NonZeroUsize::new(case.expected.len()).unwrap();
+    config.episode.batch.persist.max_records = NonZeroUsize::MIN;
+    case.selection
+        .retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &config,
+            &budget(Duration::from_secs(30)),
+            &mut |_| {},
+        )
+        .unwrap();
+    case.assert_receipt();
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
     );
 }
 
@@ -982,6 +1163,7 @@ fn completeness_walk_requires_every_page_before_certifying_exact_target() {
         Some(case.old_checkpoint)
     );
     config.episode.max_source_pages = NonZeroUsize::new(commits as usize).unwrap();
+    let materialized = case.corpus.kernel.materialized_outbox_rows_for_test();
     case.selection
         .retire(
             &case.corpus.kernel,
@@ -991,6 +1173,11 @@ fn completeness_walk_requires_every_page_before_certifying_exact_target() {
             &mut |_| {},
         )
         .unwrap();
+    assert_eq!(
+        case.corpus.kernel.materialized_outbox_rows_for_test(),
+        materialized,
+        "the completeness walk selected outbox payloads"
+    );
     case.assert_receipt();
     assert_eq!(
         case.corpus

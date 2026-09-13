@@ -67,9 +67,9 @@ pub use cas::{
 };
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
-    CommitReadTarget, CompleteCommit, PageEnd,
+    CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
 };
-pub use consumer_obligations::ConsumerObligation;
+pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
 pub use current_input::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
     StaleCurrentInput, StaleInput,

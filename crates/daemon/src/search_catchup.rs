@@ -11,7 +11,7 @@
 //! Integrity and storage failures quarantine the projection, so no acknowledgement can rest on a projection whose contents are in doubt.
 
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::{
@@ -192,6 +192,13 @@ pub enum EpisodeFault {
     LoseAcknowledgementReplyAndCancel,
     /// Acknowledges while the local write transaction is still open.
     AcknowledgeInsideLocalTransaction,
+}
+
+/// Advances the wall-clock `now` captured at entry by monotonic `elapsed`, in milliseconds.
+/// Rounds up so a partial millisecond cannot hide hold expiry from the kernel's `now >= expires_at` check.
+pub(crate) fn audit_time(now: i64, elapsed: Duration) -> i64 {
+    let elapsed = elapsed.as_nanos().div_ceil(1_000_000);
+    now.saturating_add(i64::try_from(elapsed).unwrap_or(i64::MAX))
 }
 
 /// Runs bounded catch-up episodes for one projection against one kernel.
@@ -875,9 +882,7 @@ impl<'a> SearchCatchUp<'a> {
     }
 
     fn audit_time(&self, now: i64) -> i64 {
-        // Round up so a partial millisecond cannot hide hold expiry.
-        let elapsed = self.started.elapsed().as_nanos().div_ceil(1_000_000);
-        now.saturating_add(i64::try_from(elapsed).unwrap_or(i64::MAX))
+        audit_time(now, self.started.elapsed())
     }
 
     fn refuse_if_quarantined(&self) -> Result<(), Stop> {

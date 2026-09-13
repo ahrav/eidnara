@@ -546,6 +546,8 @@ pub struct LiveDescriptorPage {
 pub struct LiveDescriptor {
     pub object_id: String,
     pub domain_id: String,
+    pub sensitivity: Sensitivity,
+    pub created_commit_seq: i64,
     pub detail: SourceDescriptorDetail,
 }
 
@@ -570,7 +572,7 @@ impl KernelStore {
         crate::slice::snapshot_tip(&tx, requested)?;
         let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
         let sql = format!(
-            "SELECT o.object_id,o.domain_id,b.observation_payload
+            "SELECT o.object_id,o.domain_id,b.sensitivity_class,o.created_commit_seq,b.observation_payload
              {rows}
                AND o.source_kind=?1 AND o.object_kind='observation'
                AND {live}
@@ -581,7 +583,7 @@ impl KernelStore {
             live = Descriptors::LiveAtEnd.predicate("?2", "0"),
         );
         let mut statement = tx.prepare_cached(&sql).map_err(map_sqlite)?;
-        let raw: Vec<(String, String, Vec<u8>)> = statement
+        let raw: Vec<(String, String, String, i64, Vec<u8>)> = statement
             .query_map(
                 rusqlite::params![
                     class.code(),
@@ -589,7 +591,15 @@ impl KernelStore {
                     after.unwrap_or(""),
                     limit.saturating_add(1)
                 ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
@@ -598,20 +608,24 @@ impl KernelStore {
         let rows = raw
             .into_iter()
             .take(max_rows.get())
-            .map(|(object_id, domain_id, payload)| {
-                let detail = stored_detail(&payload)?;
-                if detail.class != class.code()
-                    || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
-                    || reencoded_identity(&detail).is_none()
-                {
-                    return Err(KernelError::CorruptCanonicalRow);
-                }
-                Ok(LiveDescriptor {
-                    object_id,
-                    domain_id,
-                    detail,
-                })
-            })
+            .map(
+                |(object_id, domain_id, sensitivity, created_commit_seq, payload)| {
+                    let detail = stored_detail(&payload)?;
+                    if detail.class != class.code()
+                        || descriptor_object_id(&detail.lineage_id, &detail.revision) != object_id
+                        || reencoded_identity(&detail).is_none()
+                    {
+                        return Err(KernelError::CorruptCanonicalRow);
+                    }
+                    Ok(LiveDescriptor {
+                        object_id,
+                        domain_id,
+                        sensitivity: Sensitivity::from_stored(&sensitivity),
+                        created_commit_seq,
+                        detail,
+                    })
+                },
+            )
             .collect::<Result<_, _>>()?;
         Ok(LiveDescriptorPage { rows, next })
     }

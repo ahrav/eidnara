@@ -143,6 +143,27 @@ pub struct LifecycleIntent {
 }
 
 impl LifecycleIntent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != ACTIVE_SCHEMA {
+            return Err(format!("schema {}", self.schema));
+        }
+        check_invariants(
+            &self.consumer.consumer_id,
+            self.transition,
+            self.authorization_ref.as_deref(),
+            self.cause,
+        )
+        .map_err(|refusal| refusal.to_string())?;
+        if !self
+            .replacement_capture
+            .as_deref()
+            .is_none_or(ReplacementCapture::stage_is_bound)
+        {
+            return Err("certificate names another capture".to_owned());
+        }
+        Ok(())
+    }
+
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
     fn is_replay_of(&self, request: &LifecycleRequest) -> bool {
         self.transition == request.transition
@@ -328,8 +349,10 @@ impl ProjectionLifecycle {
                 "the lifecycle directory is not the caller's own directory",
             ));
         }
-        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only.
+        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only before the shared check.
         dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        owner_only_directory(&dir_fd.metadata()?)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
         let this = Self {
             data_home: data_home.to_path_buf(),
             dir,
@@ -394,15 +417,21 @@ impl ProjectionLifecycle {
     }
 
     pub(crate) fn read_at(data_home: &Path) -> ControlState {
+        Self::probe_at(data_home)
+            .unwrap_or_else(|Unreadable(reason)| ControlState::Unavailable(reason))
+    }
+
+    /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes or own metadata were refused.
+    pub(crate) fn probe_at(data_home: &Path) -> Result<ControlState, Unreadable> {
         let dir = data_home.join(CONTROL_DIR);
         let metadata = match open_directory(&dir).and_then(|fd| fd.metadata()) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return ControlState::Absent,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ControlState::Absent);
+            }
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
-        if metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return ControlState::Unavailable("insecure lifecycle directory".to_owned());
-        }
+        owner_only_directory(&metadata).map_err(|reason| Unreadable(reason.to_owned()))?;
         let path = dir.join(CONTROL_RECORD);
         let file = match OpenOptions::new()
             .read(true)
@@ -410,30 +439,33 @@ impl ProjectionLifecycle {
             .open(&path)
         {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return ControlState::Absent,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ControlState::Absent);
+            }
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
         let metadata = match file.metadata() {
             Ok(metadata) => metadata,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
+        // Nothing repairs the record's own mode or owner, unlike the directory's, so this is a refused record rather than a transient failure.
         if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return ControlState::Unavailable(
+            return Ok(ControlState::Unavailable(
                 "not the caller's own owner-only regular file".to_owned(),
-            );
+            ));
         }
         if metadata.len() > MAX_RECORD_BYTES {
-            return ControlState::Unavailable("over the size cap".to_owned());
+            return Ok(ControlState::Unavailable("over the size cap".to_owned()));
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
-            return ControlState::Unavailable(error.kind().to_string());
+            return Err(Unreadable(error.kind().to_string()));
         }
-        match serde_json::from_slice::<StoredIntent>(&bytes) {
+        Ok(match serde_json::from_slice::<StoredIntent>(&bytes) {
             Ok(StoredIntent::Current(record)) => {
                 let intent = record.current;
                 if record.schema != CURRENT_SCHEMA
-                    || intent.schema != ACTIVE_SCHEMA
+                    || intent.validate().is_err()
                     || intent.recovery_target.is_none()
                     || intent
                         .recovery_target
@@ -447,13 +479,6 @@ impl ProjectionLifecycle {
                         .as_deref()
                         .is_none_or(|d| !is_canonical_payload_digest(d))
                     || intent.replacement_capture.is_some()
-                    || check_invariants(
-                        &intent.consumer.consumer_id,
-                        intent.transition,
-                        intent.authorization_ref.as_deref(),
-                        intent.cause,
-                    )
-                    .is_err()
                 {
                     ControlState::Unavailable("invalid completion record".to_owned())
                 } else {
@@ -471,48 +496,22 @@ impl ProjectionLifecycle {
                             || e.consumed > e.allowance
                             || e.deadline <= intent.recorded_at
                     })
-                    || intent.handoff.as_deref().is_some_and(|h| {
-                        h.schema != ACTIVE_SCHEMA
-                            || check_invariants(
-                                &h.consumer.consumer_id,
-                                h.transition,
-                                h.authorization_ref.as_deref(),
-                                h.cause,
-                            )
-                            .is_err()
-                            || !h
-                                .replacement_capture
-                                .as_deref()
-                                .is_none_or(ReplacementCapture::stage_is_bound)
-                    })
+                    || intent
+                        .handoff
+                        .as_deref()
+                        .is_some_and(|h| h.validate().is_err())
                 {
                     ControlState::Unavailable("invalid disabled record".to_owned())
                 } else {
                     ControlState::Disabled(intent)
                 }
             }
-            Ok(StoredIntent::Active(intent)) if intent.schema != ACTIVE_SCHEMA => {
-                ControlState::Unavailable(format!("schema {}", intent.schema))
-            }
-            Ok(StoredIntent::Active(intent)) => match check_invariants(
-                &intent.consumer.consumer_id,
-                intent.transition,
-                intent.authorization_ref.as_deref(),
-                intent.cause,
-            ) {
-                Ok(())
-                    if !intent
-                        .replacement_capture
-                        .as_deref()
-                        .is_none_or(ReplacementCapture::stage_is_bound) =>
-                {
-                    ControlState::Unavailable("certificate names another capture".to_owned())
-                }
+            Ok(StoredIntent::Active(intent)) => match intent.validate() {
                 Ok(()) => ControlState::Intent(intent),
-                Err(refusal) => ControlState::Unavailable(refusal.to_string()),
+                Err(reason) => ControlState::Unavailable(reason),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
-        }
+        })
     }
 
     /// Reads projection generation pins for a reclaimer holding the lifecycle transaction lock.
@@ -1170,7 +1169,22 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
         })),
         ..intent.clone()
     };
-    if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
+    // `disable` wraps the active record and cleanup later fills every optional field, so the accepted intent must fit in that form too.
+    let disabled = DisabledIntent {
+        schema: DISABLED_SCHEMA,
+        handoff: Some(Box::new(exhausted)),
+        recorded_at: i64::MAX,
+        episodes: Some(EpisodeAccounting {
+            allowance: u32::MAX,
+            consumed: u32::MAX,
+            deadline: i64::MAX,
+        }),
+        through: Some(i64::MAX),
+        deregistered: true,
+    };
+    let bytes =
+        serde_json::to_vec(&disabled).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(IntentRefusal::Oversized);
     }
     Ok(())
@@ -1195,6 +1209,24 @@ pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
         .read(true)
         .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
         .open(dir)
+}
+
+/// Why a record could not be read: an I/O failure or a failed owner-only check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unreadable(pub(crate) String);
+
+/// Requires the caller's own directory with no group or other permission bits; every reader and the opener judge the directory by this one predicate.
+fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
+    if !metadata.is_dir() {
+        return Err("the lifecycle path is not a directory");
+    }
+    if !owned_by_caller(metadata) {
+        return Err("the lifecycle directory is not the caller's own");
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err("the lifecycle directory is not owner-only");
+    }
+    Ok(())
 }
 
 fn owned_by_caller(metadata: &fs::Metadata) -> bool {

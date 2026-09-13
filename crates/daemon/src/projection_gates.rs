@@ -398,6 +398,8 @@ pub struct Evidence {
 pub enum Denial {
     #[error("retrieval is stopped; explicit recovery is required")]
     RecoveryRequired,
+    #[error("the lifecycle record could not be read: {0}")]
+    ControlUnreadable(String),
     #[error("the projection admission was invalidated")]
     Invalidated,
     #[error("no manifest is installed")]
@@ -656,15 +658,19 @@ impl HookGate {
         state.invalidated.cancel();
     }
 
-    fn observe_stop(&self) {
-        use crate::projection_lifecycle::{ControlState, ProjectionLifecycle};
-        if self.data_home.as_ref().is_some_and(|home| {
-            !matches!(
-                ProjectionLifecycle::read_at(home),
-                ControlState::Absent | ControlState::Intent(_) | ControlState::Current(_)
-            )
-        }) {
-            self.disable();
+    /// Consults the durable record before an admission. A `Disabled` record, or one that was read and refused, latches the gate closed; a record that could not be read denies only this call, since the next lifecycle open or write repairs it and no durable stop exists.
+    fn observe_stop(&self) -> Result<(), Denial> {
+        use crate::projection_lifecycle::{ControlState, ProjectionLifecycle, Unreadable};
+        let Some(home) = &self.data_home else {
+            return Ok(());
+        };
+        match ProjectionLifecycle::probe_at(home) {
+            Ok(ControlState::Absent | ControlState::Intent(_) | ControlState::Current(_)) => Ok(()),
+            Ok(ControlState::Disabled(_) | ControlState::Unavailable(_)) => {
+                self.disable();
+                Ok(())
+            }
+            Err(Unreadable(reason)) => Err(Denial::ControlUnreadable(reason)),
         }
     }
 
@@ -790,11 +796,12 @@ impl HookGate {
         if hooks.is_empty() {
             return Err(Denial::NoManifest);
         }
-        self.observe_stop();
+        let observed = self.observe_stop();
         let state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
         let verdicts: Vec<Result<Admission, Denial>> = hooks
             .iter()
             .map(|hook| {
+                observed.clone()?;
                 let state = state.as_deref().ok_or(Denial::NoManifest)?;
                 if state.disabled {
                     return Err(Denial::RecoveryRequired);
@@ -841,7 +848,6 @@ impl HookGate {
         expected: &InvalidationIdentity,
         requested: &[(&str, u64)],
     ) -> Result<(), Denial> {
-        self.observe_stop();
         let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
         if state.disabled {
             return Err(Denial::RecoveryRequired);

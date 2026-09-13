@@ -1,7 +1,5 @@
 use super::*;
-use crate::embedding_supervisor::{
-    EmbeddingSupervisor, Maintained, SliceBounds, Stop, SupervisorEvent,
-};
+use crate::embedding_supervisor::{EmbeddingSupervisor, Maintained, SliceBounds, SupervisorEvent};
 use crate::projection_lifecycle::{ControlState, DisabledIntent, EpisodeAccounting, IntentRefusal};
 use kernel::CommitIntent;
 use sha2::{Digest, Sha256};
@@ -45,12 +43,6 @@ impl SearchSelection {
     ) -> Result<(), BuildError> {
         if self.maintenance.is_some() {
             return Err(BuildError::Invalid("maintenance already owned"));
-        }
-        if matches!(
-            ProjectionLifecycle::read_at(&self.data_home),
-            ControlState::Disabled(_) | ControlState::Unavailable(_)
-        ) {
-            return Err(IntentRefusal::Disabled.into());
         }
         let family = self
             .selected
@@ -96,8 +88,9 @@ impl SearchSelection {
     }
 
     /// Joins the owned supervisor before reconciling its released local prefix and ordinary deregistration.
+    /// A supervisor that already stopped on its own joins like one this disable cancelled.
     /// Cancellation or an expired wait retains the supervisor and join handle; its tracked task owns the reader.
-    /// An empty selection or an already completed deregistration returns without consuming a cleanup episode.
+    /// An empty selection, a recorded deregistration, or one the kernel already holds completes without consuming a cleanup episode.
     /// Filesystem calls require healthy dependencies; a deadline cannot interrupt a blocked syscall.
     pub async fn reconcile_disabled(
         &mut self,
@@ -154,13 +147,11 @@ impl SearchSelection {
         let end = self.cleanup_admission(gate, spec, budget, &disabled)?;
         if let Some(owner) = &mut self.maintenance {
             observer(DisableEvent::DrainStarted);
-            let report = owner
+            // A resolved drain has joined every slice and owned call regardless of what stopped the loop; refusing an earlier stop here would block cleanup until restart.
+            owner
                 .supervisor
                 .shutdown(end.saturating_duration_since(Instant::now()))
                 .await?;
-            if !matches!(report.stop, Some(Stop::Shutdown)) {
-                return Err(BuildError::Invalid("maintenance requires reconciliation"));
-            }
             let joined = tokio::time::timeout_at(end.into(), &mut owner.task)
                 .await
                 .map_err(|_| BuildError::Expired)?;
@@ -173,16 +164,8 @@ impl SearchSelection {
             return Ok(disabled);
         }
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
-        let mut next = disabled.clone();
-        let episodes = next.episodes.as_mut().expect("cleanup envelope");
-        if episodes.consumed >= episodes.allowance {
-            return Err(IntentRefusal::AllowanceExhausted.into());
-        }
-        episodes.consumed += 1;
-        lifecycle.update_disabled(&disabled, &next)?;
-        disabled = next;
-        let intent = disabled.handoff.as_deref().expect("checked handoff");
-        let digest = intent
+        let handoff = disabled.handoff.clone().expect("checked handoff");
+        let digest = handoff
             .staged_seed_digest
             .as_deref()
             .ok_or(BuildError::Invalid("selection is unfinished"))?;
@@ -193,19 +176,39 @@ impl SearchSelection {
                 "disabled selection differs from handoff",
             ));
         }
-        let check = || {
-            self.cleanup_admission(gate, spec, budget, &disabled)?;
-            if lifecycle.read() != ControlState::Disabled(disabled.clone()) {
-                return Err(IntentRefusal::Disabled.into());
-            }
-            Ok(())
-        };
-        let consumer = intent.consumer.consumer_id.clone();
-        if kernel.database_incarnation_id_within_budget(budget)? != intent.kernel_incarnation_id {
+        let consumer = handoff.consumer.consumer_id.clone();
+        if kernel.database_incarnation_id_within_budget(budget)? != handoff.kernel_incarnation_id {
             return Err(ProjectionError::IdentityMismatch.into());
         }
         let checkpoint = kernel.outbox_consumer_checkpoint_within_budget(budget, &consumer)?;
+        // A restore keeps the durable identity but can renumber history; a prefix read under one incarnation is acknowledged and deregistered only under the same one.
+        let settled = |disabled: &DisabledIntent, history: Option<CommitReadIncarnation>| {
+            self.cleanup_admission(gate, spec, budget, disabled)?;
+            if lifecycle.read() != ControlState::Disabled(disabled.clone()) {
+                return Err(IntentRefusal::Disabled.into());
+            }
+            if let Some(history) = history
+                && kernel
+                    .capture_commit_read_target_within_budget(budget)?
+                    .incarnation
+                    != history
+            {
+                return Err(ProjectionError::IdentityMismatch.into());
+            }
+            Ok::<(), BuildError>(())
+        };
+        let mut history = None;
         if checkpoint.is_some() {
+            // Only outstanding local work consumes an episode; a consumer the kernel already deregistered leaves nothing to retry but the receipt replay.
+            let mut next = disabled.clone();
+            let episodes = next.episodes.as_mut().expect("cleanup envelope");
+            if episodes.consumed >= episodes.allowance {
+                return Err(IntentRefusal::AllowanceExhausted.into());
+            }
+            episodes.consumed += 1;
+            lifecycle.update_disabled(&disabled, &next)?;
+            disabled = next;
+            let intent = &*handoff;
             let family = match self.selected.load_full() {
                 Some(family) => family,
                 None => {
@@ -227,6 +230,7 @@ impl SearchSelection {
                 return Err(IntentRefusal::FamilyHeld.into());
             }
             self.validate_family(&family, kernel, budget)?;
+            history = Some(family.incarnation);
             if family.certificate.retiring.is_some() {
                 self.retire_bound(
                     &family,
@@ -235,7 +239,7 @@ impl SearchSelection {
                         spec,
                         budget,
                         transaction: &transaction,
-                        check: &check,
+                        check: &|| settled(&disabled, history),
                     },
                     &mut |event| observer(DisableEvent::Retirement(event)),
                 )?;
@@ -248,7 +252,7 @@ impl SearchSelection {
             if disabled.through.is_some_and(|fixed| fixed != through) {
                 return Err(BuildError::Invalid("disabled prefix changed"));
             }
-            check()?;
+            settled(&disabled, history)?;
             self.selected.store(None);
             drop(family);
             let mut next = disabled.clone();
@@ -256,7 +260,7 @@ impl SearchSelection {
             lifecycle.update_disabled(&disabled, &next)?;
             disabled = next;
             observer(DisableEvent::LocalReleased);
-            self.cleanup_admission(gate, spec, budget, &disabled)?;
+            settled(&disabled, history)?;
             kernel.acknowledge_outbox_within_budget(
                 budget,
                 &consumer,
@@ -269,9 +273,9 @@ impl SearchSelection {
             .through
             .ok_or(BuildError::Invalid("missing disabled prefix"))?;
         let intent = disabled.handoff.as_deref().expect("handoff");
-        self.cleanup_admission(gate, spec, budget, &disabled)?;
+        settled(&disabled, history)?;
         observer(DisableEvent::BeforeDeregister);
-        self.cleanup_admission(gate, spec, budget, &disabled)?;
+        settled(&disabled, history)?;
         kernel.commit_within_budget(
             budget,
             CommitIntent {
@@ -304,6 +308,14 @@ impl SearchSelection {
         next.deregistered = true;
         lifecycle.update_disabled(&disabled, &next)?;
         Ok(next)
+    }
+
+    /// The supervisor this selection owns, so a test can drive it to a stop the selection did not request.
+    #[cfg(feature = "test-support")]
+    pub fn maintenance_supervisor_for_test(&self) -> Option<Arc<EmbeddingSupervisor>> {
+        self.maintenance
+            .as_ref()
+            .map(|owner| Arc::clone(&owner.supervisor))
     }
 
     #[cfg(feature = "test-support")]
@@ -339,53 +351,48 @@ impl SearchSelection {
         if end > Instant::now() + Duration::from_millis(remaining) {
             return Err(BuildError::Invalid("cleanup exceeds original deadline"));
         }
-        let work = spec.episode.max_source_pages.get() as u64;
-        gate.cleanup_limits(
-            &InvalidationIdentity::from(&self.identity),
-            &[
-                ("physical_drain_ms", remaining),
-                (
-                    "B_recovery_ms",
-                    episodes
-                        .deadline
-                        .checked_sub(disabled.recorded_at)
-                        .and_then(|n| u64::try_from(n).ok())
-                        .ok_or(BuildError::Expired)?,
-                ),
-                ("retry_attempts", u64::from(episodes.allowance)),
-                (
-                    "catchup_batch_commits",
-                    work.checked_mul(spec.episode.commits.max_commits.get() as u64)
-                        .ok_or(BuildError::InventoryBound)?,
-                ),
-                (
-                    "catchup_batch_encoded_bytes",
-                    work.checked_mul(spec.episode.commits.max_payload_bytes.get())
-                        .ok_or(BuildError::InventoryBound)?,
-                ),
-                (
-                    "local_transaction_rows",
-                    (spec.episode.batch.persist.max_records.get() as u64)
-                        .saturating_add(1)
-                        .max(self.bounds.max_live().saturating_add(
-                            self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
-                        ) as u64)
-                        .max(spec.episode.commits.max_rows.get() as u64),
-                ),
-                (
-                    "export_page_rows",
-                    self.bounds.max_live_per_class.get() as u64,
-                ),
-                (
-                    "local_transaction_bytes",
-                    spec.episode
-                        .max_source_encoded_bytes
-                        .get()
-                        .checked_add(MAX_RECORD_BYTES)
-                        .ok_or(BuildError::InventoryBound)?,
-                ),
-            ],
-        )?;
+        let mut requested = vec![
+            ("physical_drain_ms", remaining),
+            (
+                "B_recovery_ms",
+                episodes
+                    .deadline
+                    .checked_sub(disabled.recorded_at)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .ok_or(BuildError::Expired)?,
+            ),
+            ("retry_attempts", u64::from(episodes.allowance)),
+            (
+                "local_transaction_rows",
+                (spec.episode.batch.persist.max_records.get() as u64)
+                    .saturating_add(1)
+                    .max(self.bounds.max_live().saturating_add(
+                        self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
+                    ) as u64)
+                    .max(spec.episode.commits.max_rows.get() as u64)
+                    .max(
+                        u64::try_from(spec.retirement.max_obligations.get())
+                            .ok()
+                            .and_then(|rows| rows.checked_add(1))
+                            .ok_or(BuildError::InventoryBound)?,
+                    ),
+            ),
+            (
+                "export_page_rows",
+                self.bounds.max_live_per_class.get() as u64,
+            ),
+            (
+                "local_transaction_bytes",
+                spec.episode
+                    .max_source_encoded_bytes
+                    .get()
+                    .max(spec.retirement.max_obligation_bytes.get())
+                    .checked_add(MAX_RECORD_BYTES)
+                    .ok_or(BuildError::InventoryBound)?,
+            ),
+        ];
+        requested.extend(spec.catchup_page_charges());
+        gate.cleanup_limits(&InvalidationIdentity::from(&self.identity), &requested)?;
         Ok(end)
     }
 }

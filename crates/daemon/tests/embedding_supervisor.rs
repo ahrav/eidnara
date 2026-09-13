@@ -1587,3 +1587,73 @@ async fn an_unsettled_charge_keeps_its_ready_result_through_quarantine() {
         "a claim the pass never settled keeps the ready result held"
     );
 }
+
+/// AC3: a grace that lapses inside the drain's poll interval, after the last owned call has exited, resolves. The census at the grace is the verdict; a drain that owns nothing is never reported unresolved.
+#[tokio::test]
+async fn a_grace_lapsing_after_native_exit_resolves_the_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let object = corpus.publish("held", "held text");
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let occurrence = occurrence_of(&rows, &object).to_string();
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let synapse = Arc::new(component(&engine, SynapseLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&synapse)),
+        slice_bounds(Duration::from_millis(200)),
+        Arc::new(|| NOW),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    within(Duration::from_secs(30), async {
+        loop {
+            match next_event(&mut events).await {
+                SupervisorEvent::SliceEnded {
+                    kind: SliceKind::Backfill,
+                    outcome: SliceOutcome::Backfill { admitted: 1, .. },
+                } => break,
+                SupervisorEvent::Stopped(stop) => panic!("{stop:?}"),
+                _ => {}
+            }
+        }
+    })
+    .await;
+    let host_job = row(dir.path(), &occurrence).2.unwrap();
+    assert_eq!(
+        supervisor.shutdown(Duration::from_secs(2)).await,
+        Err(Unresolved {
+            slices: 0,
+            native: 1
+        })
+    );
+    within(Duration::from_secs(5), running).await.unwrap();
+
+    // With the clock frozen, the drain's first census finds the owned call and it sleeps for its poll interval, which is longer than the grace. The call then exits before the grace lapses.
+    tokio::time::pause();
+    let draining = tokio::spawn({
+        let supervisor = Arc::clone(&supervisor);
+        async move { supervisor.shutdown(Duration::from_millis(1)).await }
+    });
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    TestEngine::release(&gate);
+    let exit = Instant::now() + Duration::from_secs(10);
+    while synapse.job_status(&host_job) == Some("running") {
+        assert!(Instant::now() < exit, "the released call exits");
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(engine.completed(), 1);
+    tokio::time::advance(Duration::from_millis(10)).await;
+    let report = within(Duration::from_secs(5), draining)
+        .await
+        .unwrap()
+        .expect("nothing is owned when the grace lapses");
+    assert_eq!(report.stop, Some(Stop::Shutdown));
+    assert_eq!(report.held_results, 1);
+    assert_eq!(row(dir.path(), &occurrence).0, "admitted");
+}

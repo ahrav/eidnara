@@ -440,7 +440,9 @@ fn set_job_state(projection: &SearchProjection, occurrence_id: &str, state: &str
     projection
         .write(|conn| {
             conn.execute(
-                "UPDATE embedding_jobs SET state=?2 WHERE occurrence_id=?1",
+                "UPDATE embedding_jobs SET state=?2,
+                    host_job_id=CASE WHEN ?2='admitted' THEN 'host-job' ELSE host_job_id END
+                 WHERE occurrence_id=?1",
                 params![occurrence_id, state],
             )?;
             Ok(())

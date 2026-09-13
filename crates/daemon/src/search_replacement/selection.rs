@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use host_runtime::generation::{
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
 use retrieval::batch::VectorGeneration;
-use retrieval::coverage::{CoverageBounds, CoverageReport, verify_active};
+use retrieval::coverage::{CoverageBounds, CoverageReport, observe, verify_active, verify_pages};
 use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
 use storage::GuardedConn;
@@ -25,7 +25,11 @@ use crate::projection_gates::{
 use crate::projection_lifecycle::{
     ConsumerBinding, LifecycleIntent, MAX_RECORD_BYTES, ProjectionLifecycle,
 };
-use crate::search_projection::{SearchProjection, search_descriptor};
+use crate::search_catchup::{Refusal, classify};
+use crate::search_projection::{
+    SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
+    search_descriptor,
+};
 use crate::search_seed::{SEED_FILE, SeedVerification};
 use crate::search_writer::QuarantineKind;
 
@@ -173,13 +177,6 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
-        if matches!(
-            ProjectionLifecycle::read_at(&self.data_home),
-            crate::projection_lifecycle::ControlState::Disabled(_)
-                | crate::projection_lifecycle::ControlState::Unavailable(_)
-        ) {
-            return Err(crate::projection_lifecycle::IntentRefusal::Disabled.into());
-        }
         let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
         gate.check_limits(
             &grant,
@@ -358,48 +355,47 @@ impl SearchSelection {
         budget: &EvalBudget,
         transaction: &LifecycleTransactionLock,
     ) -> Result<(), BuildError> {
-        let result = (|| {
-            self.admit(gate, budget)?;
-            let store = GenerationStore::open(Some(&self.data_home))?;
-            match store.reconcile_search(transaction)? {
-                CurrentProfile::Absent => {
-                    self.selected.store(None);
-                    Ok(())
-                }
-                CurrentProfile::Quarantined => {
-                    Err(BuildError::Invalid("search selector quarantined"))
-                }
-                CurrentProfile::Current(digest) => {
-                    let family = match self
-                        .selected
-                        .load_full()
-                        .filter(|family| family._seed_pin.digest == digest)
-                    {
-                        Some(family) => {
-                            self.validate_family(&family, kernel, budget)
-                                .inspect_err(|error| {
-                                    if matches!(
-                                        error,
-                                        BuildError::Mutation(_)
-                                            | BuildError::Projection(_)
-                                            | BuildError::Invalid(_)
-                                    ) {
-                                        family
-                                            .projection
-                                            .enter_quarantine(QuarantineKind::Integrity, error);
-                                    }
-                                })?;
-                            family
-                        }
-                        None => Arc::new(self.open_family(&digest, kernel, budget)?),
-                    };
-                    self.admit(gate, budget)?;
-                    self.selected.store(Some(family));
-                    Ok(())
-                }
+        // Refusing an infinite budget here keeps `family_damage`'s `Invalid` arm exact: past this
+        // point the only `Invalid` `validate_family` can raise is one of its own prefix checks.
+        self.admit(gate, budget)?;
+        let store = GenerationStore::open(Some(&self.data_home))?;
+        match store.reconcile_search(transaction)? {
+            CurrentProfile::Absent => {
+                self.selected.store(None);
+                Ok(())
             }
-        })();
-        result.inspect_err(|_| self.selected.store(None))
+            CurrentProfile::Quarantined => {
+                self.selected.store(None);
+                Err(BuildError::Invalid("search selector quarantined"))
+            }
+            CurrentProfile::Current(digest) => {
+                let family = match self
+                    .selected
+                    .load_full()
+                    .filter(|family| family._seed_pin.digest == digest)
+                {
+                    Some(family) => {
+                        if let Err(error) = self.validate_family(&family, kernel, budget) {
+                            if let Some(kind) = family_damage(&error) {
+                                family.projection.enter_quarantine(kind, &error);
+                                self.selected.store(None);
+                            }
+                            return Err(error);
+                        }
+                        family
+                    }
+                    None => {
+                        // The durable pointer names a family this manager does not hold, so
+                        // whatever is cached is stale whether or not the open succeeds.
+                        self.selected.store(None);
+                        Arc::new(self.open_family(&digest, kernel, budget)?)
+                    }
+                };
+                self.admit(gate, budget)?;
+                self.selected.store(Some(family));
+                Ok(())
+            }
+        }
     }
 
     fn family_home(&self, digest: &str) -> Result<PathBuf, BuildError> {
@@ -423,10 +419,22 @@ impl SearchSelection {
         let certificate: Bootstrap =
             serde_json::from_slice(&bytes).map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
         if certificate.schema != 2
+            || certificate.intent.validate().is_err()
             || certificate.seed.stage_manifest().digest() != digest
             || certificate.intent.staged_seed_digest.as_deref() != Some(digest)
-            || certificate.intent.consumer.consumer_id.is_empty()
             || certificate.intent.consumer.generation_id != certificate.seed.generation_id
+            || certificate.intent.kernel_incarnation_id != certificate.seed.kernel_incarnation_id
+            || certificate
+                .intent
+                .recovery_target
+                .map(|target| target.commit_seq)
+                != Some(certificate.seed.checkpoint_commit_seq)
+            || certificate
+                .intent
+                .replacement_capture
+                .as_deref()
+                .and_then(|capture| capture.stage.as_deref())
+                != Some(&certificate.seed)
         {
             return Err(BuildError::Invalid("bootstrap binding mismatch"));
         }
@@ -449,6 +457,10 @@ impl SearchSelection {
             bounds: self.bounds,
             _seed_pin: seed_pin,
         };
+        // Run the page scan before readers share the family's connection.
+        family
+            .projection
+            .read_within(deadline(budget)?, verify_pages)?;
         self.validate_family(&family, kernel, budget)?;
         Ok(family)
     }
@@ -461,7 +473,15 @@ impl SearchSelection {
     ) -> Result<(), BuildError> {
         family.check_kernel(kernel, budget)?;
         let report = family.projection.read_within(deadline(budget)?, |conn| {
-            verify_active(conn, &self.identity, &family.generation(), self.bounds)
+            verify_active(conn, &self.identity, &family.generation(), self.bounds).map_err(
+                |error| {
+                    match error {
+                        // `check_kernel` excludes a kernel change, so the stored identity row itself is corrupt.
+                        ProjectionError::IdentityMismatch => ProjectionError::CorruptRow,
+                        error => error,
+                    }
+                },
+            )
         })?;
         let seed = &family.certificate.seed;
         if report.checkpoint.snapshot_commit_seq != seed.snapshot_commit_seq
@@ -511,6 +531,8 @@ impl SearchSelection {
                         || row.payload_id != source.detail.payload_id
                         || row.source_object_id != source.object_id
                         || row.domain_id != source.domain_id
+                        || row.sensitivity != source.sensitivity
+                        || row.created_commit_seq != source.created_commit_seq
                         || row.source_evidence_id != source.detail.evidence_id
                         || row.source_artifact_digest != source.detail.artifact_digest
                     {
@@ -530,15 +552,78 @@ impl SearchSelection {
         {
             return Err(BuildError::Invalid("lifecycle pinned family"));
         }
-        let home = self.family_home(digest)?;
-        if !home.try_exists()?
-            || (!home.join(CERTIFICATE).try_exists()?
-                && !home.join("search").join(SEED_FILE).try_exists()?)
-        {
-            return Ok(());
+        match self.reclaim_locked(digest)? {
+            Reclaimed::Removed | Reclaimed::Absent => Ok(()),
+            Reclaimed::Uncertified => Err(BuildError::Invalid("uncertified family")),
+            Reclaimed::Residual => Err(BuildError::Invalid("family directory not empty")),
         }
-        let certificate: Bootstrap = serde_json::from_slice(&certificate_bytes(&home)?)
-            .map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
+    }
+
+    /// Removes every family that neither the durable search pointer nor the lifecycle intent
+    /// references and that no reader leases. A leased or uncertified family is retained and
+    /// visited again by the next sweep; any other failure stops the sweep at that entry.
+    pub fn sweep(&self) -> Result<SweepReport, BuildError> {
+        let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
+        let families = self.data_home.join(FAMILIES);
+        if !families.try_exists()? {
+            return Ok(SweepReport::default());
+        }
+        let directory = open_directory(&families)?;
+        let selected = match GenerationStore::open(Some(&self.data_home))?.read_search_current()? {
+            CurrentProfile::Current(digest) => Some(digest),
+            CurrentProfile::Quarantined => {
+                return Err(BuildError::Invalid("unknown selector references"));
+            }
+            CurrentProfile::Absent => None,
+        };
+        let protected = ProjectionLifecycle::protected_generations(&self.data_home, &transaction)?;
+        let mut report = SweepReport::default();
+        for entry in fs::read_dir(&families)? {
+            let name = entry?.file_name();
+            let Some(digest) = name
+                .to_str()
+                .filter(|digest| host_runtime::lifecycle::is_canonical_payload_digest(digest))
+            else {
+                report.retained += 1;
+                continue;
+            };
+            if selected.as_deref() == Some(digest) || protected.contains(digest) {
+                continue;
+            }
+            match self.reclaim_locked(digest) {
+                Ok(Reclaimed::Removed) => report.removed += 1,
+                Ok(Reclaimed::Absent) => {}
+                Ok(Reclaimed::Uncertified | Reclaimed::Residual)
+                | Err(BuildError::Projection(SearchProjectionError::Store(
+                    storage::StoreError::Lease(_),
+                ))) => report.retained += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        directory.sync_all()?;
+        Ok(report)
+    }
+
+    fn reclaim_locked(&self, digest: &str) -> Result<Reclaimed, BuildError> {
+        let home = self.family_home(digest)?;
+        if !home.try_exists()? {
+            return Ok(Reclaimed::Absent);
+        }
+        if !home.join(CERTIFICATE).try_exists()? {
+            if home.join("search").join(SEED_FILE).try_exists()? {
+                return Ok(Reclaimed::Uncertified);
+            }
+            open_directory(&home)?;
+            return self.remove_family_dirs(&home);
+        }
+        let bytes = match certificate_bytes(&home) {
+            Ok(bytes) => bytes,
+            Err(BuildError::Invalid(_)) => return Ok(Reclaimed::Uncertified),
+            Err(error) => return Err(error),
+        };
+        let Ok(certificate) = serde_json::from_slice::<Bootstrap>(&bytes) else {
+            return Ok(Reclaimed::Uncertified);
+        };
         self.remove_family(digest, &certificate)
     }
 
@@ -567,7 +652,11 @@ impl SearchSelection {
         Ok(intent)
     }
 
-    fn remove_family(&self, digest: &str, certificate: &Bootstrap) -> Result<(), BuildError> {
+    fn remove_family(
+        &self,
+        digest: &str,
+        certificate: &Bootstrap,
+    ) -> Result<Reclaimed, BuildError> {
         match GenerationStore::open(Some(&self.data_home))?.read_search_current()? {
             CurrentProfile::Current(current) if current == digest => {
                 return Err(BuildError::Invalid("selected family"));
@@ -582,7 +671,7 @@ impl SearchSelection {
         }
         let home = self.family_home(digest)?;
         if !home.try_exists()? {
-            return Ok(());
+            return Ok(Reclaimed::Absent);
         }
         open_directory(&home)?;
         open_directory(&self.data_home.join(FAMILIES))?;
@@ -604,21 +693,63 @@ impl SearchSelection {
         if home.join(CERTIFICATE).try_exists()? {
             fs::remove_file(home.join(CERTIFICATE))?;
         }
-        open_directory(&home)?.sync_all()?;
-        for path in [home.join("search"), home.clone()] {
+        self.remove_family_dirs(&home)
+    }
+
+    /// Removes the family's directories once their expected contents are gone; a residual entry
+    /// leaves the home on disk and yields [`Reclaimed::Residual`].
+    fn remove_family_dirs(&self, home: &Path) -> Result<Reclaimed, BuildError> {
+        open_directory(home)?.sync_all()?;
+        let search = home.join("search");
+        if search.try_exists()? {
+            open_directory(&search)?;
+            for entry in fs::read_dir(&search)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file()
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        std::path::Path::new(name)
+                            .extension()
+                            .is_some_and(|ext| ext == "lease")
+                    })
+                {
+                    fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        let mut residual = false;
+        for path in [search, home.to_owned()] {
             match fs::remove_dir(path) {
                 Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                    residual = true;
+                }
                 Err(error) => return Err(error.into()),
             }
         }
         open_directory(&self.data_home.join(FAMILIES))?.sync_all()?;
-        Ok(())
+        Ok(if residual {
+            Reclaimed::Residual
+        } else {
+            Reclaimed::Removed
+        })
     }
+}
+
+enum Reclaimed {
+    Removed,
+    Absent,
+    /// A database without its certificate: ownership cannot be proven, so nothing is deleted.
+    Uncertified,
+    /// The database is gone but an unexpected entry keeps the family directory on disk.
+    Residual,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SweepReport {
+    pub removed: usize,
+    /// Families a reader still leases, whose ownership is unproven, or whose name is foreign.
+    pub retained: usize,
 }
 
 fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
@@ -718,12 +849,13 @@ impl SearchReader {
 
     pub fn coverage(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         self.read(budget, |conn| {
-            verify_active(
+            observe(
                 conn,
-                &self.family.certificate.seed.identity(),
+                &self.family.certificate.seed.kernel_incarnation_id,
                 &self.family.generation(),
                 self.family.bounds,
-            )
+            )?
+            .map_err(|_| ProjectionError::CorruptRow)
         })
     }
 
@@ -758,13 +890,52 @@ fn deadline(budget: &EvalBudget) -> Result<std::time::Instant, BuildError> {
         .ok_or(BuildError::Invalid("selection requires a finite budget"))
 }
 
+/// The quarantine a `validate_family` failure earns, or `None` when the family's own state is
+/// not in evidence. `None` keeps the cached `Arc`: dropping it would release this manager's file
+/// lease while reader clones keep theirs, and the next `reopen` would then fail with
+/// `LeaseError::Held` until every reader drained.
+fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
+    match error {
+        BuildError::Projection(SearchProjectionError::Store(store)) => {
+            match classify_store_failure(store) {
+                StoreFailure::Integrity => Some(QuarantineKind::Integrity),
+                StoreFailure::Deadline | StoreFailure::Rejected | StoreFailure::Unknown => None,
+            }
+        }
+        BuildError::Projection(SearchProjectionError::Connection(_)) => {
+            Some(QuarantineKind::Integrity)
+        }
+        BuildError::Projection(SearchProjectionError::Quarantined(_)) => None,
+        BuildError::Projection(SearchProjectionError::Projection(error))
+        | BuildError::Mutation(error) => match classify(error) {
+            Refusal::Integrity | Refusal::OperatorRepair => Some(QuarantineKind::Integrity),
+            Refusal::Storage => Some(QuarantineKind::Storage),
+            Refusal::Admission | Refusal::Identity => None,
+        },
+        BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
+        _ => None,
+    }
+}
+
 fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
     let parent_dir = crate::projection_lifecycle::open_directory(parent)?;
     let path = parent.join(name);
-    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&path)
-        && error.kind() != std::io::ErrorKind::AlreadyExists
-    {
-        return Err(error.into());
+    match fs::DirBuilder::new().mode(0o700).create(&path) {
+        // The umask may have narrowed the requested mode; the new directory is set to exactly owner-only.
+        Ok(()) => fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A crash between the create and its chmod leaves an owner-owned directory the owner
+            // cannot enter; only such a directory is widened, never one with wider bits.
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir()
+                && metadata.uid() == rustix::process::geteuid().as_raw()
+                && metadata.mode() & 0o777 & !0o700 == 0
+                && metadata.mode() & 0o700 != 0o700
+            {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Err(error) => return Err(error.into()),
     }
     open_directory(&path)?;
     parent_dir.sync_all()?;
@@ -772,12 +943,14 @@ fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
 }
 
 fn create_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 fn open_directory(path: &Path) -> std::io::Result<File> {
