@@ -2,6 +2,10 @@ use super::*;
 use kernel::{CommitIntent, CommitReadRequest, CommitReadTarget, ConsumerObligationError, PageEnd};
 use retrieval::retirement::{RetirementReceipt, record_receipt, verify_receipt};
 
+/// Each disposition row stores the receipt id and the `removed` literal beyond its censused fields.
+const DISPOSITION_ROW_BYTES: u64 =
+    (host_runtime::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetirementEvent {
     BeforeCleanup,
@@ -69,6 +73,13 @@ impl SearchSelection {
                 "retirement budget exceeds original deadline",
             ));
         }
+        let rows = u64::try_from(spec.retirement.max_obligations.get())
+            .map_err(|_| BuildError::InventoryBound)?;
+        let transaction_bytes = rows
+            .checked_mul(DISPOSITION_ROW_BYTES)
+            .and_then(|rows| rows.checked_add(spec.retirement.max_obligation_bytes.get()))
+            .and_then(|bytes| bytes.checked_add(MAX_RECORD_BYTES))
+            .ok_or(BuildError::InventoryBound)?;
         for grant in &grants {
             gate.check_limits(
                 grant,
@@ -77,19 +88,9 @@ impl SearchSelection {
                     ("physical_drain_ms", remaining),
                     (
                         "local_transaction_rows",
-                        u64::try_from(spec.retirement.max_obligations.get())
-                            .ok()
-                            .and_then(|rows| rows.checked_add(1))
-                            .ok_or(BuildError::InventoryBound)?,
+                        rows.checked_add(1).ok_or(BuildError::InventoryBound)?,
                     ),
-                    (
-                        "local_transaction_bytes",
-                        spec.retirement
-                            .max_obligation_bytes
-                            .get()
-                            .checked_add(MAX_RECORD_BYTES)
-                            .ok_or(BuildError::InventoryBound)?,
-                    ),
+                    ("local_transaction_bytes", transaction_bytes),
                 ],
             )?;
         }

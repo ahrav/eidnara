@@ -1,6 +1,7 @@
 use super::*;
 use daemon::search_projection::SearchProjectionError;
 use daemon::search_replacement::selection::retirement::RetirementEvent;
+use host_runtime::lifecycle::PAYLOAD_MANIFEST_DIGEST_LEN;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ConsumerObligation,
 };
@@ -705,6 +706,44 @@ fn census_bound_is_independent_of_the_per_batch_persist_limit() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn the_receipt_transaction_charge_covers_every_disposition_row() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let config = spec(root.path());
+    // The limit leaves room for `max_obligation_bytes` and one `MAX_RECORD_BYTES`; each disposition row adds a digest and `removed`.
+    let censused = config.retirement.max_obligation_bytes.get() + MAX_RECORD_BYTES;
+    let mut evaluator = support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &daemon::projection_gates::ProjectionHook::ALL,
+    );
+    evaluator
+        .manifest
+        .limits
+        .insert("local_transaction_bytes".to_owned(), censused);
+    case.gate.install(evaluator);
+    let error = case.retire(root.path(), &mut |_| {}).unwrap_err();
+    match error {
+        BuildError::Denied(daemon::projection_gates::Denial::LimitExceeded {
+            limit,
+            observed,
+            max,
+        }) => {
+            assert_eq!(limit, "local_transaction_bytes");
+            assert_eq!(max, censused);
+            let per_row = (PAYLOAD_MANIFEST_DIGEST_LEN + "removed".len()) as u64;
+            assert_eq!(
+                observed,
+                censused + config.retirement.max_obligations.get() as u64 * per_row
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    case.assert_no_receipt();
 }
 
 #[test]
