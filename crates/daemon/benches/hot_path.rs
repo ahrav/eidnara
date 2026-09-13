@@ -106,6 +106,12 @@ fn bench_decode(c: &mut Criterion) {
         let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
         let body = serde_json::to_vec(&request("bench-decode", &messages, false))
             .expect("bench request serializes");
+        // The evidence manifest needs the exact bytes each cell decodes.
+        if let Some(dir) = std::env::var_os("EIDNARA_DUMP_DECODE_CORPUS") {
+            let path =
+                std::path::Path::new(&dir).join(format!("decode-{count}msgs_2KiB_mixed.json"));
+            std::fs::write(&path, &body).expect("write decode corpus");
+        }
         group.throughput(criterion::Throughput::Bytes(body.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("typed_request", format!("{count}msgs_2KiB_mixed")),
