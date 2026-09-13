@@ -314,34 +314,45 @@ pub fn verify_construction(
         bounds,
     )?
     .map_err(|_| ProjectionError::CorruptRow)?;
-    let unique: std::collections::HashSet<_> = batch
-        .records
-        .iter()
-        .map(|record| crate::encode_record(record).map(|(encoded, _)| encoded.occurrence_id))
-        .collect::<Result<_, _>>()?;
+    let mut unique = std::collections::HashSet::new();
+    let mut payloads = std::collections::HashSet::new();
+    for record in &batch.records {
+        let (encoded, selected) = crate::encode_record(record)?;
+        let (occurrence_id, payload_id) = crate::canonical_digests(&encoded, selected);
+        unique.insert(occurrence_id);
+        payloads.insert(payload_id);
+    }
     let invalidated: std::collections::HashSet<_> = batch
         .invalidations
         .iter()
         .map(|row| &row.occurrence_id)
         .collect();
-    let (rows, tombstones, vectors, pending, admitted): (i64, i64, i64, i64, i64) = conn
-        .query_row(
-            "SELECT (SELECT count(*) FROM occurrences),
+    let (rows, payload_rows, tombstones, vectors, pending, admitted): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = conn.query_row(
+        "SELECT (SELECT count(*) FROM occurrences),
+         (SELECT count(*) FROM payloads),
          (SELECT count(*) FROM occurrence_tombstones),
          (SELECT count(*) FROM occurrence_vectors),
          (SELECT count(*) FROM embedding_jobs WHERE state='pending'),
          (SELECT count(*) FROM embedding_jobs WHERE state='admitted')",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
     let mut excluded_jobs = false;
     for class in OccurrenceClass::ALL
         .into_iter()
@@ -360,6 +371,7 @@ pub fn verify_construction(
         || !only_generation
         || unique.len() != batch.records.len()
         || usize::try_from(rows).ok() != Some(batch.records.len())
+        || usize::try_from(payload_rows).ok() != Some(payloads.len())
         || usize::try_from(tombstones).ok() != Some(batch.invalidations.len())
         || vectors != 0
         || admitted != 0

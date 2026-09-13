@@ -354,6 +354,19 @@ fn construction_verification_uses_occurrence_identity_and_shared_content_equalit
             Ok(())
         })
         .unwrap();
+    // A payload row the inventory does not reference is surplus content, not a fresh construction.
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute("INSERT INTO payloads VALUES ('surplus',x'61',1,0)", [])?;
+            assert!(matches!(
+                verify_construction(conn, &batch, &generation(), limits),
+                Err(ProjectionError::CorruptRow)
+            ));
+            conn.execute("DELETE FROM payloads WHERE payload_id='surplus'", [])?;
+            verify_construction(conn, &batch, &generation(), limits).unwrap();
+            Ok(())
+        })
+        .unwrap();
     store
         .with_conn_fenced(|conn| {
             use rusqlite::types::Value;
