@@ -78,9 +78,13 @@ impl ReplacementSpec {
         let wait = self
             .seed
             .attempt_wait
-            .as_millis()
-            .checked_mul(u128::from(checkpoints) * u128::from(intent.episodes.allowance))
-            .and_then(|wait| u64::try_from(wait).ok())
+            .checked_mul(checkpoints)
+            .and_then(|wait| wait.checked_mul(intent.episodes.allowance))
+            .and_then(|wait| {
+                // `quiesce` arms the full `Duration` each attempt, so round the total up, never each wait down.
+                let whole = u64::try_from(wait.as_millis()).ok()?;
+                whole.checked_add(u64::from(wait.subsec_nanos() % 1_000_000 != 0))
+            })
             .ok_or(BuildError::Invalid("checkpoint wait"))?;
         let rows = batch
             .max_local_mutations
@@ -91,7 +95,7 @@ impl ReplacementSpec {
         let peak_rows = (batch.persist.max_records.get() as u64)
             .checked_add(page.max_rows.get() as u64)
             .ok_or(BuildError::Invalid("row charge overflow"))?;
-        let pending_width = (2 * 64 + "pending".len() + 3 * std::mem::size_of::<i64>()) as u64;
+        let pending_width = (2 * 64 + "pending".len() + 4 * std::mem::size_of::<i64>()) as u64;
         let pending_bytes = pending_width
             .checked_add(self.generation.generation_id.len() as u64)
             .and_then(|width| width.checked_mul(batch.max_pending.get() as u64))
@@ -919,7 +923,7 @@ impl<'a> ReplacementBuilder<'a> {
         if budget.is_exhausted() {
             return Err(BuildError::Expired);
         }
-        self.checked_target(budget)?;
+        let target = self.checked_target(budget)?;
         let (intent, _) = self.lifecycle.admitted_intent(self.gate)?;
         if let Some(capture) = &self.capture
             && let Some(stage) = capture.stage.as_deref()
@@ -970,12 +974,18 @@ impl<'a> ReplacementBuilder<'a> {
             && capture.lease_epoch == self.kernel.lease_epoch()
         {
             let binding = self.binding()?;
-            self.kernel.release_source_hold_within_budget(
+            match self.kernel.release_source_hold_within_budget(
                 budget,
                 &binding,
                 &capture.hold_id,
                 wall_ms()?,
-            )?;
+            ) {
+                Err(SourceHoldError::Invalid(SourceHoldInvalidity::Missing))
+                    if self
+                        .incarnation
+                        .is_some_and(|held| held != target.incarnation) => {}
+                released => released?,
+            }
         }
         let binding = self.binding()?;
         self.kernel.reconcile_source_holds_within_budget(

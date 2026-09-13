@@ -1498,15 +1498,57 @@ fn construction_caps_are_checked_against_manifest_limits_before_registration() {
 }
 
 #[test]
+fn pending_bytes_charge_every_non_null_column_of_a_queued_job() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = open_gate();
+    let config = spec(root.path());
+    let per_job =
+        (2 * 64 + "pending".len() + 4 * size_of::<i64>() + fixtures::GENERATION.len()) as u64;
+    let pending = config.episode.batch.max_pending.get() as u64;
+    record(root.path(), &gate, None, &config.identity);
+    let mut evaluator = support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &daemon::projection_gates::ProjectionHook::ALL,
+    );
+    evaluator
+        .manifest
+        .limits
+        .insert("pending_bytes".to_owned(), per_job * pending - 1);
+    gate.install(evaluator);
+    let error = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .err()
+        .expect("one byte short of the pending charge is refused");
+    assert!(
+        matches!(
+            error,
+            BuildError::Denied(daemon::projection_gates::Denial::LimitExceeded {
+                ref limit,
+                observed,
+                max,
+            }) if limit == "pending_bytes" && observed == per_job * pending && max == observed - 1
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn checkpoint_wait_is_charged_for_every_attempt_of_every_episode() {
     // `quiesce` arms `attempt_wait` on each of `checkpoint_attempts` tries; the fixture allows three episodes of two.
-    for (wait_ms, admitted) in [(20_000u64, false), (16_000u64, true)] {
+    // Six waits of 16 666.7 ms total 100 000.2 ms: the charge rounds the product up, never each wait down.
+    for (wait, admitted, observed) in [
+        (Duration::from_millis(20_000), false, 120_000),
+        (Duration::from_millis(16_000), true, 0),
+        (Duration::from_micros(16_666_700), false, 100_001),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());
         corpus.seed();
         let gate = open_gate();
         let mut config = spec(root.path());
-        config.seed.attempt_wait = Duration::from_millis(wait_ms);
+        config.seed.attempt_wait = wait;
         record(root.path(), &gate, None, &config.identity);
         let mut evaluator = support::projection_gate::passing_evaluator(
             &config.identity,
@@ -1523,17 +1565,15 @@ fn checkpoint_wait_is_charged_for_every_attempt_of_every_episode() {
             drop(result.unwrap());
             continue;
         }
-        let error = result
-            .err()
-            .expect("six attempts of twenty seconds exceed the limit");
+        let error = result.err().expect("six attempts exceed the limit");
         assert!(
             matches!(
                 error,
                 BuildError::Denied(daemon::projection_gates::Denial::LimitExceeded {
                     ref limit,
-                    observed: 120_000,
+                    observed: found,
                     max: 100_000,
-                }) if limit == "B_recovery_ms"
+                }) if limit == "B_recovery_ms" && found == observed
             ),
             "{error:?}"
         );
@@ -1732,6 +1772,51 @@ fn a_restore_cannot_rebind_the_target_even_when_it_reuses_the_sequence() {
         );
         assert!(failure.cleanup_error.is_none(), "{failure:?}");
     }
+}
+
+#[test]
+fn cleanup_releases_a_capture_the_restored_history_never_held() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "base bytes");
+    let gate = open_gate();
+    record(root.path(), &gate, None, &spec(root.path()).identity);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let mut failure =
+        ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+            .unwrap()
+            .build(&budget(Duration::from_secs(30)), &mut |event| {
+                if event == BuildEvent::BaselineReleased {
+                    corpus
+                        .kernel
+                        .commit(intent("displaced"), |_| Ok(String::new()))
+                        .unwrap();
+                    corpus.kernel.restore(&saved.destination_path).unwrap();
+                }
+            })
+            .err()
+            .unwrap();
+    assert!(matches!(
+        failure.error,
+        BuildError::Blocked(daemon::search_catchup::Blocked::Read(
+            kernel::CommitReadError::IncarnationMismatch
+        ))
+    ));
+    if failure.cleanup_error.is_some() {
+        failure.cleanup(&budget(Duration::from_secs(30))).unwrap();
+    }
+    assert!(control(root.path()).replacement_capture.is_none());
 }
 
 #[test]
