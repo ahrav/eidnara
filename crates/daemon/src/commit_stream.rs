@@ -110,7 +110,6 @@ where
 /// An acknowledgement that failed this way may still have committed, because the failure can strike after the kernel's COMMIT or while waiting for its writer, so the durable checkpoint decides.
 /// `Io` leaves the acknowledgement outcome unknown, so callers must resolve it before retrying.
 /// `Deadline` is a definite refusal under the contract of [`KernelStore::acknowledge_through_source_hold_within_budget`].
-/// Every other kernel error is raised before the write begins or reports a definite rollback.
 pub(crate) fn outcome_unknown(error: KernelError) -> bool {
     matches!(
         error,
