@@ -1311,6 +1311,70 @@ fn same_manager_reopen_scans_the_cached_family_pages() {
 }
 
 #[test]
+fn reopen_rejects_an_exhausted_budget_before_waiting_for_the_lifecycle_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let _held =
+        host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+    assert!(matches!(
+        selection.reopen(&corpus.kernel, &gate, &budget(Duration::ZERO)),
+        Err(BuildError::Expired)
+    ));
+}
+
+#[test]
+fn reopen_admits_the_hook_named_by_the_certificate_transition() {
+    use daemon::projection_gates::ProjectionHook;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(root.path());
+    let request = LifecycleRequest {
+        transition: Transition::AuthorizedRecovery,
+        cause: Cause::DisabledRecovery,
+        authorization_ref: Some("operator:recovery".to_owned()),
+        ..request(None, &config.identity)
+    };
+    ProjectionLifecycle::open(root.path())
+        .unwrap()
+        .record(&gate, &request, now())
+        .unwrap();
+    let candidate = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    let selection = selector(root.path());
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+    // Bootstrap stays enabled while the recovery hook the certificate names is disabled.
+    let mut evaluator = support::projection_gate::passing_evaluator(
+        &spec(root.path()).identity,
+        0,
+        &ProjectionHook::ALL,
+    );
+    evaluator
+        .manifest
+        .enabled
+        .insert(ProjectionHook::EmbeddingBackfill, false);
+    gate.install(evaluator);
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selector(root.path())
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
 fn same_manager_identity_corruption_withdraws_existing_and_new_pins() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

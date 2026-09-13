@@ -289,6 +289,8 @@ impl SearchSelection {
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
+        // An exhausted budget is refused before the lock's retry window can outlast it.
+        deadline(budget)?;
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
         self.reopen_locked(kernel, gate, budget, &transaction)
     }
@@ -343,6 +345,11 @@ impl SearchSelection {
                     }
                 };
                 self.admit(gate, budget)?;
+                // Authorized recovery also needs the hook its transition names, as construction did.
+                let hook = family.certificate.intent.transition.hook();
+                if hook != ProjectionHook::EmbeddingBootstrap {
+                    gate.admit(hook, EntryPoint::Reload)?;
+                }
                 self.selected.store(Some(family));
                 Ok(())
             }
