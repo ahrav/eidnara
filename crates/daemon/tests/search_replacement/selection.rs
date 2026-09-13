@@ -1456,13 +1456,23 @@ fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_lease
     );
 
     drop(old);
-    // A residual entry keeps the directory on disk, so the sweep must report it retained.
-    let stray = family(&old_digest).join("stray");
-    std::fs::write(&stray, b"residual").unwrap();
-    let report = selection.sweep().unwrap();
-    assert_eq!((report.removed, report.retained), (0, 1));
-    assert!(family(&old_digest).is_dir());
-    std::fs::remove_file(&stray).unwrap();
+    // A residual entry keeps the directory on disk, so the sweep must report it retained; a
+    // foreign `.lease` file is residual too, not a storage sidecar to unlink.
+    for stray in [
+        family(&old_digest).join("search").join("notes.lease"),
+        family(&old_digest).join("stray"),
+    ] {
+        std::fs::write(&stray, b"residual").unwrap();
+        let report = selection.sweep().unwrap();
+        assert_eq!(
+            (report.removed, report.retained),
+            (0, 1),
+            "{}",
+            stray.display()
+        );
+        assert!(stray.is_file());
+        std::fs::remove_file(&stray).unwrap();
+    }
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (1, 0));
     assert!(!family(&old_digest).exists());

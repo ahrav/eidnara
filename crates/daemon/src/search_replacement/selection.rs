@@ -649,11 +649,10 @@ impl SearchSelection {
             for entry in fs::read_dir(&search)? {
                 let entry = entry?;
                 if entry.file_type()?.is_file()
-                    && entry.file_name().to_str().is_some_and(|name| {
-                        std::path::Path::new(name)
-                            .extension()
-                            .is_some_and(|ext| ext == "lease")
-                    })
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(is_lease_sidecar_name)
                 {
                     fs::remove_file(entry.path())?;
                 }
@@ -844,6 +843,17 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
         BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
         _ => None,
     }
+}
+
+/// The lease store names its sidecar `<16 lowercase hex digits>.lease`; any other `.lease`
+/// entry is foreign data the sweep must not unlink.
+fn is_lease_sidecar_name(name: &str) -> bool {
+    name.strip_suffix(".lease").is_some_and(|stem| {
+        stem.len() == 16
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
