@@ -267,7 +267,7 @@ commit. [The focused receipt][receipt] records execution with adequacy unaudited
   acceptance remains unresolved; #438 does not establish a global E1 guarantee.
 
 [unit-runner]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
-[unit-lifecycle]: ../../../../crates/daemon/src/lib.rs#L8427-L8609
+[unit-lifecycle]: ../../../../crates/daemon/src/lib.rs#L8454-L8648
 [host-unit-tests]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
 [unit-panic]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
 [receipt]: ../existing-checks.md#transform-unit-execution-receipt-2026-09-13

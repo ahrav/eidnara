@@ -173,10 +173,10 @@ completion, the foreign publish, and inline failure. They do not establish
 every possible publication schedule or a global freshness theorem. The
 [execution receipt][receipt] reports four passes, separately from full gates.
 
-[first-live]: ../../../../../crates/daemon/src/lib.rs#L8847
-[rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8806-L8844
-[settle-live]: ../../../../../crates/daemon/src/lib.rs#L8934-L8952
-[emergency-tests]: ../../../../../crates/daemon/src/lib.rs#L37901-L38134
+[first-live]: ../../../../../crates/daemon/src/lib.rs#L8886
+[rerun-live]: ../../../../../crates/daemon/src/lib.rs#L8845-L8883
+[settle-live]: ../../../../../crates/daemon/src/lib.rs#L8973-L8991
+[emergency-tests]: ../../../../../crates/daemon/src/lib.rs#L37952-L38185
 [receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13
 
 ## Rebase check, 2026-09-13
@@ -195,5 +195,5 @@ constructs publication between two post-commit reads. C5 returns to exercised
 with default-production reachability, while the separate W11 hook retains its
 test-only reachability. Neither contract or scalar-read oracle is weakened.
 
-[busy-live]: ../../../../../crates/daemon/src/lib.rs#L37916-L37972
-[post-publish-live]: ../../../../../crates/daemon/src/lib.rs#L37974-L38076
+[busy-live]: ../../../../../crates/daemon/src/lib.rs#L37967-L38023
+[post-publish-live]: ../../../../../crates/daemon/src/lib.rs#L38025-L38127
