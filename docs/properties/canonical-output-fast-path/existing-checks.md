@@ -104,7 +104,7 @@ test-only observation cannot be built, stop U0 for seam approval.
 
 ### U0 harness landing
 
-Plan U0 lands the surfaces below. The [baseline record](evidence/u0-baseline-measurement.md)
+Plan U0 lands the surfaces below at harness revision `c1dafa76`. The [baseline record](evidence/u0-baseline-measurement.md)
 retains the captured numbers and provenance. Per the method contract every
 check keeps status `unaudited`; the execution column records only that a run
 happened on this revision, not an adequacy verdict.

@@ -33,7 +33,7 @@ catalog, its evidence, and the specification copy are tracked with the U0
 harness.
 
 Seven records remain **Exercised: not yet**; S5 and C2 are **partial** after
-the plan U0 harness landed at `5b54ecd6` and captured the
+the plan U0 harness landed at `c1dafa76` and captured the
 [baseline record](evidence/u0-baseline-measurement.md) on the unchanged
 canonicalizer. No candidate ran. Inspected pre-U0 tests remain **unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
@@ -229,7 +229,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - The U0 baseline observer records one exact-N B allocation
-and A's release for every population at `5b54ecd6`; candidate ownership is
+and A's release for every population at `c1dafa76`; candidate ownership is
 unmeasured.
 Guarantee: A successful encode with only identity field permutations returns
 A by ownership transfer without B or replacement output-sized scratch.
