@@ -1362,16 +1362,16 @@ fn reopen_admits_the_hook_named_by_the_certificate_transition() {
         .enabled
         .insert(ProjectionHook::EmbeddingBackfill, false);
     gate.install(evaluator);
-    assert!(
-        selection
-            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
-            .is_err()
-    );
-    assert!(
-        selector(root.path())
-            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
-            .is_err()
-    );
+    assert!(matches!(
+        selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
+    // Released first, or a fresh selector fails on the held lease before it reaches the gate.
+    drop(selection);
+    assert!(matches!(
+        selector(root.path()).reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
 }
 
 #[test]
