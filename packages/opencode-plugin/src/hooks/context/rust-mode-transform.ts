@@ -30,14 +30,16 @@ import {
 } from "./event-resolvers";
 import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import {
+    annotateOrdinals,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     type ModuleMethod,
     type ModuleOrdinalMemo,
-    resolveOrdinalsForModule,
+    ORDINAL_ENTRY_RETAINED_BYTES,
+    type OrdinalResolution,
+    primeOrdinalMemo,
 } from "./module-wire";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
-import type { RawMessageOrdinalAnchor } from "./read-session-raw";
 import {
     knownSessionDirectory,
     resolveSessionDirectory,
@@ -45,14 +47,18 @@ import {
 } from "./session-directory";
 import type { MessageLike } from "./tag-content-primitives";
 import {
-    assertCapturedMessagesUnchanged,
-    assertReferenceableMessages,
-    type CapturedMessages,
+    CaptureBudgetExceeded,
+    type CaptureLease,
+    capturedMessagesUnchanged,
     captureMessages,
+    defaultTransformCaptureAdmission,
+    hostArrayReplacementRejection,
+    inspectReferenceableMessages,
     type MessageContentSnapshot,
     readOwnDataProperty,
-    SourceRejected,
+    replaceHostArrayContents,
     snapshotFieldsEqual,
+    type TransformCaptureAdmission,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
 
@@ -71,6 +77,11 @@ export interface RustModeTransformDeps extends SessionDirectoryDeps {
     compactionOff?: boolean;
     isSubagentSession: (sessionId: string) => boolean;
     systemPromptHashFor: (sessionId: string) => string;
+    /** A session deleted while its directory resolved declines without dispatch. */
+    isSessionDeleted?: (sessionId: string) => boolean;
+    onSessionDeletedDuringPreflight?: (sessionId: string) => void;
+    /** Hidden `eidnara-` children run Eidnara's own prompts and receive no transform. */
+    isInternalChildSession?: (sessionId: string) => boolean;
 }
 
 function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined {
@@ -117,10 +128,9 @@ const WIRE_CACHE_SESSION_CAPACITY = 64;
 interface RustWireCache {
     rawCount: number;
     wireCount: number;
-    rawLastId: string | null;
     rawLastVisible: boolean;
     /** Each pass re-verifies reused messages so in-place edits cannot reuse a stale prefix. */
-    rawContentSnapshots: MessageContentSnapshot[];
+    rawContentSnapshots: readonly MessageContentSnapshot[];
     ckFingerprint: string;
     ckPrefixFingerprintBeforeLast: string;
     nativeFingerprint: string;
@@ -138,19 +148,11 @@ export interface RustSessionState {
     /** `need_full_sync` forces the next pass to send the full wire array until a pass applies.
      * `need_full_sync` bypasses delta eligibility until a pass applies. */
     forceFullWire: boolean;
-    /** `invalidateWireState` increments this value. A pass commits its cache only when the value
+    /** `invalidateWireState` increments this value. A pass publishes only when the value
      * matches the one it read alongside the previous cache, so an invalidation that lands during
-     * the daemon call survives that pass's completion. */
+     * the daemon call rejects that pass's pending output. */
     wireInvalidations: number;
-    moduleGeneration: number;
-    idOrdinalMemoGeneration: number;
-    idOrdinalMemo: Map<string, number>;
-    ordinalMemoAnchor: RawMessageOrdinalAnchor | null;
-    ordinalMemoStoredCount: number | null;
-    ordinalMemoCanonicalCount: number;
-    /** The module returns a durable prior-lineage tail after descent.
-     * The loop continues after `base` without regenerating `index + 1` ordinals. */
-    ordinalContinuationBase: number | null;
+    ordinals: ModuleOrdinalMemo;
     failureCount: number;
     /** Consecutive passes whose newest user message is synthetic. A real user message resets it. */
     syntheticTurnCount: number;
@@ -163,20 +165,12 @@ export interface RustSessionState {
 export interface RustModeTransformOptions {
     moduleClient: RustModeModuleClient;
     projectRoot?: string;
+    /** Shared admission owner; tests inject one with smaller limits. */
+    captureAdmission?: TransformCaptureAdmission;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object";
-}
-
-/**
- * OpenCode retains the original messages array when it serializes a transform result.
- * OpenCode requires in-place mutation of its original `messages` array for the module response to reach the wire.
- */
-function replaceMessagesInPlace(output: { messages: unknown[] }, next: unknown[]): unknown[] {
-    const target = output.messages;
-    if (target !== next) target.splice(0, target.length, ...next);
-    return target;
 }
 
 function messageInfo(value: unknown): Record<string, unknown> {
@@ -189,20 +183,6 @@ function messageIdOf(message: MessageLike): string | null {
     return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-function prefixContentSnapshotsMatch(
-    snapshots: readonly MessageContentSnapshot[],
-    cache: RustWireCache,
-    prefixLength: number,
-): boolean {
-    if (prefixLength > cache.rawContentSnapshots.length) return false;
-    for (let index = 0; index < prefixLength; index += 1) {
-        if (!snapshotFieldsEqual(snapshots[index], cache.rawContentSnapshots[index])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 function advanceWireFingerprint(previous: string, encoded: unknown): string {
     return createHash("sha256")
         .update(previous)
@@ -211,17 +191,104 @@ function advanceWireFingerprint(previous: string, encoded: unknown): string {
         .digest("hex");
 }
 
-function buildWireFingerprint(encoded: unknown[]): {
+function buildWireFingerprint(
+    encoded: readonly unknown[],
+    seed = "rust-wire-v1",
+): {
     fingerprint: string;
     prefixFingerprintBeforeLast: string;
 } {
-    let fingerprint = "rust-wire-v1";
+    let fingerprint = seed;
     let prefixFingerprintBeforeLast = fingerprint;
     for (let index = 0; index < encoded.length; index += 1) {
         if (index === encoded.length - 1) prefixFingerprintBeforeLast = fingerprint;
         fingerprint = advanceWireFingerprint(fingerprint, encoded[index]);
     }
     return { fingerprint, prefixFingerprintBeforeLast };
+}
+
+interface WireDelta {
+    rawStart: number;
+    wireStart: number;
+    after: string;
+    ckAfter: string;
+    nativeAfter: string;
+}
+
+/**
+ * Delta transport requires snapshots before the former terminal to equal
+ * `previous.rawContentSnapshots`. The terminal is compared separately because an invisible
+ * former terminal may have been edited in place while a message was appended.
+ */
+function computeWireDelta(
+    previous: RustWireCache,
+    snapshots: readonly MessageContentSnapshot[],
+): WireDelta | undefined {
+    if (snapshots.length < previous.rawCount) return undefined;
+    const appending = snapshots.length > previous.rawCount;
+    const formerTerminalIndex = previous.rawCount - 1;
+    const prefixIntact =
+        formerTerminalIndex <= previous.rawContentSnapshots.length &&
+        snapshots
+            .slice(0, Math.max(0, formerTerminalIndex))
+            .every((snapshot, index) =>
+                snapshotFieldsEqual(snapshot, previous.rawContentSnapshots[index]),
+            );
+    if (!prefixIntact) return undefined;
+    const formerTerminalSnapshot = previous.rawContentSnapshots[formerTerminalIndex];
+    const lastChanged =
+        formerTerminalIndex >= 0 &&
+        !(appending && previous.rawLastVisible) &&
+        (formerTerminalSnapshot === undefined ||
+            !snapshotFieldsEqual(snapshots[formerTerminalIndex], formerTerminalSnapshot));
+    const replaceExistingTail = lastChanged || (appending && previous.rawLastVisible);
+    const rawStart = replaceExistingTail ? Math.max(0, previous.rawCount - 1) : previous.rawCount;
+    const replaceExistingWireTail = previous.rawLastVisible && (lastChanged || appending);
+    const wireStart = replaceExistingWireTail
+        ? Math.max(0, previous.wireCount - 1)
+        : previous.wireCount;
+    const ckAfter =
+        wireStart === previous.wireCount - 1
+            ? previous.ckPrefixFingerprintBeforeLast
+            : wireStart === previous.wireCount
+              ? previous.ckFingerprint
+              : undefined;
+    const nativeAfter =
+        rawStart === previous.rawCount - 1
+            ? previous.nativePrefixFingerprintBeforeLast
+            : rawStart === previous.rawCount
+              ? previous.nativeFingerprint
+              : undefined;
+    if (ckAfter === undefined || nativeAfter === undefined) return undefined;
+    return { rawStart, wireStart, ckAfter, nativeAfter, after: previous.fingerprint };
+}
+
+/** The pending cache for a pass; `nativeOutput` is attached on publication. */
+function buildWireCache(args: {
+    messages: readonly MessageLike[];
+    encoded: readonly { mid?: unknown }[];
+    snapshots: readonly MessageContentSnapshot[];
+    delta?: WireDelta;
+}): RustWireCache {
+    const { messages, encoded, snapshots, delta } = args;
+    const rawLast = messages.at(-1);
+    const rawLastId = rawLast === undefined ? null : messageIdOf(rawLast);
+    const ck = buildWireFingerprint(encoded, delta?.ckAfter);
+    const native = buildWireFingerprint(
+        delta ? messages.slice(delta.rawStart) : messages,
+        delta?.nativeAfter,
+    );
+    return {
+        rawCount: messages.length,
+        wireCount: (delta?.wireStart ?? 0) + encoded.length,
+        rawLastVisible: rawLast !== undefined && encoded.some((entry) => entry.mid === rawLastId),
+        ckFingerprint: ck.fingerprint,
+        ckPrefixFingerprintBeforeLast: ck.prefixFingerprintBeforeLast,
+        nativeFingerprint: native.fingerprint,
+        nativePrefixFingerprintBeforeLast: native.prefixFingerprintBeforeLast,
+        rawContentSnapshots: snapshots,
+        fingerprint: `${ck.fingerprint}|${native.fingerprint}`,
+    };
 }
 
 function newestUserMessage(messages: MessageLike[]): MessageLike | undefined {
@@ -360,19 +427,6 @@ function isTransformPageAttemptMismatch(error: unknown): boolean {
     return false;
 }
 
-function isRustGenerationRecord(value: unknown): value is Record<string, number> {
-    return (
-        isRecord(value) &&
-        Object.entries(value).every(
-            ([projectId, generation]) =>
-                /^\d+$/.test(projectId) &&
-                typeof generation === "number" &&
-                Number.isSafeInteger(generation) &&
-                generation >= 0,
-        )
-    );
-}
-
 function noteDeliveryPassIds(response: Record<string, unknown>): string[] {
     if (!Array.isArray(response.note_deliveries)) return [];
     return [
@@ -415,13 +469,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             passCount: 0,
             forceFullWire: false,
             wireInvalidations: 0,
-            moduleGeneration: 0,
-            idOrdinalMemoGeneration: 0,
-            idOrdinalMemo: new Map(),
-            ordinalMemoAnchor: null,
-            ordinalMemoStoredCount: null,
-            ordinalMemoCanonicalCount: 0,
-            ordinalContinuationBase: null,
+            ordinals: { generation: 0, memoGeneration: 0, entries: new Map() },
             failureCount: 0,
             syntheticTurnCount: 0,
             lastObservedUserMessageId: null,
@@ -526,13 +574,21 @@ function hasNativeResponseContent(response: Record<string, unknown>): boolean {
     return isRecord(delta) && Array.isArray(delta.messages);
 }
 
-export function applyNativeMessagesVerbatim(
-    output: { messages: unknown[] },
+/**
+ * Build the candidate output array from a module response. The result is a fresh array of shared
+ * references: kept prefix entries come from the acknowledged previous output, and every entry the
+ * module returned is used as-is because the module owns healing, ordering, and codec fidelity.
+ */
+export function buildNativeCandidate(
     response: Record<string, unknown>,
-    previous?: { messages: readonly unknown[]; fingerprint: string },
+    previous: { messages: readonly unknown[]; fingerprint: string } | undefined,
+    reserve: (slots: number) => boolean,
 ): unknown[] {
     const nativeMessages = response.native_messages;
     if (typeof nativeMessages === "string") {
+        // Each JSON array entry needs at least one character plus a separator.
+        if (!reserve(Math.ceil(nativeMessages.length / 2)))
+            throw new CaptureBudgetExceeded("native candidate array");
         let parsed: unknown;
         try {
             parsed = JSON.parse(nativeMessages) as unknown;
@@ -543,11 +599,12 @@ export function applyNativeMessagesVerbatim(
         }
         if (!Array.isArray(parsed))
             throw new Error("rust transform native_messages string was not an array");
-        return replaceMessagesInPlace(output, parsed);
+        return parsed;
     }
     if (Array.isArray(nativeMessages)) {
-        // The module owns healing, ordering, and codec fidelity; do not clone, normalize, or inspect the returned native message array.
-        return replaceMessagesInPlace(output, nativeMessages);
+        if (!reserve(nativeMessages.length))
+            throw new CaptureBudgetExceeded("native candidate array");
+        return Array.from(nativeMessages);
     }
     const delta = response.native_messages_delta;
     if (!isRecord(delta) || !Array.isArray(delta.messages)) {
@@ -566,10 +623,10 @@ export function applyNativeMessagesVerbatim(
             "rust transform native_messages_delta did not match the acknowledged output",
         );
     }
-    return replaceMessagesInPlace(output, [
-        ...previous.messages.slice(0, replaceFrom),
-        ...delta.messages,
-    ]);
+    if (!reserve(replaceFrom + delta.messages.length)) {
+        throw new CaptureBudgetExceeded("native candidate array");
+    }
+    return previous.messages.slice(0, replaceFrom).concat(delta.messages);
 }
 
 function buildTransformBody(args: {
@@ -654,21 +711,81 @@ function buildTransformBody(args: {
     };
 }
 
+const CANDIDATE_SLOT_BYTES = 8;
+/** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
+const WIRE_PROJECTION_FACTOR = 4;
+
+type PassDeclineReason =
+    | "cleared"
+    | "superseded"
+    | "capture_bytes"
+    | "unsupported_source"
+    | "host_container"
+    | "source_changed"
+    | "invalidated"
+    | "deleted"
+    | "internal_child";
+
+/** A local refusal prevents publication without counting a daemon failure. */
+class PassDeclined extends Error {
+    constructor(
+        sessionId: string,
+        readonly reason: PassDeclineReason,
+        detail?: string,
+    ) {
+        super(`rust session ${sessionId} pass declined: ${reason}${detail ? ` (${detail})` : ""}`);
+    }
+}
+
+interface DeliveryPlan {
+    sessionId: string;
+    projectRoot: string;
+    attempted: Set<string>;
+    applied: Set<string>;
+}
+
+async function deliverTransformNotes(
+    moduleClient: RustModeModuleClient,
+    plan: DeliveryPlan,
+): Promise<void> {
+    for (const disposition of ["nack", "ack"] as const) {
+        const errors: unknown[] = [];
+        for (const id of plan.attempted) {
+            if (plan.applied.has(id) !== (disposition === "ack")) continue;
+            const method = `transform.${disposition}` as const;
+            try {
+                await moduleClient.call({
+                    sessionId: plan.sessionId,
+                    projectRoot: plan.projectRoot,
+                    method,
+                    body: { method, v: 1, session_id: plan.sessionId, transform_pass_id: id },
+                });
+            } catch (error) {
+                errors.push(error);
+            }
+        }
+        if (errors.length > 0) {
+            sessionLog.warn(
+                plan.sessionId,
+                `rust note delivery ${disposition} failed (${disposition === "ack" ? "will retry" : "ignored"}):`,
+                new AggregateError(errors, `${errors.length} delivery disposition(s) failed`),
+            );
+        }
+    }
+}
+
 export function createRustModeTransform(
     deps: RustModeTransformDeps,
     options: RustModeTransformOptions,
 ): {
-    run: (
-        sessionId: string,
-        messages: readonly MessageLike[],
-        output: { messages: unknown[] },
-    ) => Promise<void>;
+    run: (sessionId: string, output: { messages: unknown[] }) => Promise<void>;
     clearSession: (sessionId: string) => void;
     invalidateWireState: (sessionId: string) => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
 } {
     const states = new Map<string, RustSessionState>();
     const wireCaches = new BoundedSessionMap<RustWireCache>(WIRE_CACHE_SESSION_CAPACITY);
+    const captureAdmission = options.captureAdmission ?? defaultTransformCaptureAdmission;
 
     const logStage = (
         sessionId: string,
@@ -687,153 +804,64 @@ export function createRustModeTransform(
         );
     };
 
-    const callModule = (args: Parameters<RustModeModuleClient["call"]>[0]): Promise<unknown> =>
-        options.moduleClient.call(args);
-
-    /** Thrown before a send when `clearSession` ran during this pass's preflight; the pass serves its input unchanged without counting a failure. */
-    class SessionClearedDuringPass extends Error {
-        constructor(sessionId: string) {
-            super(`rust session ${sessionId} was cleared during the pass`);
-        }
-    }
-
-    /** A newer session pass started before this pass could send or commit shared state. */
-    class PassSupersededDuringPass extends Error {
-        constructor(sessionId: string) {
-            super(`rust session ${sessionId} pass was superseded by a newer pass`);
-        }
-    }
-
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         state.consecutiveFailures += 1;
         state.failureCount += 1;
         sessionLog.warn(sessionId, "rust transform failed; serving the input unchanged:", error);
     };
 
-    const resetOrdinalMemo = (state: RustSessionState): void => {
-        state.idOrdinalMemo.clear();
-        state.ordinalMemoAnchor = null;
-        state.ordinalMemoStoredCount = null;
-        state.ordinalMemoCanonicalCount = 0;
-    };
-
-    // The single projection from session state to the resolver's memo bundle;
-    // evaluated at call time so a preceding resetOrdinalMemo is observed.
-    const ordinalMemoOf = (state: RustSessionState): ModuleOrdinalMemo => ({
-        generation: state.moduleGeneration,
-        memoGeneration: state.idOrdinalMemoGeneration,
-        entries: state.idOrdinalMemo,
-        anchor: state.ordinalMemoAnchor,
-        storedCount: state.ordinalMemoStoredCount,
-        canonicalCount: state.ordinalMemoCanonicalCount,
-        continuationBase: state.ordinalContinuationBase ?? 0,
-    });
-
     const invalidateWireState = (sessionId: string): void => {
         wireCaches.delete(sessionId);
+        captureAdmission.requestCancel(
+            sessionId,
+            `rust session ${sessionId} wire state invalidated`,
+        );
         const state = states.get(sessionId);
         if (!state) return;
-        resetOrdinalMemo(state);
+        state.ordinals = {
+            ...state.ordinals,
+            entries: new Map(),
+            anchor: null,
+            storedCount: null,
+            canonicalCount: 0,
+        };
         state.forceFullWire = true;
         state.wireInvalidations += 1;
     };
 
-    const run = async (
+    const execute = async (
         sessionId: string,
-        liveMessages: readonly MessageLike[],
         output: { messages: unknown[] },
-    ): Promise<void> => {
+        lease: CaptureLease,
+    ): Promise<DeliveryPlan> => {
         const passStartedAt = performance.now();
-        const logSourceDecline = (error: SourceRejected): void => {
-            sessionLog.debug(sessionId, `rust transform declined ${error.name}: ${error.message}`);
+        const deliveries: DeliveryPlan = {
+            sessionId,
+            projectRoot: "",
+            attempted: new Set(),
+            applied: new Set(),
         };
-        let captured: CapturedMessages;
-        try {
-            captured = captureMessages(liveMessages);
-            const target = readOwnDataProperty(output, "messages");
-            if (target !== liveMessages) assertReferenceableMessages(target);
-        } catch (error) {
-            if (!(error instanceof SourceRejected)) throw error;
-            logSourceDecline(error);
-            return;
+        const target = readOwnDataProperty(output, "messages") as unknown[];
+        const hostRejection = hostArrayReplacementRejection(target, 0);
+        if (hostRejection !== null) {
+            sessionLog.debug(
+                sessionId,
+                `rust transform declined before dispatch: host_container ${hostRejection}`,
+            );
+            return deliveries;
         }
-        const messages = captured.members as MessageLike[];
-        const assertSourceUnchanged = (): void => {
-            assertCapturedMessagesUnchanged(liveMessages, captured);
-        };
-        const sourceUnchanged = (): boolean => {
-            try {
-                assertSourceUnchanged();
-                return true;
-            } catch (error) {
-                if (!(error instanceof SourceRejected)) throw error;
-                logSourceDecline(error);
-                return false;
-            }
-        };
         const state = ensureState(states, sessionId);
         const timings = emptyRustPassTimings();
-        const passSequence = ++state.passCount;
-        const assertCurrentPass = (): void => {
-            if (states.get(sessionId) !== state) throw new SessionClearedDuringPass(sessionId);
-            if (state.passCount !== passSequence) throw new PassSupersededDuringPass(sessionId);
-            assertSourceUnchanged();
-        };
-        const syntheticTurn = observeSyntheticTurn(state, messages);
-        if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
-            state.syntheticCascadeLogged = true;
-            sessionLog.warn(
-                sessionId,
-                `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
-            );
-        }
-        const inputCount = messages.length;
+        let inputCount = 0;
         let decision = "error";
         let materializeReason = "none";
         let servedFrom = "none";
         let moduleElapsedMs = 0;
         let rowVersion = 0;
         let appliedAt: number | undefined;
-        const passUsageSnapshot = loadContextUsage(deps, sessionId);
-        // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
-        const directory = await resolveSessionDirectory(deps, sessionId);
-        if (!sourceUnchanged()) return;
-        const isSubagent = deps.isSubagentSession(sessionId);
-        const systemPromptHash = deps.systemPromptHashFor(sessionId);
-        if (!sourceUnchanged()) return;
-        let preflightError: unknown;
-        let model = modelFromMessages(messages);
-        if (!model) {
-            try {
-                model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
-            } catch (error) {
-                preflightError = error;
-            }
-        }
-        const modelKey = model
-            ? piModelRefToCanonical(resolveModelKey(model.providerID, model.modelID) ?? "")
-            : null;
-        let resolvedContextLimit: number | undefined;
-        let resolvedWindowGeometry: WindowGeometryResult | undefined;
-        if (model) {
-            try {
-                resolvedContextLimit = resolveTrustedContextLimit(model.providerID, model.modelID);
-                resolvedWindowGeometry = resolveContextWindowGeometry(
-                    model.providerID,
-                    model.modelID,
-                );
-            } catch (error) {
-                preflightError ??= error;
-            }
-        }
-        const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
         const finishPass = (applied: boolean): void => {
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
-            const outputCount = readOwnDataProperty(
-                readOwnDataProperty(output, "messages"),
-                "length",
-            );
             sessionLog.debug(
                 sessionId,
                 formatRustPassLog({
@@ -841,7 +869,7 @@ export function createRustModeTransform(
                     reason: materializeReason,
                     servedFrom,
                     inputCount,
-                    outputCount: typeof outputCount === "number" ? outputCount : 0,
+                    outputCount: target.length,
                     applied,
                     elapsedMs,
                     moduleElapsedMs,
@@ -921,23 +949,126 @@ export function createRustModeTransform(
                     sessionLog.debug(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
-        if (!sourceUnchanged()) return;
-        resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
-        const reduceAvailability = resolveCtxReduceAvailability(sessionId);
-        // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
-        // Synthesis fails closed when host evidence is provisional or missing.
-        resolveTodowriteAvailabilityFromMessages(sessionId, messages);
-        const todoAvailability = resolveTodowriteAvailability(sessionId);
-        const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
-        const todoToolPresent = await resolveCombinedTodowriteVerdict(
-            deps,
-            sessionId,
-            messages,
-            todoAvailability,
-        );
-        let nackSourceDecline: (() => Promise<void>) | undefined;
+        state.passCount += 1;
+        const wireInvalidationsAtRead = state.wireInvalidations;
+        // Clearing a session replaces its state object; supersession, clearing, and wire invalidation abort the capture lease.
+        const assertCurrentPass = (): void => {
+            if (states.get(sessionId) !== state) throw new PassDeclined(sessionId, "cleared");
+            if (state.wireInvalidations !== wireInvalidationsAtRead)
+                throw new PassDeclined(sessionId, "invalidated");
+            if (lease.signal.aborted) throw new PassDeclined(sessionId, "superseded");
+        };
+        const charge = (bytes: number, detail: string): void => {
+            if (!lease.reserve(bytes)) throw new CaptureBudgetExceeded(detail);
+        };
         try {
-            assertCurrentPass();
+            // Source domain is validated synchronously before any message read.
+            const prefixGuardStartedAt = performance.now();
+            const inspection = inspectReferenceableMessages(target, lease.remainingBytes);
+            if (!inspection.ok) {
+                throw new PassDeclined(
+                    sessionId,
+                    "unsupported_source",
+                    `${inspection.rejection.reason} at ${inspection.rejection.path}`,
+                );
+            }
+            inputCount = inspection.messageWireBytes.length;
+            charge(inspection.estimatedBytes, `capture charge=${inspection.estimatedBytes}`);
+            const captured = captureMessages(target, lease);
+            // Later reads use the captured members; the live array is only rechecked against them.
+            const messages = captured.members as MessageLike[];
+            logStage(sessionId, "prefixGuard", prefixGuardStartedAt, timings, "phase=capture");
+            const recheckCapture = (phase: string): void => {
+                assertCurrentPass();
+                const startedAt = performance.now();
+                const unchanged =
+                    readOwnDataProperty(output, "messages") === target &&
+                    capturedMessagesUnchanged(target, captured);
+                logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
+                if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
+            };
+            // The delta decision and the charges it implies derive from the capture, so byte pressure declines before the first await.
+            const previousWireCache = wireCaches.get(sessionId);
+            let wireDelta =
+                !state.forceFullWire && previousWireCache
+                    ? computeWireDelta(previousWireCache, captured.snapshots)
+                    : undefined;
+            const reserveWire = (from: number, to: number): void => {
+                let bytes = 0;
+                for (let index = from; index < to; index += 1)
+                    bytes += WIRE_PROJECTION_FACTOR * inspection.messageWireBytes[index];
+                charge(bytes, "wire projection");
+            };
+            reserveWire(wireDelta?.rawStart ?? 0, messages.length);
+            let memoCopyBytes = 0;
+            for (const id of state.ordinals.entries.keys())
+                memoCopyBytes += ORDINAL_ENTRY_RETAINED_BYTES + id.length * 2;
+            charge(memoCopyBytes, "ordinal memo copy");
+            const syntheticTurn = observeSyntheticTurn(state, messages);
+            if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
+                state.syntheticCascadeLogged = true;
+                sessionLog.warn(
+                    sessionId,
+                    `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
+                );
+            }
+            const passUsageSnapshot = loadContextUsage(deps, sessionId);
+            let model = modelFromMessages(messages);
+            // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
+            const directory = await resolveSessionDirectory(deps, sessionId);
+            if (deps.isSessionDeleted?.(sessionId)) {
+                deps.onSessionDeletedDuringPreflight?.(sessionId);
+                throw new PassDeclined(sessionId, "deleted");
+            }
+            if (deps.isInternalChildSession?.(sessionId)) {
+                throw new PassDeclined(sessionId, "internal_child");
+            }
+            const isSubagent = deps.isSubagentSession(sessionId);
+            const systemPromptHash = deps.systemPromptHashFor(sessionId);
+            let preflightError: unknown;
+            if (!model) {
+                try {
+                    model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
+                } catch (error) {
+                    preflightError = error;
+                }
+            }
+            const modelKey = model
+                ? piModelRefToCanonical(resolveModelKey(model.providerID, model.modelID) ?? "")
+                : null;
+            let resolvedContextLimit: number | undefined;
+            let resolvedWindowGeometry: WindowGeometryResult | undefined;
+            if (model) {
+                try {
+                    resolvedContextLimit = resolveTrustedContextLimit(
+                        model.providerID,
+                        model.modelID,
+                    );
+                    resolvedWindowGeometry = resolveContextWindowGeometry(
+                        model.providerID,
+                        model.modelID,
+                    );
+                } catch (error) {
+                    preflightError ??= error;
+                }
+            }
+            const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
+            recheckCapture("preflight");
+            // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
+            resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
+            const reduceAvailability = resolveCtxReduceAvailability(sessionId);
+            // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
+            // Synthesis fails closed when host evidence is provisional or missing.
+            resolveTodowriteAvailabilityFromMessages(sessionId, messages);
+            const todoAvailability = resolveTodowriteAvailability(sessionId);
+            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
+            const todoToolPresent = await resolveCombinedTodowriteVerdict(
+                deps,
+                sessionId,
+                messages,
+                todoAvailability,
+            );
+            recheckCapture("permission");
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
             const contextLimit =
@@ -989,125 +1120,88 @@ export function createRustModeTransform(
                 prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
-            assertSourceUnchanged();
-            const previousWireCache = wireCaches.get(sessionId);
-            // Every await after this read lets `invalidateWireState` or `clearSession` run; the commit below compares against this value.
-            const wireInvalidationsAtRead = state.wireInvalidations;
-            let wireDelta:
-                | {
-                      rawStart: number;
-                      wireStart: number;
-                      after: string;
-                      ckAfter: string;
-                      nativeAfter: string;
-                  }
-                | undefined;
-            if (
-                !state.forceFullWire &&
-                previousWireCache &&
-                messages.length >= previousWireCache.rawCount
-            ) {
-                const appending = messages.length > previousWireCache.rawCount;
-                const formerTerminal = messages[previousWireCache.rawCount - 1];
-                const prefixGuardStartedAt = performance.now();
-                const prefixIntact = prefixContentSnapshotsMatch(
-                    captured.snapshots,
-                    previousWireCache,
-                    Math.max(0, previousWireCache.rawCount - 1),
-                );
-                logStage(sessionId, "prefixGuard", prefixGuardStartedAt, timings);
-                const lastChanged =
-                    formerTerminal !== undefined &&
-                    !(appending && previousWireCache.rawLastVisible) &&
-                    !snapshotFieldsEqual(
-                        captured.snapshots[previousWireCache.rawCount - 1],
-                        previousWireCache.rawContentSnapshots[previousWireCache.rawCount - 1],
-                    );
-                const replaceExistingTail =
-                    lastChanged || (appending && previousWireCache.rawLastVisible);
-                const rawStart = replaceExistingTail
-                    ? Math.max(0, previousWireCache.rawCount - 1)
-                    : previousWireCache.rawCount;
-                const replaceExistingWireTail =
-                    previousWireCache.rawLastVisible && (lastChanged || appending);
-                const wireStart = replaceExistingWireTail
-                    ? Math.max(0, previousWireCache.wireCount - 1)
-                    : previousWireCache.wireCount;
-                const ckAfter =
-                    wireStart === previousWireCache.wireCount - 1
-                        ? previousWireCache.ckPrefixFingerprintBeforeLast
-                        : wireStart === previousWireCache.wireCount
-                          ? previousWireCache.ckFingerprint
-                          : undefined;
-                const nativeAfter =
-                    rawStart === previousWireCache.rawCount - 1
-                        ? previousWireCache.nativePrefixFingerprintBeforeLast
-                        : rawStart === previousWireCache.rawCount
-                          ? previousWireCache.nativeFingerprint
-                          : undefined;
-                if (prefixIntact && ckAfter !== undefined && nativeAfter !== undefined) {
-                    wireDelta = {
-                        rawStart,
-                        wireStart,
-                        ckAfter,
-                        nativeAfter,
-                        after: previousWireCache.fingerprint,
-                    };
-                }
-            }
-            const cloneStartedAt = performance.now();
-            const ordinalMessages = wireDelta ? messages.slice(wireDelta.rawStart) : messages;
-            logStage(
-                sessionId,
-                "clone",
-                cloneStartedAt,
-                timings,
-                wireDelta ? "mode=projection-tail" : "mode=projection-full",
-            );
+            // Ordinal work stages in a charged pass-local copy of the memo; only accepted publication promotes it.
+            const stagedMemo: ModuleOrdinalMemo = {
+                ...state.ordinals,
+                entries: new Map(state.ordinals.entries),
+            };
             const provisionalBase = wireDelta
                 ? (() => {
                       for (let index = wireDelta.rawStart - 1; index >= 0; index -= 1) {
                           const priorId = messageIdOf(messages[index]);
                           if (!priorId) continue;
-                          const prior = state.idOrdinalMemo.get(priorId);
+                          const prior = stagedMemo.entries.get(priorId);
                           if (prior !== undefined)
-                              return Math.max(prior, state.ordinalContinuationBase ?? 0);
+                              return Math.max(prior, stagedMemo.continuationBase ?? 0);
                       }
                       return Math.max(
-                          state.ordinalMemoCanonicalCount,
-                          state.ordinalContinuationBase ?? 0,
+                          stagedMemo.canonicalCount ?? 0,
+                          stagedMemo.continuationBase ?? 0,
                       );
                   })()
-                : (state.ordinalContinuationBase ?? undefined);
-            const ordinalStartedAt = performance.now();
-            let resolved = await resolveOrdinalsForModule({
-                sessionId,
-                messages: ordinalMessages,
-                assertSourceUnchanged,
-                memo: ordinalMemoOf(state),
-                provisionalBase,
-            });
-            logStage(sessionId, "ordinalResolve", ordinalStartedAt, timings);
-            assertCurrentPass();
-            if (!resolved.ok) {
-                wireDelta = undefined;
-                resetOrdinalMemo(state);
-                const fullOrdinalStartedAt = performance.now();
-                resolved = await resolveOrdinalsForModule({
+                : stagedMemo.continuationBase;
+            /**
+             * Prime the memo asynchronously, recheck the captured messages, then annotate them
+             * synchronously so no message read follows an await without a fresh guard.
+             */
+            const resolveOrdinals = async (
+                rawStart: number,
+                base: number | undefined,
+                detail: string,
+            ): Promise<OrdinalResolution> => {
+                // Annotated shells and their memo entries coexist with the staged copy.
+                charge(
+                    (messages.length - rawStart) * ORDINAL_ENTRY_RETAINED_BYTES * 2,
+                    "ordinal annotation",
+                );
+                const inputMessages = rawStart === 0 ? messages : messages.slice(rawStart);
+                const startedAt = performance.now();
+                const primed = await primeOrdinalMemo({
                     sessionId,
-                    messages,
-                    memo: ordinalMemoOf(state),
-                    assertSourceUnchanged,
-                    provisionalBase: state.ordinalContinuationBase ?? undefined,
+                    memo: stagedMemo,
+                    budget: {
+                        signal: lease.signal,
+                        reserve: (bytes) => charge(bytes, `ordinal scan for session ${sessionId}`),
+                    },
                 });
-                logStage(
-                    sessionId,
-                    "ordinalResolve",
-                    fullOrdinalStartedAt,
-                    timings,
+                recheckCapture(`ordinal:${detail}`);
+                if (!primed.ok) {
+                    logStage(sessionId, "ordinalResolve", startedAt, timings, detail);
+                    return primed;
+                }
+                const resolved = annotateOrdinals({
+                    messages: inputMessages,
+                    memo: stagedMemo,
+                    primed: primed.primed,
+                    provisionalBase: base,
+                });
+                logStage(sessionId, "ordinalResolve", startedAt, timings, detail);
+                if (resolved.ok) {
+                    stagedMemo.memoGeneration = stagedMemo.generation;
+                    stagedMemo.anchor = primed.primed.memoAnchor;
+                    stagedMemo.storedCount = primed.primed.memoStoredCount;
+                    stagedMemo.canonicalCount = primed.primed.memoCanonicalCount;
+                }
+                return resolved;
+            };
+            // A memo generation the scan cannot match forces a full re-prime without an anchor.
+            const resetStagedMemo = (): void => {
+                stagedMemo.memoGeneration = -1;
+            };
+            let resolved = await resolveOrdinals(
+                wireDelta?.rawStart ?? 0,
+                provisionalBase,
+                "attempt=first",
+            );
+            if (!resolved.ok) {
+                if (wireDelta) reserveWire(0, wireDelta.rawStart);
+                wireDelta = undefined;
+                resetStagedMemo();
+                resolved = await resolveOrdinals(
+                    0,
+                    stagedMemo.continuationBase,
                     "fallback=clean_full",
                 );
-                assertCurrentPass();
             }
             if (!resolved.ok) {
                 throw new Error(
@@ -1115,77 +1209,23 @@ export function createRustModeTransform(
                         `index=${resolved.messageIndex ?? "unknown"} role=${resolved.messageRole ?? "unknown"}`,
                 );
             }
-            state.idOrdinalMemoGeneration = resolved.memoGeneration;
-            state.ordinalMemoAnchor = resolved.memoAnchor;
-            state.ordinalMemoStoredCount = resolved.memoStoredCount;
-            state.ordinalMemoCanonicalCount = resolved.memoCanonicalCount;
 
             const projectRoot = options.projectRoot ?? directory;
             state.routeRoot = projectRoot;
+            deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
             const encodedInput = encodeOpenCodeMessagesToCk(resolved.annotatedInput);
-            timings.wireMessages = wireDelta
-                ? messages.length - wireDelta.rawStart
-                : messages.length;
-            let pendingWireCache: RustWireCache = (() => {
-                const rawLast = messages.at(-1);
-                if (!wireDelta || !previousWireCache) {
-                    const ckFingerprint = buildWireFingerprint(encodedInput);
-                    const nativeFingerprint = buildWireFingerprint(messages);
-                    return {
-                        rawCount: messages.length,
-                        wireCount: encodedInput.length,
-                        rawLastId: rawLast ? messageIdOf(rawLast) : null,
-                        rawLastVisible:
-                            rawLast !== undefined &&
-                            encodedInput.some((entry) => entry.mid === messageIdOf(rawLast)),
-                        ckFingerprint: ckFingerprint.fingerprint,
-                        ckPrefixFingerprintBeforeLast: ckFingerprint.prefixFingerprintBeforeLast,
-                        nativeFingerprint: nativeFingerprint.fingerprint,
-                        nativePrefixFingerprintBeforeLast:
-                            nativeFingerprint.prefixFingerprintBeforeLast,
-                        rawContentSnapshots: captured.snapshots,
-                        fingerprint: `${ckFingerprint.fingerprint}|${nativeFingerprint.fingerprint}`,
-                    };
-                }
-                const nativeMessages = messages.slice(wireDelta.rawStart);
-                if (nativeMessages.length === 0) {
-                    // An empty delta replaces nothing: the terminal message, its wire visibility, and both before-last fingerprints stay the acknowledged ones. Recomputing them from an empty tail would record the terminal as invisible and chain the before-last fingerprints off the full array.
-                    return { ...previousWireCache, nativeOutput: undefined };
-                }
-                let ckFingerprint = wireDelta.ckAfter;
-                let ckPrefixFingerprintBeforeLast = ckFingerprint;
-                for (let index = 0; index < encodedInput.length; index += 1) {
-                    if (index === encodedInput.length - 1)
-                        ckPrefixFingerprintBeforeLast = ckFingerprint;
-                    ckFingerprint = advanceWireFingerprint(ckFingerprint, encodedInput[index]);
-                }
-                let nativeFingerprint = wireDelta.nativeAfter;
-                let nativePrefixFingerprintBeforeLast = nativeFingerprint;
-                for (let index = 0; index < nativeMessages.length; index += 1) {
-                    if (index === nativeMessages.length - 1)
-                        nativePrefixFingerprintBeforeLast = nativeFingerprint;
-                    nativeFingerprint = advanceWireFingerprint(
-                        nativeFingerprint,
-                        nativeMessages[index],
-                    );
-                }
-                const rawLastVisible =
-                    rawLast !== undefined &&
-                    encodedInput.some((entry) => entry.mid === messageIdOf(rawLast));
-                return {
-                    rawCount: messages.length,
-                    wireCount: wireDelta.wireStart + encodedInput.length,
-                    rawLastId: rawLast ? messageIdOf(rawLast) : null,
-                    rawLastVisible,
-                    ckFingerprint,
-                    ckPrefixFingerprintBeforeLast,
-                    nativeFingerprint,
-                    nativePrefixFingerprintBeforeLast,
-                    rawContentSnapshots: captured.snapshots,
-                    fingerprint: `${ckFingerprint}|${nativeFingerprint}`,
-                };
-            })();
+            timings.wireMessages = messages.length - (wireDelta?.rawStart ?? 0);
+            let pendingWireCache: RustWireCache =
+                // An empty delta replaces nothing: the terminal message, its wire visibility, and both before-last fingerprints stay the acknowledged ones.
+                wireDelta && previousWireCache && wireDelta.rawStart === messages.length
+                    ? { ...previousWireCache, nativeOutput: undefined }
+                    : buildWireCache({
+                          messages,
+                          encoded: encodedInput,
+                          snapshots: captured.snapshots,
+                          delta: wireDelta,
+                      });
             const usageEntry = deps.contextUsageMap.get(sessionId);
             // Fields both the first attempt and the full-wire retry forward
             // unchanged. `fullArrayFingerprint` stays per-site: the retry
@@ -1235,56 +1275,46 @@ export function createRustModeTransform(
             type TransformSeriesResult =
                 | { response: Record<string, unknown> }
                 | { restart: TransformSeriesRestart };
+            /** Each series freezes its pages from revalidated source values. */
             const sendTransformSeries = async (
                 payload: Record<string, unknown>,
-                detail = "",
+                detail: string,
             ): Promise<TransformSeriesResult> => {
-                assertSourceUnchanged();
-                const pages = buildPagedModuleTransformPayloads(payload);
-                const paged = pages.some(
+                const series = buildPagedModuleTransformPayloads(payload);
+                const paged = series.some(
                     (entry) => typeof entry.page.transform_page_id === "string",
                 );
                 let response: Record<string, unknown> | undefined;
-                for (const [index, { page, bytes }] of pages.entries()) {
+                for (const [index, { page, bytes }] of series.entries()) {
+                    const restart = (
+                        reason: TransformSeriesRestart["reason"],
+                    ): TransformSeriesResult => ({
+                        restart: { reason, pages: series.length, atPage: index },
+                    });
                     // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
-                    assertCurrentPass();
+                    recheckCapture(`page:${index}${detail}`);
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
-                        moduleResponse = await callModule({
+                        moduleResponse = await options.moduleClient.call({
                             sessionId,
                             projectRoot,
                             method: "transform",
                             body: page,
+                            signal: lease.signal,
                             generationSensitive: paged && index > 0,
                         });
                     } catch (error) {
-                        if (paged && isTransformPageAttemptMismatch(error)) {
-                            return {
-                                restart: {
-                                    reason: "attempt_mismatch",
-                                    pages: pages.length,
-                                    atPage: index,
-                                },
-                            };
-                        }
+                        if (paged && isTransformPageAttemptMismatch(error))
+                            return restart("attempt_mismatch");
                         throw error;
                     }
-                    if (paged && isModuleTransportGenerationChangedResult(moduleResponse)) {
-                        return {
-                            restart: { reason: "reconnect", pages: pages.length, atPage: index },
-                        };
-                    }
-                    if (paged && isTransformPageAttemptMismatch(moduleResponse)) {
-                        return {
-                            restart: {
-                                reason: "attempt_mismatch",
-                                pages: pages.length,
-                                atPage: index,
-                            },
-                        };
-                    }
+                    if (paged && isModuleTransportGenerationChangedResult(moduleResponse))
+                        return restart("reconnect");
+                    if (paged && isTransformPageAttemptMismatch(moduleResponse))
+                        return restart("attempt_mismatch");
                     response = responseValue(moduleResponse);
+                    for (const id of noteDeliveryPassIds(response)) deliveries.attempted.add(id);
                     timings.transportBytes += bytes;
                     timings.transportPages += 1;
                     logStage(
@@ -1292,16 +1322,17 @@ export function createRustModeTransform(
                         "transport",
                         transportStartedAt,
                         timings,
-                        `page=${index + 1}/${pages.length}${detail}`,
+                        `page=${index + 1}/${series.length}${detail}`,
                     );
                 }
                 if (!response) throw new Error("rust module returned no transform response");
                 return { response };
             };
             let transformSeriesRestarted = false;
+            // One bounded series restart is the only permitted page-level recovery; it is a fresh attempt over the same validated capture.
             const sendTransformSeriesWithSingleRestart = async (
                 payload: Record<string, unknown>,
-                detail = "",
+                detail: string,
             ): Promise<Record<string, unknown>> => {
                 let result = await sendTransformSeries(payload, detail);
                 if (!("restart" in result)) return result.response;
@@ -1323,133 +1354,46 @@ export function createRustModeTransform(
                 }
                 return result.response;
             };
-            let response = await sendTransformSeriesWithSingleRestart(body);
+            let response = await sendTransformSeriesWithSingleRestart(body, "");
             captureResponseTelemetry(response);
-            const allDeliveryPassIds = new Set(noteDeliveryPassIds(response));
-            const sendNoteDeliveryDisposition = async (
-                method: "transform.ack" | "transform.nack",
-                transformPassIds: ReadonlySet<string>,
-            ): Promise<void> => {
-                const errors: unknown[] = [];
-                for (const transformPassId of transformPassIds) {
-                    try {
-                        await callModule({
-                            sessionId,
-                            projectRoot,
-                            method,
-                            body: {
-                                method,
-                                v: 1,
-                                session_id: sessionId,
-                                transform_pass_id: transformPassId,
-                            },
-                        });
-                    } catch (error) {
-                        errors.push(error);
-                    }
-                }
-                if (errors.length > 0) {
-                    throw new AggregateError(
-                        errors,
-                        `${method} failed for ${errors.length} note delivery disposition(s)`,
-                    );
-                }
-            };
-            const nackPendingRetryDeliveries = async (): Promise<void> => {
-                nackSourceDecline = undefined;
-                try {
-                    await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
-                } catch (nackError) {
-                    sessionLog.warn(
-                        sessionId,
-                        "rust retry note delivery nack failed (ignored):",
-                        nackError,
-                    );
-                }
-            };
-            nackSourceDecline = nackPendingRetryDeliveries;
-            const assertCurrentRetryPass = async (): Promise<void> => {
-                try {
+            if (isNeedFullSync(response) || !hasNativeResponseContent(response)) {
+                if (isNeedFullSync(response)) {
+                    // A cleared or superseded session must not receive the flag.
                     assertCurrentPass();
-                } catch (error) {
-                    await nackPendingRetryDeliveries();
-                    throw error;
-                }
-            };
-            const needFullSync = isNeedFullSync(response);
-            const nativeContentOmitted = !hasNativeResponseContent(response);
-            if (needFullSync || nativeContentOmitted) {
-                if (!needFullSync) {
+                    state.forceFullWire = true;
+                } else {
                     sessionLog.warn(
                         sessionId,
                         "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
                     );
                 }
-                await assertCurrentRetryPass();
-                assertSourceUnchanged();
-                state.forceFullWire = true;
                 if (wireDelta) {
-                    const retryOrdinalStartedAt = performance.now();
-                    let retryResolved = await resolveOrdinalsForModule({
-                        sessionId,
-                        messages,
-                        memo: ordinalMemoOf(state),
-                        assertSourceUnchanged,
-                        provisionalBase: state.ordinalContinuationBase ?? undefined,
-                    });
-                    logStage(
-                        sessionId,
-                        "ordinalResolve",
-                        retryOrdinalStartedAt,
-                        timings,
+                    reserveWire(0, wireDelta.rawStart);
+                    let retryResolved = await resolveOrdinals(
+                        0,
+                        stagedMemo.continuationBase,
                         "retry=full",
                     );
-                    await assertCurrentRetryPass();
-                    assertSourceUnchanged();
                     if (!retryResolved.ok) {
-                        resetOrdinalMemo(state);
-                        retryResolved = await resolveOrdinalsForModule({
-                            sessionId,
-                            messages,
-                            memo: ordinalMemoOf(state),
-                            assertSourceUnchanged,
-                        });
-                        await assertCurrentRetryPass();
-                        assertSourceUnchanged();
+                        resetStagedMemo();
+                        retryResolved = await resolveOrdinals(
+                            0,
+                            undefined,
+                            "retry=full fallback=clean_full",
+                        );
                     }
                     if (!retryResolved.ok) {
-                        await nackPendingRetryDeliveries();
                         throw new Error(`rust ordinal ${retryResolved.reason} during full retry`);
                     }
-                    state.idOrdinalMemoGeneration = retryResolved.memoGeneration;
-                    state.ordinalMemoAnchor = retryResolved.memoAnchor;
-                    state.ordinalMemoStoredCount = retryResolved.memoStoredCount;
-                    state.ordinalMemoCanonicalCount = retryResolved.memoCanonicalCount;
                     const retryEncodedInput = encodeOpenCodeMessagesToCk(
                         retryResolved.annotatedInput,
                     );
                     timings.wireMessages = messages.length;
-                    const retryCkFingerprint = buildWireFingerprint(retryEncodedInput);
-                    const retryNativeFingerprint = buildWireFingerprint(messages);
-                    const retryRawLast = messages.at(-1);
-                    pendingWireCache = {
-                        rawCount: messages.length,
-                        wireCount: retryEncodedInput.length,
-                        rawLastId: retryRawLast ? messageIdOf(retryRawLast) : null,
-                        rawLastVisible:
-                            retryRawLast !== undefined &&
-                            retryEncodedInput.some(
-                                (entry) => entry.mid === messageIdOf(retryRawLast),
-                            ),
-                        ckFingerprint: retryCkFingerprint.fingerprint,
-                        ckPrefixFingerprintBeforeLast:
-                            retryCkFingerprint.prefixFingerprintBeforeLast,
-                        nativeFingerprint: retryNativeFingerprint.fingerprint,
-                        nativePrefixFingerprintBeforeLast:
-                            retryNativeFingerprint.prefixFingerprintBeforeLast,
-                        rawContentSnapshots: captured.snapshots,
-                        fingerprint: `${retryCkFingerprint.fingerprint}|${retryNativeFingerprint.fingerprint}`,
-                    };
+                    pendingWireCache = buildWireCache({
+                        messages,
+                        encoded: retryEncodedInput,
+                        snapshots: captured.snapshots,
+                    });
                     const retryWireBuildStartedAt = performance.now();
                     body = buildTransformBody({
                         ...transformBodyBase,
@@ -1465,37 +1409,20 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                 }
-                try {
-                    response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
-                } catch (error) {
-                    await nackPendingRetryDeliveries();
-                    throw error;
-                }
+                response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
                 captureResponseTelemetry(response);
-                for (const transformPassId of noteDeliveryPassIds(response)) {
-                    allDeliveryPassIds.add(transformPassId);
-                }
                 if (isNeedFullSync(response)) {
-                    await nackPendingRetryDeliveries();
                     throw new Error("rust module still requires full sync after a full-array send");
                 }
                 if (!hasNativeResponseContent(response)) {
-                    await nackPendingRetryDeliveries();
                     throw new Error("rust module omitted native content after a full-array retry");
                 }
             }
-            await assertCurrentRetryPass();
             const appliedDeliveryPassIds = new Set(noteDeliveryPassIds(response));
-            const discardedDeliveryPassIds = new Set(
-                [...allDeliveryPassIds].filter(
-                    (transformPassId) => !appliedDeliveryPassIds.has(transformPassId),
-                ),
-            );
-            let appliedMessages: unknown[];
             const applyStartedAt = performance.now();
             try {
-                appliedMessages = applyNativeMessagesVerbatim(
-                    { messages: [] },
+                // Candidate construction and every boundary check run before the host array is touched.
+                const candidate = buildNativeCandidate(
                     response,
                     previousWireCache?.nativeOutput
                         ? {
@@ -1503,113 +1430,96 @@ export function createRustModeTransform(
                               fingerprint: previousWireCache.fingerprint,
                           }
                         : undefined,
+                    (slots) => lease.reserve(slots * CANDIDATE_SLOT_BYTES),
                 );
-                pendingWireCache.nativeOutput = appliedMessages;
+                // Kept prefix entries are host-owned since their publication, so the candidate is inspected before any plain read.
+                const candidateInspection = inspectReferenceableMessages(candidate);
+                if (!candidateInspection.ok) {
+                    throw new Error(
+                        `rust transform output is not referenceable: ${candidateInspection.rejection.reason} at ${candidateInspection.rejection.path}`,
+                    );
+                }
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
-                    assertNativeBoundary(appliedMessages, sessionId, boundaryId);
+                    assertNativeBoundary(candidate, sessionId, boundaryId);
                 }
-                logStage(sessionId, "apply", applyStartedAt, timings);
-                const applyReplaceStartedAt = performance.now();
-                assertSourceUnchanged();
-                replaceMessagesInPlace(output, appliedMessages);
-                logStage(sessionId, "apply", applyReplaceStartedAt, timings);
-            } catch (error) {
-                logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
-                nackSourceDecline = undefined;
-                try {
-                    await sendNoteDeliveryDisposition("transform.nack", allDeliveryPassIds);
-                } catch (nackError) {
-                    sessionLog.warn(
-                        sessionId,
-                        "rust note delivery nack failed (ignored):",
-                        nackError,
-                    );
-                }
-                throw error;
-            }
-            if (discardedDeliveryPassIds.size > 0) {
-                try {
-                    await sendNoteDeliveryDisposition("transform.nack", discardedDeliveryPassIds);
-                } catch (nackError) {
-                    sessionLog.warn(
-                        sessionId,
-                        "rust discarded note delivery nack failed (will retry):",
-                        nackError,
-                    );
-                }
-            }
-            if (appliedDeliveryPassIds.size > 0) {
-                try {
-                    await sendNoteDeliveryDisposition("transform.ack", appliedDeliveryPassIds);
-                } catch (ackError) {
-                    sessionLog.warn(
-                        sessionId,
-                        "rust note delivery ack failed (will retry):",
-                        ackError,
-                    );
-                }
-            }
-            const ownsSharedState =
-                states.get(sessionId) === state && state.passCount === passSequence;
-            if (ownsSharedState) {
                 const ordinalContinuationBase = response.ordinal_continuation_base;
                 if (
                     typeof ordinalContinuationBase === "number" &&
                     Number.isSafeInteger(ordinalContinuationBase) &&
                     ordinalContinuationBase > 0
                 ) {
-                    if (state.ordinalContinuationBase === null) {
-                        for (const [messageId, ordinal] of state.idOrdinalMemo) {
-                            state.idOrdinalMemo.set(messageId, ordinal + ordinalContinuationBase);
+                    if (stagedMemo.continuationBase === undefined) {
+                        for (const [messageId, ordinal] of stagedMemo.entries) {
+                            const shifted = ordinal + ordinalContinuationBase;
+                            if (!Number.isSafeInteger(shifted))
+                                throw new Error("ordinal continuation overflow");
+                            stagedMemo.entries.set(messageId, shifted);
                         }
-                        state.ordinalMemoCanonicalCount += ordinalContinuationBase;
+                        const count = (stagedMemo.canonicalCount ?? 0) + ordinalContinuationBase;
+                        if (!Number.isSafeInteger(count))
+                            throw new Error("ordinal continuation overflow");
+                        stagedMemo.canonicalCount = count;
                     }
-                    state.ordinalContinuationBase = ordinalContinuationBase;
+                    stagedMemo.continuationBase = ordinalContinuationBase;
                 }
+                // Final synchronous guards: ownership, wire invalidation, source membership and content, and the host container contract.
+                recheckCapture("publish");
+                const publishRejection = hostArrayReplacementRejection(target, candidate.length);
+                if (publishRejection !== null) {
+                    throw new PassDeclined(sessionId, "host_container", publishRejection);
+                }
+                logStage(sessionId, "apply", applyStartedAt, timings);
+                const applyReplaceStartedAt = performance.now();
+                // Publication and state promotion are synchronous from here to the lease release.
+                replaceHostArrayContents(target, candidate);
+                pendingWireCache.nativeOutput = candidate;
+                state.ordinals = stagedMemo;
                 state.initialized = true;
                 state.consecutiveFailures = 0;
-                if (state.wireInvalidations === wireInvalidationsAtRead) {
-                    state.forceFullWire = false;
-                    wireCaches.set(sessionId, pendingWireCache);
-                } else {
-                    // The wire state was invalidated while this pass awaited the daemon. The applied output stands, but the cache built from the pre-invalidation array does not.
-                    sessionLog.debug(
-                        sessionId,
-                        "rust wire state changed during the pass; discarding this pass's wire cache",
-                    );
-                }
-            } else {
-                // A newer pass or session deletion owns shared state. The applied output and note dispositions stand, but this pass publishes no cache or memo state.
-                sessionLog.debug(
-                    sessionId,
-                    "rust pass lost shared-state ownership after apply; discarding its cache update",
-                );
+                state.forceFullWire = false;
+                wireCaches.set(sessionId, pendingWireCache);
+                deliveries.applied = appliedDeliveryPassIds;
+                logStage(sessionId, "apply", applyReplaceStartedAt, timings);
+            } catch (error) {
+                logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
+                throw error;
             }
             appliedAt = performance.now();
             finishPass(true);
-        } catch (error) {
-            if (error instanceof SourceRejected) {
-                logSourceDecline(error);
-                await nackSourceDecline?.();
-                return;
-            }
+        } catch (caught) {
             servedFrom = "raw";
             materializeReason = "none";
-            if (
-                error instanceof SessionClearedDuringPass ||
-                error instanceof PassSupersededDuringPass
-            ) {
-                decision = error instanceof SessionClearedDuringPass ? "cleared" : "superseded";
-                sessionLog.debug(sessionId, error.message);
+            const error =
+                caught instanceof CaptureBudgetExceeded
+                    ? new PassDeclined(sessionId, "capture_bytes", caught.message)
+                    : caught;
+            if (error instanceof PassDeclined || lease.signal.aborted) {
+                decision = error instanceof PassDeclined ? `declined:${error.reason}` : "cancelled";
+                sessionLog.debug(sessionId, error instanceof Error ? error.message : String(error));
             } else {
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
                 markFailure(sessionId, state, error);
             }
-            if (sourceUnchanged()) replaceMessagesInPlace(output, messages);
             finishPass(false);
-            return;
         }
+        return deliveries;
+    };
+
+    const run = (sessionId: string, output: { messages: unknown[] }): Promise<void> => {
+        const admission = captureAdmission.admit(sessionId);
+        if ("declined" in admission) {
+            sessionLog.debug(
+                sessionId,
+                `rust transform declined before dispatch: ${admission.declined}`,
+            );
+            return Promise.resolve();
+        }
+        const lease = admission.lease;
+        // execute settles before admission is released; only route metadata reaches delivery.
+        return execute(sessionId, output, lease)
+            .finally(lease.release.bind(lease))
+            .then(deliverTransformNotes.bind(undefined, options.moduleClient));
     };
 
     return {
@@ -1622,6 +1532,7 @@ export function createRustModeTransform(
                 knownSessionDirectory(deps, sessionId);
             states.delete(sessionId);
             wireCaches.delete(sessionId);
+            captureAdmission.requestCancel(sessionId, `rust session ${sessionId} cleared`);
             // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
             options.moduleClient.closeSession?.(sessionId);
             if (options.moduleClient.deleteSession) {
@@ -1635,9 +1546,10 @@ export function createRustModeTransform(
         },
         invalidateWireState,
         getState(sessionId: string): Readonly<RustSessionState> {
+            const state = ensureState(states, sessionId);
             return {
-                ...ensureState(states, sessionId),
-                idOrdinalMemo: new Map(ensureState(states, sessionId).idOrdinalMemo),
+                ...state,
+                ordinals: { ...state.ordinals, entries: new Map(state.ordinals.entries) },
             };
         },
     };
@@ -1645,11 +1557,11 @@ export function createRustModeTransform(
 
 export const __rustModeTransformTest = {
     WIRE_CACHE_SESSION_CAPACITY,
-    applyNativeMessagesVerbatim,
+    WIRE_PROJECTION_FACTOR,
+    buildNativeCandidate,
     buildTransformBody,
     transformGeometryForWire,
     formatRustPassLog,
-    isRustGenerationRecord,
     isTransformPageAttemptMismatch,
     hasNativeResponseContent,
     createRustModeTransform,

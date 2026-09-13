@@ -1,7 +1,17 @@
 import { types } from "node:util";
 
-const MAX_SOURCE_WALK_BYTES = 64 * 1024 * 1024;
+const TRANSFORM_CAPTURE_MAX_PASSES = 64;
+const TRANSFORM_CAPTURE_MAX_BYTES = 64 * 1024 * 1024;
 const MAX_REFERENCEABLE_DEPTH = 256;
+/** Root arrays, the root tape, and the capture record itself. */
+const ROOT_CAPTURE_BYTES = 256;
+/** One retained tape slot; a string field also charges its UTF-16 units in case the host drops it. */
+const TAPE_SLOT_BYTES = 8;
+/** Members and snapshots arrays hold one slot each per root message. */
+const ROOT_MEMBER_BYTES = 16;
+/** Widest JSON scalar token: an f64 rendered with full precision and exponent. */
+const SCALAR_WIRE_BYTES = 24;
+
 type SnapshotField = string | number | boolean | symbol | null;
 const ARRAY = Symbol("array");
 const END_ARRAY = Symbol("end_array");
@@ -19,14 +29,34 @@ export interface MessageContentSnapshot {
     fields: SnapshotField[];
 }
 
-export class SourceRejected extends Error {
-    override name = "SourceRejected";
-}
-export class SourceWalkLimitExceeded extends SourceRejected {
-    override name = "SourceWalkLimitExceeded";
+export interface ReferenceableRejection {
+    reason:
+        | "proxy"
+        | "accessor"
+        | "prototype"
+        | "cycle"
+        | "depth"
+        | "sparse_array"
+        | "undefined_element"
+        | "nonfinite_number"
+        | "bigint"
+        | "function"
+        | "symbol"
+        | "undefined"
+        | "not_array"
+        | "to_json"
+        | "extra_property";
+    path: string;
 }
 
-// Own-slot definitions bypass inherited numeric setters on private arrays.
+/** A bounded walk or reservation failed; the transform owner treats this as a local decline. */
+export class CaptureBudgetExceeded extends Error {
+    constructor(detail: string) {
+        super(`transform capture byte budget exceeded: ${detail}`);
+    }
+}
+
+// Object.defineProperty bypasses inherited numeric setters on membership and output arrays.
 function defineSlot<T>(array: T[], index: number, value: T): void {
     Object.defineProperty(array, index, {
         value,
@@ -36,55 +66,104 @@ function defineSlot<T>(array: T[], index: number, value: T): void {
     });
 }
 
+/** Own data property read that cannot run an accessor or proxy trap. */
 export function readOwnDataProperty(value: unknown, key: string): unknown {
     if (value === null || typeof value !== "object" || types.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
+class SourceRejected extends Error {
+    constructor(
+        readonly reason: ReferenceableRejection["reason"],
+        readonly path: string,
+    ) {
+        super(`unsupported source: ${reason} at ${path}`);
+    }
+}
 const CONTENT_CHANGED = Symbol("content_changed");
 
+/**
+ * The charge covers retained tape slots and the strings they can keep alive, not engine
+ * enumeration, transient descriptors, or RSS. Own-name inspection includes hidden accessors; a
+ * field-name allowlist would drift from consumers.
+ */
 class ReferenceableWalk {
-    private bytes = 0;
+    bytes = 0;
+    /** Upper bound on the canonical JSON length of the walked values, in two-byte units for strings. */
+    wireBytes = 0;
     private field?: (value: SnapshotField) => void;
     private readonly ancestors = new Set<object>();
 
-    private spend(bytes: number): void {
-        if (bytes > MAX_SOURCE_WALK_BYTES - this.bytes)
-            throw new SourceWalkLimitExceeded("source and snapshot walk limit exceeded");
+    constructor(private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES) {
+        // A non-finite or oversize limit would disable the traversal bound.
+        if (
+            !Number.isSafeInteger(maxBytes) ||
+            maxBytes < 0 ||
+            maxBytes > TRANSFORM_CAPTURE_MAX_BYTES
+        )
+            throw new CaptureBudgetExceeded("invalid walk limit");
+    }
+
+    spend(bytes: number): void {
+        if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes) {
+            throw new CaptureBudgetExceeded("source and snapshot walk");
+        }
         this.bytes += bytes;
     }
 
-    private emit(value: SnapshotField): void {
-        this.spend(16 + (typeof value === "string" ? 32 + value.length * 2 : 0));
+    /** `wireBytes` counts only tokens JSON serialization emits; tape-only markers pass zero. */
+    private emit(value: SnapshotField, wireBytes: number): void {
+        // A tape slot keeps its string, or a symbol's description, alive after the host drops it.
+        const retained =
+            typeof value === "string"
+                ? value.length * 2
+                : typeof value === "symbol"
+                  ? (value.description?.length ?? 0) * 2
+                  : 0;
+        this.spend(TAPE_SLOT_BYTES + retained);
+        this.wire(wireBytes);
         this.field?.(value);
     }
 
+    private wire(bytes: number): void {
+        const total = this.wireBytes + bytes;
+        if (!Number.isSafeInteger(total)) throw new CaptureBudgetExceeded("wire estimate");
+        this.wireBytes = total;
+    }
+
     walk(value: unknown, path = ""): void {
-        this.spend(16);
         const type = typeof value;
         if (value === null || type !== "object") {
             if (type === "number" && !Number.isFinite(value))
-                throw new SourceRejected(`nonfinite number at ${path}`);
+                throw new SourceRejected("nonfinite_number", path);
             if (value !== null && type !== "string" && type !== "number" && type !== "boolean")
-                throw new SourceRejected(`unsupported ${type} at ${path}`);
-            this.emit(value as SnapshotField);
+                throw new SourceRejected(type as ReferenceableRejection["reason"], path);
+            // A string renders as its units plus quotes; every other scalar fits one f64 token.
+            this.emit(
+                value as SnapshotField,
+                type === "string" ? (value as string).length * 2 + 2 : SCALAR_WIRE_BYTES,
+            );
             return;
         }
         this.entries(value as object, path, (key, slot) => this.walk(slot.value, `${path}/${key}`));
     }
 
     members(messages: unknown, visit: (slot: PropertyDescriptor, index: number) => void): number {
-        if (types.isProxy(messages)) throw new SourceRejected("proxy source");
-        if (!Array.isArray(messages)) throw new SourceRejected("source is not an array");
-        this.spend(16);
-        return this.entries(messages, "", (key, slot) => visit(slot, Number(key)));
+        if (types.isProxy(messages)) throw new SourceRejected("proxy", "");
+        if (!Array.isArray(messages)) throw new SourceRejected("not_array", "");
+        this.spend(ROOT_CAPTURE_BYTES);
+        return this.entries(messages, "", (key, slot) => {
+            this.spend(ROOT_MEMBER_BYTES);
+            visit(slot, Number(key));
+        });
     }
 
     recordOrCompare(
         operation: () => void,
         expected?: MessageContentSnapshot,
     ): MessageContentSnapshot {
+        // Private tapes have no inherited setters. Returned tapes regain the ordinary array API.
         const fields: SnapshotField[] = expected?.fields ?? Object.setPrototypeOf([], null);
         let index = 0;
         const outer = this.field;
@@ -105,25 +184,27 @@ class ReferenceableWalk {
     }
 
     private attributes(slot: PropertyDescriptor): void {
-        this.emit(slot.enumerable === true);
-        this.emit(slot.writable === true);
-        this.emit(slot.configurable === true);
+        this.emit(slot.enumerable === true, 0);
+        this.emit(slot.writable === true, 0);
+        this.emit(slot.configurable === true, 0);
     }
 
+    /** Every descriptor read spends one slot so the byte budget also bounds traversal work. */
     private data(value: object, key: PropertyKey, path: string): PropertyDescriptor {
-        this.spend(48 + (typeof key === "string" ? key.length * 4 : 0));
+        this.spend(TAPE_SLOT_BYTES);
         const slot = Object.getOwnPropertyDescriptor(value, key);
-        if (!slot) throw new SourceRejected(`sparse array at ${path}`);
-        if (!("value" in slot)) throw new SourceRejected(`accessor at ${path}`);
+        if (!slot) throw new SourceRejected("sparse_array", path);
+        if (!("value" in slot)) throw new SourceRejected("accessor", path);
         return slot;
     }
 
+    /** Proxy rejection precedes prototype and descriptor reads; source iterators are never used. */
     private entries(
         value: object,
         path: string,
         visit: (key: string, slot: PropertyDescriptor) => void,
     ): number {
-        if (types.isProxy(value)) throw new SourceRejected(`proxy at ${path}`);
+        if (types.isProxy(value)) throw new SourceRejected("proxy", path);
         const array = Array.isArray(value);
         const prototype = Object.getPrototypeOf(value);
         if (
@@ -132,11 +213,9 @@ class ReferenceableWalk {
                 : prototype !== Object.prototype && prototype !== null) ||
             Object.getPrototypeOf(Array.prototype) !== Object.prototype
         )
-            throw new SourceRejected(`unsupported prototype at ${path}`);
-        if (this.ancestors.size > MAX_REFERENCEABLE_DEPTH)
-            throw new SourceRejected(`excessive depth at ${path}`);
-        if (this.ancestors.has(value)) throw new SourceRejected(`cycle at ${path}`);
-        this.spend(64);
+            throw new SourceRejected("prototype", path);
+        if (this.ancestors.size > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
+        if (this.ancestors.has(value)) throw new SourceRejected("cycle", path);
         // JSON looks up toJSON even when it is hidden or inherited.
         for (
             let holder: object | null = value;
@@ -144,21 +223,29 @@ class ReferenceableWalk {
             holder = Object.getPrototypeOf(holder)
         ) {
             const hook = Object.getOwnPropertyDescriptor(holder, "toJSON");
-            if (hook && (!("value" in hook) || hook.value !== undefined))
-                throw new SourceRejected(`toJSON at ${path}`);
+            if (hook && (!("value" in hook) || hook.value !== undefined)) {
+                const reason = !("value" in hook)
+                    ? "accessor"
+                    : types.isProxy(hook.value)
+                      ? "proxy"
+                      : typeof hook.value === "function"
+                        ? "function"
+                        : "to_json";
+                throw new SourceRejected(reason, `${path}/toJSON`);
+            }
         }
         const lengthSlot = array ? this.data(value, "length", path) : undefined;
         const length: number = lengthSlot?.value ?? 0;
         if (array) {
-            this.spend(length * 64);
-            for (const key of ARRAY_SYMBOLS) {
-                if (Object.getOwnPropertyDescriptor(value, key))
-                    throw new SourceRejected(`array operation override at ${path}`);
-            }
+            // The declared length is charged before any element read so a huge sparse length fails early.
+            this.spend(length);
+            if (ARRAY_SYMBOLS.some((key) => Object.getOwnPropertyDescriptor(value, key)))
+                throw new SourceRejected("extra_property", path);
         }
-        this.emit(array ? ARRAY : OBJECT);
+        // Opening and closing brackets; each element or key pays its own separator.
+        this.emit(array ? ARRAY : OBJECT, 1);
         if (lengthSlot) {
-            this.emit(length);
+            this.emit(length, 0);
             this.attributes(lengthSlot);
         }
         this.ancestors.add(value);
@@ -166,44 +253,41 @@ class ReferenceableWalk {
         try {
             for (const key of Object.getOwnPropertySymbols(value)) {
                 const slot = this.data(value, key, path);
-                this.emit(EXTRA_KEY);
-                this.emit(key);
+                this.emit(EXTRA_KEY, 0);
+                this.emit(key, 0);
                 this.attributes(slot);
                 this.walk(slot.value, path);
             }
             for (const key of Object.getOwnPropertyNames(value)) {
-                this.spend(16);
                 if (array && key === "length") continue;
                 if (array && ARRAY_METHODS.has(key))
-                    throw new SourceRejected(`array operation override at ${path}/${key}`);
+                    throw new SourceRejected("extra_property", path);
                 const slot = this.data(value, key, `${path}/${key}`);
+                // Own names list integer indexes ascending, so an index key that is not `count` leaves a hole at `count`.
                 if (array && key !== String(count)) {
                     const index = Number(key);
-                    if (
-                        Number.isInteger(index) &&
-                        index >= 0 &&
-                        index < length &&
-                        String(index) === key
-                    )
+                    if (Number.isInteger(index) && index >= 0 && String(index) === key)
                         this.data(value, String(count), `${path}/${count}`);
-                    this.emit(EXTRA_KEY);
-                    this.emit(key);
+                    this.emit(EXTRA_KEY, 0);
+                    this.emit(key, 0);
                     this.attributes(slot);
                     this.walk(slot.value, `${path}/${key}`);
                     continue;
                 }
                 if (slot.value === undefined) {
-                    if (array) throw new SourceRejected(`undefined element at ${path}/${key}`);
+                    if (array) throw new SourceRejected("undefined_element", `${path}/${key}`);
                     continue;
                 }
-                if (!array) this.emit(key);
+                // Object keys render quoted with a colon; array elements pay only their comma.
+                if (array) this.wire(1);
+                else this.emit(key, key.length * 2 + 4);
                 this.attributes(slot);
                 visit(key, slot);
                 count += 1;
             }
             if (array && count !== length) this.data(value, String(count), `${path}/${count}`);
-            this.emit(array ? END_ARRAY : END_OBJECT);
-            this.emit(count);
+            this.emit(array ? END_ARRAY : END_OBJECT, 1);
+            this.emit(count, 0);
             return count;
         } finally {
             this.ancestors.delete(value);
@@ -211,9 +295,32 @@ class ReferenceableWalk {
     }
 }
 
-export function assertReferenceableMessages(messages: unknown): void {
-    const walker = new ReferenceableWalk();
-    walker.members(messages, (slot, index) => walker.walk(slot.value, `/${index}`));
+export interface ReferenceableInspection {
+    ok: true;
+    /** Per-message upper bounds for JSON escaping, not retained heap charges. */
+    messageWireBytes: number[];
+    estimatedBytes: number;
+}
+
+/** Byte-limit exhaustion throws CaptureBudgetExceeded. */
+export function inspectReferenceableMessages(
+    messages: unknown,
+    maxBytes = TRANSFORM_CAPTURE_MAX_BYTES,
+): ReferenceableInspection | { ok: false; rejection: ReferenceableRejection } {
+    const walker = new ReferenceableWalk(maxBytes);
+    const messageWireBytes: number[] = [];
+    try {
+        walker.members(messages, (slot, index) => {
+            const wireBefore = walker.wireBytes;
+            walker.walk(slot.value, `/${index}`);
+            defineSlot(messageWireBytes, index, walker.wireBytes - wireBefore);
+        });
+    } catch (error) {
+        if (error instanceof SourceRejected)
+            return { ok: false, rejection: { reason: error.reason, path: error.path } };
+        throw error;
+    }
+    return { ok: true, estimatedBytes: walker.bytes, messageWireBytes };
 }
 
 export function snapshotFieldsEqual(
@@ -228,13 +335,16 @@ export function snapshotFieldsEqual(
 }
 
 export interface CapturedMessages {
-    members: unknown[];
-    snapshots: MessageContentSnapshot[];
+    members: readonly unknown[];
+    snapshots: readonly MessageContentSnapshot[];
     rootSnapshot: MessageContentSnapshot;
 }
 
-export function captureMessages(messages: unknown): CapturedMessages {
-    const walker = new ReferenceableWalk();
+/** The caller reserves the inspection charge before allocating retained capture state. */
+export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages {
+    if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
+        throw new CaptureBudgetExceeded("capture requires a live reservation");
+    const walker = new ReferenceableWalk(Math.min(lease.chargedBytes, TRANSFORM_CAPTURE_MAX_BYTES));
     const members: unknown[] = [];
     const snapshots: MessageContentSnapshot[] = [];
     const rootSnapshot = walker.recordOrCompare(() => {
@@ -250,7 +360,8 @@ export function captureMessages(messages: unknown): CapturedMessages {
     return { members, snapshots, rootSnapshot };
 }
 
-export function assertCapturedMessagesUnchanged(live: unknown, captured: CapturedMessages): void {
+/** Membership is checked through own descriptors; an accessor or inherited slot cannot match. */
+export function capturedMessagesUnchanged(live: unknown, captured: CapturedMessages): boolean {
     try {
         const walker = new ReferenceableWalk();
         walker.recordOrCompare(() => {
@@ -267,8 +378,161 @@ export function assertCapturedMessagesUnchanged(live: unknown, captured: Capture
             });
             if (count !== captured.members.length) throw CONTENT_CHANGED;
         }, captured.rootSnapshot);
+        return true;
     } catch (error) {
-        if (error === CONTENT_CHANGED) throw new SourceRejected("source changed during transform");
+        if (
+            error === CONTENT_CHANGED ||
+            error instanceof SourceRejected ||
+            error instanceof CaptureBudgetExceeded
+        )
+            return false;
         throw error;
     }
 }
+
+type HostArrayRejectionReason =
+    | ReferenceableRejection["reason"]
+    | "not_extensible"
+    | "length_not_writable"
+    | "element_not_writable"
+    | "budget";
+
+export function hostArrayReplacementRejection(
+    target: unknown,
+    nextLength: number,
+): HostArrayRejectionReason | null {
+    if (types.isProxy(target)) return "proxy";
+    if (!Array.isArray(target)) return "not_array";
+    if (
+        !Number.isSafeInteger(nextLength) ||
+        nextLength < 0 ||
+        nextLength > TRANSFORM_CAPTURE_MAX_BYTES / 64
+    )
+        return "budget";
+    if (!Object.isExtensible(target)) return "not_extensible";
+    if (!Object.getOwnPropertyDescriptor(target, "length")?.writable) return "length_not_writable";
+    try {
+        let writable = true;
+        new ReferenceableWalk().members(target, (slot) => {
+            writable = writable && slot.writable === true && slot.configurable === true;
+        });
+        return writable ? null : "element_not_writable";
+    } catch (error) {
+        if (error instanceof SourceRejected) return error.reason;
+        if (error instanceof CaptureBudgetExceeded) return "budget";
+        throw error;
+    }
+}
+
+/**
+ * Preconditions: `hostArrayReplacementRejection(target, next.length)` returns `null` and `next`
+ * passed `inspectReferenceableMessages`. Own-slot definitions bypass inherited setters; a writable
+ * length and configurable slots allow shrinking.
+ */
+export function replaceHostArrayContents(target: unknown[], next: readonly unknown[]): void {
+    for (let index = 0; index < next.length; index += 1) {
+        defineSlot(target, index, next[index]);
+    }
+    Object.defineProperty(target, "length", { value: next.length });
+}
+
+export interface CaptureLease {
+    readonly signal: AbortSignal;
+    readonly chargedBytes: number;
+    /** Owner-wide headroom shared by every lease, not this lease's own remainder; zero once released. */
+    readonly remainingBytes: number;
+    reserve(bytes: number): boolean;
+    requestCancel(reason: string): void;
+    release(): void;
+}
+
+/** TransformCaptureAdmission permits one live lease per session. */
+export class TransformCaptureAdmission {
+    private readonly leases = new Map<string, CaptureLease>();
+    private chargedBytesTotal = 0;
+    /** Injected limits may only tighten the process ceiling; a copy keeps later caller mutation out. */
+    constructor(
+        private readonly limits = {
+            maxPasses: TRANSFORM_CAPTURE_MAX_PASSES,
+            maxBytes: TRANSFORM_CAPTURE_MAX_BYTES,
+        },
+    ) {
+        for (const limit of [limits.maxPasses, limits.maxBytes]) {
+            if (!Number.isSafeInteger(limit) || limit < 0)
+                throw new RangeError("invalid capture limits");
+        }
+        if (
+            limits.maxPasses > TRANSFORM_CAPTURE_MAX_PASSES ||
+            limits.maxBytes > TRANSFORM_CAPTURE_MAX_BYTES
+        )
+            throw new RangeError("capture limits exceed the process ceiling");
+        this.limits = { ...limits };
+    }
+
+    get activePasses(): number {
+        return this.leases.size;
+    }
+    get chargedBytes(): number {
+        return this.chargedBytesTotal;
+    }
+    get remainingBytes(): number {
+        return this.limits.maxBytes - this.chargedBytesTotal;
+    }
+
+    admit(
+        sessionId: string,
+    ): { lease: CaptureLease } | { declined: "session_busy" | "pass_count" } {
+        const held = this.leases.get(sessionId);
+        if (held) {
+            held.requestCancel(
+                `transform pass for session ${sessionId} superseded by a newer call`,
+            );
+            return { declined: "session_busy" };
+        }
+        if (this.leases.size >= this.limits.maxPasses) return { declined: "pass_count" };
+        const controller = new AbortController();
+        const owner = this;
+        let bytes = 0;
+        let released = false;
+        const lease: CaptureLease = {
+            signal: controller.signal,
+            get chargedBytes() {
+                return bytes;
+            },
+            get remainingBytes() {
+                return released ? 0 : owner.remainingBytes;
+            },
+            reserve(additional) {
+                if (
+                    released ||
+                    !Number.isSafeInteger(additional) ||
+                    additional < 0 ||
+                    additional > owner.remainingBytes
+                )
+                    return false;
+                owner.chargedBytesTotal += additional;
+                bytes += additional;
+                return true;
+            },
+            requestCancel(reason) {
+                if (!controller.signal.aborted) controller.abort(new Error(reason));
+            },
+            release() {
+                if (released) return;
+                released = true;
+                owner.chargedBytesTotal -= bytes;
+                bytes = 0;
+                owner.leases.delete(sessionId);
+            },
+        };
+        this.leases.set(sessionId, lease);
+        return { lease };
+    }
+
+    requestCancel(sessionId: string, reason: string): void {
+        this.leases.get(sessionId)?.requestCancel(reason);
+    }
+}
+
+/** Module-wide default owner; tests can inject a separate instance. */
+export const defaultTransformCaptureAdmission = new TransformCaptureAdmission();

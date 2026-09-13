@@ -556,10 +556,10 @@ describe("logger", () => {
                         return { native_messages: native, decision: "HARD", timings: { handler_total: 5 } };
                     } } });
                     const output = { messages: structuredClone(input) };
-                    await transform.run(sessionId, structuredClone(input), output);
+                    await transform.run(sessionId, output);
                     fail = true;
                     const fallback = { messages: structuredClone(input) };
-                    await transform.run(sessionId, structuredClone(input), fallback);
+                    await transform.run(sessionId, fallback);
                     const handle = createEventHandler({ contextUsageMap });
                     const event = { event: { type: "message.updated", properties: { info: {
                         role: "assistant", sessionID: sessionId, tokens: { input: 0 },

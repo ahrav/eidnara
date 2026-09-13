@@ -105,6 +105,30 @@ async function connected(
 }
 
 describe("HostClient", () => {
+    test("request rejects serialization errors as promises without dispatch or route loss", async () => {
+        const { client, daemon } = await connected();
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const route = await opening;
+        const failure = new Error("cannot serialize request");
+        let waiting: Promise<unknown> | undefined;
+        expect(() => {
+            waiting = client.request(route, {
+                toJSON() {
+                    throw failure;
+                },
+            });
+        }).not.toThrow();
+        await expect(waiting).rejects.toBe(failure);
+        expect(daemon.drain()).toBeNull();
+
+        const recovery = client.request(route, { method: "ping" });
+        const frame = await daemon.next();
+        expect(JSON.parse(Buffer.from(frame.body).toString("utf8"))).toEqual({ method: "ping" });
+        daemon.respond(frame.header, { ok: true });
+        expect(await recovery).toEqual({ ok: true });
+    });
+
     test("plain Pi-style objects cannot collide with the serialized body identity", async () => {
         const { client, daemon } = await connected();
         const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);

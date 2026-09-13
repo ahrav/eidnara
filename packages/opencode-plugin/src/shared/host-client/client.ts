@@ -531,22 +531,22 @@ export class HostClient {
 
     /**
      * request sends one routed request on the supplied route generation and never replays the body.
+     * Only encoded text crosses the asynchronous boundary, so abandoned waits cannot retain the caller's object graph.
      */
-    async request(
-        handle: RouteHandle,
-        body: unknown,
-        options: RequestOptions = {},
-    ): Promise<unknown> {
-        const active = this.requireLiveHandle(handle);
-        const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
-        const terminal = await this.awaitRequest(active.generation, {
-            channel: handle.channel,
-            epoch: handle.epoch,
-            body: encodeBody(body),
-            deadline,
-            options,
-        });
-        return parseResponseJson(terminal);
+    request(handle: RouteHandle, body: unknown, options: RequestOptions = {}): Promise<unknown> {
+        try {
+            const active = this.requireLiveHandle(handle);
+            const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
+            return this.awaitRequest(active.generation, {
+                channel: handle.channel,
+                epoch: handle.epoch,
+                body: encodeBody(body),
+                deadline,
+                options,
+            }).then(parseResponseJson);
+        } catch (error) {
+            return Promise.reject(error);
+        }
     }
 
     /** Caller releases the returned ReceiveLease. */

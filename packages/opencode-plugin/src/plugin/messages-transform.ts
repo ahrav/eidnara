@@ -1,10 +1,6 @@
 import { types } from "node:util";
 import type { ResolvedTransformMode as TransformMode } from "../config/transform-mode";
-import {
-    assertReferenceableMessages,
-    readOwnDataProperty,
-    SourceRejected,
-} from "../hooks/context/transform-capture";
+import { readOwnDataProperty } from "../hooks/context/transform-capture";
 import { log } from "../shared/logger";
 
 type MessageWithParts = {
@@ -26,8 +22,8 @@ function returnableMessageArray(value: unknown): boolean {
 }
 
 /**
- * The hook publishes its result by replacing entries of `output.messages`, never by editing a
- * message's `info` or `parts` in place: the handler's rollback restores array membership only.
+ * The hook publishes its result by replacing entries of `output.messages` in one synchronous
+ * all-or-none step, never by editing a message's `info` or `parts` in place.
  */
 type EidnaraTransformHooks = {
     "experimental.chat.messages.transform"?: (
@@ -38,7 +34,9 @@ type EidnaraTransformHooks = {
 
 /**
  * `ts` mode returns messages unchanged because this plugin has no TypeScript transform.
- * If the hook throws, the handler restores the pre-hook message array.
+ * The hook owns publication. The wrapper never restores captured contents after an error.
+ * Unsupported containers stay on the host output object but are not returned: promise resolution
+ * reads `then`, which could invoke a proxy trap or a getter.
  */
 export function createMessagesTransformHandler(args: {
     eidnara: EidnaraTransformHooks;
@@ -58,28 +56,20 @@ export function createMessagesTransformHandler(args: {
     }
 
     return async (input, output): Promise<MessageWithParts[] | undefined> => {
-        const messages = readOwnDataProperty(output, "messages") as MessageWithParts[];
-        try {
-            if (!returnableMessageArray(messages))
-                throw new SourceRejected("unsupported wrapper array or then property");
-            assertReferenceableMessages(messages);
-        } catch (error) {
-            if (!(error instanceof SourceRejected)) throw error;
-            log(`[eidnara] transform declined ${error.name}: ${error.message}`);
+        const messages = readOwnDataProperty(output, "messages");
+        if (!returnableMessageArray(messages)) {
+            log("[eidnara] transform declined: unsupported wrapper array or then property");
             return;
         }
-        // A throw after the hook has replaced some entries would otherwise send that partial history to the model.
-        const snapshot = messages.slice();
         const eidnara = args.getEidnara ? args.getEidnara() : args.eidnara;
         try {
             await eidnara?.["experimental.chat.messages.transform"]?.(input, output);
         } catch (error) {
-            output.messages = snapshot;
             const code = (error as { code?: string } | null)?.code;
             const name = (error as { name?: string } | null)?.name;
             const message = error instanceof Error ? error.message : String(error);
             log(
-                `[eidnara] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Continuing with unmodified messages for this pass.`,
+                `[eidnara] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Keeping current host messages for this pass.`,
                 error,
             );
         }

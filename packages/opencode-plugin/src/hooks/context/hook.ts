@@ -38,12 +38,7 @@ import { resolveSessionDirectory, type SessionDirectoryResolver } from "./sessio
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
-import {
-    assertCapturedMessagesUnchanged,
-    captureMessages,
-    readOwnDataProperty,
-    SourceRejected,
-} from "./transform-capture";
+import { readOwnDataProperty } from "./transform-capture";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
 
@@ -93,10 +88,15 @@ export interface EidnaraDeps {
     rustModeModuleClient: RustModeModuleClient;
 }
 
-/** The transform receives no session id of its own; every message carries it in `info.sessionID`. */
+/**
+ * The transform receives no session id of its own; every message carries it in `info.sessionID`.
+ * The read goes through own-data descriptors because the source guard has not run yet.
+ */
 function resolveSessionId(messages: readonly MessageLike[]): string | undefined {
-    const info = readOwnDataProperty(readOwnDataProperty(messages, "0"), "info");
-    const sessionId = readOwnDataProperty(info, "sessionID");
+    const sessionId = readOwnDataProperty(
+        readOwnDataProperty(readOwnDataProperty(messages, "0"), "info"),
+        "sessionID",
+    );
     return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
 }
 
@@ -324,6 +324,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
             systemPromptHashFor: (sessionId) =>
                 systemPromptHash.promptStateFor(sessionId)?.systemPromptHash ?? "",
+            // The transform owns the directory read, so admission precedes it; these gates run once the read classifies the session.
+            isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),
+            onSessionDeletedDuringPreflight: clearDeletedSessionRoutingState,
+            isInternalChildSession: (sessionId) => internalChildSessions.has(sessionId),
         },
         // No `projectRoot` option: the transform routes each session by its own resolved directory.
         { moduleClient },
@@ -334,24 +338,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         ? async (_input: unknown, output: { messages: unknown[] }): Promise<void> => {
               const messages = readOwnDataProperty(output, "messages") as MessageLike[];
               const sessionId = resolveSessionId(messages);
-              if (sessionId && deletedSessions.has(sessionId)) return;
-              try {
-                  const captured = captureMessages(messages);
-                  if (!sessionId) return;
-                  // Hidden children receive no project context; the directory lookup identifies restored children.
-                  await sessionDirectoryFor(sessionId);
-                  assertCapturedMessagesUnchanged(messages, captured);
-              } catch (error) {
-                  if (!(error instanceof SourceRejected)) throw error;
-                  log(`[eidnara] transform declined ${error.name}: ${error.message}`);
-                  return;
-              }
-              if (deletedSessions.has(sessionId)) {
-                  clearDeletedSessionRoutingState(sessionId);
-                  return;
-              }
-              if (internalChildSessions.has(sessionId)) return;
-              await rustTransform.run(sessionId, messages, output);
+              if (!sessionId) return;
+              if (deletedSessions.has(sessionId)) return;
+              await rustTransform.run(sessionId, output);
           }
         : async (): Promise<void> => {};
 

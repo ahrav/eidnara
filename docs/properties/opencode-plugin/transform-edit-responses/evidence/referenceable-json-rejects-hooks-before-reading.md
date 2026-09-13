@@ -6,55 +6,58 @@ The parent specification's TE19 requires source validation without invoking
 accessors, proxies or serialization hooks. Recursive field snapshots must not
 invoke those hooks while attempting to detect mutation.
 
-This evidence covers the source-guard precursor only. The parent companion
-catalog is unavailable in this checkout. No claim about its full acceptance
-status is inferred from this supplement.
+This evidence covers the client source guard. The parent companion catalog is
+unavailable in this checkout. No claim about its full acceptance status is
+inferred from this supplement.
 
 ## Evidence trail
 
-Source base: `352ce13fdac3024485e7d05c1679fe0db74c8d98` plus this precursor's
-uncommitted changes. References use paths and symbols because added files do
-not exist at the source base.
+Revision: the #533 change on `fix/client-transform-owner`, parent `b0023512`. Line
+numbers below are from that tree.
 
-- `packages/opencode-plugin/src/hooks/context/transform-capture.ts`:
-  `ReferenceableWalk` validates descriptors before visiting their values.
-  `captureMessages` retains membership and field tapes; rechecks compare exact
-  primitive values, named array metadata, key order, descriptor attributes,
-  container terminators and entry counts. Root metadata has its own tape.
-- `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts`:
-  `run` captures before message reads and directory preflight. The existing
-  pass checks also recheck the source. The pre-apply check repeats immediately
-  before replacement. Prefix reuse compares captured fields directly.
-- `packages/opencode-plugin/src/hooks/context/module-wire.ts`:
-  `resolveOrdinalsForModule` invokes the caller's source guard after asynchronous
-  scanning and before its synchronous message filtering and projection.
-- `packages/opencode-plugin/src/hooks/context/hook.ts`:
-  root, index, `info` and session ID reads use own-data descriptors. Capture
-  precedes hook-side directory resolution, with a recheck after that await.
-- `packages/opencode-plugin/src/plugin/messages-transform.ts`:
-  pre-hook source validation protects array copying. A shared cheap root check
-  protects promise assimilation before and after the hook. The post-hook check
-  cannot suppress publication already made through the host array. Existing
-  rollback behavior is outside this precursor's ownership claim.
+- [transform-capture.ts](../../../../../packages/opencode-plugin/src/hooks/context/transform-capture.ts):
+  `ReferenceableWalk.entries` rejects proxies with `util.types.isProxy` before
+  any prototype or descriptor read (`:207`), checks the prototype, depth, and
+  cycles (`:208-218`), walks the prototype chain for an own or inherited
+  `toJSON` (`:220-236`), and charges the declared array length before element
+  reads (`:240-241`). `data` spends one slot per descriptor read and rejects
+  sparse slots and accessors (`:192-198`). `walk` rejects functions, symbols,
+  bigints, and non-finite numbers (`:137-147`). `readOwnDataProperty` (`:70`)
+  returns `undefined` for accessors, proxies, and inherited properties.
+- [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts):
+  `execute` reads `output.messages` with `readOwnDataProperty` (`:844`),
+  checks the container (`:845`), inspects the source before any message read
+  (`:967`), and captures it (`:977`). The candidate returned by the daemon,
+  including host-owned kept prefix entries, is inspected before
+  `assertNativeBoundary` and any plain read (`:1436-1445`).
+- [module-wire.ts](../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts):
+  `primeOrdinalMemo` (`:473`) scans asynchronously; the caller rechecks the
+  capture (`rust-mode-transform.ts:1167`) before `annotateOrdinals` reads
+  messages synchronously.
+- [hook.ts](../../../../../packages/opencode-plugin/src/hooks/context/hook.ts):
+  the session ID is read through nested `readOwnDataProperty` calls
+  (`:96-97`) and the transform entry reads `output.messages` the same way
+  (`:339`).
+- [messages-transform.ts](../../../../../packages/opencode-plugin/src/plugin/messages-transform.ts):
+  `returnableMessageArray` (`:13-22`) checks proxy, array, prototype chain,
+  and `then` before the hook and again before returning (`:59-63`, `:76-82`).
+  The wrapper never assigns `output.messages`.
 
 ## Failure scenario
 
 A getter installed on `parts` during an ordinal scan can execute before a
-post-resolver guard runs. The resolver therefore checks before its synchronous
-source-reading half. A proxy root can trap even during length or membership
-inspection; the non-trapping runtime proxy predicate must run first.
+post-resolver guard runs. The resolver therefore rechecks before its
+synchronous source-reading half. A proxy root can trap even during length or
+membership inspection; the non-trapping runtime proxy predicate runs first.
 
 ## Timing windows and dependencies
 
-The direct tests distinguish initial rejection from mutation after an earlier
-valid dispatch. They pause directory and transport promises, and schedule
-mutation from the ordinal provider before the asynchronous scan resumes.
-Each of the four pause windows has an unmutated control that must publish the
-independent expected output and ACK its own delivery. Mutated cases require no
-additional transform send and no ACK. A separate retry-check test schedules
-mutation after the synchronous check but before its await resumes, then proves
-that the known delivery receives one NACK. Pure helpers also test content edits,
-membership replacement, removal, metadata renames and descriptor changes.
+The direct tests distinguish initial rejection from installation after an
+earlier valid dispatch. They pause directory and transport promises and
+schedule installation from the ordinal provider or a post-response microtask.
+Each pause window has an unmutated control that publishes. Pure helpers also
+test content edits, membership replacement, removal, metadata renames and
+descriptor changes.
 
 ## What a test must construct
 
@@ -71,41 +74,45 @@ membership replacement, removal, metadata renames and descriptor changes.
 
 ### Q: What has executable evidence?
 
-- Sources examined: the source and test paths above, and the donor's guard walk.
-- Findings: the focused six-file Bun run passes 193 tests and 1,441 assertions;
-  plugin typechecking passes on Node 24.18.0. Existing module-wire and wrapper
-  tests and the serialized-frame tests run alongside the added witnesses.
-  A separate Node 24.18.0 runtime probe rejects normal and revoked proxies,
-  detects root metadata changes, reads hidden array length, and rejects an
-  installed accessor with zero traps.
-  These counts describe the recorded run, not a claim that every test proves
-  TE19.
-- Missing evidence: PR2's complete ownership, admission and publication fault
-  matrix, native-addon-enabled CI coverage, and U5 measurements. Supplied review
-  findings and repairs are recorded in [the dispositions](../review-dispositions.md).
-- Conclusion: partial source-guard evidence is present. The parent contract
-  remains unresolved until the deferred work and controller gates complete.
+- Sources examined: the source paths above and the witnesses below.
+- Findings: Every guard entry has a trap-counter witness. The non-trapping
+  property of `util.types.isProxy` is a Node runtime behavior; these tests
+  establish it on Node 24.18.0 under Bun 1.3.14 only.
+- Missing evidence: Native-addon-enabled CI coverage and U5 measurements are
+  outside this run. Earlier review findings and repairs are recorded in
+  [the dispositions](../review-dispositions.md).
+- Conclusion (2026-09-13, revision-bound run, 1098 pass, 0 fail): resolved
+  as exercised. Witnesses, all with marker `expect(counter.count).toBe(0)`,
+  `expect(trap).not.toHaveBeenCalled()`, or a zero `getterCalls` or
+  `trapCalls` count:
+  - `transform-capture.test.ts:75`, `:107`, `:212`, `:282`, `:291`, `:305`,
+    `:338`, `:364`, `:549`, `:891`, and the `it.each` families at `:132`
+    (own array `toJSON`), `:154` (hidden array operation overrides), `:168`
+    (membership accessors), `:185` (inherited `toJSON`), `:249` (hidden
+    accessors on production-read fields).
+  - `rust-mode-transform.test.ts:2581` "declines an unsupported source before
+    any dispatch and leaves the host array intact" (`calls` 0); `:2387`
+    "rejects nested <accessor|toJSON|proxy> installed at <source-await|
+    pre-apply> without invoking it" (6 cases); `:1980` "refuses a kept
+    previous-output entry that gained an accessor and invokes no hook".
+  - `hook.test.ts:210` "rejects <unsupported> at the actual <hook|wrapper>
+    entry without triggering reads" (12 cases; also `client.session.get` and
+    `fake.calls` untouched); `hook.test.ts:174` `it.each` accepts hidden own
+    data through both entries as a positive control.
+  - `messages-transform.test.ts:64` and `:114` `it.each` families refuse
+    `then`, root proxies, and prototype proxies at entry and after the await;
+    `:196` leaves array-slot inspection to the inner owner.
 
-Focused commands run from `packages/opencode-plugin`, with Node 24.18.0 first
-on PATH:
+Focused command, run from `packages/opencode-plugin` with Node 24.18.0 first on
+PATH:
 
 ```sh
-bun test src/hooks/context/transform-capture.test.ts \
-  src/hooks/context/rust-mode-transform.test.ts src/hooks/context/hook.test.ts \
-  src/plugin/messages-transform.test.ts src/hooks/context/module-wire.test.ts \
-  src/hooks/context/module-wire-frame.test.ts
-bun run typecheck
+bun test src/hooks/context/ src/plugin/messages-transform.test.ts \
+  src/shared/host-client/client.test.ts
 ```
 
-Exact-file Biome checks, the repository comment-marker scan and `git diff
---check` also pass. The unchanged sequential benchmark script passes a
-1,000-message, one-sample smoke run. That run checks its oracle, not performance
-acceptance or a comparison with the historical baseline.
-
-`bun run check:repo` passes with Node 24.18.0 first on PATH, including root
-typechecking, lint, tests, builds and the generated-TUI drift check. The full
-OpenCode package suite reports 3,351 passing tests. Lint reports warnings in
-unchanged files; the ten-file scoped check reports none. The native package
-tests report `addon_unavailable`, so this root gate is not evidence of an
-enabled native addon. `bun run --cwd packages/opencode-plugin smoke` passes
-both smart-note Wasm bundle checks and TUI import checks.
+Result: 1098 pass, 0 fail, 31,141 `expect()` calls, 34 files. `tsc --noEmit`
+over `src/` passes in the same tree; the package `typecheck` script then fails
+in `tsconfig.scripts.json` at `scripts/bench-transform-client.ts:206`
+(`Expected 2 arguments, but got 3`), which is outside these records. Earlier
+whole-repository gate claims from a prior revision are not repeated here.
