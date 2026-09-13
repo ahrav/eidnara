@@ -17,7 +17,7 @@ use alloc_recorder::{BufferProvenance, Event, Ledger, record_window};
 use memory_store::WireMessage;
 use served_output_fixtures::{
     BLOCK_COUNTS, KEYS_PER_ASCII_BLOCK, Population, declaration_order_equals_canonical,
-    populations, reference_bytes,
+    populations, reference_bytes, serialization_buffer_root_bytes,
 };
 
 #[global_allocator]
@@ -31,6 +31,8 @@ fn canonicalize_recorded(message: &WireMessage) -> (Vec<u8>, Ledger) {
 const MAX_EVENTS_PER_BLOCK: usize = 8;
 const _: () = assert!(MAX_EVENTS_PER_BLOCK < KEYS_PER_ASCII_BLOCK);
 const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
+/// Lowercase hex of a SHA-256 digest.
+const HEX_DIGEST_BYTES: usize = 64;
 
 #[test]
 fn decoded_shell_canonicalization_allocates_independently_of_key_count() {
@@ -92,36 +94,79 @@ fn every_population_takes_the_reorder_copy_path() {
             1,
             "{label}: exactly one exact output-sized allocation"
         );
-        // The serialization buffer is the last buffer outside the returned chain that
-        // grew to at least N; it must be released before return.
-        let serialization_buffer = ledger
-            .allocations_at_least_outside(bytes.len(), ptr)
-            .last()
-            .map(|event| match event {
-                Event::Alloc { ptr, .. } | Event::Realloc { new_ptr: ptr, .. } => *ptr,
-                Event::Dealloc { .. } => unreachable!(),
-            })
-            .expect("the copy path grows a serialization buffer to N");
         assert!(
-            ledger.was_released(serialization_buffer),
+            ledger.was_released(serialization_buffer(&ledger, bytes.len(), ptr)),
             "{label}: the serialization buffer is released after the copy"
         );
         drop(bytes);
     }
 }
 
-/// Bytes of the per-block receipt strings the no-projection constructor serializes.
-fn message_receipt_bytes(population: &Population) -> usize {
+/// A leaked serialization buffer remains unreleased when a later allocation of
+/// at least `N` bytes is freed.
+#[test]
+fn serialization_buffer_oracle_sees_a_leaked_serialization_buffer() {
+    const N: usize = 200;
+    let (returned, ledger) = record_window(|| {
+        let mut objects: Vec<[usize; 5]> = Vec::with_capacity(4);
+        objects.push([0; 5]);
+        let mut a: Vec<u8> = Vec::new();
+        a.extend_from_slice(b"{");
+        a.extend(std::iter::repeat_n(b'x', N - 1));
+        objects.extend(std::iter::repeat_n([0; 5], 8));
+        drop(objects);
+        let b = a.clone();
+        std::mem::forget(a);
+        b
+    });
+    let ptr = returned.as_ptr() as usize;
+    assert_eq!(
+        ledger.buffer_provenance(ptr, returned.len(), returned.capacity()),
+        BufferProvenance::FreshExactSizeAllocation
+    );
+    let serialization_buffer = serialization_buffer(&ledger, returned.len(), ptr);
+    assert!(
+        !ledger.was_released(serialization_buffer),
+        "the leaked serialization buffer must not read as released"
+    );
+    drop(returned);
+}
+
+fn serialization_buffer(ledger: &Ledger, output_len: usize, returned_ptr: usize) -> usize {
+    let root = serialization_buffer_root_bytes();
+    match ledger.grown_from_root_outside(root, output_len, returned_ptr)[..] {
+        [buffer] => buffer,
+        ref found => panic!(
+            "expected one serialization buffer rooted at {root} bytes reaching {output_len}, found {found:?}"
+        ),
+    }
+}
+
+/// The largest peak the receipt serializer reaches for one block of the population, measured
+/// through the same canonical producer the constructor calls.
+fn largest_receipt_peak(population: &Population) -> usize {
     population
         .build()
         .content()
         .iter()
         .map(|block| {
-            serde_json::to_string(block)
-                .expect("block serializes")
-                .len()
+            let (receipt, ledger) =
+                record_window(|| daemon::served_json::canonical_block_bytes_for_test(block));
+            drop(receipt);
+            ledger.peak_live_bytes
         })
-        .sum()
+        .max()
+        .unwrap_or(0)
+}
+
+fn message_blocks(population: &Population) -> usize {
+    population.build().content().len()
+}
+
+/// `Arc<[T]>` and `Arc<str>` store strong and weak counts before the payload
+/// and pad the layout to word alignment.
+fn arc_layout(payload_bytes: usize) -> usize {
+    (payload_bytes + ARC_HEADER_BYTES).next_multiple_of(ARC_HEADER_BYTES / 2)
 }
 
 #[test]
@@ -130,9 +175,11 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         let label = population.label();
         let message = population.build();
         let reference = reference_bytes(&message);
-        let arc_size = (reference.len() + ARC_HEADER_BYTES).next_multiple_of(ARC_HEADER_BYTES / 2);
-        let (_, canonicalizer) = canonicalize_recorded(&message);
+        let arc_size = arc_layout(reference.len());
+        let (canonical, canonicalizer) = canonicalize_recorded(&message);
         let canonicalizer_peak = canonicalizer.peak_live_bytes;
+        let returned_capacity = canonical.capacity();
+        drop(canonical);
         let (served, ledger) =
             record_window(|| daemon::transform::served_message_for_test(message));
         assert!(!ledger.overflow, "{label}: ledger overflow");
@@ -147,17 +194,41 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
             ledger.peak_live_bytes,
             reference.len()
         );
-        // Beyond the canonicalizer's own peak, the constructor can only add the Arc
-        // payload, one serialized receipt string per block, and the identity string.
-        let receipts: usize = message_receipt_bytes(&population);
-        let bound = canonicalizer_peak + arc_size + receipts + 64 + 1024;
+        let blocks = message_blocks(&population);
+        let message_arc = arc_layout(std::mem::size_of::<WireMessage>());
+        let fingerprint_vec = blocks * std::mem::size_of::<(String, usize)>();
+        let fingerprint_arc = arc_layout(fingerprint_vec);
+        let digests = blocks * HEX_DIGEST_BYTES;
+        let identity_arc = arc_layout(HEX_DIGEST_BYTES);
+        let retained = message_arc + fingerprint_arc + digests + identity_arc + arc_size;
+        assert_eq!(
+            ledger.live_bytes_at_close, retained as isize,
+            "{label}: the constructor retains the message, fingerprints, identity, and payload"
+        );
+        // The constructor converts the returned buffer to its exact-size `Arc`
+        // before serializing receipts, so the buffer's spare capacity and the
+        // `Arc` overlap only during that conversion.
+        let conversion_peak = returned_capacity + arc_size;
+        let live_after_conversion = arc_size + fingerprint_vec + digests;
+        let hashing_peak = live_after_conversion + largest_receipt_peak(&population);
+        // Ownership transfer: the identity string and its `Arc` overlap, then the
+        // fingerprint `Vec` and its `Arc` overlap while the identity `Arc` is live.
+        let ownership_peak = live_after_conversion
+            + message_arc
+            + identity_arc
+            + HEX_DIGEST_BYTES.max(fingerprint_arc);
+        let bound = canonicalizer_peak
+            .max(conversion_peak)
+            .max(hashing_peak)
+            .max(ownership_peak);
         assert!(
             ledger.peak_live_bytes <= bound,
-            "{label}: constructor peak {} exceeds canonicalizer peak {} plus receipts {} and Arc {}",
+            "{label}: constructor peak {} exceeds max(canonicalizer {}, conversion {}, hashing {}, ownership {})",
             ledger.peak_live_bytes,
             canonicalizer_peak,
-            receipts,
-            arc_size
+            conversion_peak,
+            hashing_peak,
+            ownership_peak
         );
         // `Arc<[u8]>` stores the strong and weak counts ahead of the bytes, so the
         // allocation starts two words before the payload pointer and its layout is
@@ -199,23 +270,21 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         })
     };
     while foreign_allocations.load(Ordering::Relaxed) == 0 {
-        std::hint::spin_loop();
+        std::thread::yield_now();
     }
     let (grown, foreign_during_window, ledger) = {
-        let before = foreign_allocations.load(Ordering::Relaxed);
-        let ((grown, seen), ledger) = record_window(|| {
+        let ((grown, foreign_during_window), ledger) = record_window(|| {
+            let before = foreign_allocations.load(Ordering::Relaxed);
             let mut grown: Vec<u8> = Vec::with_capacity(8);
             grown.extend(std::iter::repeat_n(7u8, 100));
             let scratch = vec![1u8; 17];
             drop(scratch);
-            // Spin until the other thread has allocated at least 16 times inside
-            // this window, so the exclusion below is exercised rather than assumed.
             while foreign_allocations.load(Ordering::Relaxed) < before + 16 {
-                std::hint::spin_loop();
+                std::thread::yield_now();
             }
-            (grown, foreign_allocations.load(Ordering::Relaxed))
+            (grown, foreign_allocations.load(Ordering::Relaxed) - before)
         });
-        (grown, seen - before, ledger)
+        (grown, foreign_during_window, ledger)
     };
     stop.store(true, Ordering::Relaxed);
     noisy.join().unwrap();
@@ -260,6 +329,19 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         "a shrunk buffer is not a growth chain"
     );
     drop(shrunk);
+
+    // A one-shot over-allocation never grew, so it is neither fresh-exact nor a chain.
+    let (slack, ledger) = record_window(|| {
+        let mut slack: Vec<u8> = Vec::with_capacity(64);
+        slack.extend(std::iter::repeat_n(1u8, 10));
+        slack
+    });
+    assert_eq!(
+        ledger.buffer_provenance(slack.as_ptr() as usize, slack.len(), slack.capacity()),
+        BufferProvenance::Unattributed,
+        "a single over-allocated alloc is not a growth chain"
+    );
+    drop(slack);
 }
 
 #[test]
@@ -288,10 +370,13 @@ fn recorder_aggregates_follow_a_scripted_sequence_and_report_overflow() {
     assert_eq!(ledger.peak_live_bytes, 0);
 
     // More events than the ledger holds: aggregates stay exact, events truncate.
-    let (boxes, ledger) = record_window(|| (0..70_000).map(|_| Box::new(1u8)).collect::<Vec<_>>());
+    // `boxes` is preallocated outside the window, so only its `Box<u8>` allocations are recorded.
+    let mut boxes: Vec<Box<u8>> = Vec::with_capacity(70_000);
+    let ((), ledger) = record_window(|| boxes.extend((0..70_000).map(|_| Box::new(1u8))));
     assert!(ledger.overflow);
-    assert!(ledger.requested_bytes >= 70_000);
-    assert!(ledger.peak_live_bytes >= 70_000);
+    assert_eq!(ledger.requested_bytes, 70_000);
+    assert_eq!(ledger.peak_live_bytes, 70_000);
+    assert_eq!(ledger.live_bytes_at_close, 70_000);
     assert!(ledger.events.len() < 70_000);
     drop(boxes);
 }

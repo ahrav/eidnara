@@ -1,6 +1,3 @@
-//! Included by `#[path]` from `tests/served_json_shell_allocations.rs` and
-//! `examples/canonical_output_evidence.rs`.
-
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
 pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
@@ -93,6 +90,12 @@ pub fn reference_bytes(message: &WireMessage) -> Vec<u8> {
 /// object needs reordering.
 pub fn declaration_order_equals_canonical(message: &WireMessage, canonical: &[u8]) -> bool {
     serde_json::to_vec(message).expect("to_vec") == canonical
+}
+
+pub fn serialization_buffer_root_bytes() -> usize {
+    let mut probe: Vec<u8> = Vec::new();
+    probe.extend_from_slice(b"{");
+    probe.capacity()
 }
 
 fn decoded(body: &str) -> WireMessage {

@@ -15,7 +15,13 @@ The `before/` directory is the frozen before leg of the
   to obtain the bench binary (the `decode` group and the corpus dump in
   `crates/daemon/benches/hot_path.rs`). Its SHA-256 is in the manifest.
 - `corpus/`: the exact request bodies each cell decodes, with SHA-256 in the
-  manifest.
+  manifest. The before-leg binary built these bodies through the serializer
+  of revision `85accd89` and dumped the same `body` value it timed. The
+  committed `bench_decode` now `include_bytes!` these two files instead, so a
+  later revision whose serializer omits fields (for example
+  `provider_executed: false` after canonical block bytes landed) still decodes
+  the same bytes. Rebuilding the corpus on such a revision yields bodies 520
+  and 2,600 bytes smaller; do not regenerate it.
 - `raw/<cell>/<size>/r<N>/`: Criterion `sample.json`, `estimates.json`, and
   `benchmark.json` for each of five independent processes.
 
@@ -27,6 +33,12 @@ cargo +1.98 bench -p daemon --locked --features bench-internals --bench hot_path
 EIDNARA_DUMP_DECODE_CORPUS=<corpus-dir> CRITERION_HOME=<criterion-dir> \
   target/release/deps/hot_path-<hash> --bench decode --save-baseline before-r<N> --noplot
 ```
+
+The after leg runs the committed `decode` group on its final tree (not
+`harness.patch`, whose corpus rebuild is serializer-dependent), confirms the
+bytes each cell decoded equal the manifest corpus, alternates before/after
+process order AB, BA, AB, BA, AB across five pairs, and applies the manifest's
+predeclared rule per cell.
 
 Before-leg process-mean medians and relative spreads (max minus min over the
 median of the five process means), which fix each cell's noise floor:

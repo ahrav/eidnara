@@ -13980,22 +13980,46 @@ pub(crate) mod tests {
                 .contains("-0.0")
         );
 
-        // Positional mismatch falls back to the equality index and keeps the first of
-        // two identical candidates.
-        let shifted = wire_message_from_blocks("assistant", vec![call("z", 5.0), call("b", 1.0)]);
-        let reused = ServedMessage::from_message_reusing(shifted.clone(), Some(&flats));
+        // The equality index applies only when the served index has no projected block.
+        // Distinct receipts make first-candidate selection observable independently of content.
+        let mut receipts = projection.blocks.clone();
+        for (index, flat) in receipts.iter_mut().enumerate() {
+            flat.content_hash = [index as u8; 32];
+        }
+        let receipts: Vec<&FlatBlock> = receipts.iter().collect();
+        let shifted = wire_message_from_blocks(
+            "assistant",
+            vec![
+                call("b", 1.0),
+                call("y", 6.0),
+                call("x", 7.0),
+                call("b", 1.0),
+            ],
+        );
+        let reused = ServedMessage::from_message_reusing(shifted.clone(), Some(&receipts));
         let fresh = ServedMessage::from_message(shifted);
+        // Served indexes 0-2 each have an unequal positional candidate, so none reuses
+        // an equal projected block even though projected indexes 1 and 2 equal index 0.
         assert_eq!(
             reused.block_fingerprints[0], fresh.block_fingerprints[0],
-            "no candidate: fresh hash"
+            "unequal positional candidate: fresh hash"
         );
-        assert_eq!(
-            reused.block_fingerprints[1].0,
-            wire::fingerprint_digest(&flats[1].content_hash)
-        );
-        assert_eq!(flats[1].content_hash, flats[2].content_hash);
         assert_eq!(
             reused.block_fingerprints[1], fresh.block_fingerprints[1],
+            "unequal positional candidate: fresh hash"
+        );
+        assert_eq!(
+            reused.block_fingerprints[2], fresh.block_fingerprints[2],
+            "unequal positional candidate: fresh hash"
+        );
+        assert_eq!(
+            reused.block_fingerprints[3],
+            (wire::fingerprint_digest(&[1; 32]), receipts[1].bytes.len()),
+            "served index 3 has no projected block: the equality index keeps the first equal candidate"
+        );
+        assert_ne!(reused.block_fingerprints[3], fresh.block_fingerprints[3]);
+        assert_eq!(
+            fresh.block_fingerprints[0], fresh.block_fingerprints[3],
             "identical typed blocks hash identically"
         );
 

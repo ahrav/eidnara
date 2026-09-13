@@ -264,13 +264,15 @@ mod tests {
 
     #[test]
     fn every_key_permutation_reports_change_exactly_when_disordered() {
-        // Each triple is listed in decoded order: raw ASCII, escape-only, prefix and
-        // quote, and mixed Unicode.
-        let triples: [[&str; 3]; 4] = [
+        // Each triple is listed in decoded order. Values carry the source index,
+        // so a stable sort of equal keys is observable.
+        let triples: [[&str; 3]; 6] = [
             ["a", "b", "c"],
             ["\n", "a", "\u{e9}"],
             ["a", "a b", "a\""],
             ["\u{1}", "!", "\u{1F600}"],
+            ["a", "a", "b"],
+            ["\n", "\n", "a"],
         ];
         for sorted_keys in triples {
             for permutation in permutations(&sorted_keys) {
@@ -280,10 +282,13 @@ mod tests {
                     .map(|(index, key)| (*key, serde_json::json!(index)))
                     .collect();
                 let source = Ordered(&pairs);
-                let expected = reference(&source);
+                // `reference` would collapse duplicate keys; a stable sort keeps them.
+                let mut stable = pairs.clone();
+                stable.sort_by_key(|(key, _)| *key);
+                let expected = serde_json::to_vec(&Ordered(&stable)).unwrap();
                 let mut encoded = serialize_with_spans(&source).unwrap();
                 let changed = sort_all_fields(&encoded.bytes, &mut encoded.objects);
-                let disordered = permutation != sorted_keys;
+                let disordered = !permutation.is_sorted();
                 assert_eq!(changed, disordered, "{permutation:?}");
                 assert_eq!(encode(&source).unwrap(), expected, "{permutation:?}");
                 assert_eq!(
@@ -382,12 +387,20 @@ mod tests {
         for case in cases {
             let value: serde_json::Value = serde_json::from_str(case).unwrap();
             let map = value.as_object().unwrap();
-            let mut reversed: Vec<(&str, serde_json::Value)> = map
+            let ordered: Vec<(&str, serde_json::Value)> = map
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.clone()))
                 .collect();
+            let mut reversed = ordered.clone();
             reversed.reverse();
-            for source in [Ordered(&reversed)] {
+            // A root with at least two keys makes `ordered` and `reversed` distinct.
+            assert_eq!(
+                serde_json::to_vec(&Ordered(&ordered)).unwrap()
+                    == serde_json::to_vec(&Ordered(&reversed)).unwrap(),
+                ordered.len() < 2,
+                "{case}"
+            );
+            for source in [Ordered(&ordered), Ordered(&reversed)] {
                 let encoded = serialize_with_spans(&source).unwrap();
                 let mut whole = Vec::new();
                 copy_sorted_range(
@@ -468,11 +481,18 @@ mod tests {
                 }
                 let mut outer = serializer.serialize_map(None)?;
                 outer.serialize_entry("z", &1)?;
-                outer.serialize_key("a")?;
-                let mut inner = serde_json::Map::new();
-                inner.insert("b".into(), serde_json::json!(1));
-                outer.serialize_value(&inner)?;
-                outer.serialize_key("open")?;
+                outer.serialize_entry("a", &OpenInner)?;
+                unreachable!("the nested value refuses")
+            }
+        }
+        /// Fails between a nested object's first entry and its close, so the
+        /// formatter stack holds two open objects at the error.
+        struct OpenInner;
+        impl Serialize for OpenInner {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeMap};
+                let mut inner = serializer.serialize_map(None)?;
+                inner.serialize_entry("b", &1)?;
                 Err(S::Error::custom("refused with an open nested object"))
             }
         }

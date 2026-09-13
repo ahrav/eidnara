@@ -6,6 +6,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
+use super::applicability::EvalBudget;
+use super::open::AcquireLimit;
 use super::outbox::{OutboxEntry, outbox_entry};
 use super::{CachedSql, KernelError, KernelStore, map_sqlite};
 
@@ -186,6 +188,18 @@ fn outbox_rows(
 }
 
 impl KernelStore {
+    /// Reads the durable database identity, which survives an ordinary reopen.
+    pub fn database_incarnation_id_within_budget(
+        &self,
+        budget: &EvalBudget,
+    ) -> Result<String, KernelError> {
+        let limit = budget.acquire_limit();
+        let reader = self.reader_with_limit(&limit)?;
+        let identity = super::open::database_incarnation_id_via(&reader)?;
+        limit.check()?;
+        Ok(identity)
+    }
+
     #[cfg(feature = "test-support")]
     pub fn materialized_outbox_rows_for_test(&self) -> usize {
         self.materialized_outbox_rows
@@ -194,14 +208,30 @@ impl KernelStore {
 
     /// Captures the committed tip and the incarnation it belongs to from one reader snapshot.
     pub fn capture_commit_read_target(&self) -> Result<CommitReadTarget, KernelError> {
-        let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(map_sqlite)?;
-        Ok(CommitReadTarget {
+        self.capture_commit_read_target_inner(&AcquireLimit::default())
+    }
+
+    /// Exhaustion refuses the target with `KernelError::Deadline`, including when a reader is free.
+    pub fn capture_commit_read_target_within_budget(
+        &self,
+        budget: &EvalBudget,
+    ) -> Result<CommitReadTarget, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.capture_commit_read_target_inner(&limit))
+    }
+
+    fn capture_commit_read_target_inner(
+        &self,
+        limit: &AcquireLimit,
+    ) -> Result<CommitReadTarget, KernelError> {
+        let mut reader = self.reader_with_limit(limit)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
+        let target = CommitReadTarget {
             through_commit: tip(&tx).map_err(map_sqlite)?,
             incarnation: self.incarnation(),
-        })
+        };
+        limit.check()?;
+        Ok(target)
     }
 
     /// Must run under a reader guard because a restore holds every guard while advancing
@@ -226,19 +256,37 @@ impl KernelStore {
         request: &CommitReadRequest,
         bounds: CommitPageBounds,
     ) -> Result<CommitPage, CommitReadError> {
+        self.read_complete_commits_inner(&AcquireLimit::default(), request, bounds)
+    }
+
+    /// Exhaustion returns `CommitReadError::Kernel(KernelError::Deadline)`, never a partial page.
+    pub fn read_complete_commits_within_budget(
+        &self,
+        budget: &EvalBudget,
+        request: &CommitReadRequest,
+        bounds: CommitPageBounds,
+    ) -> Result<CommitPage, CommitReadError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.read_complete_commits_inner(&limit, request, bounds))
+    }
+
+    fn read_complete_commits_inner(
+        &self,
+        limit: &AcquireLimit,
+        request: &CommitReadRequest,
+        bounds: CommitPageBounds,
+    ) -> Result<CommitPage, CommitReadError> {
         if request.consumer_id.trim().is_empty()
             || request.after_commit < 0
             || request.through_commit < request.after_commit
         {
             return Err(CommitReadError::InvalidRequest);
         }
-        let mut reader = self.lock_reader()?;
+        let mut reader = self.reader_with_limit(limit)?;
         if request.incarnation != self.incarnation() {
             return Err(CommitReadError::IncarnationMismatch);
         }
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(sqlite)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
         let checkpoint: i64 = tx
             .query_row_cached(
                 "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
@@ -255,7 +303,7 @@ impl KernelStore {
             return Err(CommitReadError::TargetBeyondTip);
         }
         // One more than the page can hold, so the commit that ends the page is seen without enumerating the whole range.
-        let limit = i64::try_from(bounds.max_commits.get())
+        let sequence_limit = i64::try_from(bounds.max_commits.get())
             .unwrap_or(i64::MAX - 1)
             .saturating_add(1);
         let mut sequences = tx
@@ -266,7 +314,7 @@ impl KernelStore {
             .map_err(sqlite)?;
         let sequences = sequences
             .query_map(
-                params![request.after_commit, request.through_commit, limit],
+                params![request.after_commit, request.through_commit, sequence_limit],
                 |row| row.get::<_, i64>(0),
             )
             .map_err(sqlite)?;
@@ -277,6 +325,7 @@ impl KernelStore {
         let mut used_bytes = 0u64;
         let mut end = None;
         for commit_seq in sequences {
+            limit.check()?;
             let commit_seq = commit_seq.map_err(sqlite)?;
             // A page full by count ends before inspecting the next commit; defects in that commit
             // belong to the page it opens.
@@ -303,6 +352,7 @@ impl KernelStore {
                 });
                 break;
             }
+            limit.check()?;
             let rows = outbox_rows(&tx, commit_seq, &shape)?;
             #[cfg(feature = "test-support")]
             self.materialized_outbox_rows
@@ -312,6 +362,7 @@ impl KernelStore {
             through = commit_seq;
             commits.push(CompleteCommit { commit_seq, rows });
         }
+        limit.check()?;
         Ok(CommitPage {
             commits,
             through,

@@ -9,15 +9,6 @@
 //!
 //! Exactly one thread records inside a window; the live and peak counters are
 //! updated by the owner thread only.
-//!
-//! Included by `#[path]` from `tests/served_json_shell_allocations.rs` and
-//! `examples/canonical_output_evidence.rs`. Each binary that observes allocations
-//! declares the global allocator itself:
-//!
-//! ```ignore
-//! #[global_allocator]
-//! static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
-//! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
@@ -213,7 +204,7 @@ impl Ledger {
             [Event::Alloc { size, .. }] if *size == len && capacity == len => {
                 BufferProvenance::FreshExactSizeAllocation
             }
-            [Event::Alloc { .. }, rest @ ..] => {
+            [Event::Alloc { .. }, rest @ ..] if !rest.is_empty() => {
                 let grows = rest.iter().all(|event| {
                     matches!(event, Event::Realloc { old_size, new_size, .. } if new_size > old_size)
                 });
@@ -232,19 +223,64 @@ impl Ledger {
         }
     }
 
-    /// Allocation events requesting at least `size` bytes that are not part of
-    /// the chain producing `ptr`.
-    pub fn allocations_at_least_outside(&self, size: usize, ptr: usize) -> Vec<Event> {
-        let chain = self.growth_chain(ptr);
-        self.events
+    /// Final pointers of the buffers that grew, without shrinking, from an
+    /// `alloc` of exactly `root_size` bytes to at least `size` bytes, excluding
+    /// the chain that produced `ptr`.
+    pub fn grown_from_root_outside(&self, root_size: usize, size: usize, ptr: usize) -> Vec<usize> {
+        let excluded = self.growth_chain(ptr);
+        let mut finals = Vec::new();
+        for event in &self.events {
+            let produced = match event {
+                Event::Alloc { ptr, size: s }
+                | Event::Realloc {
+                    new_ptr: ptr,
+                    new_size: s,
+                    ..
+                } if *s >= size => *ptr,
+                _ => continue,
+            };
+            if excluded.contains(event) {
+                continue;
+            }
+            let chain = self.growth_chain(produced);
+            let rooted =
+                matches!(chain.first(), Some(Event::Alloc { size, .. }) if *size == root_size);
+            let grows = chain[1..].iter().all(|event| {
+                matches!(event, Event::Realloc { old_size, new_size, .. } if new_size > old_size)
+            });
+            if !(rooted && grows) {
+                continue;
+            }
+            let last = self.final_pointer(produced);
+            if !finals.contains(&last) {
+                finals.push(last);
+            }
+        }
+        finals
+    }
+
+    /// Follows reallocations forward from `ptr` to the buffer's last address.
+    fn final_pointer(&self, ptr: usize) -> usize {
+        let mut current = ptr;
+        let mut cursor = self
+            .events
             .iter()
-            .copied()
-            .filter(|event| match event {
-                Event::Alloc { size: s, .. } | Event::Realloc { new_size: s, .. } => *s >= size,
+            .rposition(|event| match event {
+                Event::Alloc { ptr: p, .. } | Event::Realloc { new_ptr: p, .. } => *p == ptr,
                 Event::Dealloc { .. } => false,
             })
-            .filter(|event| !chain.contains(event))
-            .collect()
+            .map_or(0, |index| index + 1);
+        while cursor < self.events.len() {
+            if let Event::Realloc {
+                old_ptr, new_ptr, ..
+            } = self.events[cursor]
+                && old_ptr == current
+            {
+                current = new_ptr;
+            }
+            cursor += 1;
+        }
+        current
     }
 
     /// Events whose requested size equals `size`, in ledger order.
