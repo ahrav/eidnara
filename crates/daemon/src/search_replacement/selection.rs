@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -539,6 +539,7 @@ impl SearchSelection {
         match self.reclaim_locked(digest)? {
             Reclaimed::Removed | Reclaimed::Absent => Ok(()),
             Reclaimed::Uncertified => Err(BuildError::Invalid("uncertified family")),
+            Reclaimed::Residual => Err(BuildError::Invalid("family directory not empty")),
         }
     }
 
@@ -576,7 +577,7 @@ impl SearchSelection {
             match self.reclaim_locked(digest) {
                 Ok(Reclaimed::Removed) => report.removed += 1,
                 Ok(Reclaimed::Absent) => {}
-                Ok(Reclaimed::Uncertified)
+                Ok(Reclaimed::Uncertified | Reclaimed::Residual)
                 | Err(BuildError::Projection(SearchProjectionError::Store(
                     storage::StoreError::Lease(_),
                 ))) => report.retained += 1,
@@ -597,13 +598,17 @@ impl SearchSelection {
                 return Ok(Reclaimed::Uncertified);
             }
             open_directory(&home)?;
-            self.remove_family_dirs(&home)?;
-            return Ok(Reclaimed::Removed);
+            return self.remove_family_dirs(&home);
         }
-        let certificate: Bootstrap = serde_json::from_slice(&certificate_bytes(&home)?)
-            .map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
-        self.remove_family(digest, &certificate)?;
-        Ok(Reclaimed::Removed)
+        let bytes = match certificate_bytes(&home) {
+            Ok(bytes) => bytes,
+            Err(BuildError::Invalid(_)) => return Ok(Reclaimed::Uncertified),
+            Err(error) => return Err(error),
+        };
+        let Ok(certificate) = serde_json::from_slice::<Bootstrap>(&bytes) else {
+            return Ok(Reclaimed::Uncertified);
+        };
+        self.remove_family(digest, &certificate)
     }
 
     pub fn recover_partial(&self, gate: &HookGate) -> Result<LifecycleIntent, BuildError> {
@@ -631,7 +636,11 @@ impl SearchSelection {
         Ok(intent)
     }
 
-    fn remove_family(&self, digest: &str, certificate: &Bootstrap) -> Result<(), BuildError> {
+    fn remove_family(
+        &self,
+        digest: &str,
+        certificate: &Bootstrap,
+    ) -> Result<Reclaimed, BuildError> {
         match GenerationStore::open(Some(&self.data_home))?.read_search_current()? {
             CurrentProfile::Current(current) if current == digest => {
                 return Err(BuildError::Invalid("selected family"));
@@ -646,7 +655,7 @@ impl SearchSelection {
         }
         let home = self.family_home(digest)?;
         if !home.try_exists()? {
-            return Ok(());
+            return Ok(Reclaimed::Absent);
         }
         open_directory(&home)?;
         open_directory(&self.data_home.join(FAMILIES))?;
@@ -671,7 +680,9 @@ impl SearchSelection {
         self.remove_family_dirs(&home)
     }
 
-    fn remove_family_dirs(&self, home: &Path) -> Result<(), BuildError> {
+    /// Removes the family's directories once their expected contents are gone; a residual entry
+    /// leaves the home on disk and yields [`Reclaimed::Residual`].
+    fn remove_family_dirs(&self, home: &Path) -> Result<Reclaimed, BuildError> {
         open_directory(home)?.sync_all()?;
         let search = home.join("search");
         if search.try_exists()? {
@@ -689,19 +700,23 @@ impl SearchSelection {
                 }
             }
         }
+        let mut residual = false;
         for path in [search, home.to_owned()] {
             match fs::remove_dir(path) {
                 Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                    ) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                    residual = true;
+                }
                 Err(error) => return Err(error.into()),
             }
         }
         open_directory(&self.data_home.join(FAMILIES))?.sync_all()?;
-        Ok(())
+        Ok(if residual {
+            Reclaimed::Residual
+        } else {
+            Reclaimed::Removed
+        })
     }
 }
 
@@ -710,6 +725,8 @@ enum Reclaimed {
     Absent,
     /// A database without its certificate: ownership cannot be proven, so nothing is deleted.
     Uncertified,
+    /// The database is gone but an unexpected entry keeps the family directory on disk.
+    Residual,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -873,10 +890,22 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
 fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
     let parent_dir = crate::projection_lifecycle::open_directory(parent)?;
     let path = parent.join(name);
-    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&path)
-        && error.kind() != std::io::ErrorKind::AlreadyExists
-    {
-        return Err(error.into());
+    match fs::DirBuilder::new().mode(0o700).create(&path) {
+        // The umask may have narrowed the requested mode; the new directory is set to exactly owner-only.
+        Ok(()) => fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A crash between the create and its chmod leaves an owner-owned directory the owner
+            // cannot enter; only such a directory is widened, never one with wider bits.
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir()
+                && metadata.uid() == rustix::process::geteuid().as_raw()
+                && metadata.mode() & 0o777 & !0o700 == 0
+                && metadata.mode() & 0o700 != 0o700
+            {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Err(error) => return Err(error.into()),
     }
     open_directory(&path)?;
     parent_dir.sync_all()?;
@@ -884,12 +913,14 @@ fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
 }
 
 fn create_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 fn open_directory(path: &Path) -> std::io::Result<File> {

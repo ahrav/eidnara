@@ -282,6 +282,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE occurrences SET sensitivity='secret'",
         "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
         "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
+        "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -927,12 +928,12 @@ fn concurrent_queries_observe_one_family_for_rows_checkpoint_and_job_set() {
     std::thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
-                let pinned = selection
-                    .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
-                    .unwrap();
-                assert_eq!(observe(&pinned), before);
+                let pinned = selection.pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)));
+                let seen = pinned.as_ref().ok().map(observe);
                 ready.wait();
                 published.wait();
+                let pinned = pinned.unwrap();
+                assert_eq!(seen.unwrap(), before);
                 for _ in 0..20 {
                     assert_eq!(observe(&pinned), before);
                     let current = selection
@@ -946,6 +947,41 @@ fn concurrent_queries_observe_one_family_for_rows_checkpoint_and_job_set() {
         selection.select(candidate, &mut |_| Ok(())).unwrap();
         published.wait();
     });
+}
+
+#[test]
+#[ignore = "launched by `a_umask_that_masks_owner_bits_does_not_break_family_creation`"]
+fn umask_child() {
+    let root = std::path::PathBuf::from(std::env::var("UMASK_CHILD_ROOT").unwrap());
+    let corpus = Corpus::open(&root);
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let config = spec(&root);
+    record(&root, &gate, None, &config.identity);
+    let candidate = ReplacementBuilder::open(&root, &corpus.kernel, &gate, config)
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+    // Only family creation runs under the umask; the builder's storage layer is not under test.
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o100));
+    let selection = selector(&root);
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+    let pinned = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(observe(&pinned).rows.len(), 1);
+}
+
+#[test]
+fn a_umask_that_masks_owner_bits_does_not_break_family_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "selection::umask_child", "--ignored"])
+        .env("UMASK_CHILD_ROOT", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
 }
 
 #[test]
@@ -1299,18 +1335,18 @@ fn transient_reopen_failures_keep_the_live_family_without_quarantine() {
 
     // The reader releases after 1.5 seconds, so a quarantine that waits for the connection
     // completes and fails the assertion below instead of deadlocking the scope.
-    let held = std::sync::Barrier::new(2);
+    let (held, entered) = std::sync::mpsc::sync_channel(1);
     let contended = std::thread::scope(|scope| {
         scope.spawn(|| {
             old.projection()
-                .read(|_| {
-                    held.wait();
+                .read(move |_| {
+                    held.send(()).unwrap();
                     std::thread::sleep(Duration::from_millis(1500));
                     Ok(())
                 })
                 .unwrap();
         });
-        held.wait();
+        entered.recv().expect("the reader entered its callback");
         selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_millis(300)))
     });
     assert!(matches!(
@@ -1383,6 +1419,15 @@ fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_lease
     let selected_digest = candidate.staged().digest.clone();
     selection.select(candidate, &mut |_| Ok(())).unwrap();
 
+    // A truncated certificate proves nothing, so the orphan is retained and the sweep goes on.
+    let certificate = family(&partial_digest).join("bootstrap.json");
+    let bytes = std::fs::read(&certificate).unwrap();
+    std::fs::write(&certificate, &bytes[..bytes.len() / 2]).unwrap();
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (0, 2));
+    assert!(family(&partial_digest).is_dir());
+    std::fs::write(&certificate, &bytes).unwrap();
+
     // The old family is leased by `old`.
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (1, 1));
@@ -1395,6 +1440,13 @@ fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_lease
     );
 
     drop(old);
+    // A residual entry keeps the directory on disk, so the sweep must report it retained.
+    let stray = family(&old_digest).join("stray");
+    std::fs::write(&stray, b"residual").unwrap();
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (0, 1));
+    assert!(family(&old_digest).is_dir());
+    std::fs::remove_file(&stray).unwrap();
     let report = selection.sweep().unwrap();
     assert_eq!((report.removed, report.retained), (1, 0));
     assert!(!family(&old_digest).exists());
