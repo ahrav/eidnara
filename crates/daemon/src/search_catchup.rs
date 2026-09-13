@@ -157,7 +157,7 @@ pub enum EpisodeEnd {
 pub struct EpisodeReport {
     /// `target` is `0` when the episode is refused before capture.
     pub target: i64,
-    /// The kernel consumer checkpoint when the episode ended.
+    /// `acknowledged_through` is the kernel consumer checkpoint at episode end; it remains `0` if refusal occurs before the checkpoint read.
     pub acknowledged_through: i64,
     pub batches_applied: usize,
     pub commits_consumed: usize,
@@ -464,14 +464,21 @@ impl<'a> SearchCatchUp<'a> {
 
     /// Reads the projection's checkpoint; the checkpoint's hold id must match `consumer.hold_id`.
     fn local_prefix(&mut self, consumer: &CatchUpConsumer) -> Result<ProjectionCheckpoint, Stop> {
-        let read = self
-            .projection
-            .read(|conn| read_checkpoint(conn, &consumer.kernel_incarnation_id));
+        let read = |conn: &storage::GuardedConn<'_>| {
+            read_checkpoint(conn, &consumer.kernel_incarnation_id)
+        };
+        let read = match self.budget.deadline() {
+            Some(deadline) => self.projection.read_within(deadline, read),
+            None => self.projection.read(read),
+        };
         let checkpoint = match read {
             Ok(Some(checkpoint)) => checkpoint,
             Ok(None) => return Err(Blocked::NoLocalBaseline.into()),
             Err(SearchProjectionError::Projection(ProjectionError::IdentityMismatch)) => {
                 return Err(Blocked::ProjectionIdentity.into());
+            }
+            Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                return Err(Blocked::Cancelled.into());
             }
             Err(error) => return Err(self.stop_from_projection_error(error)),
         };

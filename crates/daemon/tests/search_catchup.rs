@@ -1800,6 +1800,49 @@ fn target_fixed_before_a_restore_is_refused() {
 }
 
 #[test]
+fn original_deadline_bounds_the_initial_checkpoint_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish("next", &[("a", "1", "next message")]);
+    let before = durable(dir.path());
+    let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+    let (deadline, report, finished) = std::thread::scope(|scope| {
+        // Another task holds the projection's only connection while the episode starts.
+        let projection = &projection;
+        scope.spawn(move || {
+            projection
+                .read(|_| {
+                    acquired_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_secs(4));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+        let report = SearchCatchUp::new(&corpus.kernel, projection)
+            .with_budget(budget)
+            .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {
+                panic!("a blocked checkpoint read admitted work")
+            });
+        (deadline, report.unwrap(), Instant::now())
+    });
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert!(finished.duration_since(deadline) < Duration::from_secs(1));
+    assert_eq!(durable(dir.path()), before);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+    let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {})
+        .unwrap();
+    reached(&replay);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+}
+
+#[test]
 fn original_deadline_bounds_lost_commit_reconciliation() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
