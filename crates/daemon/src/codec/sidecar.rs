@@ -167,7 +167,7 @@ impl AlignmentScore {
 
 /// Hashes decoded content after removing codec-owned identity metadata. The
 /// digest is the hex SHA-256 of the block's canonical bytes; a block that cannot
-/// serialize hashes as JSON `null`, matching `stable_hash`'s failure value.
+/// serialize hashes the JSON text `null`.
 pub(crate) fn decoded_block_fingerprint(block: &WireBlock) -> String {
     let mut canonical = block.clone();
     canonical.provider_extras.remove(BLOCK_IDENTITY_NAMESPACE);
@@ -415,15 +415,6 @@ fn optimal_block_metas<'a>(
     by_block
 }
 
-/// Returns the full lowercase SHA-256 digest of `serde_json`-serialized bytes.
-///
-/// Serialization failure hashes an empty byte sequence.
-pub fn stable_hash(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    let digest = Sha256::digest(bytes);
-    hex_prefix(&digest, digest.len())
-}
-
 /// Returns up to `chars` lowercase hexadecimal characters from serialized JSON's SHA-256 digest.
 ///
 /// Serialization failure hashes an empty byte sequence. Requests above 64 characters
@@ -484,6 +475,11 @@ mod tests {
         WireBlock::bare(BlockKind::Text {
             text: text.to_string(),
         })
+    }
+
+    fn stable_hash(value: &Value) -> String {
+        let digest = Sha256::digest(serde_json::to_vec(value).unwrap());
+        hex_prefix(&digest, digest.len())
     }
 
     fn text_meta(block_index: usize) -> BlockMeta {
