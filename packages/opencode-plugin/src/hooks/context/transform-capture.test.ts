@@ -168,6 +168,32 @@ describe("referenceable source guard", () => {
         expect(trap).not.toHaveBeenCalled();
     });
 
+    it("rejects an accessor inherited from Object.prototype without calling it", () => {
+        const key = "agent";
+        const trap = mock(() => "polluted");
+        const source = [{ info: { role: "user" } }];
+        const captured = captureMessages(source);
+        const saved = Object.getOwnPropertyDescriptor(Object.prototype, key);
+        let valid = true;
+        let unchanged = true;
+        let reason: SourceRejected | undefined;
+        try {
+            Object.defineProperty(Object.prototype, key, { get: trap, configurable: true });
+            valid = referenceableMessages(source);
+            unchanged = capturedMessagesUnchanged(source, captured);
+            reason = rootArrayRejection(source);
+        } finally {
+            if (saved) Object.defineProperty(Object.prototype, key, saved);
+            else Reflect.deleteProperty(Object.prototype, key);
+        }
+        expect(valid).toBe(false);
+        expect(unchanged).toBe(false);
+        expect(reason?.message).toBe("accessor agent on Object.prototype");
+        expect(reason?.logLevel).toBe("warn");
+        expect(rootArrayRejection(source)).toBeUndefined();
+        expect(trap).not.toHaveBeenCalled();
+    });
+
     it("rejects an inherited then on the root array without calling it", () => {
         const key = "then";
         const trap = mock(() => undefined);
@@ -181,7 +207,7 @@ describe("referenceable source guard", () => {
             Object.defineProperty(Array.prototype, key, { get: trap, configurable: true });
             valid = referenceableMessages(source);
             unchanged = capturedMessagesUnchanged(source, captured);
-            reason = rootArrayRejection(source);
+            reason = rootArrayRejection(source)?.message;
         } finally {
             if (saved) Object.defineProperty(Array.prototype, key, saved);
             else Reflect.deleteProperty(Array.prototype, key);
@@ -190,9 +216,9 @@ describe("referenceable source guard", () => {
         expect(unchanged).toBe(false);
         expect(reason).toBe("then property on root array");
         expect(rootArrayRejection(source)).toBeUndefined();
-        expect(rootArrayRejection(new Proxy(source, {}))).toBe("proxy root array");
-        expect(rootArrayRejection({ length: 0 })).toBe("root is not an array");
-        expect(rootArrayRejection(Object.defineProperty([], key, { value: 1 }))).toBe(
+        expect(rootArrayRejection(new Proxy(source, {}))?.message).toBe("proxy root array");
+        expect(rootArrayRejection({ length: 0 })?.message).toBe("root is not an array");
+        expect(rootArrayRejection(Object.defineProperty([], key, { value: 1 }))?.message).toBe(
             "then property on root array",
         );
         expect(trap).not.toHaveBeenCalled();

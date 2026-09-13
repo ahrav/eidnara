@@ -79,7 +79,7 @@ export function createMessagesTransformHandler(args: {
         const result = readOwnDataProperty(output, "messages") as MessageWithParts[];
         const rejection = rootArrayRejection(result);
         if (rejection !== undefined) {
-            logSourceDecline(new SourceRejected(rejection), "return");
+            logSourceDecline(rejection, "return");
             return;
         }
         return result;

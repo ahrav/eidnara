@@ -27,6 +27,10 @@ export class SourceWalkLimitExceeded extends SourceRejected {
     override name = "SourceWalkLimitExceeded";
     override readonly logLevel = "warn";
 }
+class SourcePrototypePolluted extends SourceRejected {
+    override name = "SourcePrototypePolluted";
+    override readonly logLevel = "warn";
+}
 
 // Own-slot definitions bypass inherited numeric setters on private arrays.
 function defineSlot<T>(array: T[], index: number, value: T): void {
@@ -47,19 +51,31 @@ export function readOwnDataProperty(value: unknown, key: string): unknown {
 /**
  * The root array is the one value that crosses back to the host as a return value, so a `then`
  * anywhere on its chain would be assimilated by the host's promise machinery; `in` observes an
- * inherited accessor without invoking it. Returns the rejection reason, or `undefined` when the
- * root is a plain non-proxy array over an untouched prototype chain.
+ * inherited accessor without invoking it. Reads of absent optional fields and out-of-range indexes
+ * fall through to the built-in prototypes, so an accessor installed there is refused the same way.
+ * Returns the rejection, or `undefined` when the root is a plain non-proxy array over an untouched
+ * prototype chain.
  */
-export function rootArrayRejection(value: unknown): string | undefined {
-    if (types.isProxy(value)) return "proxy root array";
-    if (!Array.isArray(value)) return "root is not an array";
+export function rootArrayRejection(value: unknown): SourceRejected | undefined {
+    if (types.isProxy(value)) return new SourceRejected("proxy root array");
+    if (!Array.isArray(value)) return new SourceRejected("root is not an array");
     if (
         Object.getPrototypeOf(value) !== Array.prototype ||
         Object.getPrototypeOf(Array.prototype) !== Object.prototype ||
         Object.getPrototypeOf(Object.prototype) !== null
     )
-        return "unsupported prototype on root array";
-    if ("then" in value) return "then property on root array";
+        return new SourceRejected("unsupported prototype on root array");
+    if ("then" in value) return new SourceRejected("then property on root array");
+    for (const [name, prototype] of [
+        ["Array", Array.prototype],
+        ["Object", Object.prototype],
+    ] as const) {
+        for (const key of Reflect.ownKeys(prototype)) {
+            const slot = Object.getOwnPropertyDescriptor(prototype, key);
+            if (key !== "__proto__" && slot && !("value" in slot))
+                return new SourcePrototypePolluted(`accessor ${String(key)} on ${name}.prototype`);
+        }
+    }
     return undefined;
 }
 
@@ -97,7 +113,7 @@ class ReferenceableWalk {
 
     members(messages: unknown, visit: (slot: PropertyDescriptor, index: number) => void): number {
         const rejection = rootArrayRejection(messages);
-        if (rejection !== undefined) throw new SourceRejected(rejection);
+        if (rejection !== undefined) throw rejection;
         this.spend(16);
         return this.entries(messages as unknown[], "", (key, slot) => visit(slot, Number(key)));
     }

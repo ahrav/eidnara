@@ -16,9 +16,10 @@ are the only edited files. No ownership or response-protocol cutover is claimed.
    getter calls. The test restores the descriptor before running any assertions.
    The combined repair made this witness pass. An independent mutation check
    found that the new array terminators also reject this case before the tape
-   ends, so the witness does not isolate the explicit bounds check. That check
-   remains defense in depth, not an independently demonstrated requirement of
-   this fixture.
+   ends, and the root check now refuses any accessor on `Array.prototype`
+   before the tape is read, so the witness does not isolate the explicit bounds
+   check. That check remains defense in depth, not an independently
+   demonstrated requirement of this fixture.
 2. **Array metadata collisions and missing root metadata: fixed.** Array tapes
    encode extra-key markers, names, order, attributes and an explicit end marker.
    Capture retains a separate root tape while recording each member. Recheck
