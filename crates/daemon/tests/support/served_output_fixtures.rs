@@ -109,6 +109,12 @@ pub fn declaration_order_equals_canonical(message: &WireMessage, canonical: &[u8
     serde_json::to_vec(message).expect("to_vec") == canonical
 }
 
+pub fn serialization_buffer_root_bytes() -> usize {
+    let mut probe: Vec<u8> = Vec::new();
+    probe.extend_from_slice(b"{");
+    probe.capacity()
+}
+
 fn retained(body: &str) -> WireMessage {
     let message: WireMessage = serde_json::from_str(body).expect("fixture body parses");
     assert!(
