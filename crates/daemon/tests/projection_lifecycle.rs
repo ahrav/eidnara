@@ -16,6 +16,7 @@ use daemon::projection_lifecycle::{
     Transition, WriteBarrier,
 };
 use daemon::search_projection::SearchProjection;
+use host_runtime::LifecycleTransactionLock;
 use serde_json::{Value, json};
 use support::projection_gate::{identity, open_gate, passing_evaluator};
 
@@ -42,6 +43,55 @@ fn rebuild_request() -> LifecycleRequest {
     }
 }
 
+#[test]
+fn fixing_a_target_preserves_original_request_replay_and_never_moves_it() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = open_gate();
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+    let request = LifecycleRequest {
+        recovery_target: None,
+        ..rebuild_request()
+    };
+    lifecycle.record(&gate, &request, NOW).unwrap();
+    assert_eq!(
+        lifecycle.fix_target(&gate, RecoveryTarget { commit_seq: -1 }),
+        Err(IntentRefusal::IllegalCombination)
+    );
+    let fixed = lifecycle
+        .fix_target(&gate, RecoveryTarget { commit_seq: 41 })
+        .unwrap();
+    assert_eq!(
+        fixed.recovery_target,
+        Some(RecoveryTarget { commit_seq: 41 })
+    );
+    assert_eq!(
+        lifecycle
+            .fix_target(&gate, RecoveryTarget { commit_seq: 41 })
+            .unwrap(),
+        fixed
+    );
+    assert!(matches!(
+        lifecycle.fix_target(&gate, RecoveryTarget { commit_seq: 42 }),
+        Err(IntentRefusal::Conflict { .. })
+    ));
+    let replay = lifecycle.record(&gate, &request, NOW + 1).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.intent, fixed);
+    let other = LifecycleRequest {
+        recovery_target: Some(RecoveryTarget { commit_seq: 42 }),
+        ..request
+    };
+    assert!(matches!(
+        lifecycle.record(&gate, &other, NOW + 2),
+        Err(IntentRefusal::Conflict { .. })
+    ));
+    drop(lifecycle);
+    assert_eq!(
+        ProjectionLifecycle::open(root.path()).unwrap().read(),
+        ControlState::Intent(fixed)
+    );
+}
+
 fn recovery_request() -> LifecycleRequest {
     LifecycleRequest {
         transition: Transition::AuthorizedRecovery,
@@ -50,6 +100,355 @@ fn recovery_request() -> LifecycleRequest {
         authorization_ref: Some("ops:ticket-77".to_owned()),
         ..rebuild_request()
     }
+}
+
+#[test]
+fn control_lock_refuses_without_waiting_and_allows_explicit_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+    let lock = std::fs::File::open(root.path().join(CONTROL_DIR)).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let gate = open_gate();
+    assert_eq!(
+        lifecycle.record(&gate, &rebuild_request(), NOW),
+        Err(IntentRefusal::WouldBlock)
+    );
+    assert_eq!(
+        ProjectionLifecycle::open(root.path()).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock).unwrap();
+    assert!(
+        !lifecycle
+            .record(&gate, &rebuild_request(), NOW)
+            .unwrap()
+            .replayed
+    );
+}
+
+#[test]
+fn private_cleanup_preserves_live_families_and_revoked_lease_handoffs() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = open_gate();
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+    lifecycle.record(&gate, &rebuild_request(), NOW).unwrap();
+    let main = SearchProjection::open(root.path()).unwrap();
+    let private_home = root.path().join(CONTROL_DIR).join("replacement");
+    let private = SearchProjection::open(&private_home).unwrap();
+    let path = private.path().to_path_buf();
+    let mut handoffs = 0;
+    assert_eq!(
+        lifecycle.delete_replacement_family(&gate, None, || handoffs += 1),
+        Err(IntentRefusal::FamilyHeld)
+    );
+    assert_eq!(handoffs, 1);
+    assert!(path.exists());
+    let mut lease = private.close().1;
+    let close_gate = std::sync::Arc::clone(&gate);
+    let lifecycle = lifecycle.with_write_barrier_for_test(move |barrier| {
+        if barrier == WriteBarrier::BeforeFamilyRemoval {
+            close_gate.close();
+        }
+    });
+    assert_eq!(
+        lifecycle.delete_replacement_family(&gate, None, || {
+            lease.take();
+        }),
+        Err(IntentRefusal::Revoked)
+    );
+    assert!(lease.is_some(), "revocation precedes lease handoff");
+    assert!(path.exists());
+    assert!(main.path().exists());
+    drop(lifecycle);
+    gate.install(passing_evaluator(
+        &identity("test-incarnation", 8),
+        0,
+        &ProjectionHook::ALL,
+    ));
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+    lifecycle
+        .delete_replacement_family(&gate, None, || {
+            lease.take();
+        })
+        .unwrap();
+    assert!(!path.exists());
+    assert!(
+        main.path().exists(),
+        "private cleanup cannot select another data home"
+    );
+    let private = SearchProjection::open(&private_home).unwrap();
+    lease = private.close().1;
+    let before = fs::read(record_path(root.path())).unwrap();
+    assert_eq!(
+        lifecycle.delete_replacement_family(&gate, None, || {
+            lease.take();
+            gate.close();
+        }),
+        Err(IntentRefusal::Revoked)
+    );
+    assert!(
+        lease.is_none(),
+        "the callback relinquished the original owner"
+    );
+    assert!(path.exists(), "revocation during handoff stops deletion");
+    assert_eq!(fs::read(record_path(root.path())).unwrap(), before);
+    gate.install(passing_evaluator(
+        &identity("test-incarnation", 8),
+        0,
+        &ProjectionHook::ALL,
+    ));
+    lifecycle
+        .delete_replacement_family(&gate, None, || {
+            lease.take();
+        })
+        .unwrap();
+    assert!(!path.exists());
+    assert!(main.path().exists());
+}
+
+#[test]
+fn capture_replacement_and_stage_reversal_require_owned_cleanup() {
+    use daemon::projection_lifecycle::ReplacementCapture;
+    let root = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+    let transaction = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+    let gate = open_gate();
+    lifecycle.record(&gate, &rebuild_request(), NOW).unwrap();
+    let capture = ReplacementCapture {
+        hold_id: "a".repeat(32),
+        snapshot: 40,
+        lease_epoch: 1,
+        source_policy_version: "source-policy.v1".to_owned(),
+        expires_at: NOW + 30_000,
+        stage: None,
+    };
+    lifecycle
+        .record_capture(&gate, &transaction, Some(capture.clone()), None)
+        .unwrap();
+    let other = ReplacementCapture {
+        hold_id: "b".repeat(32),
+        ..capture.clone()
+    };
+    assert!(matches!(
+        lifecycle.record_capture(
+            &gate,
+            &transaction,
+            Some(other.clone()),
+            Some(&capture.hold_id)
+        ),
+        Err(IntentRefusal::Conflict { .. })
+    ));
+    assert!(matches!(
+        lifecycle.record_capture(&gate, &transaction, None, Some(&other.hold_id)),
+        Err(IntentRefusal::Conflict { .. })
+    ));
+    for changed in [
+        ReplacementCapture {
+            snapshot: 41,
+            ..capture.clone()
+        },
+        ReplacementCapture {
+            lease_epoch: 2,
+            ..capture.clone()
+        },
+        ReplacementCapture {
+            source_policy_version: "different".to_owned(),
+            ..capture.clone()
+        },
+        ReplacementCapture {
+            expires_at: NOW + 40_000,
+            ..capture.clone()
+        },
+    ] {
+        let before = fs::read(record_path(root.path())).unwrap();
+        assert!(matches!(
+            lifecycle.record_capture(&gate, &transaction, Some(changed), Some(&capture.hold_id)),
+            Err(IntentRefusal::Conflict { .. })
+        ));
+        assert_eq!(fs::read(record_path(root.path())).unwrap(), before);
+    }
+    let certificate = certificate(&capture.hold_id);
+    let staged = ReplacementCapture {
+        stage: Some(Box::new(certificate)),
+        ..capture.clone()
+    };
+    lifecycle
+        .record_capture(
+            &gate,
+            &transaction,
+            Some(staged.clone()),
+            Some(&capture.hold_id),
+        )
+        .unwrap();
+    lifecycle
+        .record_capture(
+            &gate,
+            &transaction,
+            Some(staged.clone()),
+            Some(&capture.hold_id),
+        )
+        .unwrap();
+    assert!(matches!(
+        lifecycle.record_capture(
+            &gate,
+            &transaction,
+            Some(capture.clone()),
+            Some(&capture.hold_id)
+        ),
+        Err(IntentRefusal::Conflict { .. })
+    ));
+    let expected = staged.stage.as_ref().unwrap().stage_manifest().digest();
+    assert_eq!(
+        ProjectionLifecycle::protected_generations(root.path(), &transaction).unwrap(),
+        std::collections::BTreeSet::from([expected.clone()])
+    );
+    lifecycle
+        .record_capture(&gate, &transaction, None, Some(&capture.hold_id))
+        .unwrap();
+    let cleared = fs::read(record_path(root.path())).unwrap();
+    lifecycle
+        .record_capture(&gate, &transaction, None, Some(&capture.hold_id))
+        .unwrap();
+    assert_eq!(fs::read(record_path(root.path())).unwrap(), cleared);
+    assert_eq!(
+        lifecycle.record_capture(&gate, &transaction, Some(staged), None),
+        Err(IntentRefusal::IllegalCombination)
+    );
+    lifecycle
+        .record_capture(&gate, &transaction, Some(other), None)
+        .unwrap();
+}
+
+fn certificate(hold_id: &str) -> daemon::search_seed::SeedVerification {
+    serde_json::from_value(serde_json::json!({
+        "schema": 1, "schema_version": 3, "kernel_incarnation_id": "incarnation-a",
+        "projection_policy_version": "source-policy.v1", "identity_contract_version": "search-projection-identity-v2",
+        "limit_manifest_protocol_version": "limits.v1", "embedding_model": "model", "tokenizer_fingerprint": "tokenizer",
+        "vector_dimension": 8, "generation_epoch": 1, "generation_id": "gen-2", "generation_state": "building",
+        "snapshot_commit_seq": 40, "checkpoint_commit_seq": 41, "occurrences": 0, "tombstones": 0,
+        "hold_id": hold_id, "pending_jobs": 0, "admitted_jobs": 0, "vectors": 0, "bytes": 0, "sha256": "a".repeat(64),
+    })).unwrap()
+}
+
+#[test]
+fn pinning_validates_digest_spelling_and_binds_a_prepared_certificate() {
+    for prepared in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let gate = open_gate();
+        let transaction = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+        let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+        lifecycle.record(&gate, &rebuild_request(), NOW).unwrap();
+        let mut capture = daemon::projection_lifecycle::ReplacementCapture {
+            hold_id: "a".repeat(32),
+            snapshot: 40,
+            lease_epoch: 1,
+            source_policy_version: "source-policy.v1".to_owned(),
+            expires_at: NOW + 30_000,
+            stage: None,
+        };
+        let expected = if prepared {
+            lifecycle
+                .record_capture(&gate, &transaction, Some(capture.clone()), None)
+                .unwrap();
+            capture.stage = Some(Box::new(certificate(&capture.hold_id)));
+            lifecycle
+                .record_capture(
+                    &gate,
+                    &transaction,
+                    Some(capture.clone()),
+                    Some(&capture.hold_id),
+                )
+                .unwrap();
+            capture.stage.as_ref().unwrap().stage_manifest().digest()
+        } else {
+            "a".repeat(64)
+        };
+        let before = fs::read(record_path(root.path())).unwrap();
+        for invalid in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            assert_eq!(
+                lifecycle.pin_seed(&gate, &transaction, &invalid),
+                Err(IntentRefusal::InvalidDigest)
+            );
+            assert_eq!(fs::read(record_path(root.path())).unwrap(), before);
+        }
+        if prepared {
+            assert_ne!(expected, "0".repeat(64));
+            assert!(matches!(
+                lifecycle.pin_seed(&gate, &transaction, &"0".repeat(64)),
+                Err(IntentRefusal::Conflict { .. })
+            ));
+            assert_eq!(fs::read(record_path(root.path())).unwrap(), before);
+        }
+        let pinned = lifecycle.pin_seed(&gate, &transaction, &expected).unwrap();
+        assert_eq!(
+            pinned.staged_seed_digest.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            lifecycle.pin_seed(&gate, &transaction, &expected).unwrap(),
+            pinned
+        );
+        drop(lifecycle);
+        assert_eq!(
+            ProjectionLifecycle::open(root.path()).unwrap().read(),
+            ControlState::Intent(pinned)
+        );
+    }
+}
+
+#[test]
+fn capture_and_target_writes_keep_upstream_revocation_and_size_guards() {
+    let root = tempfile::tempdir().unwrap();
+    let gate = open_gate();
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
+    let transaction = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+    let request = LifecycleRequest {
+        recovery_target: None,
+        ..rebuild_request()
+    };
+    lifecycle.record(&gate, &request, NOW).unwrap();
+    let before = lifecycle.read();
+    let mut capture = daemon::projection_lifecycle::ReplacementCapture {
+        hold_id: "a".repeat(32),
+        snapshot: 40,
+        lease_epoch: 1,
+        source_policy_version: "p".repeat(daemon::projection_lifecycle::MAX_RECORD_BYTES as usize),
+        expires_at: NOW + 30_000,
+        stage: None,
+    };
+    assert_eq!(
+        lifecycle.record_capture(&gate, &transaction, Some(capture.clone()), None),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), before);
+    capture.source_policy_version = "source-policy.v1".to_owned();
+    let close_gate = std::sync::Arc::clone(&gate);
+    let lifecycle = lifecycle.with_write_barrier_for_test(move |barrier| {
+        if barrier == WriteBarrier::BeforeRename {
+            close_gate.close();
+        }
+    });
+    assert_eq!(
+        lifecycle.record_capture(&gate, &transaction, Some(capture), None),
+        Err(IntentRefusal::Revoked)
+    );
+    assert_eq!(lifecycle.read(), before);
+    gate.install(passing_evaluator(
+        &identity("test-incarnation", 8),
+        0,
+        &ProjectionHook::ALL,
+    ));
+    assert_eq!(
+        lifecycle.fix_target(&gate, RecoveryTarget { commit_seq: 41 }),
+        Err(IntentRefusal::Revoked)
+    );
+    assert_eq!(lifecycle.read(), before);
 }
 
 /// The record the test expects, built from the request alone.
@@ -70,6 +469,7 @@ fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
         },
         authorization_ref: request.authorization_ref.clone(),
         staged_seed_digest: None,
+        replacement_capture: None,
         recorded_at: NOW,
     }
 }
@@ -415,7 +815,17 @@ fn concurrent_duplicate_requests_leave_exactly_one_intent() {
                 let root = root.clone();
                 scope.spawn(move || {
                     let gate = open_gate();
-                    let lifecycle = ProjectionLifecycle::open(&root).unwrap();
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let lifecycle = loop {
+                        match ProjectionLifecycle::open(&root) {
+                            Ok(lifecycle) => break lifecycle,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(std::time::Instant::now() < deadline);
+                                std::thread::yield_now();
+                            }
+                            Err(error) => panic!("{error}"),
+                        }
+                    };
                     let request = if worker % 4 == 3 {
                         LifecycleRequest {
                             attempt_id: format!("attempt-other-{worker}"),
@@ -424,9 +834,15 @@ fn concurrent_duplicate_requests_leave_exactly_one_intent() {
                     } else {
                         recovery_request()
                     };
-                    lifecycle
-                        .record(&gate, &request, NOW)
-                        .map(|recorded| recorded.replayed)
+                    loop {
+                        match lifecycle.record(&gate, &request, NOW) {
+                            Err(IntentRefusal::WouldBlock) => {
+                                assert!(std::time::Instant::now() < deadline);
+                                std::thread::yield_now();
+                            }
+                            result => break result.map(|recorded| recorded.replayed),
+                        }
+                    }
                 })
             })
             .collect();
@@ -470,7 +886,6 @@ fn concurrent_duplicate_requests_leave_exactly_one_intent() {
     );
 }
 
-/// Two threads sharing one handle spend the allowance one episode at a time. The first writer is parked after it read `consumed = 0` and before its rename; a second writer on the same handle must wait for it rather than read the same `consumed = 0`, or the first writer's rename would erase the second's episode.
 #[test]
 fn a_shared_handle_serializes_its_own_threads() {
     let dir = tempfile::tempdir().unwrap();
@@ -503,17 +918,20 @@ fn a_shared_handle_serializes_its_own_threads() {
     let outcomes = std::thread::scope(|scope| {
         let first = scope.spawn(|| lifecycle.consume_episode(&gate, NOW + 1));
         reached_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-        // The first writer holds the handle's lock while parked; the second must block here.
-        let second = scope.spawn(|| lifecycle.consume_episode(&gate, NOW + 2));
-        std::thread::sleep(Duration::from_millis(300));
-        let second_ran_early = second.is_finished();
+        let (result_tx, result_rx) = mpsc::channel();
+        let shared = (&lifecycle, &gate);
+        let second = scope.spawn(move || {
+            result_tx
+                .send(shared.0.consume_episode(shared.1, NOW + 2))
+                .unwrap()
+        });
+        let blocked = result_rx.recv_timeout(Duration::from_secs(30));
         // Released before the assertion so a failure does not leave the parked thread for the scope to wait on.
         release_tx.send(()).unwrap();
-        assert!(
-            !second_ran_early,
-            "the second writer ran while the first held the lock"
-        );
-        [first.join().unwrap(), second.join().unwrap()]
+        let first = first.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(blocked.unwrap(), Err(IntentRefusal::WouldBlock));
+        [first, lifecycle.consume_episode(&gate, NOW + 2)]
     });
     assert!(
         outcomes.iter().all(Result::is_ok),
@@ -690,6 +1108,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     let dir = tempfile::tempdir().unwrap();
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     let digest = "d".repeat(64);
+    let transaction = LifecycleTransactionLock::acquire_exclusive(Some(dir.path())).unwrap();
     let terminal = LifecycleIntent {
         staged_seed_digest: Some(digest.clone()),
         ..expected(&base, base.allowance)
@@ -717,7 +1136,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         ..base.clone()
     };
     lifecycle.record(&open, &fits, NOW).unwrap();
-    let pinned = lifecycle.pin_seed(&open, &digest).unwrap();
+    let pinned = lifecycle.pin_seed(&open, &transaction, &digest).unwrap();
     assert_eq!(pinned.staged_seed_digest.as_deref(), Some(digest.as_str()));
     for _ in 0..base.allowance {
         lifecycle.consume_episode(&open, NOW).unwrap();

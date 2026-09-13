@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use host_runtime::LifecycleTransactionLock;
-use host_runtime::generation::{GenerationError, GenerationStore, SourceSpec, StageMeta};
+use host_runtime::generation::{
+    GenerationError, GenerationManifest, GenerationStore, ManifestFile, SourceSpec, StageMeta,
+};
 use kernel::applicability::EvalBudget;
 use retrieval::ProjectionIdentity;
 use rusqlite::{Connection, OpenFlags};
@@ -158,6 +160,26 @@ impl SeedVerification {
     /// The sha256 of [`Self::canonical_bytes`].
     pub fn report_sha256(&self) -> String {
         hex(&Sha256::digest(self.canonical_bytes()))
+    }
+
+    pub fn stage_manifest(&self) -> GenerationManifest {
+        GenerationManifest::from_files(
+            &seed_stage_meta(self),
+            vec![
+                ManifestFile {
+                    path: SEED_FILE.to_owned(),
+                    mode: 0o600,
+                    size: self.bytes,
+                    sha256: self.sha256.clone(),
+                },
+                ManifestFile {
+                    path: SEED_REPORT_FILE.to_owned(),
+                    mode: 0o600,
+                    size: self.canonical_bytes().len() as u64,
+                    sha256: self.report_sha256(),
+                },
+            ],
+        )
     }
 }
 
@@ -643,14 +665,7 @@ pub fn stage(
     protected: &BTreeSet<String>,
 ) -> Result<StagedSeed, SeedRefusal> {
     let io = |error: io::Error| SeedRefusal::Io(error.kind().to_string());
-    // Every field of the report is a function of the file's bytes, so a matching digest is a matching report; the copy hashes the bytes again and refuses a mismatch of its own.
-    let never: Ended = Arc::new(|| false);
-    match closed_bytes(&seed.path, u64::MAX, &never) {
-        Ok((bytes, sha256))
-            if bytes == seed.verification.bytes && sha256 == seed.verification.sha256 => {}
-        Ok(_) => return Err(SeedRefusal::BytesChanged),
-        Err(refusal) => return Err(refusal),
-    }
+    verify_certificate(seed)?;
     // Under the exclusive transaction lock no other stager is live, so every report already here is stale.
     for entry in fs::read_dir(report_dir).map_err(io)?.flatten() {
         if entry
@@ -676,32 +691,55 @@ pub fn stage(
         return Err(io(error));
     }
     drop(file);
-    let sources = [
-        SourceSpec {
-            rel_path: SEED_FILE.to_owned(),
-            source: seed.path.clone(),
-            executable: false,
-            expected_size: Some(seed.verification.bytes),
-            expected_sha256: Some(seed.verification.sha256.clone()),
-        },
-        SourceSpec {
-            rel_path: SEED_REPORT_FILE.to_owned(),
-            source: report_path.clone(),
-            executable: false,
-            expected_size: Some(report.len() as u64),
-            expected_sha256: Some(seed.verification.report_sha256()),
-        },
-    ];
+    let manifest = seed.verification.stage_manifest();
+    let sources: Vec<_> = manifest
+        .files
+        .iter()
+        .map(|file| {
+            let source = match file.path.as_str() {
+                SEED_FILE => seed.path.clone(),
+                SEED_REPORT_FILE => report_path.clone(),
+                _ => {
+                    return Err(SeedRefusal::Staging(
+                        "unexpected seed manifest path".to_owned(),
+                    ));
+                }
+            };
+            Ok(SourceSpec {
+                rel_path: file.path.clone(),
+                source,
+                executable: false,
+                expected_size: Some(file.size),
+                expected_sha256: Some(file.sha256.clone()),
+            })
+        })
+        .collect::<Result<_, _>>()?;
     let staged = store.stage(&sources, &seed_stage_meta(&seed.verification), protected);
     let _ = fs::remove_file(&report_path);
     let digest = staged.map_err(|error| match error {
         GenerationError::InsufficientStorage => SeedRefusal::InsufficientStorage,
         other => SeedRefusal::Staging(other.to_string()),
     })?;
+    if digest != manifest.digest() {
+        return Err(SeedRefusal::BytesChanged);
+    }
     Ok(StagedSeed {
         digest,
         verification: seed.verification.clone(),
     })
+}
+
+pub(crate) fn verify_certificate(seed: &ClosedSeed) -> Result<(), SeedRefusal> {
+    let never: Ended = Arc::new(|| false);
+    match closed_bytes(&seed.path, u64::MAX, &never) {
+        Ok((bytes, sha256))
+            if bytes == seed.verification.bytes && sha256 == seed.verification.sha256 =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(SeedRefusal::BytesChanged),
+        Err(refusal) => Err(refusal),
+    }
 }
 
 fn file_sha256(path: &Path, ended: &Ended) -> Result<String, SeedRefusal> {

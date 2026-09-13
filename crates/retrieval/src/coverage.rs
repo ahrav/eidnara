@@ -294,3 +294,95 @@ pub fn covered_among<'a>(
     }
     Ok(covered)
 }
+
+/// Supply the complete inventory; matching counts alone do not prove completeness.
+///
+/// # Errors
+///
+/// A failed check returns no certificate. Collision and database errors are not downgraded to absence.
+pub fn verify_construction(
+    conn: &GuardedConn<'_>,
+    batch: &crate::batch::ProjectionBatch<'_>,
+    generation: &VectorGeneration,
+    bounds: CoverageBounds,
+) -> Result<CoverageReport, ProjectionError> {
+    use crate::batch::{BatchStatus, batch_status};
+    let report = observe(
+        conn,
+        &batch.identity.kernel_incarnation_id,
+        generation,
+        bounds,
+    )?
+    .map_err(|_| ProjectionError::CorruptRow)?;
+    let unique: std::collections::HashSet<_> = batch
+        .records
+        .iter()
+        .map(|record| crate::encode_record(record).map(|(encoded, _)| encoded.occurrence_id))
+        .collect::<Result<_, _>>()?;
+    let invalidated: std::collections::HashSet<_> = batch
+        .invalidations
+        .iter()
+        .map(|row| &row.occurrence_id)
+        .collect();
+    let (rows, tombstones, vectors, pending, admitted): (i64, i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM occurrences),
+         (SELECT count(*) FROM occurrence_tombstones),
+         (SELECT count(*) FROM occurrence_vectors),
+         (SELECT count(*) FROM embedding_jobs WHERE state='pending'),
+         (SELECT count(*) FROM embedding_jobs WHERE state='admitted')",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+    let mut excluded_jobs = false;
+    for class in OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| !dense_eligible(*class))
+    {
+        excluded_jobs |= conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM embedding_jobs j JOIN occurrences o USING(occurrence_id) WHERE o.class=?1)",
+            [class.code()], |row| row.get::<_, bool>(0),
+        )?;
+    }
+    let only_generation: bool = conn.query_row(
+        "SELECT count(*)=1 AND min(generation_id)=?1 AND min(state)='building' FROM vector_generations",
+        [&generation.generation_id], |row| row.get(0),
+    )?;
+    if invalidated.len() != batch.invalidations.len()
+        || !only_generation
+        || unique.len() != batch.records.len()
+        || usize::try_from(rows).ok() != Some(batch.records.len())
+        || usize::try_from(tombstones).ok() != Some(batch.invalidations.len())
+        || vectors != 0
+        || admitted != 0
+        || excluded_jobs
+        || batch.generation_id != Some(generation.generation_id.as_str())
+        || report.checkpoint.checkpoint_commit_seq != batch.identity.through_commit_seq
+        || report
+            .classes
+            .iter()
+            .any(|class| class.missing_without_pending != 0)
+        || usize::try_from(pending).ok()
+            != Some(
+                report
+                    .classes
+                    .iter()
+                    .map(|class| class.pending)
+                    .sum::<usize>(),
+            )
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
+    if batch_status(conn, batch)? != BatchStatus::Applied {
+        return Err(ProjectionError::CorruptRow);
+    }
+    Ok(report)
+}

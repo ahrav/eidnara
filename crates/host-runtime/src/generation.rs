@@ -30,7 +30,7 @@ use crate::instance::{
     is_secure_regular, mode_bits, open_secure_dir_existing, owner_uid, read_all_fd,
     repair_owner_access, secure_runtime_dir,
 };
-use crate::lifecycle::{is_canonical_payload_digest, lifecycle_dir_path};
+use crate::lifecycle::{LifecycleTransactionLock, is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
     HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, is_stale_mtime, is_temp_name,
     open_created_dir, open_or_create_parents, open_rel_nofollow, path_names_descriptor,
@@ -175,6 +175,18 @@ pub struct GenerationManifest {
 }
 
 impl GenerationManifest {
+    pub fn from_files(meta: &StageMeta, mut files: Vec<ManifestFile>) -> Self {
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Self {
+            schema: 1,
+            target: meta.target.clone(),
+            release_contract_sha256: meta.release_contract_sha256.clone(),
+            inputs_lock_sha256: meta.inputs_lock_sha256.clone(),
+            source_payload_manifest_sha256: Some(meta.source_payload_manifest_sha256.clone()),
+            files,
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("manifest serialization cannot fail")
     }
@@ -699,15 +711,7 @@ impl GenerationStore {
             let entry = copy_source_into(temp_fd, spec, source, &mut dirs)?;
             files.push(entry);
         }
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        let manifest = GenerationManifest {
-            schema: 1,
-            target: meta.target.clone(),
-            release_contract_sha256: meta.release_contract_sha256.clone(),
-            inputs_lock_sha256: meta.inputs_lock_sha256.clone(),
-            source_payload_manifest_sha256: Some(meta.source_payload_manifest_sha256.clone()),
-            files,
-        };
+        let manifest = GenerationManifest::from_files(meta, files);
         let bytes = manifest.canonical_bytes();
         // The validator cannot revalidate manifests larger than `MAX_MANIFEST_BYTES`, so staging rejects them before promotion.
         if bytes.len() > MAX_MANIFEST_BYTES {
@@ -858,6 +862,45 @@ impl GenerationStore {
             decode_with_schema::<GenerationManifest>(&bytes),
             SchemaDecode::UnknownSchema
         )
+    }
+
+    /// Removes one unselected object matching `expected`. The caller holds the lifecycle transaction lock.
+    /// Missing objects are reconciled from the generation directory, independently of source files.
+    /// Supply every live reference in `protected`; exclude an owned abort candidate only after proving it unpinned under the lock.
+    pub fn discard_unselected(
+        &self,
+        expected: &GenerationManifest,
+        _transaction: &LifecycleTransactionLock,
+        protected: &BTreeSet<String>,
+    ) -> Result<(), GenerationError> {
+        self.verify_named_identity()?;
+        let digest = expected.digest();
+        if protected.contains(&digest) {
+            return Err(invalid("generation is protected"));
+        }
+        match self.read_current()? {
+            CurrentProfile::Current(current) if current == digest => {
+                return Err(invalid("generation is selected"));
+            }
+            CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
+            _ => {}
+        }
+        match rustix::fs::statat(
+            &self.generations_fd,
+            digest.as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(invalid("generation lookup failed")),
+            Ok(_) => {
+                if self.validate(&digest)?.manifest != *expected {
+                    return Err(invalid("generation does not match owned manifest"));
+                }
+                remove_tree(&self.generations_fd, &digest)?;
+            }
+        }
+        fsync(&self.generations_fd).map_err(|_| invalid("generations fsync failed"))?;
+        self.verify_named_identity()
     }
 
     /// `prune` removes complete generations outside `protected` and owned incomplete staging temps.
@@ -1845,6 +1888,91 @@ mod tests {
         assert!(!blocked.exists(), "the empty unopenable temp is removed");
         assert!(!generations.join(&obsolete).exists());
         assert!(store.validate(&current).is_ok());
+    }
+
+    #[test]
+    fn owned_discard_is_idempotent_and_never_removes_current_or_other_generations() {
+        let root = tempfile::tempdir().unwrap();
+        let transaction = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        let current = stage_default(&store, src.path());
+        let current_manifest = store.validate(&current).unwrap().manifest;
+        let owned = store
+            .stage(
+                &[SourceSpec {
+                    rel_path: "seed".to_owned(),
+                    source: write_source(src.path(), "seed", b"owned-seed"),
+                    executable: false,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let owned_manifest = store.validate(&owned).unwrap().manifest;
+        let other = store
+            .stage(
+                &[SourceSpec {
+                    rel_path: "other".to_owned(),
+                    source: write_source(src.path(), "other", b"other-seed"),
+                    executable: false,
+                    expected_size: None,
+                    expected_sha256: None,
+                }],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        let empty = BTreeSet::new();
+        assert!(
+            store
+                .discard_unselected(&current_manifest, &transaction, &empty)
+                .is_err()
+        );
+        let protected = BTreeSet::from([owned.clone()]);
+        assert!(matches!(
+            store.discard_unselected(&owned_manifest, &transaction, &protected),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "generation is protected"
+            })
+        ));
+        store.validate(&owned).unwrap();
+        let profile_path = store.root().join(CURRENT_PROFILE_NAME);
+        let profile = std::fs::read(&profile_path).unwrap();
+        std::fs::write(&profile_path, br#"{"schema":99}"#).unwrap();
+        assert!(matches!(
+            store.discard_unselected(&owned_manifest, &transaction, &empty),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+        store.validate(&owned).unwrap();
+        std::fs::write(&profile_path, &profile).unwrap();
+        let manifest_path = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(&owned)
+            .join(GENERATION_MANIFEST_NAME);
+        let mut wrong_manifest = owned_manifest.clone();
+        wrong_manifest.target = "different-target".to_owned();
+        let wrong_bytes = wrong_manifest.canonical_bytes();
+        std::fs::write(&manifest_path, &wrong_bytes).unwrap();
+        assert!(
+            store
+                .discard_unselected(&owned_manifest, &transaction, &empty)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), wrong_bytes);
+        std::fs::write(&manifest_path, owned_manifest.canonical_bytes()).unwrap();
+        store
+            .discard_unselected(&owned_manifest, &transaction, &empty)
+            .unwrap();
+        store
+            .discard_unselected(&owned_manifest, &transaction, &empty)
+            .unwrap();
+        assert!(store.validate(&owned).is_err());
+        store.validate(&current).unwrap();
+        store.validate(&other).unwrap();
     }
 
     #[test]

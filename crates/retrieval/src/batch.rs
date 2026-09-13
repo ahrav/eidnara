@@ -221,7 +221,8 @@ pub fn row_identities(rows: &[SourceRow]) -> Vec<Vec<(&str, &str)>> {
 /// Jobs in any state count as applied; tombstoned records require no job.
 /// Status does not identify which transaction produced the durable effects.
 /// A missing or different installed kernel incarnation is an identity error.
-/// Conflicting occurrence identity or payload bytes return collision errors.
+/// Conflicting tuple, payload identity/bytes, domain, sensitivity, source object,
+/// evidence, artifact digest, or creation commit returns a collision error.
 /// A missing or different tombstone returns `NotApplied`; replay can still refuse a conflicting tombstone.
 /// Recovery must supply the original records, including their payload variants and spans.
 pub fn batch_status(
@@ -244,7 +245,7 @@ pub fn batch_status(
         let Some(stored) = crate::read_occurrence(conn, &occurrence_id)? else {
             return Ok(BatchStatus::NotApplied);
         };
-        if stored.tuple != encoded.tuple || stored.payload_id != payload_id {
+        if stored.content() != record.content(&encoded.tuple, &payload_id) {
             return Err(ProjectionError::OccurrenceCollision { occurrence_id });
         }
         if stored.bytes != selected {
