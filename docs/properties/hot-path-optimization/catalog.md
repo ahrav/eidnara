@@ -228,12 +228,12 @@ Exercised: partial - the
 [cancel and route-close tests](evidence/route-cleanup-waits-for-request-owned-physical-work.md#request-work-join-evidence)
 hold a request's blocking work on its thread, cancel or close, and see no
 terminal, no route-gone, and no charge release until the work is released, then
-one of each, with work the handler did not await joined by route close alone;
-the late-release test releases the work after the close has aborted the
-dispatch task and still sees the `cancelled` terminal before route-gone; the
-budget test holds work past a shortened route-close budget and sees the fatal
-path, not cleanup; the panic and stderr tests cover the redacted diagnostic,
-the internal-error settlement, and the charge released on unwind. Work the
+one of each. Detached work remains joined by route close and host shutdown.
+Paused-time tests observe dispatch abort before releasing a completion token;
+fallback then emits one `cancelled` terminal. Held tokens past both close
+windows refuse cleanup. A real held-worker test checks that fatal close retains
+the handler and instance lock until release. The panic and stderr tests cover
+redaction, internal-error settlement, and charge release on unwind. Work the
 daemon submits through `kernel_routes::blocking` runs through none of this, and
 no relocated transform runs through the seam yet.
 Guarantee: The callback completion gate precedes route cleanup and reuse, and
@@ -241,9 +241,14 @@ blocking work a request runs through its context is inside that gate: joined by
 the request's cancel arm and by route close, with its panics redacted.
 Check: `always` - At route-gone entry and cleanup-gated reuse, an independent
 ledger contains no live request-owned work that can access that route's state;
-an unquiesced timeout follows the fatal/refusal path instead of cleanup; a
-cancelled terminal is not sent while the request's blocking work runs, and is
-sent once it stops, whether the dispatch task or the route drain emits it.
+an unquiesced timeout follows the fatal/refusal path instead of cleanup.
+Work registered before the cancel arm completes its request-ledger drain
+finishes before a cancelled terminal. Later submissions may outlive that
+terminal but remain joined by route close and host shutdown. If cancellation
+wins and the generation remains viable through output admission, one cancelled
+terminal is queued after the request drain. Logical settlement does not
+prove peer observation: retired generations and failed delivery preserve
+`outcome_unknown`, and unquiesced work follows fatal refusal.
 Fault/timing angle: Cancellation or outer-future drop precedes actual worker
 completion, including a worker that has not observed abort.
 Required faults and enabling state: Hold request work at an observable live
@@ -251,10 +256,10 @@ barrier, start route or generation close, and independently observe completion,
 route-gone, and reuse. Classify durable outcomes through existing CAS/receipts.
 Confidence: medium - [Evidence](evidence/route-cleanup-waits-for-request-owned-physical-work.md).
 The handler completion fence, the request ledger the cancel arm waits on, the
-route-tracker entry of the join task, and the route drain's fallback settlement
+physical-work and observer tracker tokens, and the route drain's fallback settlement
 are source-verified and exercised for work submitted through
 `RequestCtx::run_blocking`. The daemon's `kernel_routes::blocking` still
-submits request-owned store work at ten call sites outside both ledgers and
+submits request-owned store work at ten call sites outside these ledgers and
 outside the redaction guard, so the `always` check does not hold for kernel
 routes today; see the open question.
 Existing check: [Lifecycle checks](existing-checks.md#execution-lifecycle) cover
@@ -262,7 +267,7 @@ settlement and cleanup cases; their status is unaudited.
 Impact: Cleanup can race live work or permit stale work to affect reused state.
 Open questions:
 - What owns and joins any proposed off-worker transform work? The host does:
-  `RequestCtx::run_blocking` enters the work in the request's and the route's
+  `RequestCtx::run_blocking` enters the work in request, route, and host
   ledgers, and the daemon keeps no drain of its own. (answered)
 - `kernel_routes::blocking`
   ([mod.rs:462-468](../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468))
@@ -335,14 +340,19 @@ run in `cargo test -p storage`: a warm fenced statement is not re-prepared
 across two callbacks; a foreign `CREATE TABLE` forces a re-prepare, and a
 temp-shadow statement cached before it is refused afterwards; a statement
 prepared under the unrestricted mode is refused in a guarded callback once the
-cache is flushed; a panicking read or fenced callback returns the connection to
+cache is flushed; the flush also runs when a maintenance callback panics, so a
+temp-shadow statement cached before that callback's main DDL is refused
+afterwards; a panicking read or fenced callback returns the connection to
 the unrestricted mode and rolls its partial write back; and baseline text with
 a pragma write, `ATTACH`, `BEGIN`, `SAVEPOINT`, fence-row insert, or
 format-marker delete is refused by the store connection's gate. With the
 snapshot keyed on the schema and data versions, a rename through a second
 connection is observed by the next callback even when the schema version is
 written back, a maintenance-left temp shadow is still refused, a panicking
-maintenance callback still discards the snapshot and re-arms the pin, and the
+maintenance callback still discards the snapshot and re-arms the pin, a
+rescan under an unchanged schema version flushes the cached statements and
+reloads the parsed schema, a
+second connection cannot leave WAL while the store is open, and the
 durability pin runs once per connection until the maintenance path re-arms it. No baseline-versus-candidate trace over interleaved facade
 callers runs.
 Guarantee: Cached statements and reduced callback setup preserve each call's
@@ -361,12 +371,7 @@ Callback installation, release, shadow checks, and facade scope sites are read.
 Existing check: [Guarded-store checks](existing-checks.md#guarded-store) are
 unaudited and cover cached statements, shadows, and restoration.
 Impact: Setup elision can authorize stale privileges or target shadow objects.
-Open questions:
-- Resolved by the connection-open unit (#430): the read path's `query_only`
-  toggle stays. It expires every cached statement on the connection, and it is
-  the read callback's only write barrier for main and temp alike because
-  `deny_scope_escapes` allows DML on every non-infrastructure table; the two
-  pragma statements are the price of that barrier.
+Open questions: None.
 
 ### callback-batching-preserves-observation-boundaries
 
@@ -661,19 +666,19 @@ them without creating implementation tickets.
 [r1]: #prepared-field-output-and-audit-policy-agree
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
-[pass-read]: ../../../crates/daemon/src/lib.rs#L8133-L8202
+[pass-read]: ../../../crates/daemon/src/lib.rs#L8190-L8270
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L141-L212
 [memory-default]: ../../../crates/daemon/src/config.rs#L122
-[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L823-L934
-[close]: ../../../crates/host-runtime/src/dispatch.rs#L1234-L1298
-[read-callback]: ../../../crates/storage/src/lib.rs#L229-L245
-[write-callback]: ../../../crates/storage/src/lib.rs#L290-L316
-[prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2245-L2271
-[hard-compose]: ../../../crates/daemon/src/transform.rs#L4031-L4058
+[dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L824-L940
+[close]: ../../../crates/host-runtime/src/dispatch.rs#L1249-L1322
+[read-callback]: ../../../crates/storage/src/lib.rs#L343
+[write-callback]: ../../../crates/storage/src/lib.rs#L436
+[prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380
+[hard-compose]: ../../../crates/daemon/src/transform.rs#L4081-L4112
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
-[core-prep]: ../../../crates/memory-store/src/lib.rs#L3428-L3459
-[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3462-L3494
-[prepare-field]: ../../../crates/memory-store/src/lib.rs#L2204-L2243
+[core-prep]: ../../../crates/memory-store/src/lib.rs#L3550-L3581
+[transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3584-L3616
+[prepare-field]: ../../../crates/memory-store/src/lib.rs#L2289-L2328
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L21-L32
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3132-L3298
@@ -681,7 +686,7 @@ them without creating implementation tickets.
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180
 [soft-core]: ../../../crates/cache-stability/src/lib.rs#L221-L287
-[soft-inputs]: ../../../crates/daemon/src/transform.rs#L4455-L4507
+[soft-inputs]: ../../../crates/daemon/src/transform.rs#L4458-L4510
 [render-json]: ../../../crates/daemon/testdata/render-golden.json
 [tight-json]: ../../../crates/daemon/testdata/render-tight-golden.json
 [shape-json]: ../../../crates/daemon/testdata/decay-store-shape.json

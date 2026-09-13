@@ -66,9 +66,9 @@ fn bench_tokenizer(c: &mut Criterion) {
 }
 
 /// Retained message JSON makes the benchmark input match decoded requests.
-fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressMessages {
+fn decoded_messages(class: ContentClass, count: usize, bytes: usize) -> Vec<IngressMessage> {
     let typed = corpus::messages(class, count, bytes, CORPUS_SEED);
-    let messages: IngressMessages =
+    let messages: Vec<IngressMessage> =
         serde_json::from_value(serde_json::to_value(&typed).expect("bench corpus serializes"))
             .expect("bench corpus decodes as a wire message array");
     assert!(
@@ -78,6 +78,22 @@ fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressM
         "bench ingress must carry retained message JSON like a request over the wire"
     );
     messages
+}
+
+fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressMessages {
+    decoded_messages(class, count, bytes).into_iter().collect()
+}
+
+/// Message-level retained JSON is cleared; block-level retained JSON stays, so a
+/// timed `flatten_block` replays each block's `Value` instead of cloning its payload.
+fn reattached_messages(class: ContentClass, count: usize, bytes: usize) -> IngressMessages {
+    decoded_messages(class, count, bytes)
+        .into_iter()
+        .map(|mut message| {
+            message.ck.mark_modified();
+            message
+        })
+        .collect()
 }
 
 fn bench_projection(c: &mut Criterion) {
@@ -102,10 +118,18 @@ fn bench_projection(c: &mut Criterion) {
 fn bench_projection_reattached(c: &mut Criterion) {
     let mut group = c.benchmark_group("projection/reattached_prefix");
     for &count in MESSAGE_COUNTS {
-        let messages: IngressMessages =
-            corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED)
-                .into_iter()
-                .collect();
+        let messages = reattached_messages(ContentClass::Mixed, count, 2_048);
+        assert!(
+            messages.iter().all(|message| {
+                message.ck.original().is_none()
+                    && message
+                        .ck
+                        .content()
+                        .iter()
+                        .all(|block| block.original().is_some())
+            }),
+            "reattached bench shells must drop only the message original and keep every block original"
+        );
         let projection = project_messages(&messages).expect("projection");
         assert!(
             projection

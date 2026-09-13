@@ -132,6 +132,8 @@ cannot report the bounded-liveness or resource checks as passed.
 | [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
 | [embedding-identity-gc-preserves-live-work](#embedding-identity-gc-preserves-live-work) | safety | test-only | always | active | medium |
 | [embedding-supervisor-shares-budget-and-joins](#embedding-supervisor-shares-budget-and-joins) | safety | test-only | always | active | medium |
+| [embedding-dispatch-scan-makes-bounded-progress](#embedding-dispatch-scan-makes-bounded-progress) | liveness | test-only | always | active | high |
+| [embedding-dispatch-actions-respect-pass-budget](#embedding-dispatch-actions-respect-pass-budget) | safety | test-only | always | active | high |
 
 An admitted episode has independently witnessed workload and service
 preconditions. It is not selected because the implementation successfully
@@ -213,24 +215,38 @@ Type: safety
 Reachability: test-only - no production RP2.1 durable pending source or driver
 exists; `crates/host-runtime/src/synapse/jobs.rs:162-196` is process-local state.
 Status: active
-Exercised: not yet - durable pending operations and admission trace are absent.
+Exercised: partial - the dispatcher covers durable pending admission, lost charge
+replies, capacity refusal, a recovery episode replacing a submitted episode
+before charge, and the post-charge crash/reopen window. A production caller,
+the submission-before-charge crash window, and full acceptance trace are absent.
 Guarantee: Every product batch dispatch is backed by durable pending work and
-uses the existing JobTable admission and result-lifetime authority.
+uses the existing JobTable admission and result-lifetime authority. The durable
+attempt charge applies only to the episode identity submitted as the host item.
 Check: `always` - each new batch worker has a preceding durable Pending(K) and
 one `Admitted` result from the component's JobTable; `Existing` creates no
 worker; refusal or lost response does not erase Pending(K); accepted pending
 mutations and resident admissions stay within their separate approved limits;
 check each transition because durable discovery is not a second runnable queue.
+Before charging or recognizing an existing charge, the ledger episode equals
+the submitted item identity. If recovery replaces episode A with B before A is
+charged, B remains pending with zero attempts and no A host job identity.
 Fault/timing angle: Dispatch before local commit, concurrent sweeps of one row,
-full admission, and response loss between admission and descriptor observation.
+full admission, response loss between admission and descriptor observation, and
+operator recovery between host submission and durable charge.
 Required faults and enabling state: A committed pending row, two discovery
-attempts for it, a full JobTable, and a lost admission response. Local transaction
+attempts for it, a full JobTable, a lost admission response, and a stopped A
+episode that recovery replaces with B before A's charge. Local transaction
 creation is supplied by the projection lane.
 Confidence: medium - [evidence](evidence/embedding-pending-drives-one-job-table.md).
 P1 line 109 and P2 line 54 name the ownership; JobTable reuse is source-verified.
-Existing check: `crates/host-runtime/src/synapse/jobs.rs:387-489` and
-`crates/host-runtime/tests/synapse_protocol.rs:990-1045` cover local admission
-and replay, unaudited. No durable-to-process handoff check exists.
+Existing check: `admission_full_and_lost_replies_never_charge_twice` in
+`crates/daemon/tests/embedding_dispatch.rs` covers local capacity and charge
+reconciliation. `admission_charge_is_fenced_to_the_submitted_episode` at
+`crates/retrieval/tests/batches.rs:1541-1613` covers the A-to-B recovery race in
+one serialized transaction. `crash_after_charge_reopens_state_and_accounting_together`
+in `crates/daemon/tests/embedding_dispatch.rs` kills a child after the durable
+charge, reopens the projection with a fresh host, and completes under the same
+episode. The submission-before-charge crash window remains uncovered.
 Impact: Required work disappears on restart or duplicate routing/lease machinery
 acquires conflicting ownership and resource accounting.
 Open questions:
@@ -449,6 +465,96 @@ Open questions:
 - What public budget bridge and supervisor registration express these owners,
   and what bounds an uncooperative native call's physical drain? (needs human input)
 
+### embedding-dispatch-scan-makes-bounded-progress
+
+Type: liveness
+Reachability: test-only - `EmbeddingDispatcher::run_pass` has integration-test
+callers, but no caller under `crates/daemon/src` outside its own definition.
+Status: active
+Exercised: yes - a durable queue with 2,048 older WrongScope rows ahead of one
+eligible row is processed across repeated passes by one dispatcher. A deferred
+row is also revisited when its retry becomes due, and a failed terminal write
+leaves its candidate visible for retry.
+Guarantee: One dispatch pass judges at most two pages of at most 1,024 candidates
+each. Before the first action, the dispatcher-retained cursor advances over each
+consecutive deferred or WrongScope row and records the earliest deferred retry
+only for rows not judged WrongScope.
+The cursor freezes before the first action, so an unresolved eligible, admitted,
+or terminal row remains visible. Scanning resets to the ordered beginning at the
+tail, when the project or destination binding changes, or when `now >= revisit_at`.
+Ordinary cursor progress commits only after terminal writes and selected-job
+drives succeed. A binding or revisit reset may be retained before a later failure,
+but that reset only moves scanning to the beginning and cannot skip work.
+Check: `always` - each pass reads no more than two keyset pages and each kernel
+call receives at most `MAX_ELIGIBILITY_CANDIDATES`; after every successful pass,
+the next pass starts strictly after the last consecutive deferred or WrongScope
+candidate before the first action, or at the beginning after tail wrap, a binding
+change, or a due deferred retry. An actionable row remains visible until its
+durable state leaves the open-row keyspace. Under a fixed finite WrongScope prefix
+and successful passes, later eligible work cannot starve.
+Fault/timing angle: More than two full pages belong to another project. A failed
+terminal write must leave ordinary cursor progress uncommitted so the unresolved
+candidate is retried rather than skipped. Repeated foreign-project retry
+rescheduling must not reset the requested project's scan progress; scope judgment
+precedes deferral.
+Required faults and enabling state: At least 2,048 older WrongScope rows, one
+later eligible row, repeated calls on the same dispatcher, and a bounded terminal
+write refusal before one retry.
+Confidence: high -
+[evidence](evidence/embedding-dispatch-scan-makes-bounded-progress.md). The SQL
+order, private two-page cap, cursor reset and commit points, tail wrap, and
+integration tests were verified together.
+Existing check: `project_scan_cursor_advances_across_more_than_two_wrong_scope_pages`
+at `crates/daemon/tests/embedding_dispatch.rs:2822-2855`,
+`deferred_row_is_revisited_when_its_retry_becomes_due` at
+`crates/daemon/tests/embedding_dispatch.rs:2922-2977`, and
+`terminal_search_deadline_preserves_the_candidate_for_retry` at
+`crates/daemon/tests/embedding_dispatch.rs:1973-2021`;
+`eligible_rows_are_taken_oldest_first_not_by_identifier` checks the keyset order.
+`foreign_retries_do_not_restart_another_projects_scan` in
+`crates/daemon/tests/embedding_dispatch.rs` verifies progress across repeated
+foreign retry reschedules by a second dispatcher.
+Impact: A project with a large older prefix can starve forever, or a failed
+disposition can be skipped permanently.
+Open questions: None.
+
+### embedding-dispatch-actions-respect-pass-budget
+
+Type: safety
+Reachability: test-only - the dispatcher has integration-test callers but no
+production caller under `crates/daemon/src`.
+Status: active
+Exercised: yes - mixed terminal candidates, malformed identity, WrongScope, and
+valid selected work are covered with a one-action pass bound.
+Guarantee: In one pass, selected jobs plus terminal or malformed candidate
+dispositions never exceed `DispatchBounds.max_jobs`; WrongScope consumes scan
+work but no action budget, and terminal dispositions commit in one bounded
+transaction.
+Check: `always` - `selected.len + terminal.len <= max_jobs` at every disposition
+boundary; malformed candidates consume one terminal action without entering the
+kernel batch; verdict count must exactly equal valid candidate count; one
+`write_within` transaction applies all terminal obsoletions or none, and only an
+`Obsoletion::Marked` outcome emits a stop event.
+Fault/timing angle: A page can contain only terminal candidates, or a malformed
+candidate before valid work. The write lock can remain held through the terminal
+deadline.
+Required faults and enabling state: `max_jobs=1`, at least two terminal rows, a
+malformed source identity followed by valid work, a WrongScope prefix, and a
+contended search writer.
+Confidence: high -
+[evidence](evidence/embedding-dispatch-actions-respect-pass-budget.md). Production
+counter increments, batch cardinality guard, transactional obsoletion, and the
+named tests agree.
+Existing check: `max_jobs_bounds_terminal_dispositions`,
+`malformed_candidate_is_obsoleted_without_poisoning_valid_work`, and
+`terminal_search_deadline_preserves_the_candidate_for_retry` in
+`crates/daemon/tests/embedding_dispatch.rs`; `eligibility_cardinality_mismatch_is_a_release_error`
+in `crates/daemon/src/embedding_dispatch.rs`. The malformed-candidate test runs
+two one-action passes and observes the valid row remain pending after the first.
+Impact: A nominally bounded maintenance pass can perform unbounded writes, skip
+valid work after malformed input, or emit completion events for no-op races.
+Open questions: None.
+
 ## Relationship map
 
 - The reused bundle fingerprint record is a prerequisite for
@@ -495,23 +601,23 @@ These are testing seams, not prescribed test implementations.
 | embedding-backfill-preserves-query-admission | Query arrival/admission/start trace under saturated backfill, original D, declared service envelope. | Shared async query lane with RP2.7.U3 and priority integration in RP2.1.U3; `/testing:deterministic-simulation-testing` for mixed admission schedules. |
 | embedding-identity-gc-preserves-live-work | GC candidate selection barrier, live-reference oracle, delayed completion, reopened state. | `/testing:deterministic-simulation-testing` for selection/deletion races. |
 | embedding-supervisor-shares-budget-and-joins | Shared flag/D trace, physical completion gate, task/permit/charge census and supervisor slice count. | Shared EvalBudget/query adapter prerequisite with RP2.7.U3; `/testing:invariant-test-review` for existing cancellation checks and `/low-level-systems:defensive-assertions-and-invariant-guards` for enforcement. |
+| embedding-dispatch-scan-makes-bounded-progress | Ordered backlog above two pages, persistent cursor observations, and a failed terminal write before retry. | `/testing:invariant-test-review` for the bounded-progress oracle. |
+| embedding-dispatch-actions-respect-pass-budget | Mixed selected, terminal, malformed, and WrongScope candidates under a one-action bound. | `/testing:invariant-test-review` for action accounting and event semantics. |
 
 The [fault map](fault-map.md) names independent coverage prerequisites. The
 [existing-check inventory](existing-checks.md) distinguishes adjacent checks
-from missing product checks. Nine records, nine index rows, and nine evidence
+from missing product checks. Eleven records, eleven index rows, and eleven evidence
 files form this handoff. [Portfolio evaluation](portfolio-evaluation.md) records
 the central findings, local dispositions, and unresolved owner decisions.
 
 ## Mechanical verification receipt
 
-Read-only artifact verification on 2026-09-10 confirms nine records, nine index
-rows, and nine matching evidence files. The METHOD fields occur in order in
-every record. Local links, heading anchors, source ranges, and named declaration
-anchors are checked again after the central refinements. Refreshed artifact
-counts are recorded in [portfolio-evaluation.md](portfolio-evaluation.md).
+The original read-only verification on 2026-09-10 covered nine records. This
+implementation update adds two records, two index rows, and two evidence files;
+the METHOD fields occur in order in both additions.
 
-The semantics distribution is nine `always` records: seven safety and two
-bounded-liveness claims. The fault map carries 16 constant `sometimes`
+The semantics distribution is eleven `always` records: eight safety and three
+bounded-liveness claims. The fault map carries 18 constant `sometimes`
 precondition markers. These counts describe artifacts, not executed checks.
 No product test, build, or benchmark runs. The central evaluation is complete;
 open design prerequisites and acceptance evidence remain outstanding.

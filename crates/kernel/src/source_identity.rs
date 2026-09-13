@@ -237,7 +237,7 @@ pub fn normalize_span(span: Option<Span>, buffer: &str) -> Option<Span> {
     normalize_span_for_length(span, buffer.len() as u64)
 }
 
-fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option<Span> {
+pub(crate) fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option<Span> {
     span.filter(|span| !(span.start == 0 && span.end == byte_length))
 }
 

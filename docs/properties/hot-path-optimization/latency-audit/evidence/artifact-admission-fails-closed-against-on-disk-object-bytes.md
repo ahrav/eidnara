@@ -17,8 +17,8 @@ preserve that, or state what it trades away.
   under `tmp` ([`:379-405`][ingest-temp]) before any lock; a
   [`StagedObject`][staged] unlinks it on drop unless consumed.
 - It then takes the exclusive [writer lock][lock-writer] and calls
-  [`check_budget`][check-budget] at [`:407-410`][ingest-lock], before the
-  shard is created ([`:411-416`][ingest-lock]), before the reservation row
+  [`check_budget`][check-budget] at [`:407-416`][ingest-lock], before the
+  shard is created ([`:407-416`][ingest-lock]), before the reservation row
   ([`:424-471`][ingest-reservation]), and before the publish rename
   ([`:476-526`][ingest-publish]).
 - [`check_budget`][check-budget] calls [`regular_file_bytes`][walk] with an
@@ -117,5 +117,5 @@ or a refusal after an unrecovered orphan publish.
 [t-cap]: ../../../../../crates/kernel/tests/kernel_cas.rs#L418-L433
 [t-retained]: ../../../../../crates/kernel/tests/kernel_cas.rs#L436-L450
 [t-payload]: ../../../../../crates/kernel/tests/kernel_cas.rs#L214-L234
-[t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L543-L562
-[t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3728-L3756
+[t-reclaim]: ../../../../../crates/kernel/tests/kernel_gc.rs#L535-L554
+[t-route-cap]: ../../../../../crates/daemon/tests/kernel_routes.rs#L3600-L3629

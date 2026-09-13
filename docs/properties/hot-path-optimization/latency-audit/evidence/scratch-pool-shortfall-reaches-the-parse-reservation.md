@@ -110,8 +110,9 @@ budget: another charge holds half the pool, a body that fits the capacity is
 decoded, the meter refuses it as transient and releases its bytes, the count
 rises, the meter's marker satisfies both preconditions, `resident_refusal`
 maps it to `queue_full`, and once the holder releases the same body decodes. It
-also shows a transient refusal of a body the pool could never hold classed as
-too large. The [effect test][t-effect] drives the same transient refusal
+also shows a body the pool could never hold refused as transient while another
+request holds the pool and as too large once the pool has room to count it,
+there being no second parse to class it earlier. The [effect test][t-effect] drives the same transient refusal
 through `dispatch_body` and shows no dispatch-side effect. A shortfall through
 the ring is not constructed: the fixture's scratch pool is the fixed
 `SCRATCH_RESERVED_BYTES`, and holding a first request's charge while a second
@@ -119,15 +120,15 @@ arrives needs a barrier inside the handler that the fixture does not expose.
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p daemon --locked` passed 1018 tests including the two above.
+`cargo test -p daemon --locked` passed 1024 tests including the two above.
 
-[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L131-L138
-[need]: ../../../../../crates/daemon/src/metered_decode.rs#L212-L269
-[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L110-L117
-[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L180-L185
-[count]: ../../../../../crates/daemon/src/metered_decode.rs#L124-L126
-[t-drain]: ../../../../../crates/daemon/src/lib.rs#L19804-L19852
-[t-effect]: ../../../../../crates/daemon/src/lib.rs#L19857-L19908
+[meter]: ../../../../../crates/daemon/src/metered_decode.rs#L135-L144
+[need]: ../../../../../crates/daemon/src/metered_decode.rs#L246-L306
+[marker]: ../../../../../crates/daemon/src/metered_decode.rs#L114-L121
+[shortfall]: ../../../../../crates/daemon/src/metered_decode.rs#L194-L199
+[count]: ../../../../../crates/daemon/src/metered_decode.rs#L128-L130
+[t-drain]: ../../../../../crates/daemon/src/lib.rs#L20181-L20238
+[t-effect]: ../../../../../crates/daemon/src/lib.rs#L20300-L20348
 
 [handle]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L11805-L11827
 [footprint]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L15427-L15455

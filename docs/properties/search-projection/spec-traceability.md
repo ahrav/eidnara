@@ -22,7 +22,7 @@ granularity only; it does not change source behavior or external ownership.
 | R3: N1.3 source/control-plane/supervisor slices | Implementation Decisions; U3/U4 | AC3/AC5/AC8/AC9; T3/T7/T8 | Daemon adapters/orchestration; existing JobTable and shared supervisor remain owners of their mechanisms. |
 | R4: rows/checkpoint/pending before canonical ack | C3; KTD1; U2 | AC2; T5 | Projection owns local atomicity; export/recovery owns ack/lock order. |
 | R5: rebuild on all five contract mismatches | C7; U5 | AC6; T5/T9 | Export/recovery and daemon lifecycle. |
-| KTD1: daemon ownership and kernel-only retrieval dependency | C1/C3; Implementation Decisions | AC2/AC6/AC12; T5/T7 and architectural gates | Kernel canonical facts/eligibility; daemon effects; proposed retrieval pure logic. |
+| KTD1: daemon ownership and kernel-only retrieval dependency | C1/C3; Implementation Decisions | AC2/AC6/AC12; T5/T7 and architectural gates | Kernel canonical facts/eligibility; daemon effects; retrieval pure projection logic. |
 | KTD2: register before S, stable cursor, pre-decode caps, full catch-up | C2; U1/U5 | AC1/AC2/AC6; T4/T5/T6/T7 | Kernel export, daemon orchestration. |
 | KTD3: verified artifact/fingerprint, untruncated typed count, no new wire method | C5 | AC4; T1/T2 | Embedding owner; provider-accounting vocabulary remains distinct. |
 | KTD4: occurrence tuple separate from collision-checked payload bytes | C4 | AC3/AC10; T1/T3/T4 | Projection identity contract. |
@@ -78,7 +78,9 @@ scenario in the three maps, in addition to the specific criteria listed below.
 The acceptance criteria and the seams in each row are the union over that
 property's cells in the [witness matrix](witness-matrix.md); the kernel test
 `search_projection_construction_inputs` checks the two agree.
-All records remain proposed, active, `test-only`, and unexercised.
+Records retain their individual status and reachability. The bounded-dispatch
+records are exercised by integration tests but remain `test-only` because the
+dispatcher has no production caller under `crates/daemon/src`.
 
 | Canonical property | Specification obligation | Testing seam |
 | --- | --- | --- |
@@ -112,14 +114,16 @@ All records remain proposed, active, `test-only`, and unexercised.
 | [embedding-backfill-preserves-query-admission](embedding/catalog.md#embedding-backfill-preserves-query-admission) | C6; shared RP2.7 prerequisite; U3; AC8 | T8 offered-query ledger under bounded saturated backfill. |
 | [embedding-identity-gc-preserves-live-work](embedding/catalog.md#embedding-identity-gc-preserves-live-work) | C5; U3; AC3/AC5 | T3 live-reference/obsolete-state matrix and no-op control. |
 | [embedding-supervisor-shares-budget-and-joins](embedding/catalog.md#embedding-supervisor-shares-budget-and-joins) | C6; R3; shared RP2.7 prerequisite; AC8 | T8 original deadline/flag and physical owner/permit/charge census. |
+| [embedding-dispatch-scan-makes-bounded-progress](embedding/catalog.md#embedding-dispatch-scan-makes-bounded-progress) | C5/C6; U3; AC5/AC7 | T8 and T9 ordered WrongScope prefix, persistent cursor, and failed-disposition retry. |
+| [embedding-dispatch-actions-respect-pass-budget](embedding/catalog.md#embedding-dispatch-actions-respect-pass-budget) | C5/C6; U3; AC5/AC8 | T6 and T8 mixed selected, terminal, malformed, and WrongScope candidates under one pass bound. |
 
 ## Ownership and completeness checks
 
-The map contains 30 distinct canonical slugs, matching the ten/eleven/nine
-catalog split and 30 evidence files. Ack ordering and ack-loss marker definitions
+The map contains 32 distinct canonical slugs, matching the ten/eleven/eleven
+catalog split and 32 evidence files. Ack ordering and ack-loss marker definitions
 stay with export/recovery. Local atomicity stays with projection; completion
 durability and current vector validity stay with embedding. Projection's one
-campaign record binds all 63 marker definitions and required dimensions without
+campaign record binds all 65 marker definitions and required dimensions without
 copying their definitions into a new map.
 
 Every source requirement, KTD, U dependency/falsifier, acceptance category, gate,

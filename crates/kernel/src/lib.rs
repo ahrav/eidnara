@@ -12,6 +12,7 @@ pub mod applicability;
 mod backup;
 mod cas;
 mod commit_read;
+mod current_input;
 mod durable_fs;
 mod eligibility;
 mod envelope;
@@ -67,6 +68,10 @@ pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
     CommitReadTarget, CompleteCommit, PageEnd,
 };
+pub use current_input::{
+    CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
+    StaleCurrentInput, StaleInput,
+};
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
     MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
@@ -89,14 +94,17 @@ pub use scope::{
     coerce_version, scope_equivalent, scope_matches, scope_overlaps, scope_subsumes,
 };
 pub use slice::{
-    ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot,
-    DecisionEventOutcome, DecisionEventPayload, DecisionEventSpec, DecisionPayload, DecisionRow,
-    DecisionSpec, DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload,
-    ObservationRow, ObservationSpec, ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
+    ALIGNMENT_DEPENDENCY_KIND, APPROVAL_REVOKE_KIND, AlignmentRebuild, AlignmentRow,
+    AlignmentSnapshot, DECISION_CHANGE_KINDS, DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND,
+    DECISION_INSERT_KIND, DECISION_RETIRE_KIND, DecisionEventOutcome, DecisionEventPayload,
+    DecisionEventSpec, DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome,
+    ObservationDependencySpec, ObservationPayload, ObservationRow, ObservationSpec,
+    ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
 };
 pub use source_descriptor::{
-    MAX_DESCRIPTORS_PER_COMMIT, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND,
-    SourceDescriptorDetail, SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
+    LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,
+    SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, SourceDescriptorDetail,
+    SourceDescriptorError, SourceDescriptorOutcome, SourceDescriptorPolicy,
     SourceDescriptorRequest, descriptor_object_id,
 };
 pub use source_export::{

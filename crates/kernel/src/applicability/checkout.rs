@@ -167,6 +167,11 @@ impl EvalBudget {
         Arc::clone(&self.interrupt)
     }
 
+    /// The absolute deadline every stage under this budget shares, or `None` for a budget bounded only by cancellation.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// Cancellation is irreversible: no method clears `interrupt`.
     pub fn cancel(&self) {
         self.interrupt.store(true, Ordering::Relaxed);

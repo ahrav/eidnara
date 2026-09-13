@@ -111,8 +111,7 @@ async fn expect_disabled_with(mutate: impl FnOnce(&Path), expected_fragment: &st
     );
 }
 
-/// Infeasible limits fail host startup instead of disabling Synapse while the host remains healthy.
-/// An `Err` from `activate` fails host startup.
+/// Infeasible limits fail host startup before bundle activation begins.
 async fn expect_limits_fail_startup(
     mutate: impl FnOnce(&mut SynapseLimits),
     expected_fragment: &str,
@@ -122,18 +121,14 @@ async fn expect_limits_fail_startup(
     let mut config = config_for(dir.path(), &pre_ort_identity());
     mutate(&mut config.limits);
     let component = SynapseComponent::new(Some(config));
-    component
+    let error = component
         .initialize()
         .await
-        .expect("bootstrap defers bundle work and cannot fail on limits");
+        .expect_err("infeasible limits must fail initialization");
     assert!(
-        matches!(component.status(), SynapseStatus::Starting),
-        "bootstrap must leave the lane starting, not decided"
+        matches!(component.status(), SynapseStatus::Disabled { .. }),
+        "failed initialization must not publish a starting lane"
     );
-    let error = component
-        .activate()
-        .await
-        .expect_err("infeasible limits must fail activation");
     let reason = error.to_string();
     assert!(
         reason.contains(expected_fragment),

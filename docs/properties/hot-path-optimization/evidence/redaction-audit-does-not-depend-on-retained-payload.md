@@ -11,13 +11,13 @@ This is a performance hypothesis, not a claim that retained text is unredacted.
 
 ## Evidence trail
 
-- [memory-store/lib.rs:2221-2242][retain] clones Content output and retains the
+- [memory-store/lib.rs:2306-2327][retain] clones Content output and retains the
   Redaction in the scan. Identity branches return the input value instead.
-- [2133-2143][json] already records JSON-observed scans with empty retained text
+- [2218-2228][json] already records JSON-observed scans with empty retained text
   and preserved detections, field identity, action, and owners.
-- [2356-2424][audit] persists detector revision/digest, finding count, owner
+- [2441-2509][audit] persists detector revision/digest, finding count, owner
   copies, labels, and actions. It does not consume field.redaction.text.
-- [2245-2271][execute] co-commits applied effects and audit under a fenced write.
+- [2330-2356][execute] co-commits applied effects and audit under a fenced write.
   Replay skips a new audit append at this boundary.
 
 ## Failure scenario
@@ -62,7 +62,7 @@ Existing checks are unaudited, and no new parity or allocation run occurs here.
   M5 allocation acceptance still needs separate owner-approved measurement;
   neither receipt parity nor sentinel absence proves allocation savings.
 
-[retain]: ../../../../crates/memory-store/src/lib.rs#L2221-L2242
-[json]: ../../../../crates/memory-store/src/lib.rs#L2133-L2143
-[audit]: ../../../../crates/memory-store/src/lib.rs#L2356-L2424
-[execute]: ../../../../crates/memory-store/src/lib.rs#L2245-L2271
+[retain]: ../../../../crates/memory-store/src/lib.rs#L2306-L2327
+[json]: ../../../../crates/memory-store/src/lib.rs#L2218-L2228
+[audit]: ../../../../crates/memory-store/src/lib.rs#L2441-L2509
+[execute]: ../../../../crates/memory-store/src/lib.rs#L2330-L2356

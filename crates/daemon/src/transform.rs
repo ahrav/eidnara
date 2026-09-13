@@ -186,12 +186,9 @@ impl ServedMessage {
                         }
                         index
                     });
-                    index.get(&wire::block_identity_digest(block)).map(|flat| {
-                        (
-                            wire::fingerprint_digest(&flat.content_hash),
-                            flat.bytes.len(),
-                        )
-                    })
+                    index
+                        .get(&wire::block_identity_digest(block))
+                        .and_then(|flat| wire::fingerprint_from_projected_wire(block, Some(flat)))
                 } else {
                     None
                 };
@@ -1034,6 +1031,8 @@ pub struct TransformTimings {
     #[serde(default)]
     pub request_observed_to_handler: f64,
     #[serde(default)]
+    pub pass_state_load: f64,
+    #[serde(default)]
     pub delta_expand: f64,
     #[serde(default)]
     pub side_channel_drain: f64,
@@ -1245,7 +1244,7 @@ pub fn format_pass_timing_line(
     };
     format!(
         "eidnara-pass-timing session={session} total={:.1} handler_total={:.1} request_observed_to_handler={:.1} \
-         delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
+         pass_state_load={:.1} delta_expand={:.1} side_channel_drain={:.1} trace_received={:.1} projection_cache_lookup={:.1} projection_cache_store={:.1} \
          native_attach={:.1} trace_complete={:.1} response_observation={:.1} retained_size={:.1} snapshot_store={:.1} projection={:.1} \
          projection_reused_messages={} projection_projected_messages={} store_cache_state={:.1} store_tags={:.1} store_temporal={:.1} \
          store_user_hints={:.1} store_channel1={:.1} store_overlay_frontier={:.1} \
@@ -1271,6 +1270,7 @@ pub fn format_pass_timing_line(
         timings.total,
         timings.handler_total,
         timings.request_observed_to_handler,
+        timings.pass_state_load,
         timings.delta_expand,
         timings.side_channel_drain,
         timings.trace_received,
@@ -13939,7 +13939,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn served_serialization_has_no_value_round_trip_or_structural_fallback() {
+    fn served_serialization_has_no_value_round_trip_and_fallback_reuses_receipt_helper() {
         let source = include_str!("transform.rs");
         let constructor = source
             .split_once("    fn from_message_reusing(")
@@ -13956,9 +13956,16 @@ pub(crate) mod tests {
             .split_once("} else {")
             .unwrap()
             .0;
-        assert!(!fallback.contains("flat.wire.as_ref() == block"));
         assert_eq!(fallback.matches("by_identity.get_or_init").count(), 1);
         assert!(!fallback.contains(".find("));
+        assert_eq!(
+            fallback
+                .matches("wire::fingerprint_from_projected_wire(block, Some(flat))")
+                .count(),
+            1
+        );
+        assert!(!fallback.contains("wire::fingerprint_digest("));
+        assert!(!fallback.contains("flat.bytes.len()"));
     }
 
     fn comparable_response(response: TransformResponse) -> Value {
@@ -22578,15 +22585,31 @@ pub(crate) mod tests {
     fn production_transform_reuses_hygiene_memo_and_recounts_only_edited_block() {
         const CHILD: &str = "EIDNARA_HYGIENE_MEMO_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            // libtest names tests without the crate segment that `module_path!` includes.
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, rest)| rest);
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "transform::tests::production_transform_reuses_hygiene_memo_and_recounts_only_edited_block", "--nocapture"])
+                .arg("--exact")
+                .arg(format!(
+                    "{module}::{}",
+                    stringify!(
+                        production_transform_reuses_hygiene_memo_and_recounts_only_edited_block
+                    )
+                ))
+                .arg("--nocapture")
                 .env(CHILD, "1")
-                .output().unwrap();
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
+                "{stdout}\n{}",
                 String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "the child must run exactly this test:\n{stdout}"
             );
             return;
         }

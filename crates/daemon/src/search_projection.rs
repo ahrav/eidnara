@@ -8,12 +8,17 @@
 //! outside this disposable database.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use retrieval::batch::{BatchBounds, BatchOutcome, BatchStatus, ProjectionBatch};
 use retrieval::{BASELINE, ProjectionError};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, StoreError, open_sqlite,
 };
+
+use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The page cache the projection connection is allowed, in KiB.
 pub const CACHE_KIB: u32 = 8 * 1024;
@@ -40,11 +45,70 @@ pub enum SearchProjectionError {
     Projection(#[from] ProjectionError),
     #[error("search.sqlite connection is not in the required state: {0}")]
     Connection(String),
+    #[error("the search projection is quarantined: {}", .0.detail)]
+    Quarantined(Quarantine),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreFailure {
+    Deadline,
+    Rejected,
+    Integrity,
+    Unknown,
+}
+
+pub(crate) fn classify_store_failure(error: &StoreError) -> StoreFailure {
+    match error {
+        StoreError::Deadline => StoreFailure::Deadline,
+        StoreError::Baseline(_)
+        | StoreError::FenceCorrupt { .. }
+        | StoreError::FenceMissing
+        | StoreError::FenceExhausted { .. } => StoreFailure::Integrity,
+        StoreError::Fenced { .. } => StoreFailure::Rejected,
+        StoreError::Lease(_)
+        | StoreError::UnsupportedBackend(_)
+        | StoreError::Backend(_)
+        | StoreError::Io(_)
+        | StoreError::DurabilityUnknown(_) => StoreFailure::Unknown,
+    }
+}
+
+/// `<data_home>/search/search.sqlite`.
+fn search_database_path(data_home: &Path) -> PathBuf {
+    data_home.join("search").join("search.sqlite")
+}
+
+/// The descriptor the projection at `data_home` opens under. The storage lease and fence key derive from it, so every operation on the family, opening it or deleting it, must present this same descriptor to contend for the same lease.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Io`] when the path is not valid UTF-8.
+pub(crate) fn search_descriptor(data_home: &Path) -> Result<StorageDescriptor, StoreError> {
+    let path = search_database_path(data_home);
+    Ok(StorageDescriptor {
+        module_id: "eidnara".to_string(),
+        storage_namespace: "search-projection".to_string(),
+        isolation: Isolation::Module,
+        backend: StorageBackend::Sqlite {
+            path: path
+                .to_str()
+                .ok_or_else(|| {
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "search projection path is not valid UTF-8",
+                    ))
+                })?
+                .to_owned(),
+        },
+    })
 }
 
 pub struct SearchProjection {
     store: SqliteStore,
     path: PathBuf,
+    /// Shares one quarantine among the projection's writers.
+    quarantine: Mutex<Option<Quarantine>>,
+    quarantined: AtomicBool,
 }
 
 impl SearchProjection {
@@ -64,25 +128,15 @@ impl SearchProjection {
     /// A baseline mismatch is a storage error.
     /// Returns [`SearchProjectionError::Connection`] on pragma value mismatches.
     pub fn open(data_home: &Path) -> Result<Self, SearchProjectionError> {
-        let path = data_home.join("search").join("search.sqlite");
-        let descriptor = StorageDescriptor {
-            module_id: "eidnara".to_string(),
-            storage_namespace: "search-projection".to_string(),
-            isolation: Isolation::Module,
-            backend: StorageBackend::Sqlite {
-                path: path
-                    .to_str()
-                    .ok_or_else(|| {
-                        StoreError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "search projection path is not valid UTF-8",
-                        ))
-                    })?
-                    .to_owned(),
-            },
-        };
+        let path = search_database_path(data_home);
+        let descriptor = search_descriptor(data_home)?;
         let store = open_sqlite(&descriptor, BASELINE)?;
-        let projection = Self { store, path };
+        let projection = Self {
+            store,
+            path,
+            quarantine: Mutex::new(None),
+            quarantined: AtomicBool::new(false),
+        };
         projection.pin_connection()?;
         projection.verify_connection()?;
         Ok(projection)
@@ -90,6 +144,68 @@ impl SearchProjection {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn quarantine(&self) -> Option<Quarantine> {
+        if !self.quarantined.load(Ordering::Acquire) {
+            return None;
+        }
+        self.quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The shared quarantine state preserves the first cause so every writer
+    /// returns the same [`Quarantine`].
+    pub(crate) fn enter_quarantine(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        let quarantine = self.publish_quarantine_intent(kind, error);
+        self.synchronize_quarantine(quarantine)
+    }
+
+    pub(crate) fn publish_quarantine_intent(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        let mut state = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let quarantine = state
+            .get_or_insert_with(|| Quarantine::new(kind, error))
+            .clone();
+        self.quarantined.store(true, Ordering::Release);
+        quarantine
+    }
+
+    pub(crate) fn synchronize_quarantine(&self, quarantine: Quarantine) -> Quarantine {
+        // Wait for active transactions so their final quarantine checks can roll back their writes.
+        let _ = self.store.with_conn_unfenced(|_| Ok(()));
+        quarantine
+    }
+
+    pub(crate) fn acknowledgement_guard(&self) -> Option<MutexGuard<'_, Option<Quarantine>>> {
+        let state = self
+            .quarantine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.is_some() { None } else { Some(state) }
+    }
+
+    /// Forces quarantine without constructing a storage failure, so tests can
+    /// place the state change at an exact writer boundary.
+    #[cfg(feature = "test-support")]
+    pub fn enter_quarantine_for_test(
+        &self,
+        kind: QuarantineKind,
+        error: &dyn std::fmt::Display,
+    ) -> Quarantine {
+        self.enter_quarantine(kind, error)
     }
 
     /// Bounds the page cache and keeps transient sort and index storage in
@@ -192,6 +308,20 @@ impl SearchProjection {
         self.run(f, Access::Write)
     }
 
+    /// [`Self::write`] whose connection and write-lock acquisition end at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when the
+    /// connection or the write lock is still held at `deadline`; nothing was written.
+    pub fn write_within<T>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
+        self.run(f, Access::WriteWithin(deadline))
+    }
+
     /// One query-only read transaction on the same connection; a write inside
     /// it is refused by the store's authorizer.
     pub fn read<T>(
@@ -199,6 +329,20 @@ impl SearchProjection {
         f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, SearchProjectionError> {
         self.run(f, Access::Read)
+    }
+
+    /// [`Self::read`] whose connection acquisition ends at `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when the
+    /// connection is still held at `deadline`; nothing was read.
+    pub fn read_within<T>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
+        self.run(f, Access::ReadWithin(deadline))
     }
 
     /// Runs `f` under the store's transaction of the given access. A refusal
@@ -210,19 +354,37 @@ impl SearchProjection {
         access: Access,
     ) -> Result<T, SearchProjectionError> {
         let mut outcome: Option<Result<T, ProjectionError>> = None;
+        let mut quarantine = None;
         let inner = |conn: &GuardedConn<'_>| -> rusqlite::Result<()> {
+            if !access.is_read()
+                && let Some(found) = self.quarantine()
+            {
+                quarantine = Some(found);
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             let result = f(conn);
             let failed = result.is_err();
             outcome = Some(result);
             if failed {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
+            if !access.is_read()
+                && let Some(found) = self.quarantine()
+            {
+                quarantine = Some(found);
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             Ok(())
         };
         let store_result = match access {
             Access::Write => self.store.with_conn_fenced(inner),
+            Access::WriteWithin(deadline) => self.store.with_conn_fenced_within(deadline, inner),
             Access::Read => self.store.with_conn(inner),
+            Access::ReadWithin(deadline) => self.store.with_conn_within(deadline, inner),
         };
+        if let Some(quarantine) = quarantine {
+            return Err(SearchProjectionError::Quarantined(quarantine));
+        }
         match outcome {
             Some(Ok(value)) => {
                 store_result?;
@@ -242,5 +404,13 @@ impl SearchProjection {
 #[derive(Clone, Copy)]
 enum Access {
     Write,
+    WriteWithin(Instant),
     Read,
+    ReadWithin(Instant),
+}
+
+impl Access {
+    fn is_read(self) -> bool {
+        matches!(self, Self::Read | Self::ReadWithin(_))
+    }
 }

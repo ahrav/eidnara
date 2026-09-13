@@ -10,14 +10,14 @@ leave metadata behind even when no output value is returned.
 
 ## Evidence trail
 
-- [memory-store/lib.rs:465][bound] sets the durable text limit to 512 KiB.
-- [2204-2243][prepare] checks input first, refuses detected NewIdentity next,
+- [memory-store/lib.rs:550][bound] sets the durable text limit to 512 KiB.
+- [2289-2328][prepare] checks input first, refuses detected NewIdentity next,
   checks chosen output, and appends a scan only after all three checks.
-- [2245-2271][execute] persists audit only for an applied operation in its
+- [2330-2356][execute] persists audit only for an applied operation in its
   fenced transaction; a callback error propagates rather than applying audit.
-- [8921-8931][refusal] turns transaction preparation failure into an error
+- [9233-9243][refusal] turns transaction preparation failure into an error
   because returning a successful Replay disposition would commit earlier writes.
-- [22694-22725][test] constructs a fitting input whose redacted output exceeds
+- [23212-23248][test] constructs a fitting input whose redacted output exceeds
   the bound, then a replacement-adjusted exactly fitting output.
 
 ## Failure scenario
@@ -55,9 +55,9 @@ The bound and rollback tests are [unaudited][checks]; no new experiment runs.
 - Conclusion: The two observation boundaries must remain separate; the
   in-memory witness is unresolved and must be added by the test handoff.
 
-[bound]: ../../../../crates/memory-store/src/lib.rs#L465
-[prepare]: ../../../../crates/memory-store/src/lib.rs#L2204-L2243
-[execute]: ../../../../crates/memory-store/src/lib.rs#L2245-L2271
-[refusal]: ../../../../crates/memory-store/src/lib.rs#L8921-L8931
-[test]: ../../../../crates/memory-store/src/lib.rs#L22694-L22725
+[bound]: ../../../../crates/memory-store/src/lib.rs#L550
+[prepare]: ../../../../crates/memory-store/src/lib.rs#L2289-L2328
+[execute]: ../../../../crates/memory-store/src/lib.rs#L2330-L2356
+[refusal]: ../../../../crates/memory-store/src/lib.rs#L9233-L9243
+[test]: ../../../../crates/memory-store/src/lib.rs#L23212-L23248
 [checks]: ../existing-checks.md#redaction-ownership

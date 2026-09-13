@@ -39,9 +39,29 @@ pub(crate) fn btree_map_allocation_bytes<K, V>(len: usize) -> usize {
 /// The estimate includes inline keys, inline values, and one control byte per
 /// bucket. Arithmetic saturates at `usize::MAX`.
 pub(crate) fn hash_map_allocation_bytes<K, V>(map: &HashMap<K, V>) -> usize {
+    hash_map_bucket_bytes::<K, V>(hash_map_buckets(map.capacity()))
+}
+
+/// Estimates the hashbrown bucket bytes a map holds after admitting one more entry.
+pub(crate) fn hash_map_allocation_bytes_after_insert<K, V>(map: &HashMap<K, V>) -> usize {
+    if map.len() < map.capacity() {
+        return hash_map_allocation_bytes(map);
+    }
+    let buckets = if map.capacity() == 0 {
+        4
+    } else {
+        hash_map_buckets(map.capacity()).saturating_mul(2)
+    };
+    hash_map_bucket_bytes::<K, V>(buckets)
+}
+
+fn hash_map_buckets(capacity: usize) -> usize {
     // hashbrown uses one control byte per bucket and admits seven entries per eight buckets.
     // The calculation converts admission capacity to bucket count because `capacity()` reports admission capacity.
-    let buckets = map.capacity().saturating_mul(8).saturating_add(6) / 7;
+    capacity.saturating_mul(8).saturating_add(6) / 7
+}
+
+fn hash_map_bucket_bytes<K, V>(buckets: usize) -> usize {
     buckets.saturating_mul(
         size_of::<K>()
             .saturating_add(size_of::<V>())

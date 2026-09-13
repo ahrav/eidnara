@@ -36,7 +36,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
   [`mark_historian_side_channel_delivered_tx`][mark] in one `with_conn_fenced`
   call per kind; the mark updates under `delivered_at_ms IS NULL` and returns
   `QueryReturnedNoRows` when `changed != 1`, which rolls the transaction back.
-  A test-only `fail_once` seam at [`:10922-10933`][fail-once] injects a
+  A test-only `fail_once` seam at [`:11234-11245`][fail-once] injects a
   failure per kind.
 - [`record_historian_side_channel_failure`][failure] computes
   `delay = 1000 * 2^min(attempt_count, 6)` capped at
@@ -54,7 +54,7 @@ rows a pass touches, so any restructuring must preserve those exactly.
 - Rows are enqueued by [`publish_historian_chunk`][publish]; the outbox
   [primary key][outbox-sql] is `(session_id, firing_seq, kind, source_start,
   source_end, item_index)`. The publish task also drains after a committed
-  publish ([`:10762-10771`][publish-drain]), so two drainers can overlap on one
+  publish ([`:11074-11083`][publish-drain]), so two drainers can overlap on one
   session.
 - Firing needs a configured [`model_chain`][cfg-models] (the
   [`no_models` gate][no-models]); `user_observation` rows also need
@@ -129,8 +129,8 @@ window, two drainers, ordering across firings, the limit, or the backoff.
 [failure]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L10975-L11014
 [delete-all]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L11016-L11029
 [delete-one]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L11031-L11053
-[events-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13580-L13601
 [mark]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13739-L13764
+[events-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13580-L13601
 [primer-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13766-L13808
 [obs-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L13810-L13831
 [t-faults]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L18704
@@ -147,13 +147,17 @@ that precede it on the branch.
 Preservation authority: [implementation ticket](https://github.com/ahrav/eidnara/issues/434)
 and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 
-[Delivery][deliver] inserts the target row and [retires the outbox row][retire]
+[Delivery][deliver-live] inserts the target row and [retires the outbox row][retire]
 in one fenced transaction. The retirement is a `DELETE` whose
 `delivered_at_ms IS NULL` predicate is the row-still-pending guard: a
 drainer that read the row before another drainer retired it finds nothing to
 delete, the delivery rolls its target insert back and reports the row as
 already retired, and the drain counts it as neither delivered nor failed, so no
-failure record or backoff is written for a row that no longer exists. Drainers
+failure record or backoff is written for a row that no longer exists. The
+predicate also names the payload: a handle read before a session reset cannot
+consume a row re-issued under the same composite key with other bytes, as the
+[key-reuse test][reuse-test] shows (the stale delivery reports already
+retired, delivers nothing, and the re-created row stays pending). Drainers
 on one store serialize on the connection, so the guard closes a stale read,
 not two simultaneous statements. The per-row delete transaction is gone
 because nothing remains for a restart or a concurrent drainer to redeliver: a
@@ -169,18 +173,21 @@ hold nothing, and all three rows stay pending. That half shows the insert and
 the retirement share one transaction; the baseline already held the insert and
 the mark in one transaction, so it is not a behavior change. The gap the
 baseline left, a crash between the mark commit and the delete commit, is
-closed by construction because no second commit exists; the discriminating
-assertion is that the outbox ends empty rather than marked. The test then
-reads the due rows a second time before one drain delivers them, and each
-stale delivery reports the row as already retired: each target holds one row
-and the outbox holds none.
+closed by construction because no second commit exists. The discriminating
+assertion is a direct `deliver_historian_side_channel` call after which the
+row is already absent, before any drain runs; the baseline would have left it
+marked until the drain's second commit. The test then reads the due rows a
+second time before one drain delivers the rest, and each stale delivery
+reports the row as already retired: each target holds one row and the outbox
+holds none.
 
 ### Focused execution, 2026-09-12
 
 `cargo test -p memory-store --locked` passed 180 tests including the test above
 and the existing restart and per-kind isolation tests.
 
-[deliver]: ../../../../../crates/memory-store/src/lib.rs#L11361-L11448
-[retire]: ../../../../../crates/memory-store/src/lib.rs#L14212-L14236
-[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11494-L11518
-[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L19831-L19970
+[deliver-live]: ../../../../../crates/memory-store/src/lib.rs#L11646-L11724
+[retire]: ../../../../../crates/memory-store/src/lib.rs#L14489-L14514
+[sweep]: ../../../../../crates/memory-store/src/lib.rs#L11770-L11794
+[crash-test]: ../../../../../crates/memory-store/src/lib.rs#L20883-L21043
+[reuse-test]: ../../../../../crates/memory-store/src/lib.rs#L17365-L17432

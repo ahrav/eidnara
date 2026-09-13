@@ -54,13 +54,15 @@ const GATES: [&str; 5] = [
     "capability",
     "both_harness",
 ];
-const INVALIDATION_IDENTITY: [&str; 6] = [
+const INVALIDATION_IDENTITY: [&str; 8] = [
     "schema_version",
     "tokenizer_fingerprint",
     "embedding_model",
     "projection_policy_version",
     "identity_contract_version",
     "limit_manifest_protocol_version",
+    "vector_dimension",
+    "generation_epoch",
 ];
 const MANIFEST_FIELDS: [&str; 9] = [
     "protocol_version",
@@ -262,8 +264,8 @@ fn fault_maps_define_each_marker_once_and_mention_no_undefined_marker() {
         total += defined.len();
         union.extend(unique);
     }
-    assert_eq!(total, 63);
-    assert_eq!(union.len(), 63);
+    assert_eq!(total, 65);
+    assert_eq!(union.len(), 65);
 
     let sites = matrix["marker_definition_sites"]
         .as_object()
@@ -712,7 +714,7 @@ fn contracts_freeze_the_five_classes() {
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
         contracts["identity_contract_version"],
-        "search-projection-identity-v2"
+        "search-projection-identity-v3"
     );
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(

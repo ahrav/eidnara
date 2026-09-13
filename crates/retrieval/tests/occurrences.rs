@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use kernel::Sensitivity;
 use kernel::source_identity::{Occurrence, OccurrenceRefusal, Span};
+use retrieval::eligibility::live_candidates;
 use retrieval::{
     OccurrenceRecord, Payload, PersistBounds, PersistedOccurrence, ProjectionError,
     ProjectionIdentity, Tombstone, TombstoneReason, install_identity, persist_occurrences,
@@ -15,6 +16,7 @@ use retrieval::{
     tombstone_occurrence,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
 };
@@ -225,7 +227,7 @@ fn identity() -> ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
         kernel_incarnation_id: "kernel-incarnation-1".to_string(),
         projection_policy_version: "source-policy.v1".to_string(),
-        identity_contract_version: "search-projection-identity-v2".to_string(),
+        identity_contract_version: "search-projection-identity-v3".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
         embedding_model: "model-a".to_string(),
         tokenizer_fingerprint: "fp-a".to_string(),
@@ -496,6 +498,63 @@ fn missing_or_altered_payload_is_corruption_not_absence() {
             })
             .unwrap();
     }
+}
+
+#[test]
+fn oversized_payload_with_a_matching_digest_is_corruption() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = {
+        let store = open(dir.path());
+        store
+            .with_conn_fenced(|conn| {
+                Ok(persist_all(conn, std::slice::from_ref(&record))
+                    .unwrap()
+                    .remove(0))
+            })
+            .unwrap()
+    };
+    let oversized = kernel::MAX_PAYLOAD_BYTES + 1;
+    let mut digest = Sha256::new();
+    let zeros = [0_u8; 64 * 1024];
+    for _ in 0..oversized / zeros.len() {
+        digest.update(zeros);
+    }
+    digest.update(&zeros[..oversized % zeros.len()]);
+    let oversized_payload_id = format!("{:x}", digest.finalize());
+    let oversized_sql = i64::try_from(oversized).unwrap();
+    {
+        let raw = rusqlite::Connection::open(dir.path().join("search/search.sqlite")).unwrap();
+        assert_eq!(
+            raw.execute(
+                "INSERT INTO payloads(payload_id,bytes,byte_length,created_at)
+                 SELECT ?2,zeroblob(?3),?3,created_at FROM payloads WHERE payload_id=?1",
+                rusqlite::params![outcome.payload_id, oversized_payload_id, oversized_sql],
+            )
+            .unwrap(),
+            1,
+        );
+        assert_eq!(
+            raw.execute(
+                "UPDATE occurrences SET payload_id=?2 WHERE occurrence_id=?1",
+                rusqlite::params![outcome.occurrence_id, oversized_payload_id],
+            )
+            .unwrap(),
+            1,
+        );
+    }
+
+    let store = open(dir.path());
+    store
+        .with_conn(|conn| {
+            assert_eq!(
+                read_occurrence(conn, &outcome.occurrence_id),
+                Err(ProjectionError::CorruptRow),
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -790,6 +849,27 @@ fn forced_collisions_refuse_unequal_values_and_replay_keeps_identities() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn live_candidates_with_a_bound_at_or_past_i64_max_returns_every_live_row() {
+    let fixtures = fixtures();
+    let record = Owned::from_json(&fixtures["records"][0]);
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    store
+        .with_conn_fenced(|conn| Ok(persist_all(conn, &[record]).unwrap()))
+        .unwrap();
+    for max in [
+        NonZeroUsize::new(i64::MAX as usize).unwrap(),
+        NonZeroUsize::MAX,
+    ] {
+        let live = store
+            .with_conn(|conn| Ok(live_candidates(conn, None, max)))
+            .unwrap()
+            .unwrap_or_else(|err| panic!("max={max}: {err}"));
+        assert_eq!(live.len(), 1, "max={max}");
+    }
 }
 
 #[test]
@@ -1259,7 +1339,12 @@ fn a_different_identity_cannot_be_installed_over_an_existing_projection() {
     let store = open(dir.path());
     store
         .with_conn_fenced(|conn| {
-            for schema_version in [retrieval::SCHEMA_VERSION + 1, 0, u32::MAX] {
+            for schema_version in [
+                retrieval::SCHEMA_VERSION - 1,
+                retrieval::SCHEMA_VERSION + 1,
+                0,
+                u32::MAX,
+            ] {
                 let mut wrong_version = identity();
                 wrong_version.schema_version = schema_version;
                 assert_eq!(

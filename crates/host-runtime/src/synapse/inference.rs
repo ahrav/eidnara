@@ -219,7 +219,7 @@ fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
 
 /// The served-vector contract every engine must meet: `dims` finite components with an L2 norm within `UNIT_NORM_TOLERANCE` of 1.
 /// Accumulating in f64 keeps summation roundoff below the tolerance at `MAX_DIMS`; an f32 sum can drift past it and fail a correctly normalized vector.
-pub(crate) fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), String> {
+pub fn validate_unit_vector(dims: usize, vector: &[f32]) -> Result<(), String> {
     if vector.len() != dims {
         return Err(format!(
             "vector has {} dimensions, manifest requires {dims}",

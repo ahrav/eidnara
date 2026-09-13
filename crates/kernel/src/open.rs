@@ -13,11 +13,11 @@ use super::schema::{
     KERNEL_APPLICATION_ID, KERNEL_FORMAT_EPOCH, apply_kernel_schema, kernel_schema_digest,
     kernel_schema_object_inventory,
 };
-use crate::current_time_ms;
 use crate::sqlite_runtime::{
     SqliteEngineIdentity, compute_marker_digest, evaluate_sqlite_runtime_gate,
     probe_sqlite_engine_identity_off_path,
 };
+use crate::{CachedSql, current_time_ms, map_sqlite};
 
 const BUSY_TIMEOUT_MS: i64 = 5_000;
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
@@ -837,6 +837,22 @@ fn read_valid_marker(conn: &Connection) -> Result<FormatMarker, KernelError> {
         created_at: marker.created_at,
         marker_digest: marker.marker_digest.clone(),
     })
+}
+
+pub(super) fn database_incarnation_id_via(conn: &Connection) -> Result<String, KernelError> {
+    let incarnation = conn
+        .query_row_cached(
+            "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(map_sqlite)?
+        .ok_or(KernelError::CorruptCanonicalRow)?;
+    if !is_lower_hex(&incarnation, 32) {
+        return Err(KernelError::CorruptCanonicalRow);
+    }
+    Ok(incarnation)
 }
 
 pub(super) fn open_writer(path: &Path) -> rusqlite::Result<Connection> {

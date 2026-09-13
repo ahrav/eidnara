@@ -609,10 +609,31 @@ impl KernelStore {
         through: i64,
         updated_at: i64,
     ) -> Result<(), SourceHoldError> {
+        let acknowledged =
+            self.acknowledge_through_source_hold_if(binding, hold_id, through, updated_at, || {
+                Some(())
+            })?;
+        debug_assert!(acknowledged);
+        Ok(())
+    }
+
+    /// Moves the checkpoint only when `authorize` returns a token after the kernel writer is acquired.
+    /// The token remains live until the checkpoint transaction ends.
+    pub fn acknowledge_through_source_hold_if<Authorization>(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        updated_at: i64,
+        authorize: impl FnOnce() -> Option<Authorization>,
+    ) -> Result<bool, SourceHoldError> {
         if updated_at < 0 {
             return Err(SourceHoldError::InvalidRequest);
         }
         let mut writer = self.lock_writer()?;
+        let Some(_authorization) = authorize() else {
+            return Ok(false);
+        };
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite)?;
@@ -625,7 +646,7 @@ impl KernelStore {
         }
         acknowledge_outbox_in_tx(&tx, &binding.consumer_id, through, updated_at)?;
         tx.commit().map_err(sqlite)?;
-        Ok(())
+        Ok(true)
     }
 
     /// Rounding elapsed monotonic time up prevents partial milliseconds from hiding expiry.

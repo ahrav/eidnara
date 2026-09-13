@@ -1,10 +1,11 @@
 # `protected-transactions-pin-fence-durability`
 
 - **Discovery:** storage durability pass.
-- **Primary evidence:** `pin_fence_durability` (`crates/storage/src/lib.rs:898-913`) runs at the start of `with_conn_fenced`; `open_sqlite` (`crates/storage/src/lib.rs:915-1020`) calls the same function before the transaction that applies the baseline and claims the fence, so an open on a VFS that cannot switch to WAL fails instead of committing a claim every later fenced write would reject.
+- **Primary evidence:** `pin_durability_once` (`crates/storage/src/lib.rs:912-928`) runs `pin_fence_durability` (`crates/storage/src/lib.rs:1347-1349`) at the start of `with_conn_fenced` unless the pin has held since open or since the last maintenance callback, whose exit guard re-arms it; `open_sqlite` (`crates/storage/src/lib.rs:915-1020`) calls the same function before the transaction that applies the baseline and claims the fence, so an open on a VFS that cannot switch to WAL fails instead of committing a claim every later fenced write would reject.
 - **Existing evidence:** `open_pins_full_synchronous` (`crates/storage/src/lib.rs:3391-3400`), `a_read_callback_cannot_lower_fence_durability` (`crates/storage/src/lib.rs:3424-3490`).
 - **Failure scenario:** WAL with `synchronous = NORMAL` can lose the most recent commits after power loss, rolling the fence epoch back.
 - **Timing window:** power loss after a fence claim; not injected.
 - **Instrumentation:** `PRAGMA synchronous` and `PRAGMA journal_mode` reads.
 - **Audit verdict (U2): pass. The test lowers the settings through the maintenance path, then observes the re-pinned values after a fenced write and after a fenced schema change.
+- **Once-per-connection pin:** `the_durability_pin_runs_once_per_connection_until_maintenance` (`crates/storage/src/lib.rs:2400-2438`) shows a fenced write leaving a raw-connection `synchronous=OFF` alone and the first fenced write after maintenance re-pinning `FULL`; `a_second_connection_cannot_leave_wal_while_the_store_holds_the_database_open` (`crates/storage/src/lib.rs:5262-5292`) shows the foreign journal-mode switch refused. Unaudited.
 - **Open-question log:** power-loss evidence belongs to `/testing:crash-consistency-and-failpoint-testing`.

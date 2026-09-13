@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "identity_contract_version": "search-projection-identity-v2",
+  "identity_contract_version": "search-projection-identity-v3",
   "records": [
     {
       "id": "m1",

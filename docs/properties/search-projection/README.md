@@ -16,11 +16,11 @@ byte; the temporary file is removed. No implementation ticket or PR was created.
 | [Portfolio evaluation](portfolio-evaluation.md) | Central independent evaluation, qualified findings, dispositions, and remaining owner decisions. |
 | [Verification receipt](verification.md) | Fresh verifier verdict, corrected findings, static checks, and evidence limits. |
 | [Construction contracts](construction-contracts.md) | P1's frozen contracts CC1-CC12: classes, identity, spans, tuple encoding, payload identity, scanning, excluded inputs, capability dispositions, the RP2.9 limit-manifest interface, the hook-to-gate map, residue, and admission dimensions. |
-| [Witness matrix](witness-matrix.md) | P1's nonempty required witness matrix over the 63 marker definitions, mapped to AC1-AC12 and T1-T9 with oracles, negative controls, and integration observations. |
+| [Witness matrix](witness-matrix.md) | P1's nonempty required witness matrix over the 65 marker definitions, mapped to AC1-AC12 and T1-T9 with oracles, negative controls, and integration observations. |
 | [Prerequisite receipts](prerequisite-receipts.md) | P1's adoption of the parent prerequisite receipts, including the receipt that is absent. |
 | [Export and recovery catalog](export-recovery/catalog.md) | Ten properties for export, complete catch-up, ack ordering, selection, disable, and bounded recovery. |
 | [Projection and coverage catalog](projection-coverage/catalog.md) | Eleven properties for local atomicity, identity, source inventory, raw fidelity, gates, coverage, conditional remediation, and campaign witnesses. |
-| [Embedding catalog](embedding/catalog.md) | Nine properties for exact preflight, durable pending/completion, identity fencing/GC, backfill, and physical ownership. |
+| [Embedding catalog](embedding/catalog.md) | Eleven properties for exact preflight, durable pending/completion, bounded dispatch, identity fencing/GC, backfill, and physical ownership. |
 
 Each part owns its `catalog.md`, `existing-checks.md`, `fault-map.md`,
 `portfolio-evaluation.md`, and one `evidence/<slug>.md` per record. Stable slugs
@@ -51,7 +51,7 @@ reachability. Each is individually classified `test-only` and unexercised.
 `Active` means an obligation belongs in the specification, not that product
 behavior exists. Existing checks remain `unaudited`; source inspection does
 not upgrade their adequacy or execution status. The three fault maps define
-23, 24, and 16 markers respectively. Marker definitions are not witnesses.
+23, 24, and 18 markers respectively. Marker definitions are not witnesses.
 
 The coordinator commissioned the central analyst evaluation and the independent
 testing-owner report. These are analyst evidence, not user-supplied runtime

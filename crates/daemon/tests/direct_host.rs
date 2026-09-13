@@ -477,11 +477,6 @@ async fn refused_bodies_emit_one_terminal_and_leave_no_dispatch_state() {
     let (code, message) = refuse(padded.into_bytes()).await;
     assert_eq!(code, "host.invalid_params", "{message}");
 
-    // Under both caps, so only the resident charge can refuse them: two million values at
-    // the node charge is far above the scratch pool's capacity. The first body carries a page
-    // key, so it takes the tree lane and the `Value` decode refuses it; the second is a
-    // complete unpaged transform request whose values sit under an ignored field, so the
-    // direct decode refuses it. A shape refusal would be `host.bad_request`.
     let dense_values = || {
         let mut values = b"[0".to_vec();
         for _ in 1..2_000_000 {

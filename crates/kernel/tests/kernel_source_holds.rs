@@ -48,6 +48,19 @@ struct ConcurrentRun {
     held_after_delete: Vec<String>,
 }
 
+struct CheckpointAuthorization<'a> {
+    fixture: &'a Fixture,
+    through: i64,
+    dropped: &'a AtomicBool,
+}
+
+impl Drop for CheckpointAuthorization<'_> {
+    fn drop(&mut self) {
+        assert_eq!(self.fixture.checkpoint(), self.through);
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
 fn assert_hold_matches_ledger_inventory(fixture: &Fixture, hold: &SourceHold) {
     let (expected, _, _) = fixture.expected_at(hold.snapshot);
     assert_eq!(fixture.held_all(hold, 4), expected, "held inventory at S");
@@ -2486,6 +2499,40 @@ fn extension_is_bounded_idempotent_and_gates_acknowledgement() {
         through,
         "no failure advances acknowledgement"
     );
+}
+
+#[test]
+fn acknowledgement_authorization_outlives_the_checkpoint_commit() {
+    let mut fixture = Fixture::open();
+    fixture.seed_five_classes();
+    let binding = fixture.binding();
+    let checkpoint = fixture.store.tip().unwrap();
+    fixture
+        .store
+        .acknowledge_outbox(CONSUMER, checkpoint, 1)
+        .unwrap();
+    let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
+    fixture.publish("messages", "authorization", 1, "authorization window");
+    let through = fixture.store.tip().unwrap();
+    fixture
+        .store
+        .extend_source_hold(&binding, &hold.hold_id, through, wide_admission())
+        .unwrap();
+    let dropped = AtomicBool::new(false);
+
+    let acknowledged = fixture
+        .store
+        .acknowledge_through_source_hold_if(&binding, &hold.hold_id, through, 2, || {
+            Some(CheckpointAuthorization {
+                fixture: &fixture,
+                through,
+                dropped: &dropped,
+            })
+        })
+        .unwrap();
+
+    assert!(acknowledged);
+    assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[test]

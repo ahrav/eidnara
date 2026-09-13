@@ -451,6 +451,25 @@ fn decision_event_preserves_valid_evidence_identifier() {
         )
         .unwrap();
     assert_eq!(stored_evidence_id, handle.evidence_id);
+    let tip = store.tip().unwrap();
+    let retirement = store.commit(intent("retire-event-evidence", '3'), |envelope| {
+        envelope.retire_evidence("evidence-object")?;
+        Ok(String::new())
+    });
+    assert_eq!(retirement.unwrap_err(), KernelError::Conflict);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(store.read_artifact(&handle).unwrap(), b"fixture evidence");
+    store
+        .commit(intent("retire-event-owner", '4'), |envelope| {
+            envelope.retire_decision("decision-object-1")?;
+            envelope.retire_evidence("evidence-object")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        store.read_artifact(&handle).unwrap_err().kind(),
+        kernel::ArtifactErrorKind::ReferenceUnavailable
+    );
     assert_eq!(
         inspect_i64(
             directory.path(),

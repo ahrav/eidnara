@@ -23,6 +23,9 @@ use crate::instance::{ConnectionKey, InstanceError, InstanceGuard};
 use crate::routing::RouteRegistry;
 use crate::wire::ByteBudget;
 
+#[cfg(test)]
+mod close_tests;
+
 /// HostError reports failures that prevent graceful completion.
 #[derive(Debug)]
 pub enum HostError {

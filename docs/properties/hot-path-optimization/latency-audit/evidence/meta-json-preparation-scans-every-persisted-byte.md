@@ -142,42 +142,71 @@ and [parent specification](https://github.com/ahrav/eidnara/issues/350).
 ahead of one walk, and the walk does the rest: it validates every object key it
 descends through, refuses or substitutes protected values, records detections,
 and sets a [`changed` flag][changed] when a value is replaced by different
-text. The separate key-validation pass and the clone-and-compare are gone; the
+text. The separate key-validation pass is gone. The clone-and-compare is gone
+from release builds; a debug build keeps the [clone][debug-clone] and asserts
+that the flag agrees with the [structural compare][debug-compare], so a
+mutation site that forgets the flag fails every test run. The
 [clean branch][clean-branch-live] returns the input when nothing changed and
-re-serializes otherwise. The two places the walk judges a subtree whole
-without descending, an identity-named value and an integrity-named value, run
-the [key validation][keys-live] over that subtree, so a secret-bearing key
-under `{"signature": {...}}` or `{"id": {...}}` is still refused. The
-[wrapper][collecting-live] that callers use asserts in debug builds that clean
-output equals the input and that a change left a detection for the receipt.
+re-serializes otherwise. The walk judges a subtree whole without descending in
+two cases, an integrity-named value and an identity-named value under a policy
+that does not preserve identities, and runs the [key validation][keys-live]
+over that subtree, so a secret-bearing key under `{"signature": {...}}` is
+refused there. Under the `DurablePreserveIdentities` policy that `meta` uses,
+an identity-named scalar is [preserved][preserved-live] and an identity-named
+container falls through to the ordinary walk, whose [object arm][walk-keys-live]
+validates each key, so a secret-bearing key under `{"id": {...}}` is refused
+by the walk itself. The
+[wrapper][collecting-live] that callers use asserts in debug builds that a
+change left a detection for the receipt; byte identity of clean output is the
+clean branch's construction rather than an assertion.
 
 The order in which a document with two independent faults reports its error
 can differ from the baseline, where every key was validated before any value;
 the outcome on one fault is unchanged and detections gathered before a refusal
-are discarded with the refused write, as before.
+are discarded with the refused write, as before. `serde_json::Value` walks
+object members in `serde_json::Map` order, so a value precedes a refusing key
+only when its own key sorts first; a fixture that plants the value under a
+later-sorting key never reaches the refusal with a detection in hand.
 
 The [unit test][unit-live] shows clean input returned byte for byte with
 `changed` false, a substitution with `changed` true and one recorded detection,
 and refusals for a secret-bearing key under an integrity-named and under an
-identity-named container. The [store test][store-live] shows, through
-`commit`, clean `meta` stored equal to `serde_json::to_string` of the value, a
-secret planted in a `block_identity_by_mid` entry's value substituted and
-recorded on the `meta` scan, and a secret planted in a `block_identity_by_mid`
-key refused with no row stored. Duplicate object names remain refused by
-[`parse_json_with_unique_names`][unique-live] and its existing test.
+identity-named container. The [refusal-ordering test][refusal-live] serializes
+the store test's `keyed` fixture, a `block_identity_by_mid` map whose `a-mid`
+entry carries a value secret and whose second key is itself a secret, and shows
+the caller's vector holding one detection when `prepare_json_content_collecting`
+returns the refusal. The [store test][store-live] shows, through `commit`,
+clean `meta` stored equal to `serde_json::to_string` of the value with a
+`meta` receipt whose `finding_count` is zero, a secret planted in a
+`block_identity_by_mid` entry's value substituted with a `meta` receipt whose
+`finding_count` is one (`scan_detections` deduplicates labels, so the count
+is the oracle), and the same `keyed` fixture refused with no row stored and
+every scan-audit table count unchanged from before the refused `commit`, so
+the detection the walk gathered before the refusal was discarded rather than
+recorded. Duplicate object names remain
+refused by [`parse_json_with_unique_names`][unique-live] and its
+[existing test][t-dup-live].
 
 ### Focused execution, 2026-09-12
 
-`cargo test -p memory-store --locked` passed 176 tests including the two above;
-`cargo test -p daemon --locked` passed 1012, the two `dreamer_run_task_bounds_*`
-tests failing under full-suite load on the base branch as well and passing in
-isolation.
+At the merged tree `39f706b6`, `cargo test -p memory-store --locked` passed
+every test in each binary: 144 in the library, 5 in `baseline.rs`, 8 in
+`dreamer_ledger.rs`, and 22 in `production_redaction.rs`, the three above
+among them. `cargo test -p daemon --locked` passed 1021; the two
+`dreamer_run_task_bounds_*` tests fail under full-suite load on the base
+branch as well and pass in isolation.
 
-[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3225-L3410
-[changed]: ../../../../../crates/memory-store/src/lib.rs#L3402
-[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3403-L3409
-[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3275
-[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3207-L3219
-[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3414
-[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L15537-L15582
-[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L701
+[single-pass]: ../../../../../crates/memory-store/src/lib.rs#L3412-L3604
+[changed]: ../../../../../crates/memory-store/src/lib.rs#L3567-L3570
+[debug-clone]: ../../../../../crates/memory-store/src/lib.rs#L3590-L3591
+[debug-compare]: ../../../../../crates/memory-store/src/lib.rs#L3596-L3597
+[clean-branch-live]: ../../../../../crates/memory-store/src/lib.rs#L3598-L3603
+[keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3462-L3475
+[preserved-live]: ../../../../../crates/memory-store/src/lib.rs#L3500-L3510
+[walk-keys-live]: ../../../../../crates/memory-store/src/lib.rs#L3577-L3583
+[collecting-live]: ../../../../../crates/memory-store/src/lib.rs#L3396-L3406
+[unique-live]: ../../../../../crates/memory-store/src/lib.rs#L3672-L3674
+[t-dup-live]: ../../../../../crates/memory-store/src/lib.rs#L16283-L16295
+[unit-live]: ../../../../../crates/memory-store/src/lib.rs#L16103-L16156
+[refusal-live]: ../../../../../crates/memory-store/src/lib.rs#L16158-L16195
+[store-live]: ../../../../../crates/memory-store/tests/production_redaction.rs#L611-L725
