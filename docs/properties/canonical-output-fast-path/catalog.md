@@ -45,10 +45,10 @@ not proof that an implementation satisfies it.
 
 | Lens | Verified model and consequence |
 | --- | --- |
-| Architecture and data flow | [Encoding][encode] serializes once into growable A, records spans, sorts every object, then unconditionally allocates and fills B at HEAD. The plan selects returning A only when every field permutation is identity. |
+| Architecture and data flow | [Encoding][encode] serializes once into growable A, records spans, sorts every object, and returns A when every field permutation is identity; otherwise it allocates and fills B. |
 | Representation and compatibility | [Wire messages][message] replay retained parsed `Value` or serialize typed data. Originals are not raw input text. Existing decoded Rust `String` ordering in [sort_fields][sort] is preserved; the host wire contract does not define a new canonical collation. |
 | State, cache, and persistence | The [transform caller][caller] passes the output cache; [default configuration][config] enables compaction. A [clean positive hit][cache] reuses served owners. Completed [prepared-page replay][replay] is a distinct in-memory replay path. Neither is a new durable replay guarantee. |
-| Ownership and concurrency | [ServedMessage][constructor] owns message, canonical bytes, identity, and receipts. A returned Vec remains live through receipt construction and hashing before Arc conversion. Cache snapshots and response owners can outlive a cache entry. |
+| Ownership and concurrency | [ServedMessage][constructor] owns message, canonical bytes, identity, and receipts. The returned Vec is converted to its exact-size Arc before receipt construction and hashing. Cache snapshots and response owners can outlive a cache entry. |
 | Safety and resources | [Formatter tables][spans] give unique increasing field starts. Compact punctuation and recursive [copying][copy] supply the identity lemma. Removing B does not remove A growth, decoded-key work, Arc conversion, response assembly, or arena copies. |
 | Failure and degradation | The serialization `?` precedes finalization. [Preparation][dispatch] preserves source-specific length and error behavior. [Settlement][settlement] measures, checks cancellation, reserves, checks cancellation, and writes. |
 | Liveness and coordination | This is synchronous work before reservation. It adds no distributed coordination, asynchronous ownership, recovery loop, or liveness state machine. Preserve existing cancellation cuts and [best-effort wire cancellation][wire-cancel]; no new transport fault campaign is required. |
@@ -387,8 +387,10 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: partial - The U0 driver constructs cold canonical misses, typed and
-edited unordered misses, and warm positive hits and records their frequencies;
+Exercised: partial - The U0 driver constructs cold canonical misses and typed
+and edited unordered misses and records their frequencies. Warm runs record
+lookup hits only; that counter does not distinguish a positive entry from
+`Some(None)`, so positive hits are not independently observed, and
 completed-output page replay is not constructed.
 Guarantee: A cache campaign constructs cold canonical misses, typed and edited
 disordered misses, warm positive hits, and separate prepared-result replay.

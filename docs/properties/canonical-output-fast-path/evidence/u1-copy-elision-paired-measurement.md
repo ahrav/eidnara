@@ -72,9 +72,9 @@ Observations:
   zero logical reorder bytes, one allocation event fewer, and canonicalizer
   requested bytes fall by exactly N. Canonicalizer peak residency falls by
   less than N or not at all: 105 of 137 bytes for `retained_ascii/1blocks`,
-  0 of 141 for `retained_escaped/1blocks`, and N minus 32 bytes for the other
-  four cells. Typed and one-edited-block populations are unchanged in every
-  column.
+  0 of 141 for `retained_escaped/1blocks`, 7131 of 7437 for
+  `retained_escaped/65blocks`, and N minus 32 bytes for the three remaining
+  cells. Typed and one-edited-block populations are unchanged in every column.
 - A's spare capacity is real: `cap/len` is 1.10 to 2.00 on the ownership path.
   For a single 64 KiB scalar the returned buffer holds 2N.
 - The first candidate (canonicalizer change only, before the constructor
@@ -99,9 +99,11 @@ Identical for A and B and across all processes.
 | `transform_warm/1000msgs_2KiB_mixed` | 1002 | 1000 | 2 | 1002 | 0 |
 
 Every cold served message is a miss (100 or 1000 canonical-order retained
-originals plus 2 unordered synthetic shells); every warm served message is a
-positive hit and constructs nothing. Completed-output page replay is not
-constructed by this driver.
+originals plus 2 unordered synthetic shells); every warm served message
+returned a cache entry on lookup. The hit counter is a proxy: it does not
+distinguish a positive entry from `Some(None)`, so warm positive hits and
+skipped construction are not observed here. Completed-output page replay is
+not constructed by this driver.
 
 ### Timing (A → B, ten independent process pairs)
 
@@ -157,7 +159,9 @@ Reading, at the actual scope of each boundary:
   touches 1.0, so no transform-level change is claimed; the canonicalizer is
   a small share of a pass that also projects, renders, hashes, and builds
   receipts.
-- CPU per sample moves with the elapsed medians in every cell.
+- CPU per sample moves in the same direction as the elapsed median in every
+  cell except `full_constructor` / `one_edited_block/65blocks`, where elapsed
+  falls 229075 to 228789 ns and CPU rises 230601 to 230719 ns.
 
 ### Host latency
 
