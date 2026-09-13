@@ -9,6 +9,7 @@ use std::io;
 use std::path::PathBuf;
 
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use crate::config::HostInit;
 
@@ -595,39 +596,64 @@ impl RequestCtx {
     ) -> impl Future<Output = Result<T, BlockingWorkFailed>> + Send + 'static {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         // Registration precedes the closed check so accepted work holds the drain open.
-        let physical_work = (
-            self.work.host.token(),
-            self.work.request.token(),
-            self.work.route.token(),
-        );
+        let captured = BlockingTaskValue {
+            value: RedactedValue(Some(work)),
+            completion: (
+                self.work.host.token(),
+                self.work.request.token(),
+                self.work.route.token(),
+            ),
+        };
         if self.work.route.is_closed() {
-            crate::panic_boundary::redact_sync(|| drop(work));
+            drop(captured);
             drop(result_tx);
             return blocking_result(result_rx, BlockingWorkFailed::RouteClosing);
         }
-        let join_work = (physical_work.0.clone(), physical_work.2.clone());
+        let join_work = (captured.completion.0.clone(), captured.completion.2.clone());
         let blocking = tokio::task::spawn_blocking(move || {
-            let _physical_work = physical_work;
-            crate::panic_boundary::redact_sync(work)
+            let mut captured = captured;
+            let work = captured
+                .value
+                .0
+                .take()
+                .expect("blocking work is invoked once");
+            let outcome = crate::panic_boundary::redact_sync(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            });
+            BlockingTaskValue {
+                value: RedactedValue(Some(outcome)),
+                completion: captured.completion,
+            }
         });
-        // Physical work retains its tokens even if runtime shutdown drops the join task.
-        // The observer retains its own tokens through result delivery or disposal.
+        // Work and unobserved output retain tokens even if runtime shutdown drops the observer.
         let join_task = self.work.request.track_future(async move {
             let _join_work = join_work;
-            let outcome = blocking.await;
-            crate::panic_boundary::redact_sync(|| {
-                let _ = result_tx.send(BlockingOutcome(Some(outcome)));
-            });
+            if let Ok(mut output) = blocking.await {
+                let outcome = output
+                    .value
+                    .0
+                    .take()
+                    .expect("blocking output is delivered once");
+                crate::panic_boundary::redact_sync(|| {
+                    let _ = result_tx.send(RedactedValue(Some(outcome)));
+                });
+            }
         });
         tokio::spawn(join_task);
         blocking_result(result_rx, BlockingWorkFailed::RuntimeStopped)
     }
 }
 
-#[derive(Debug)]
-struct BlockingOutcome<T>(Option<Result<T, tokio::task::JoinError>>);
+// Field order keeps completion tokens alive while `value` is dropped.
+struct BlockingTaskValue<T> {
+    value: RedactedValue<T>,
+    completion: (TaskTrackerToken, TaskTrackerToken, TaskTrackerToken),
+}
 
-impl<T> Drop for BlockingOutcome<T> {
+#[derive(Debug)]
+struct RedactedValue<T>(Option<T>);
+
+impl<T> Drop for RedactedValue<T> {
     fn drop(&mut self) {
         crate::panic_boundary::drop_redacted(self.0.take());
     }
@@ -635,7 +661,7 @@ impl<T> Drop for BlockingOutcome<T> {
 
 /// Resolves a blocking result from its channel; a channel with no sender reports `unrun`.
 async fn blocking_result<T: Send + 'static>(
-    result_rx: tokio::sync::oneshot::Receiver<BlockingOutcome<T>>,
+    result_rx: tokio::sync::oneshot::Receiver<RedactedValue<std::thread::Result<T>>>,
     unrun: BlockingWorkFailed,
 ) -> Result<T, BlockingWorkFailed> {
     let outcome = match result_rx.await {
@@ -644,12 +670,10 @@ async fn blocking_result<T: Send + 'static>(
     };
     match outcome {
         Ok(value) => Ok(value),
-        Err(join) if join.is_panic() => {
-            // `JoinError` owns the panic payload; drop it under the redaction guard.
-            crate::panic_boundary::redact_sync(|| drop(join));
+        Err(payload) => {
+            crate::panic_boundary::drop_redacted(payload);
             Err(BlockingWorkFailed::Panicked)
         }
-        Err(_) => Err(unrun),
     }
 }
 
@@ -803,7 +827,7 @@ mod tests {
             }
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
-        assert!(tx.send(BlockingOutcome(Some(Ok(PanicsOnDrop)))).is_ok());
+        assert!(tx.send(RedactedValue(Some(Ok(PanicsOnDrop)))).is_ok());
         let future = blocking_result(rx, BlockingWorkFailed::RuntimeStopped);
         let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _future = future;
@@ -888,6 +912,81 @@ mod tests {
             request_still_held && route_still_held,
             "runtime shutdown released fences while the closure was held"
         );
+    }
+
+    #[tokio::test]
+    async fn secondary_runtime_shutdown_keeps_output_disposal_fenced_and_redacted() {
+        struct HeldDrop {
+            started: std::sync::mpsc::Sender<bool>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Drop for HeldDrop {
+            fn drop(&mut self) {
+                self.started
+                    .send(crate::panic_boundary::callback_is_polling())
+                    .unwrap();
+                let _ = self.release.recv();
+            }
+        }
+        for panics in [false, true] {
+            let ctx = request_context();
+            let ledgers = ctx.work.clone();
+            let (release_work, work_gate) = std::sync::mpsc::channel::<()>();
+            let (work_started, running) = std::sync::mpsc::channel();
+            let (drop_started, dropping) = std::sync::mpsc::channel();
+            let (release_drop, drop_gate) = std::sync::mpsc::channel::<()>();
+            let result = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap();
+                let future: std::pin::Pin<
+                    Box<dyn Future<Output = Result<HeldDrop, BlockingWorkFailed>> + Send>,
+                > = {
+                    let _entered = runtime.enter();
+                    Box::pin(ctx.run_blocking(move || {
+                        work_started.send(()).unwrap();
+                        let _ = work_gate.recv();
+                        let value = HeldDrop {
+                            started: drop_started,
+                            release: drop_gate,
+                        };
+                        if panics {
+                            std::panic::panic_any(value);
+                        }
+                        value
+                    }))
+                };
+                running
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                runtime.shutdown_background();
+                future
+            })
+            .join()
+            .unwrap();
+            assert!(matches!(
+                result.await,
+                Err(BlockingWorkFailed::RuntimeStopped)
+            ));
+            ledgers.request.close();
+            ledgers.route.close();
+            ledgers.host.close();
+            drop(release_work);
+            let redacted = dropping
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let fenced = !ledgers.request.is_empty()
+                && !ledgers.route.is_empty()
+                && !ledgers.host.is_empty();
+            drop(release_drop);
+            ledgers.request.wait().await;
+            ledgers.route.wait().await;
+            ledgers.host.wait().await;
+            assert!(
+                fenced && redacted,
+                "unobserved output disposal escaped ownership: fenced={fenced}, redacted={redacted}"
+            );
+        }
     }
 
     #[test]
@@ -983,9 +1082,6 @@ mod tests {
         }
     }
 
-    /// The `JoinError` of panicked blocking work owns the panic payload; the receiver that
-    /// translates it drops that payload under the redaction guard, so a destructor panic in
-    /// the payload is redacted wherever the returned future is awaited.
     #[tokio::test]
     async fn a_blocking_panic_payload_is_dropped_under_the_redaction_guard() {
         let seen_polling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -995,7 +1091,9 @@ mod tests {
 
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         result_tx
-            .send(BlockingOutcome(Some(outcome)))
+            .send(RedactedValue(Some(
+                outcome.map_err(tokio::task::JoinError::into_panic),
+            )))
             .expect("receiver is held");
         let result = blocking_result::<()>(result_rx, BlockingWorkFailed::RuntimeStopped).await;
         assert_eq!(result, Err(BlockingWorkFailed::Panicked));

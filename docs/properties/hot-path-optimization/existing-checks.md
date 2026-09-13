@@ -75,6 +75,7 @@ decoding is a quiet compatibility boundary, not a proven safe omission.
 | [`blocking_work_panic_payload_is_redacted_from_process_stderr`][t-stderr-work] | A child process panicking inside `run_blocking` writes the fixed diagnostic and not the payload to stderr. | unaudited |
 | [Physical-work shutdown ownership][t-host-work] | Held blocking work prevents handler shutdown/drop and successor admission after fatal close; release permits deferred cleanup. | unaudited |
 | [Secondary-runtime shutdown][t-secondary-work] | Stopping the submitting runtime drops the observer, but request and route tokens remain held until physical work is released. | unaudited |
+| [Unobserved task output][t-task-output] | After secondary-runtime shutdown, value and panic-payload destructors retain request, route, and host fences and run under redaction. | unaudited |
 | [Detached cancellation][t-cooperative-work] | A detached closure observes route cancellation after its handler has responded and closes without fatal timeout. | unaudited |
 | [Buffered result disposal][t-buffered-work] | Dropping an unpolled result future disposes of both values and panic payloads under redaction. | unaudited |
 | [Refused capture disposal][t-refused-work] | A closed route refuses invocation and disposes of captures under redaction. | unaudited |
@@ -451,10 +452,11 @@ that no related check exists anywhere in the repository.
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
 [pass-probe]: ../../../crates/daemon/src/lib.rs#L25871
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1494
-[t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L853
+[t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L877
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1464
-[t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L817
-[t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L839
+[t-buffered-work]: ../../../crates/host-runtime/src/handler.rs#L841
+[t-task-output]: ../../../crates/host-runtime/src/handler.rs#L918
+[t-refused-work]: ../../../crates/host-runtime/src/handler.rs#L863
 [t-deadline-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L208
 [t-rejection-work]: ../../../crates/host-runtime/src/runtime/close_tests.rs#L236
 [sort-spill]: ../../../crates/memory-store/src/lib.rs#L16054

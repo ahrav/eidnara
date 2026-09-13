@@ -16,22 +16,23 @@ widens to every pass.
 ## Evidence trail
 
 - The guard is the thread-local `CALLBACK_POLL_DEPTH` at
-  [`panic_boundary.rs:11-13`][pb-tls], initialised to `0`. Only
-  [`redact_sync`][pb-sync] and [`redact`][pb-async] raise it, through
+  [`panic_boundary.rs:11-13`][pb-tls], initialised to `0`.
+  [`redact_sync`][pb-sync], [`redact`][pb-async], and
+  [`drop_redacted`][pb-drop] raise it through
   `CallbackPollGuard::enter` at [`:15-22`][pb-guard].
 - The hook installed at [`:36-50`][pb-hook] reads the depth on the panicking
   thread ([`callback_is_polling`][pb-polling]). Depth non-zero prints
   [`REDACTED_DIAGNOSTIC`][pb-redacted] and nothing else (`:44`); depth zero
   calls `previous(info)` with the full panic info (`:46`). `previous` is
   whatever `take_hook` returned at the single install
-  ([`runtime.rs:602`][install]); the only other `std::panic::set_hook` in the
-  tree is the test at [`tests/dispatch.rs:631-660`][t-panic-child], so in the
+  ([`runtime.rs:605`][install]); the only other `std::panic::set_hook` in the
+  tree is the test at [`tests/dispatch.rs:643-673`][t-panic-child], so in the
   daemon it is the Rust default, which prints the thread name, location, and
   payload text.
-- The host wraps the request handler at [`dispatch.rs:928-934`][wrap]:
+- The host wraps the request handler at [`dispatch.rs:934-940`][wrap]:
   `redact_sync` around `handler.handle(ctx)` and `redact` around the returned
   future, both on the runtime worker that polls the task. A panic there is
-  caught by Tokio as a `JoinError` and mapped at [`:985-989`][terminal] to
+  caught by Tokio as a `JoinError` and mapped at [`:991-995`][terminal] to
   `Terminal::Error { code: "internal_error", message: "handler request task
   failed" }` ([`CODE_INTERNAL_ERROR`][code]).
 - [`kernel_routes::blocking`][blocking] at [`mod.rs:462-468`][blocking] calls
@@ -57,7 +58,7 @@ widens to every pass.
   caller (`:3810`).
 - The evaluation names `routing.rs:591` as a production tenant of the pool.
   That call sits inside `#[cfg(test)] mod tests`
-  ([`routing.rs:458-459`][routing-tests]) and is not production code; the
+  ([`routing.rs:464-465`][routing-tests]) and is not production code; the
   record does not list it.
 - The other production `thread_local!` the boundary crosses is the
   token-cache counter block at [`token_cache.rs:57-76`][tc-local] (W2). The
@@ -112,7 +113,7 @@ inside one closure. No existing daemon check panics on a worker thread.
 The host settles an in-handler panic as `internal_error`; the kernel routes
 settle a worker panic as an `unavailable` response by documented intent.
 
-- Sources examined: [`dispatch.rs:985-989`][terminal],
+- Sources examined: [`dispatch.rs:991-995`][terminal],
   [`mod.rs:462-468`][blocking], [`read.rs:296-322`][read-arms],
   [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3867-3875`][spawn-store-open].
 - Findings: Three distinct mappings exist for a `JoinError` from a worker
@@ -144,9 +145,10 @@ settle a worker panic as an `unavailable` response by documented intent.
 [pb-hook]: ../../../../../crates/host-runtime/src/panic_boundary.rs#L36-L50
 [pb-sync]: ../../../../../crates/host-runtime/src/panic_boundary.rs#L52-L55
 [pb-async]: ../../../../../crates/host-runtime/src/panic_boundary.rs#L60-L72
-[install]: ../../../../../crates/host-runtime/src/runtime.rs#L602
-[wrap]: ../../../../../crates/host-runtime/src/dispatch.rs#L928-L934
-[terminal]: ../../../../../crates/host-runtime/src/dispatch.rs#L985-L989
+[pb-drop]: ../../../../../crates/host-runtime/src/panic_boundary.rs#L82-L96
+[install]: ../../../../../crates/host-runtime/src/runtime.rs#L605
+[wrap]: ../../../../../crates/host-runtime/src/dispatch.rs#L934-L940
+[terminal]: ../../../../../crates/host-runtime/src/dispatch.rs#L991-L995
 [code]: ../../../../../crates/host-runtime/src/control.rs#L17
 [blocking-doc]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L460-L461
 [blocking]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L462-L468
@@ -164,7 +166,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 [spawn-health]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
 [spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3867-L3875
-[routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L458-L459
+[routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L464-L465
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
 [tl-test]: ../../../../../crates/daemon/src/transform.rs#L495-L498
 [t-panic-stderr]: ../../../../../crates/host-runtime/tests/dispatch.rs#L603-L605

@@ -86,7 +86,13 @@ work is refused rather than run outside every join. Registration takes a route
 tracker token before checking whether the fence has closed. An accepted offer
 therefore holds the drain open before submitting its closure. The join itself
 runs in a task of its own. [Completion tokens][work-ledgers] belong to both
-the physical closure and its observer. Request cancellation waits on the
+the physical task's [guarded work/output carrier][work-carrier] and its observer. Worker
+panics are caught inside the redaction scope and remain guarded outcomes.
+If the observer disappears, disposal of the task's unobserved result or panic
+payload finishes before its completion tokens are released. Successful
+handoff transfers the result into a guarded channel value, then releases the
+task's tokens; returned values remain owned by their receiver.
+Request cancellation waits on the
 [`dispatch_request` ledger][ctx-work], route close waits on the route ledger,
 and shutdown waits on the existing host tracker. Dropping the observer during
 secondary-runtime shutdown cannot release the physical closure's tokens.
@@ -164,16 +170,17 @@ hook.
 ### Focused execution, 2026-09-12
 
 `cargo test --locked -p host-runtime --all-features` passed the crate suites,
-including 384 library tests, 28 dispatch tests, and eight doctests. Tests that
+including 400 library tests, 28 dispatch tests, and eight doctests. Tests that
 require external runtimes remain ignored. The close-phase unit tests use paused
 Tokio time and an abort-drop signal; they do not claim to execute real blocking
 threads. Separate integration tests exercise held physical work and instance
 exclusion.
 
-[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L592-L624
-[work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L451-L455
-[failed]: ../../../../crates/host-runtime/src/handler.rs#L460-L468
-[cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L495-L530
+[run-blocking]: ../../../../crates/host-runtime/src/handler.rs#L593-L644
+[work-ledgers]: ../../../../crates/host-runtime/src/handler.rs#L452-L456
+[work-carrier]: ../../../../crates/host-runtime/src/handler.rs#L647-L660
+[failed]: ../../../../crates/host-runtime/src/handler.rs#L461-L469
+[cancel-signal]: ../../../../crates/host-runtime/src/handler.rs#L496-L531
 [redact-sync]: ../../../../crates/host-runtime/src/panic_boundary.rs#L52-L55
 [ctx-work]: ../../../../crates/host-runtime/src/dispatch.rs#L915
 [cancel-join]: ../../../../crates/host-runtime/src/dispatch.rs#L951
