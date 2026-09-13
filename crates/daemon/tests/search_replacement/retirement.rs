@@ -317,7 +317,10 @@ fn a_stale_inspection_copy_of_the_old_database_is_owned_residue_not_a_permanent_
     let mut case = RetirementCase::new(root.path());
     let database = case.old.as_ref().unwrap().projection().path().to_owned();
     drop(case.old.take());
-    let scratch = database.parent().unwrap().join(".inspect-4242-1");
+    let scratch = database.parent().unwrap().join(format!(
+        ".inspect-{}-4242-1",
+        database.file_name().unwrap().to_string_lossy()
+    ));
     std::fs::create_dir(&scratch).unwrap();
     std::fs::copy(&database, scratch.join(database.file_name().unwrap())).unwrap();
     case.retire(root.path(), &mut |_| {}).unwrap();
