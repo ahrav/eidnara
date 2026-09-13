@@ -1,0 +1,467 @@
+{
+  "kind": "typed-wire-resources-measurement-pair/before-leg/v1",
+  "gate": "EG1 decode-projection payoff (docs/properties/typed-wire-decode/resources/evidence-gates.md)",
+  "leg": "before",
+  "source": {
+    "production_revision": "b73ca464",
+    "production_revision_note": "projection-golden before-image commit on branch perf/typed-wire-u2-canonical-block-bytes: production code before canonical_block_bytes; stacked on the canonical-output U0/U1 branches, whose served_json change does not reach flatten_block's serde_json::to_string path",
+    "harness_patch": "harness.patch",
+    "harness_patch_sha256": "a864ac466e36f17e5eaacb8e2d9099d303f82ccb32e876cdfc1b68fb06f5facd",
+    "harness_patch_scope": "crates/daemon/benches/hot_path.rs only: decode group and corpus dump"
+  },
+  "binary": {
+    "path": "target/release/deps/hot_path-ac1ba13b38fc740b",
+    "sha256": "46ebcbdd6f802d3cbe7ca22530b81a55c0d6aef744e4691e3f27ff6f14614295"
+  },
+  "build": {
+    "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "command": "cargo +1.98 bench -p daemon --locked --features bench-internals --bench hot_path --no-run",
+    "profile": "bench (release, opt-level 3)",
+    "features": "bench-internals",
+    "allocator": "System (no recording wrapper)",
+    "locked": true
+  },
+  "host": {
+    "cpu": "ARM Neoverse V1 (implementer 0x41 part 0xd40)",
+    "nproc": 32,
+    "kernel": "Linux 6.12.103-127.188.amzn2023.aarch64",
+    "os": "linux aarch64"
+  },
+  "corpus": {
+    "decode-200msgs_2KiB_mixed.json": {
+      "sha256": "f45d91797f9f97807a06e4466fd4d09bbfb03a0edbd4394cc9590375fb07e8d1",
+      "bytes": 372397,
+      "messages": 200,
+      "blocks": 200,
+      "blocks_by_kind": {
+        "text": 100,
+        "tool_call": 50,
+        "tool_result": 50
+      },
+      "roles": {
+        "user": 50,
+        "assistant": 100,
+        "tool": 50
+      },
+      "payload_bytes": 321416
+    },
+    "decode-40msgs_2KiB_mixed.json": {
+      "sha256": "928e93739612f0033db4fe6d68afda1ebe458383a2b75b6257f6e3e2320b2acf",
+      "bytes": 75628,
+      "messages": 40,
+      "blocks": 40,
+      "blocks_by_kind": {
+        "text": 20,
+        "tool_call": 10,
+        "tool_result": 10
+      },
+      "roles": {
+        "user": 10,
+        "assistant": 20,
+        "tool": 10
+      },
+      "payload_bytes": 64292
+    }
+  },
+  "operation": {
+    "typed_request": "serde_json::from_slice::<TransformRequest>(&body); the decoded request is dropped outside the timed interval (Criterion iter_with_large_drop)",
+    "typed_request_plus_projection": "serde_json::from_slice::<TransformRequest>(&body) then wire::project_messages(&request.messages); request and projection both stay live to the end of the interval and are dropped outside it",
+    "excluded": "transport, probing, admission (decode_metered), store work, response encoding",
+    "warmup": "Criterion default 3 s per cell",
+    "measurement": "Criterion default 5 s per cell, 100 samples, linear iteration schedule",
+    "order_within_process": "typed_request/40, plus_projection/40, typed_request/200, plus_projection/200 (Criterion registration order)",
+    "estimators": "Criterion's console `time:` line is the slope estimator under linear sampling; estimates.json also holds mean, median, MAD, and std_dev. The predeclared rule uses the mean; slopes are retained for cross-checking."
+  },
+  "replication": {
+    "processes": 5,
+    "assignment": "before leg only; each run is a fresh process of the same binary",
+    "after_leg": "to be collected by the U1 ticket with the same harness patch applied to its final tree, alternating before/after process order AB,BA,AB,BA,AB across five pairs"
+  },
+  "predeclared_rule": {
+    "noise_floor": "per cell, the relative spread of the five before-leg process means (max-min over median), recorded below",
+    "proceed": "for every one of the four cells, in at least four of five process pairs the after-leg mean is below the before-leg mean by more than twice that cell's before-leg noise floor, and the median per-pair after/before mean ratio is below 1.0 minus twice the noise floor",
+    "within_noise": "any cell whose median per-pair ratio falls inside 1.0 plus or minus twice its noise floor: stop for the whole plan per P:L18",
+    "regression": "any cell whose median per-pair ratio exceeds 1.0 plus twice its noise floor: not a faster claim; report",
+    "uncertainty": "Criterion bootstrap 95% confidence interval of the mean per process, plus the process-level spread; iterations are never pooled across processes"
+  },
+  "cells": {
+    "decode/typed_request/40msgs_2KiB_mixed": {
+      "runs": [
+        {
+          "run": 1,
+          "mean_ns": 223750.00084440433,
+          "mean_ci95_ns": [
+            223131.28494329326,
+            224452.1629247177
+          ],
+          "median_ns": 223581.51112877583,
+          "std_dev_ns": 3450.3256223586764,
+          "samples": 100,
+          "per_iteration_min_ns": 219531.75,
+          "per_iteration_max_ns": 243317.0,
+          "slope_ns": 224444.41459139943,
+          "slope_ci95_ns": [
+            224040.7712065366,
+            224841.13579043414
+          ]
+        },
+        {
+          "run": 2,
+          "mean_ns": 223641.73449227717,
+          "mean_ci95_ns": [
+            222908.8567655798,
+            224514.75227773938
+          ],
+          "median_ns": 222679.2380577803,
+          "std_dev_ns": 4149.959541698717,
+          "samples": 100,
+          "per_iteration_min_ns": 219190.89705882352,
+          "per_iteration_max_ns": 250583.0,
+          "slope_ns": 224558.69379045366,
+          "slope_ci95_ns": [
+            223881.7877741595,
+            225189.9952025927
+          ]
+        },
+        {
+          "run": 3,
+          "mean_ns": 222576.7750346871,
+          "mean_ci95_ns": [
+            221809.93707498081,
+            223529.51038490378
+          ],
+          "median_ns": 221992.79737183647,
+          "std_dev_ns": 4435.351219798674,
+          "samples": 100,
+          "per_iteration_min_ns": 218314.44318181818,
+          "per_iteration_max_ns": 255600.25,
+          "slope_ns": 222799.52701935865,
+          "slope_ci95_ns": [
+            222318.66521519778,
+            223290.18993250545
+          ]
+        },
+        {
+          "run": 4,
+          "mean_ns": 223291.17174263138,
+          "mean_ci95_ns": [
+            222445.50100535844,
+            224373.13580827357
+          ],
+          "median_ns": 222252.641723356,
+          "std_dev_ns": 5018.441068871895,
+          "samples": 100,
+          "per_iteration_min_ns": 218717.37962962964,
+          "per_iteration_max_ns": 261682.75,
+          "slope_ns": 223580.93871878233,
+          "slope_ci95_ns": [
+            223075.70324824363,
+            224069.30377142655
+          ]
+        },
+        {
+          "run": 5,
+          "mean_ns": 223165.0529784551,
+          "mean_ci95_ns": [
+            222509.69251199963,
+            224007.68741663345
+          ],
+          "median_ns": 223013.70208177046,
+          "std_dev_ns": 3796.642607748434,
+          "samples": 100,
+          "per_iteration_min_ns": 218719.3046875,
+          "per_iteration_max_ns": 249719.5,
+          "slope_ns": 223253.84780700458,
+          "slope_ci95_ns": [
+            222923.61157290707,
+            223592.50878833418
+          ]
+        }
+      ],
+      "process_mean_median_ns": 223291.17174263138,
+      "process_mean_min_ns": 222576.7750346871,
+      "process_mean_max_ns": 223750.00084440433,
+      "process_mean_relative_spread": 0.005254241807058578
+    },
+    "decode/typed_request/200msgs_2KiB_mixed": {
+      "runs": [
+        {
+          "run": 1,
+          "mean_ns": 1274578.9103434205,
+          "mean_ci95_ns": [
+            1262854.6999836997,
+            1286351.8955240864
+          ],
+          "median_ns": 1283804.0213585435,
+          "std_dev_ns": 60036.86168159171,
+          "samples": 100,
+          "per_iteration_min_ns": 1174151.75,
+          "per_iteration_max_ns": 1411041.0,
+          "slope_ns": 1317659.9092625978,
+          "slope_ci95_ns": [
+            1309908.5278777522,
+            1324038.4383463117
+          ]
+        },
+        {
+          "run": 2,
+          "mean_ns": 1312726.436817862,
+          "mean_ci95_ns": [
+            1301285.195198965,
+            1324255.4946328825
+          ],
+          "median_ns": 1327816.6607142857,
+          "std_dev_ns": 59059.060019681136,
+          "samples": 100,
+          "per_iteration_min_ns": 1191463.0,
+          "per_iteration_max_ns": 1451516.0,
+          "slope_ns": 1344253.1134594355,
+          "slope_ci95_ns": [
+            1337803.4442949798,
+            1349539.2631316239
+          ]
+        },
+        {
+          "run": 3,
+          "mean_ns": 1281775.8175044206,
+          "mean_ci95_ns": [
+            1270082.1142547475,
+            1293016.125971537
+          ],
+          "median_ns": 1294694.1875,
+          "std_dev_ns": 58464.01704389277,
+          "samples": 100,
+          "per_iteration_min_ns": 1182767.25,
+          "per_iteration_max_ns": 1420424.0,
+          "slope_ns": 1317074.1357351854,
+          "slope_ci95_ns": [
+            1308432.725669706,
+            1324044.9489061343
+          ]
+        },
+        {
+          "run": 4,
+          "mean_ns": 1264350.3872936969,
+          "mean_ci95_ns": [
+            1252586.273562831,
+            1276023.98406474
+          ],
+          "median_ns": 1252619.7364718616,
+          "std_dev_ns": 60281.37082303471,
+          "samples": 100,
+          "per_iteration_min_ns": 1179811.0526315789,
+          "per_iteration_max_ns": 1438562.0,
+          "slope_ns": 1308337.2166395744,
+          "slope_ci95_ns": [
+            1298743.6074528554,
+            1316237.778111507
+          ]
+        },
+        {
+          "run": 5,
+          "mean_ns": 1280939.4238465382,
+          "mean_ci95_ns": [
+            1269351.752541479,
+            1292495.3540598785
+          ],
+          "median_ns": 1293502.5337519622,
+          "std_dev_ns": 59404.686398024205,
+          "samples": 100,
+          "per_iteration_min_ns": 1188763.7916666667,
+          "per_iteration_max_ns": 1450138.0,
+          "slope_ns": 1321479.7752534358,
+          "slope_ci95_ns": [
+            1313701.9669158158,
+            1328022.9722774469
+          ]
+        }
+      ],
+      "process_mean_median_ns": 1280939.4238465382,
+      "process_mean_min_ns": 1264350.3872936969,
+      "process_mean_max_ns": 1312726.436817862,
+      "process_mean_relative_spread": 0.03776607123145339
+    },
+    "decode/typed_request_plus_projection/40msgs_2KiB_mixed": {
+      "runs": [
+        {
+          "run": 1,
+          "mean_ns": 687275.5375735783,
+          "mean_ci95_ns": [
+            683726.1306172818,
+            690866.2085819204
+          ],
+          "median_ns": 693250.5957142857,
+          "std_dev_ns": 18360.074373077772,
+          "samples": 100,
+          "per_iteration_min_ns": 659121.7962962963,
+          "per_iteration_max_ns": 756256.5,
+          "slope_ns": 697658.050608837,
+          "slope_ci95_ns": [
+            695043.4609653708,
+            699857.6346231723
+          ]
+        },
+        {
+          "run": 2,
+          "mean_ns": 689111.1926080256,
+          "mean_ci95_ns": [
+            685720.7454856902,
+            692603.9649005006
+          ],
+          "median_ns": 692694.7303921569,
+          "std_dev_ns": 17649.56284652961,
+          "samples": 100,
+          "per_iteration_min_ns": 661900.6875,
+          "per_iteration_max_ns": 766474.0,
+          "slope_ns": 698453.5013329393,
+          "slope_ci95_ns": [
+            696093.2014021676,
+            700418.7431907789
+          ]
+        },
+        {
+          "run": 3,
+          "mean_ns": 679842.2588127671,
+          "mean_ci95_ns": [
+            676321.3482383486,
+            683641.5688041667
+          ],
+          "median_ns": 675079.7346311475,
+          "std_dev_ns": 18788.861068379338,
+          "samples": 100,
+          "per_iteration_min_ns": 656089.9,
+          "per_iteration_max_ns": 766134.5,
+          "slope_ns": 688672.5735998227,
+          "slope_ci95_ns": [
+            685742.4077236847,
+            691125.8082032684
+          ]
+        },
+        {
+          "run": 4,
+          "mean_ns": 677961.2850959435,
+          "mean_ci95_ns": [
+            674306.7716598909,
+            681789.5642797506
+          ],
+          "median_ns": 678074.6615159402,
+          "std_dev_ns": 19041.326411326932,
+          "samples": 100,
+          "per_iteration_min_ns": 652795.0333333333,
+          "per_iteration_max_ns": 750825.0,
+          "slope_ns": 689075.8555608098,
+          "slope_ci95_ns": [
+            686148.5356846468,
+            691542.5935250336
+          ]
+        },
+        {
+          "run": 5,
+          "mean_ns": 692542.4615669133,
+          "mean_ci95_ns": [
+            676957.8142751879,
+            720810.9424840565
+          ],
+          "median_ns": 677685.6475563911,
+          "std_dev_ns": 132628.78884574605,
+          "samples": 100,
+          "per_iteration_min_ns": 657376.5,
+          "per_iteration_max_ns": 1995619.6666666667,
+          "slope_ns": 688729.3874597311,
+          "slope_ci95_ns": [
+            685818.5848318093,
+            691194.7915855799
+          ]
+        }
+      ],
+      "process_mean_median_ns": 687275.5375735783,
+      "process_mean_min_ns": 677961.2850959435,
+      "process_mean_max_ns": 692542.4615669133,
+      "process_mean_relative_spread": 0.021215910757494075
+    },
+    "decode/typed_request_plus_projection/200msgs_2KiB_mixed": {
+      "runs": [
+        {
+          "run": 1,
+          "mean_ns": 3358276.078333333,
+          "mean_ci95_ns": [
+            3335880.800020832,
+            3391826.0426041665
+          ],
+          "median_ns": 3339731.7916666665,
+          "std_dev_ns": 149646.44521919277,
+          "samples": 100,
+          "per_iteration_min_ns": 3257535.8333333335,
+          "per_iteration_max_ns": 4716721.5,
+          "slope_ns": null,
+          "slope_ci95_ns": null
+        },
+        {
+          "run": 2,
+          "mean_ns": 3356888.6749999984,
+          "mean_ci95_ns": [
+            3345183.908333334,
+            3368853.974166665
+          ],
+          "median_ns": 3343922.166666667,
+          "std_dev_ns": 60892.946176678204,
+          "samples": 100,
+          "per_iteration_min_ns": 3260522.9166666665,
+          "per_iteration_max_ns": 3537837.75,
+          "slope_ns": null,
+          "slope_ci95_ns": null
+        },
+        {
+          "run": 3,
+          "mean_ns": 3323641.615833335,
+          "mean_ci95_ns": [
+            3314145.8308333335,
+            3333767.2141666673
+          ],
+          "median_ns": 3307032.0,
+          "std_dev_ns": 50373.356839355016,
+          "samples": 100,
+          "per_iteration_min_ns": 3252990.9166666665,
+          "per_iteration_max_ns": 3457955.9166666665,
+          "slope_ns": null,
+          "slope_ci95_ns": null
+        },
+        {
+          "run": 4,
+          "mean_ns": 3281020.924166667,
+          "mean_ci95_ns": [
+            3272185.5225,
+            3290584.4883333333
+          ],
+          "median_ns": 3266075.5,
+          "std_dev_ns": 47569.16611269026,
+          "samples": 100,
+          "per_iteration_min_ns": 3226223.0,
+          "per_iteration_max_ns": 3472028.6666666665,
+          "slope_ns": null,
+          "slope_ci95_ns": null
+        },
+        {
+          "run": 5,
+          "mean_ns": 3326626.065833335,
+          "mean_ci95_ns": [
+            3316783.170500001,
+            3337040.142500001
+          ],
+          "median_ns": 3310480.916666667,
+          "std_dev_ns": 51739.40767733012,
+          "samples": 100,
+          "per_iteration_min_ns": 3261038.25,
+          "per_iteration_max_ns": 3476840.75,
+          "slope_ns": null,
+          "slope_ci95_ns": null
+        }
+      ],
+      "process_mean_median_ns": 3326626.065833335,
+      "process_mean_min_ns": 3281020.924166667,
+      "process_mean_max_ns": 3358276.078333333,
+      "process_mean_relative_spread": 0.023223275666636598
+    }
+  }
+}

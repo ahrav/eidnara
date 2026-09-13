@@ -10,7 +10,10 @@ its instrumentation validity rules do not create a second evidence gate.
 
 ## EG1: decode-projection payoff
 
-Status: required; execution pending.
+Status: required; before leg collected in
+[`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md)
+at production revision `b73ca464` with the retained harness patch; after leg
+and verdict pending the typed-wire U1 ticket.
 
 Origin: P:L18, P:L57, and P:L213. The record
 [`decode-projection-payoff-has-comparable-evidence`](catalog.md#decode-projection-payoff-has-comparable-evidence)
