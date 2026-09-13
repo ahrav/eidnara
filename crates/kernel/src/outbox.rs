@@ -520,17 +520,37 @@ impl KernelStore {
         &self,
         consumer_id: &str,
     ) -> Result<Option<i64>, KernelError> {
+        self.outbox_consumer_checkpoint_inner(&crate::open::AcquireLimit::default(), consumer_id)
+    }
+
+    /// Budget exhaustion returns `KernelError::Deadline` rather than reporting an absent consumer.
+    pub fn outbox_consumer_checkpoint_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        consumer_id: &str,
+    ) -> Result<Option<i64>, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.outbox_consumer_checkpoint_inner(&limit, consumer_id))
+    }
+
+    fn outbox_consumer_checkpoint_inner(
+        &self,
+        limit: &crate::open::AcquireLimit,
+        consumer_id: &str,
+    ) -> Result<Option<i64>, KernelError> {
         let consumer_id = consumer_identity(consumer_id)?;
-        let reader = self.lock_reader()?;
+        let reader = self.reader_with_limit(limit)?;
         // One statement is its own snapshot, so no transaction brackets it.
-        reader
+        let checkpoint = reader
             .query_row(
                 "SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1",
                 [&consumer_id],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(map_sqlite)
+            .map_err(map_sqlite)?;
+        limit.check()?;
+        Ok(checkpoint)
     }
 
     /// Advances a registered consumer checkpoint monotonically.

@@ -1023,7 +1023,7 @@ pub(crate) fn release_capture_pin_in_tx(
              WHERE capture_pin_id=?2 AND released_at IS NULL",
             params![released_at, capture_pin_id],
         )
-        .map_err(|_| KernelError::Io)?;
+        .map_err(super::map_sqlite)?;
     if changed != 1 {
         return Ok(false);
     }
@@ -1033,7 +1033,7 @@ pub(crate) fn release_capture_pin_in_tx(
          WHERE capture_pin_id=?1 AND released_at IS NULL",
         [capture_pin_id],
     )
-    .map_err(|_| KernelError::Io)?;
+    .map_err(super::map_sqlite)?;
     Ok(true)
 }
 

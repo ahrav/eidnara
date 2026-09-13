@@ -10,6 +10,12 @@ use crate::durable_fs::open_regular_nofollow;
 use crate::{KernelStore, Sensitivity};
 
 impl KernelStore {
+    #[cfg(feature = "test-support")]
+    pub fn verified_object_reads_for_test(&self) -> usize {
+        self.verified_object_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Reads and verifies an artifact referenced by live evidence.
     ///
     /// The metadata snapshot must contain the exact evidence and digest pair, and no purge tombstone may exist. Object reads reject links and non-regular files, enforce the object size cap, and verify the SHA-256 digest before returning bytes.
@@ -61,6 +67,9 @@ impl KernelStore {
     /// `CorruptObject`. The caller has already validated `digest` and decided
     /// whether the reference is live.
     pub(crate) fn read_verified_object(&self, digest: &str) -> Result<Vec<u8>, ArtifactError> {
+        #[cfg(feature = "test-support")]
+        self.verified_object_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let missing = || ArtifactError::for_digest(ArtifactErrorKind::MissingObject, digest);
         let corrupt = || ArtifactError::for_digest(ArtifactErrorKind::CorruptObject, digest);
         let shard = self

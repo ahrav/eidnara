@@ -12,6 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use kernel::applicability::EvalBudget;
 use kernel::{
     ArtifactDeletionFault, ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
     ArtifactGcFault, KernelError, MAX_ACTIVE_SOURCE_HOLDS_PER_CONSUMER,
@@ -534,9 +535,14 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
     let mut seen_at_admission = Vec::new();
     let hold = fixture
         .store
-        .capture_source_hold_with_hook_for_test(&fixture.binding(), exact, |refs| {
-            seen_at_admission.push(refs);
-        })
+        .capture_source_hold_with_hook_for_test(
+            &EvalBudget::unbounded(),
+            &fixture.binding(),
+            exact,
+            |refs| {
+                seen_at_admission.push(refs);
+            },
+        )
         .unwrap();
     assert_eq!(
         seen_at_admission,
@@ -562,9 +568,14 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
         let mut seen = Vec::new();
         let error = fixture
             .store
-            .capture_source_hold_with_hook_for_test(&fixture.binding(), tight, |refs| {
-                seen.push(refs);
-            })
+            .capture_source_hold_with_hook_for_test(
+                &EvalBudget::unbounded(),
+                &fixture.binding(),
+                tight,
+                |refs| {
+                    seen.push(refs);
+                },
+            )
             .unwrap_err();
         assert_eq!(
             error,
@@ -596,6 +607,7 @@ fn admission_precedes_reference_materialization_and_refusal_leaves_no_partial_ho
             let mut reached_reference_admission = false;
             assert_eq!(
                 fixture.store.capture_source_hold_with_hook_for_test(
+                    &EvalBudget::unbounded(),
                     &fixture.binding(),
                     SourceHoldBounds {
                         max_descriptor_rows: NonZeroUsize::new(max_descriptor_rows).unwrap(),
@@ -634,6 +646,7 @@ fn capture_expiring_during_admission_rolls_back_pin_and_references() {
     let lifetime_ms = 20;
     let mut seen_at_admission = false;
     let result = fixture.store.capture_source_hold_with_hook_for_test(
+        &EvalBudget::unbounded(),
         &fixture.binding(),
         bounds(lifetime_ms),
         |refs| {
@@ -710,6 +723,7 @@ fn extension_expiring_during_admission_preserves_hold_and_checkpoint() {
     let through = fixture.store.tip().unwrap();
     let mut seen_at_admission = false;
     let result = fixture.store.extend_source_hold_with_hook_for_test(
+        &EvalBudget::unbounded(),
         &binding,
         &hold.hold_id,
         through,
@@ -781,6 +795,7 @@ fn a_disappearing_object_is_missing_rather_than_an_io_failure() {
     assert!(fixture.object_present(&digest));
     assert_eq!(
         fixture.store.source_hold_status_with_hook_for_test(
+            &EvalBudget::unbounded(),
             &binding,
             &hold.hold_id,
             hold.captured_at,
@@ -888,6 +903,7 @@ fn capture_work_is_bounded_independently_of_shared_evidence() {
         let tip = fixture.store.tip().unwrap();
         let mut reached_reference_admission = false;
         let result = fixture.store.capture_source_hold_with_hook_for_test(
+            &EvalBudget::unbounded(),
             &binding,
             SourceHoldBounds {
                 max_descriptor_rows: NonZeroUsize::new(7).unwrap(),
@@ -956,6 +972,7 @@ fn hold_status_expires_while_verifying_objects() {
     let hold = fixture.store.capture_source_hold(&binding, wide()).unwrap();
     assert_eq!(
         fixture.store.source_hold_status_with_hook_for_test(
+            &EvalBudget::unbounded(),
             &binding,
             &hold.hold_id,
             hold.expires_at - 1,
@@ -992,6 +1009,7 @@ fn hold_status_requires_revalidation_after_extension() {
             let path = fixture.object_path(&fixture.ledger[&added].digest);
             let mut extended = hold.clone();
             let result = fixture.store.source_hold_status_with_hook_for_test(
+                &EvalBudget::unbounded(),
                 &binding,
                 &hold.hold_id,
                 hold.captured_at,
@@ -1062,6 +1080,7 @@ fn hold_status_requires_revalidation_after_restore_replaces_equal_count_refs() {
     let original_refs = fixture.pin_refs(&hold.hold_id);
     assert_eq!(hold.references, 1);
     let result = store.source_hold_status_with_hook_for_test(
+        &EvalBudget::unbounded(),
         &binding,
         &hold.hold_id,
         hold.captured_at,
@@ -1115,6 +1134,7 @@ fn hold_status_observes_invalidation_during_object_verification() {
             SourceHoldInvalidity::Released
         };
         let result = fixture.store.source_hold_status_with_hook_for_test(
+            &EvalBudget::unbounded(),
             &binding,
             &hold.hold_id,
             hold.captured_at,
@@ -2267,6 +2287,7 @@ fn extension_is_bounded_idempotent_and_gates_acknowledgement() {
     let error = fixture
         .store
         .extend_source_hold_with_hook_for_test(
+            &EvalBudget::unbounded(),
             &binding,
             &hold.hold_id,
             through,
@@ -2346,6 +2367,7 @@ fn extension_is_bounded_idempotent_and_gates_acknowledgement() {
     for replay_extension in [false, true] {
         let mut snapshot_hooks = 0;
         let status = fixture.store.source_hold_status_with_hook_for_test(
+            &EvalBudget::unbounded(),
             &binding,
             &hold.hold_id,
             hold.captured_at,
