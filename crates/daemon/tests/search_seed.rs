@@ -729,7 +729,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 12] = [
+    let cases: [(&str, &str, SeedRefusal); 13] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -789,6 +789,12 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
             "UPDATE occurrence_vectors SET vector=zeroblob(16),vector_dimension=4",
             SeedRefusal::VectorContract(1),
         ),
+        // A schema that lost a baseline object still passes `integrity_check`, but `SearchProjection::open` refuses it; the certifier applies the same baseline classification.
+        (
+            "dropped baseline index",
+            "DROP INDEX idx_occurrences_payload",
+            SeedRefusal::Baseline(String::new()),
+        ),
         (
             "orphan vector",
             "PRAGMA foreign_keys=OFF; INSERT INTO occurrence_vectors(occurrence_id,generation_id,vector,vector_dimension,input_bytes,input_tokens,completed_at) VALUES('ghost','gen-1',zeroblob(32),8,1,1,1)",
@@ -801,14 +807,18 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let verification = verify_closed(&path, &fixture.expected, u64::MAX, &unbounded());
         let staged = stage(&reopen_seed(), &store, &tx, dir.path(), &BTreeSet::new());
         assert_eq!(staged.unwrap_err(), SeedRefusal::BytesChanged, "{name}");
-        if refusal == SeedRefusal::BytesChanged {
-            assert_ne!(
+        match &refusal {
+            SeedRefusal::BytesChanged => assert_ne!(
                 verification.unwrap(),
                 reopen_seed().verification().clone(),
                 "{name}"
-            );
-        } else {
-            assert_eq!(verification.unwrap_err(), refusal, "{name}");
+            ),
+            // The baseline refusal carries the store's description of the difference.
+            SeedRefusal::Baseline(_) => assert!(
+                matches!(verification, Err(SeedRefusal::Baseline(_))),
+                "{name}: {verification:?}"
+            ),
+            _ => assert_eq!(verification.unwrap_err(), refusal, "{name}"),
         }
         assert_eq!(
             store.read_current().unwrap(),

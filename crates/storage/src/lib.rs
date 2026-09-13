@@ -2041,6 +2041,20 @@ mod sqlite_backend {
         pub sql: Option<String>,
     }
 
+    /// Checks that `conn`'s database presents exactly the identity [`open_sqlite`] requires for `consumer`: the store's application and user versions, the format marker of this baseline, and the full schema inventory. Reads only, so a closed file can be judged on an immutable connection before a store reopens it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Baseline`] naming the difference, including for a pristine (empty) database, and [`StoreError::Backend`] when a read fails.
+    pub fn verify_baseline(conn: &Connection, consumer: &str) -> Result<(), StoreError> {
+        match ExpectedIdentity::for_baseline(consumer)?.classify(conn)? {
+            FileState::Baseline => Ok(()),
+            FileState::Pristine => Err(StoreError::Baseline(
+                "the database is pristine; the baseline was never applied".into(),
+            )),
+        }
+    }
+
     /// `sqlite_schema` of `conn`'s main database in a fixed order.
     pub fn schema_inventory(conn: &Connection) -> Result<Vec<SchemaObject>, StoreError> {
         let mut statement = conn
@@ -2787,7 +2801,7 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    delete_sqlite_family, immutable_uri, open_sqlite, schema_inventory,
+    delete_sqlite_family, immutable_uri, open_sqlite, schema_inventory, verify_baseline,
 };
 
 #[cfg(all(test, feature = "sqlite"))]

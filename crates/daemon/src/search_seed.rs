@@ -17,7 +17,7 @@ use rusqlite::{Connection, OpenFlags};
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use storage::{StoreError, immutable_uri};
+use storage::{StoreError, immutable_uri, verify_baseline};
 
 use crate::projection_gates::{EntryPoint, HookGate, ProjectionHook};
 use crate::search_projection::{
@@ -71,6 +71,9 @@ pub enum SeedRefusal {
     AdmittedWork(u64),
     #[error("integrity check reported: {0}")]
     Integrity(String),
+    /// The file does not present the projection's storage baseline, so [`SearchProjection::open`] would refuse it.
+    #[error("the file does not present the projection baseline: {0}")]
+    Baseline(String),
     #[error("{0} foreign-key violations")]
     ForeignKeys(u64),
     #[error("the projection identity row is missing or corrupt")]
@@ -401,7 +404,7 @@ fn closed_bytes(path: &Path, max_bytes: u64, ended: &Ended) -> Result<(u64, Stri
     Ok((bytes, file_sha256(path, ended)?))
 }
 
-/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, every completed job with its vector, and every vector of its generation's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
+/// Verifies a closed database file on its own connection: no sidecar, `integrity_check` ok, the projection's storage baseline, no foreign-key violations, the identity `expected`, exactly one live generation of that identity, a checkpoint row, no work admitted to a worker, every completed job with its vector, and every vector of its generation's dimension. Returns the report with the file's digest. The hash and every statement poll `budget`, so cancellation or the deadline ends verification instead of holding the closed file.
 ///
 /// # Errors
 ///
@@ -453,6 +456,14 @@ fn verify_closed_until(
     if integrity != "ok" {
         return Err(SeedRefusal::Integrity(integrity));
     }
+    // The same classification `SearchProjection::open` runs through `open_sqlite`, so a certified file is one the projection reopens.
+    verify_baseline(&conn, retrieval::BASELINE).map_err(|error| {
+        if ended() {
+            SeedRefusal::Cancelled
+        } else {
+            SeedRefusal::Baseline(error.to_string())
+        }
+    })?;
     // Each row is checked: an interrupted scan yields an error row, which is the cancellation, not a violation.
     let violations: u64 = conn
         .prepare("PRAGMA foreign_key_check")
@@ -469,8 +480,18 @@ fn verify_closed_until(
         return Err(SeedRefusal::ForeignKeys(violations));
     }
     // The projection's own readers define the identity and checkpoint rows, so the certifier and the writer read them by one rule.
+    // A statement the handler interrupted is the cancellation, not a corrupt control row.
+    let interrupted = |refusal: SeedRefusal| {
+        move |_| {
+            if ended() {
+                SeedRefusal::Cancelled
+            } else {
+                refusal.clone()
+            }
+        }
+    };
     let identity = retrieval::read_identity(&conn)
-        .map_err(|_| SeedRefusal::Identity)?
+        .map_err(interrupted(SeedRefusal::Identity))?
         .ok_or(SeedRefusal::Identity)?;
     if identity != *expected {
         return Err(SeedRefusal::IdentityMismatch);
@@ -503,7 +524,7 @@ fn verify_closed_until(
     }
     let (generation_id, generation_state) = live.remove(0);
     let checkpoint = retrieval::batch::read_checkpoint(&conn, &identity.kernel_incarnation_id)
-        .map_err(|_| SeedRefusal::Checkpoint)?
+        .map_err(interrupted(SeedRefusal::Checkpoint))?
         .ok_or(SeedRefusal::Checkpoint)?;
     // The schema admits a NULL hold, read back as empty; `apply_batch` refuses an empty hold, so no batch could extend that checkpoint.
     if checkpoint.hold_id.is_empty() {
@@ -545,6 +566,10 @@ fn verify_closed_until(
     }
     let vectors = count("SELECT count(*) FROM occurrence_vectors")?;
     drop(conn);
+    // The handler runs every thousand VM steps, so a short final statement may finish without a poll; the certificate is issued only if nothing ended meanwhile.
+    if ended() {
+        return Err(SeedRefusal::Cancelled);
+    }
     Ok(SeedVerification {
         schema: REPORT_SCHEMA,
         schema_version: identity.schema_version,
