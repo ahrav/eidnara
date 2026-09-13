@@ -1,0 +1,515 @@
+[
+  {
+    "mid": "sys_0",
+    "ordinal": 1,
+    "ck": {
+      "role": "system",
+      "content": [
+        {
+          "kind": {
+            "type": "text",
+            "text": "You are a helpful assistant."
+          }
+        }
+      ],
+      "meta": {
+        "harness_id": "sys_0",
+        "ordinal": 1,
+        "synthetic": false,
+        "summary": false,
+        "errored": false
+      }
+    }
+  },
+  {
+    "mid": "usr_1",
+    "ordinal": 2,
+    "ck": {
+      "role": "user",
+      "content": [
+        {
+          "kind": {
+            "type": "text",
+            "text": "Look at these files: café → 😀 \"quoted\" \\ back\nslash"
+          },
+          "provider_extras": {
+            "opencode": {
+              "metadata": {
+                "source": "editor"
+              },
+              "cache_control": {
+                "type": "ephemeral"
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "media",
+            "kind": "file",
+            "media_type": "text/plain",
+            "filename": "notes.txt",
+            "source": {
+              "type": "data_base64",
+              "data": "aGVsbG8="
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "media",
+            "kind": "image",
+            "media_type": "image/png",
+            "source": {
+              "type": "url",
+              "url": "https://example.invalid/pic.png"
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "media",
+            "kind": "document",
+            "media_type": "application/pdf",
+            "filename": "spec.pdf",
+            "source": {
+              "type": "opaque",
+              "raw": {
+                "type": "file",
+                "mime": "application/pdf",
+                "filename": "spec.pdf"
+              }
+            }
+          }
+        }
+      ],
+      "meta": {
+        "harness_id": "usr_1",
+        "ordinal": 2,
+        "synthetic": false,
+        "summary": false,
+        "errored": false
+      }
+    }
+  },
+  {
+    "mid": "asst_2",
+    "ordinal": 3,
+    "ck": {
+      "role": "assistant",
+      "content": [
+        {
+          "kind": {
+            "type": "reasoning",
+            "text": "let me think",
+            "signature": "sig-abc"
+          }
+        },
+        {
+          "kind": {
+            "type": "reasoning",
+            "text": "unsigned thought"
+          }
+        },
+        {
+          "kind": {
+            "type": "redacted_reasoning",
+            "data": "encrypted-blob"
+          }
+        },
+        {
+          "kind": {
+            "type": "text",
+            "text": "calling tools"
+          },
+          "provider_extras": {
+            "opencode": {
+              "metadata": {
+                "providerExecuted": false
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_call",
+            "id": "call_read",
+            "name": "read",
+            "input": {
+              "filePath": "/tmp/a.txt",
+              "offset": 0
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_call",
+            "id": "call_web",
+            "name": "websearch",
+            "input": {
+              "query": "eidnara"
+            },
+            "provider_executed": true
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_call",
+            "id": "call_edit",
+            "name": "edit",
+            "input": {
+              "filePath": "/tmp/a.txt",
+              "oldString": "a",
+              "newString": "b"
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_call",
+            "id": "call_bash",
+            "name": "bash",
+            "input": {
+              "command": "ls",
+              "description": "list"
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_call",
+            "id": "call_err",
+            "name": "grep",
+            "input": {
+              "pattern": "x"
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_call",
+            "id": "call_json",
+            "name": "todowrite",
+            "input": {
+              "todos": [
+                {
+                  "content": "a",
+                  "status": "pending",
+                  "priority": "high"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_result",
+            "id": "call_read",
+            "tool_name": "read",
+            "output": {
+              "kind": {
+                "type": "text",
+                "text": "file body"
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_result",
+            "id": "call_web",
+            "tool_name": "websearch",
+            "output": {
+              "kind": {
+                "type": "text",
+                "text": "results"
+              }
+            },
+            "provider_executed": true
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_result",
+            "id": "call_edit",
+            "tool_name": "edit",
+            "output": {
+              "kind": {
+                "type": "content",
+                "blocks": [
+                  {
+                    "kind": {
+                      "type": "text",
+                      "text": "edited"
+                    }
+                  },
+                  {
+                    "kind": {
+                      "type": "media",
+                      "media": {
+                        "kind": "image",
+                        "media_type": "image/png",
+                        "filename": "shot.png",
+                        "source": {
+                          "type": "data_base64",
+                          "data": "iVBOR"
+                        }
+                      }
+                    },
+                    "provider_extras": {
+                      "opencode": {
+                        "rawAttachment": {
+                          "type": "image",
+                          "mime": "image/png",
+                          "filename": "shot.png",
+                          "data": "iVBOR"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": {
+                      "type": "opaque",
+                      "opaque": {
+                        "source": {
+                          "type": "harness",
+                          "harness": "opencode"
+                        },
+                        "kind": "attachment",
+                        "raw": {
+                          "type": "attachment",
+                          "note": "x"
+                        }
+                      }
+                    },
+                    "provider_extras": {
+                      "opencode": {
+                        "rawAttachment": {
+                          "type": "attachment",
+                          "note": "x"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_result",
+            "id": "call_bash",
+            "tool_name": "bash",
+            "output": {
+              "kind": {
+                "type": "error_content",
+                "blocks": [
+                  {
+                    "kind": {
+                      "type": "text",
+                      "text": "exit 1"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_result",
+            "id": "call_err",
+            "tool_name": "grep",
+            "output": {
+              "kind": {
+                "type": "error_text",
+                "text": "no matches"
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "tool_result",
+            "id": "call_json",
+            "tool_name": "todowrite",
+            "output": {
+              "kind": {
+                "type": "text",
+                "text": ""
+              }
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "opaque",
+            "source": {
+              "type": "harness",
+              "harness": "opencode"
+            },
+            "kind": "step-start",
+            "raw": {
+              "type": "step-start",
+              "id": "step_1"
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "opaque",
+            "source": {
+              "type": "harness",
+              "harness": "opencode"
+            },
+            "kind": "permission-request",
+            "raw": {
+              "type": "permission-request",
+              "approvalId": "appr_1",
+              "id": "perm_1"
+            },
+            "arc": {
+              "kind": "Approval",
+              "id": "appr_1",
+              "role": "Request"
+            }
+          }
+        },
+        {
+          "kind": {
+            "type": "opaque",
+            "source": {
+              "type": "harness",
+              "harness": "opencode"
+            },
+            "kind": "permission-response",
+            "raw": {
+              "type": "permission-response",
+              "approvalId": "appr_1"
+            },
+            "arc": {
+              "kind": "Approval",
+              "id": "appr_1",
+              "role": "Response"
+            }
+          }
+        }
+      ],
+      "origin": {
+        "api": "anthropic",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4"
+      },
+      "meta": {
+        "harness_id": "asst_2",
+        "ordinal": 3,
+        "synthetic": false,
+        "summary": false,
+        "errored": false,
+        "finish": "tool-calls",
+        "created_at_ms": 1700000000000
+      }
+    }
+  },
+  {
+    "mid": "asst_3",
+    "ordinal": 4,
+    "ck": {
+      "role": "assistant",
+      "content": [
+        {
+          "kind": {
+            "type": "text",
+            "text": "Done."
+          }
+        }
+      ],
+      "origin": {
+        "api": "anthropic",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4"
+      },
+      "meta": {
+        "harness_id": "asst_3",
+        "ordinal": 4,
+        "synthetic": false,
+        "summary": false,
+        "errored": false,
+        "finish": "stop",
+        "created_at_ms": 1700000001000
+      }
+    }
+  },
+  {
+    "mid": "summ_4",
+    "ordinal": 5,
+    "ck": {
+      "role": "user",
+      "content": [
+        {
+          "kind": {
+            "type": "text",
+            "text": "Summary of the earlier conversation."
+          }
+        }
+      ],
+      "meta": {
+        "harness_id": "summ_4",
+        "ordinal": 5,
+        "synthetic": false,
+        "summary": true,
+        "errored": false
+      }
+    }
+  },
+  {
+    "mid": "err_5",
+    "ordinal": 6,
+    "ck": {
+      "role": "assistant",
+      "content": [
+        {
+          "kind": {
+            "type": "text",
+            "text": ""
+          }
+        }
+      ],
+      "origin": {
+        "api": "openai",
+        "provider": "openai",
+        "model": "gpt-5"
+      },
+      "meta": {
+        "harness_id": "err_5",
+        "ordinal": 6,
+        "synthetic": false,
+        "summary": false,
+        "errored": true
+      }
+    }
+  },
+  {
+    "mid": "synth_6",
+    "ordinal": 7,
+    "ck": {
+      "role": "user",
+      "content": [
+        {
+          "kind": {
+            "type": "text",
+            "text": "[todo marker]"
+          }
+        }
+      ],
+      "meta": {
+        "harness_id": "synth_6",
+        "ordinal": 7,
+        "synthetic": true,
+        "summary": false,
+        "errored": false
+      }
+    }
+  }
+]

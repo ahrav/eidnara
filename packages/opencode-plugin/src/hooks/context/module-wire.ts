@@ -435,6 +435,7 @@ export async function resolveOrdinalsForModule(args: {
     memo: ModuleOrdinalMemo;
     /** Absolute ordinal immediately before a sliced unresolved tail. */
     provisionalBase?: number;
+    assertSourceUnchanged?: () => void;
 }): Promise<
     | {
           ok: true;
@@ -497,6 +498,7 @@ export async function resolveOrdinalsForModule(args: {
     anchor = scan.anchor;
     storedCount = scan.storedCount;
 
+    args.assertSourceUnchanged?.();
     const normalizations: ModuleNormalizationRecord[] = [];
     const visibleIndexes: number[] = [];
     const visibleMessages = args.messages.filter((message, index) => {
