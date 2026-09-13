@@ -136,7 +136,8 @@ adds the flag and stable duplicate-key permutation check.
 Impact: False negatives threaten B1 bytes; false positives defeat plan R1's
 no-B allocation requirement while potentially preserving every byte.
 Open questions:
-- The changed result and pre-sort descriptors need private test observation.
+- The permutation test observes the flag and emitted bytes; descriptor
+  contents are not inspected directly.
 
 ### served-order-decision-visits-every-object
 
@@ -169,9 +170,7 @@ The loop, object recording, and typed child field order are verified at HEAD.
 Existing check: [Nested and counted literals](existing-checks.md#canonicalizer-and-guards)
 are unaudited; no aggregate-flag assertion was found.
 Impact: B1 ordering can fail even when the first object's local flag is correct.
-Open questions:
-- Add the smallest late-disorder witness that rejects short-circuiting without
-  introducing a parallel loop or observation framework.
+Open questions: None.
 
 ### served-unchanged-span-copy-is-identity
 
@@ -198,12 +197,12 @@ of real encode after optimization; do not duplicate serializer setup, add a
 production hook, or require a general geometry validator.
 Confidence: high - [Evidence](evidence/served-unchanged-span-copy-is-identity.md).
 Formatter boundaries and recursive compact-punctuation reasoning are verified;
-the direct observation is missing.
+`unchanged_span_copy_is_identity` is the direct observation.
 Existing check: [Formatter guards and byte fixtures](existing-checks.md#canonicalizer-and-guards)
-are unaudited; no direct unchanged-table identity check was found.
+are unaudited; the [U1 landing](existing-checks.md#u1-copy-elision-landing)
+adds the direct unchanged-table identity check.
 Impact: A correct no-change flag alone would not justify omitting the copier.
-Open questions:
-- Retain the actual tables for a scoped private test without a second encode.
+Open questions: None.
 
 ### served-serialization-is-single-pass-and-error-terminal
 
@@ -234,8 +233,7 @@ Existing check: [Counted success and source guard](existing-checks.md)
 are unaudited; no failing-prefix/finalization probe was found.
 Impact: A second traversal can observe stateful input twice; finalizing partial
 tables can panic or replace the original error with partial output.
-Open questions:
-- Add a private finalization observation that also detects erroneous early return.
+Open questions: None.
 
 ### served-canonical-return-retains-a-without-b
 
@@ -265,22 +263,14 @@ and small span/key metadata, including ordered escaped keys. Construct fixtures
 and reference bytes outside thread-owned, nonallocating recording. Follow the
 explicit libtest and nextest isolation commands in [the evidence](evidence/served-canonical-return-retains-a-without-b.md).
 Confidence: high - [Evidence](evidence/served-canonical-return-retains-a-without-b.md).
-The B site and later Arc boundary are verified; no allocation saving is claimed.
+The A return and early Arc boundary are verified; the paired record measures
+the saving.
 Existing check: [Allocation slope](existing-checks.md#allocation-and-measurement)
-is unaudited; no absolute B/lifetime/copy oracle was found.
+is unaudited; the U0 harness and [U1 landing](existing-checks.md#u1-copy-elision-landing)
+add the return-buffer provenance oracle and paired ledgers.
 Impact: Plan R1 can fail while every B1 byte assertion passes. Longer-lived A
 slack can also raise full-constructor peak memory despite local savings.
-Open questions:
-- Implement isolated recording without counting harness allocations.
-- U0 must establish and verify the full-constructor observer in an isolated,
-  filtered in-crate test using the existing private constructor. Search/reuse
-  allocator fixtures first; the integration facade covers only canonicalization.
-  No public wrapper or production hook is needed. If compatible test-only
-  observation is unavailable, stop U0 for seam approval rather than weaken the
-  peak gate. The feasible route is not executed proof.
-- Measure A through receipt construction, hashing, and Arc conversion; investigate
-  increased constructor peak residency before landing. B1 preserves final Arc
-  payload length/bytes; unchanged retained accounting is not a global RSS bound.
+Open questions: None.
 
 ### served-output-cache-hit-skips-construction
 
@@ -447,7 +437,7 @@ Deliverables: [existing checks](existing-checks.md), [fault map](fault-map.md),
 independent analyst evaluation `ses_f675203e4ffevgEH7CseOxb6jK` is complete:
 accepted with no blockers. All eight findings are dispositioned in the
 evaluation report. The U0 baseline measurement has run on the unchanged
-canonicalizer; candidate observations remain unrun.
+canonicalizer and the U1 paired record compares candidate `8a1fb166` to it.
 Semantics distribution: six `always`, one `always-or-unreached`, two
 `sometimes`; no `reachable`, `unreachable`, or liveness records.
 
@@ -465,16 +455,16 @@ Semantics distribution: six `always`, one `always-or-unreached`, two
 [t4]: ../hot-path-optimization/latency-audit/catalog.md#direct-frame-outlives-its-handler-before-publication
 [w1]: ../hot-path-optimization/latency-audit/catalog.md#optimized-stage-is-measured-at-production-shape
 [w2]: ../hot-path-optimization/latency-audit/catalog.md#stage-timing-fields-keep-their-boundaries
-[encode]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L121-L142
-[sort]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L144-L164
-[spans]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L24-L81
-[copy]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L84-L109
-[constructor]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L144-L224
+[encode]: https://github.com/ahrav/eidnara/blob/68a4bc4378105a567aa409f6fafdd0f1070811aa/crates/daemon/src/served_json.rs#L133-L174
+[sort]: https://github.com/ahrav/eidnara/blob/68a4bc4378105a567aa409f6fafdd0f1070811aa/crates/daemon/src/served_json.rs#L176-L211
+[spans]: https://github.com/ahrav/eidnara/blob/68a4bc4378105a567aa409f6fafdd0f1070811aa/crates/daemon/src/served_json.rs#L24-L82
+[copy]: https://github.com/ahrav/eidnara/blob/68a4bc4378105a567aa409f6fafdd0f1070811aa/crates/daemon/src/served_json.rs#L84-L109
+[constructor]: https://github.com/ahrav/eidnara/blob/68a4bc4378105a567aa409f6fafdd0f1070811aa/crates/daemon/src/transform.rs#L144-L228
 [caller]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L8492-L8499
 [config]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/config.rs#L116-L125
 [serde-feature]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/Cargo.toml#L47
 [serde-lock]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/Cargo.lock#L2828-L2839
-[cache]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L10392-L10432
+[cache]: https://github.com/ahrav/eidnara/blob/68a4bc4378105a567aa409f6fafdd0f1070811aa/crates/daemon/src/transform.rs#L10410-L10450
 [replay]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/lib.rs#L9680-L9701
 [message]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L99-L162
 [meta]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/memory-store/src/lib.rs#L73-L123
