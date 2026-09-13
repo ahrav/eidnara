@@ -379,3 +379,27 @@ fn saved_sqlite_busy_timeout_can_expire_before_a_live_caller_budget() {
         5
     );
 }
+
+#[test]
+fn interrupted_capture_pin_release_reports_deadline_and_keeps_writer_usable() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    let budget = EvalBudget::unbounded();
+    let limit = budget.acquire_limit();
+    let mut writer = store.writer_with_limit(&limit).unwrap();
+    let tx = writer.transaction(TransactionBehavior::Immediate).unwrap();
+    // Fire on the first VDBE step so the UPDATE itself is what observes cancellation.
+    tx.progress_handler(1, Some(|| true)).unwrap();
+    assert_eq!(
+        crate::backup::release_capture_pin_in_tx(&tx, "missing-pin", 1),
+        Err(KernelError::Deadline)
+    );
+    drop(tx);
+    assert_eq!(
+        writer
+            .query_row("SELECT count(*) FROM capture_pins", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
