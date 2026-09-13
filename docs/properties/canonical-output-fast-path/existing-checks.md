@@ -135,18 +135,19 @@ transform driver is not retained; host latency remains unmeasured.
 
 ### U1 copy-elision landing
 
-Plan U1 lands at candidate `8a1fb166` with the checks below. The
-[paired record](evidence/u1-copy-elision-paired-measurement.md) retains the
-ten-pair AB/BA comparison against the harness tip `2a415271`, whose
-allocation ledgers equal the `c1dafa76` baseline record.
+Plan U1 lands at candidate `8a1fb166` with the checks below; the two rows
+strengthened after the paired run cite `68a4bc43`, the revision that ran
+them. The [paired record](evidence/u1-copy-elision-paired-measurement.md)
+retains the ten-pair AB/BA comparison against the harness tip `2a415271`,
+whose allocation ledgers equal the `c1dafa76` baseline record.
 
 | Check | What it observes | Status | Execution evidence |
 | --- | --- | --- | --- |
-| `served_json::tests::every_key_permutation_reports_change_exactly_when_disordered` | Six permutations of six key triples, two with equal keys; flag equals disorder; bytes equal the stable-sorted reference. | unaudited | passes at `8a1fb166` |
+| `served_json::tests::every_key_permutation_reports_change_exactly_when_disordered` | Six permutations of six key triples, two with equal keys; flag equals disorder; bytes equal the stable-sorted reference. | unaudited | passes at `68a4bc43` |
 | `served_json::tests::aggregate_order_decision_visits_every_object` | Late, last-object, root-only, and fully ordered documents. | unaudited | passes |
 | `served_json::tests::unchanged_span_copy_is_identity` | Copier over unsorted tables reproduces whole buffer, object ranges, and field ranges. | unaudited | passes |
 | `served_json::tests::canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not` | Pointer, length, capacity identity for A; fresh exact buffer for B; one finalization each. | unaudited | passes |
-| `served_json::tests::serialization_error_returns_before_finalization` | Errors before writing and inside an open nested object; no finalization. | unaudited | passes |
+| `served_json::tests::serialization_error_returns_before_finalization` | Errors before writing and inside an open nested object; no finalization. | unaudited | passes at `68a4bc43` |
 | `transform::tests::positive_output_cache_hit_reuses_owned_artifacts_without_constructing` | Positive hit never calls the constructor closure and returns pointer-equal Arcs; four miss shapes construct. | unaudited | passes |
 | `canonical_miss_return_buffer_provenance_is_classified` | Retained populations now expect the growth chain; typed and edited still expect B; always-copy build fails. | unaudited | passes; negative control run |
 
