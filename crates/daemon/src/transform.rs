@@ -14558,16 +14558,30 @@ pub(crate) mod tests {
         );
     }
 
+    /// The corpus mirrors every block shape `module-wire.ts` emits: each `BlockKind`
+    /// and `OutputKind` variant, tool flags absent and `true`, media with and without
+    /// `filename`, opaque with and without `arc`, reasoning with and without
+    /// `signature`, and every `meta` flag combination. Regenerate with
+    /// `EIDNARA_REGEN_PROJECTION_GOLDEN=1`; a diff on any entry is an identity change
+    /// that must be reviewed, not accepted by rerunning.
     #[test]
     fn wire_golden_projects_to_flat_blocks() {
-        let ck: Vec<WireMessage> =
-            serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
-        let projection = project_messages(
-            &ingress_from_ck(ck)
-                .into_iter()
-                .collect::<wire::IngressMessages>(),
-        )
-        .unwrap();
+        let messages: Vec<wire::IngressMessage> =
+            serde_json::from_str(include_str!("../testdata/ingress-projection-corpus.json"))
+                .unwrap();
+        for message in &messages {
+            assert!(
+                message.ck.original().is_some(),
+                "{}: corpus entries decode as retained plugin ingress",
+                message.mid
+            );
+        }
+        let projection =
+            project_messages(&messages.into_iter().collect::<wire::IngressMessages>()).unwrap();
+        for block in &projection.blocks {
+            let digest: [u8; 32] = Sha256::digest(block.bytes.as_bytes()).into();
+            assert_eq!(block.content_hash, digest, "{}", block.id);
+        }
         let actual = serde_json::to_value(&projection.blocks).unwrap();
         if std::env::var_os("EIDNARA_REGEN_PROJECTION_GOLDEN").is_some() {
             std::fs::write(
