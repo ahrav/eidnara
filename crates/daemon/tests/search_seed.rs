@@ -729,7 +729,7 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         let _ = fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     };
-    let cases: [(&str, &str, SeedRefusal); 13] = [
+    let cases: [(&str, &str, SeedRefusal); 14] = [
         (
             "corrupt identity",
             "UPDATE projection_identity SET embedding_model='other'",
@@ -793,6 +793,12 @@ async fn corrupt_identity_missing_work_or_truncated_bytes_fail_without_selecting
         (
             "dropped baseline index",
             "DROP INDEX idx_occurrences_payload",
+            SeedRefusal::Baseline(String::new()),
+        ),
+        // `open_sqlite` requires the fence row after the schema check; a seed without one would stage but never reopen.
+        (
+            "missing fence row",
+            "DELETE FROM fence",
             SeedRefusal::Baseline(String::new()),
         ),
         (

@@ -2041,14 +2041,16 @@ mod sqlite_backend {
         pub sql: Option<String>,
     }
 
-    /// Checks that `conn`'s database presents exactly the identity [`open_sqlite`] requires for `consumer`: the store's application and user versions, the format marker of this baseline, and the full schema inventory. Reads only, so a closed file can be judged on an immutable connection before a store reopens it.
+    /// Checks that `conn`'s database presents exactly what [`open_sqlite`] requires of a file for `consumer`: the store's application and user versions, the format marker of this baseline, the full schema inventory, and the fence row the epoch floor is read from. Reads only, so a closed file can be judged on an immutable connection before a store reopens it.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Baseline`] naming the difference, including for a pristine (empty) database, and [`StoreError::Backend`] when a read fails.
+    /// Returns [`StoreError::Baseline`] naming the difference, including for a pristine (empty) database, [`StoreError::FenceMissing`] when the schema is right but the fence row is absent, and [`StoreError::Backend`] when a read fails.
     pub fn verify_baseline(conn: &Connection, consumer: &str) -> Result<(), StoreError> {
         match ExpectedIdentity::for_baseline(consumer)?.classify(conn)? {
-            FileState::Baseline => Ok(()),
+            FileState::Baseline => read_fence_epoch_in(conn)?
+                .map(|_| ())
+                .ok_or(StoreError::FenceMissing),
             FileState::Pristine => Err(StoreError::Baseline(
                 "the database is pristine; the baseline was never applied".into(),
             )),
