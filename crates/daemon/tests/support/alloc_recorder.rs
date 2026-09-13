@@ -10,7 +10,7 @@
 //! Exactly one thread records inside a window; the live and peak counters are
 //! updated by the owner thread only.
 //!
-//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
+//! Included by `#[path]` from `tests/served_json_shell_allocations.rs` and
 //! `examples/canonical_output_evidence.rs`. Each binary that observes allocations
 //! declares the global allocator itself:
 //!

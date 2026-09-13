@@ -6,9 +6,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use daemon::metered_decode::{ResidentMeter, ResidentReserve, decode_metered, footprint_of};
+use daemon::metered_decode::{
+    ResidentMeter, ResidentReserve, count_only_reserve, decode_metered, footprint_of,
+};
 
-/// A reserve with room for anything; the test reads what the meter counted, not what it held.
+use daemon::transform::TransformRequest;
+
+/// A reserve with room for anything; the tests read what the meter counted, not what it held.
 struct Unmetered;
 
 impl ResidentReserve for Unmetered {
@@ -20,7 +24,8 @@ impl ResidentReserve for Unmetered {
         usize::MAX
     }
 }
-use daemon::transform::TransformRequest;
+
+const UNMETERED: Unmetered = Unmetered;
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -147,7 +152,7 @@ fn parse_charge_covers_dense_native_typed_decode_peak() {
             ignored.extend_from_slice(b",0");
         }
         ignored.extend_from_slice(b"]}");
-        let meter = ResidentMeter::new(&Unmetered);
+        let meter = ResidentMeter::new(&UNMETERED);
         let base = reset_peak();
         let request: TransformRequest = decode_metered(&ignored, &meter).expect("metered decode");
         let metered_peak = peak_since(base);
@@ -332,22 +337,6 @@ fn a_held_pool_refuses_before_the_lane_probe_unescapes_a_long_key() {
     );
 }
 
-/// A reserve that grants everything up to a stated capacity; the meter's permanent refusal
-/// comes from the capacity alone.
-struct Capped {
-    capacity: usize,
-}
-
-impl ResidentReserve for Capped {
-    fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
-        Some(host_runtime::wire::ByteCharge::none())
-    }
-
-    fn capacity(&self) -> usize {
-        self.capacity
-    }
-}
-
 /// The production tree lane: the metered `Value` parse, then the consuming typed conversion.
 /// The peak is read across both steps, with the tree and the request live at the handoff.
 fn tree_lane_peak(body: &[u8], meter: &ResidentMeter<'_>) -> (TransformRequest, usize) {
@@ -370,7 +359,7 @@ fn parse_charge_covers_text_heavy_peaks_on_both_lanes() {
     for (text_bytes, escaped) in [(1usize << 22, true), (1 << 22, false), (1 << 16, true)] {
         let body = text_body(text_bytes, escaped);
         for lane in [direct_lane_peak, tree_lane_peak] {
-            let meter = ResidentMeter::new(&Unmetered);
+            let meter = ResidentMeter::new(&UNMETERED);
             meter
                 .reserve_unescape_scratch(&body)
                 .expect("the scratch charge is granted");
@@ -387,15 +376,15 @@ fn parse_charge_covers_text_heavy_peaks_on_both_lanes() {
     }
 }
 
-/// A body whose typed decode fails at a duplicate key inside its last message, after a text
-/// block of `text_bytes`, so the direct lane falls back to the tree from the same bytes.
-fn late_duplicate_body(text_bytes: usize, escaped: bool) -> Vec<u8> {
-    let mut body = text_body(text_bytes, escaped);
+/// A body whose typed decode fails at a duplicate key inside its last message, after a 4 MiB
+/// text block, so the direct lane falls back to the tree from the same bytes.
+fn late_duplicate_body(escaped: bool) -> Vec<u8> {
+    let mut body = text_body(1 << 22, escaped);
     let tail = br#"]}"#;
     assert!(body.ends_with(tail));
     body.truncate(body.len() - tail.len());
     body.extend_from_slice(
-        br#",{"mid":"dup","mid":"dup","ordinal":1,"ck":{"role":"user","content":[]}}]}"#,
+        br#",{"mid":"dup-first","mid":"dup-last","ordinal":1,"ck":{"role":"user","content":[]}}]}"#,
     );
     body
 }
@@ -404,14 +393,14 @@ fn late_duplicate_body(text_bytes: usize, escaped: bool) -> Vec<u8> {
 fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
     let _serial = measure();
     for escaped in [false, true] {
-        let body = late_duplicate_body(1 << 22, escaped);
+        let body = late_duplicate_body(escaped);
         assert!(
             serde_json::from_slice::<TransformRequest>(&body).is_err(),
             "the typed decode refuses the duplicate key"
         );
-        let meter = ResidentMeter::new(&Unmetered);
+        let meter = ResidentMeter::new(&UNMETERED);
         let base = reset_peak();
-        let walked = daemon::direct_lane_admission_for_test(&body, &Unmetered)
+        let walked = daemon::direct_lane_admission_for_test(&body, &UNMETERED)
             .expect("the walk is admitted");
         assert!(walked, "the tree walk accepts the duplicate key");
         meter
@@ -428,6 +417,10 @@ fn parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback() {
         let request: TransformRequest = serde_json::from_value(tree).expect("typed conversion");
         let peak = peak_since(base);
         assert_eq!(request.messages.len(), 2);
+        assert_eq!(
+            request.messages[1].mid, "dup-last",
+            "the tree fallback keeps the last value of the duplicate key"
+        );
         drop(request);
         let largest_needed = footprint_of(&body).max(typed_needed).max(meter.needed());
         assert!(
@@ -459,15 +452,15 @@ fn payload_heavy_body(block_count: usize) -> Vec<u8> {
     body
 }
 
-/// The direct lane owns every payload `Value` once and fits its charge.
-/// The tree lane builds each small object as a `BTreeMap` leaf node of eleven slots before conversion, which the per-value node charge does not cover; that gap is container storage and is independent of the string coefficient.
-/// `docs/properties/typed-wire-decode/resources/evidence/decode-footprint-covers-both-lanes-combined-peak.md` retains the measured tree-lane overshoot.
+/// The tree lane builds each small object as a `BTreeMap` leaf node of eleven slots before conversion, which the per-value node charge does not cover; that gap is container storage, independent of the string coefficient, and `TREE_LANE_CONTAINER_SLACK_DENOMINATOR` pins its measured size so it cannot widen unnoticed.
+const TREE_LANE_CONTAINER_SLACK_DENOMINATOR: usize = 3;
+
 #[test]
-fn parse_charge_covers_payload_heavy_direct_decode_peak() {
+fn parse_charge_covers_payload_heavy_direct_decode_peak_and_pins_the_tree_lane_gap() {
     let _serial = measure();
     for block_count in [64usize, 4096] {
         let body = payload_heavy_body(block_count);
-        let meter = ResidentMeter::new(&Unmetered);
+        let meter = ResidentMeter::new(&UNMETERED);
         meter
             .reserve_unescape_scratch(&body)
             .expect("the scratch charge is granted");
@@ -479,16 +472,20 @@ fn parse_charge_covers_payload_heavy_direct_decode_peak() {
             "{block_count} payload blocks peaked at {peak} bytes but the direct lane charged only {}",
             meter.needed()
         );
-        let tree_meter = ResidentMeter::new(&Unmetered);
+        let tree_meter = ResidentMeter::new(&UNMETERED);
         tree_meter
             .reserve_unescape_scratch(&body)
             .expect("the scratch charge is granted");
         let (request, tree_peak) = tree_lane_peak(&body, &tree_meter);
         drop(request);
-        eprintln!(
-            "payload-heavy tree lane: {block_count} blocks, {} body bytes, peak {tree_peak}, charged {}",
-            body.len(),
-            tree_meter.needed()
+        let charged = tree_meter.needed();
+        assert!(
+            tree_peak > charged,
+            "{block_count} payload blocks: the tree lane peaked at {tree_peak} bytes within its charge of {charged}; the container gap closed and this pin can be removed"
+        );
+        assert!(
+            tree_peak <= charged + charged / TREE_LANE_CONTAINER_SLACK_DENOMINATOR,
+            "{block_count} payload blocks: the tree lane peaked at {tree_peak} bytes against a charge of {charged}, above the pinned container gap"
         );
     }
 }
@@ -496,12 +493,11 @@ fn parse_charge_covers_payload_heavy_direct_decode_peak() {
 /// The text-heavy admission ceiling under one numeric capacity.
 /// An unescaped text block is charged once, so the largest admissible body approaches the capacity itself.
 /// One escape charges the unescape scratch buffer at twice the block, so that ceiling is a third of the capacity.
-/// With three string copies per byte the same pool admitted a third and a fifth of the capacity respectively.
 #[test]
 fn text_heavy_admission_ceiling_witnesses() {
     let _serial = measure();
     const CAPACITY: usize = 8 << 20;
-    let reserve = Capped { capacity: CAPACITY };
+    let reserve = count_only_reserve(CAPACITY);
     let margin = 64 * 1024;
     for (text_bytes, escaped, admitted) in [
         (CAPACITY - margin, false, true),
@@ -519,15 +515,22 @@ fn text_heavy_admission_ceiling_witnesses() {
         );
         assert_eq!(footprint_of(&body) <= CAPACITY, admitted);
         if admitted {
-            for lane in [direct_lane_peak, tree_lane_peak] {
-                let meter = ResidentMeter::new(&reserve);
-                meter
-                    .reserve_unescape_scratch(&body)
-                    .expect("the scratch charge is granted");
-                let (request, peak) = lane(&body, &meter);
-                drop(request);
-                assert!(peak <= meter.needed() && meter.needed() <= CAPACITY);
-            }
+            let meter = ResidentMeter::new(&reserve);
+            meter
+                .reserve_unescape_scratch(&body)
+                .expect("the scratch charge is granted");
+            let (request, peak) = direct_lane_peak(&body, &meter);
+            drop(request);
+            assert!(
+                meter.needed() <= CAPACITY,
+                "{text_bytes} text bytes (escaped: {escaped}) charged {} against {CAPACITY}",
+                meter.needed()
+            );
+            assert!(
+                peak <= meter.needed(),
+                "{text_bytes} text bytes (escaped: {escaped}) peaked at {peak} bytes against a charge of {}",
+                meter.needed()
+            );
         } else {
             assert!(matches!(
                 outcome,

@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use alloc_recorder::{BufferProvenance, Event, Ledger, record_window};
 use memory_store::WireMessage;
 use served_output_fixtures::{
-    BLOCK_COUNTS, KEYS_PER_ASCII_BLOCK, declaration_order_equals_canonical, populations,
-    reference_bytes,
+    BLOCK_COUNTS, KEYS_PER_ASCII_BLOCK, Population, declaration_order_equals_canonical,
+    populations, reference_bytes,
 };
 
 #[global_allocator]
@@ -28,7 +28,7 @@ fn canonicalize_recorded(message: &WireMessage) -> (Vec<u8>, Ledger) {
 }
 
 /// A cap below the per-block key count rejects one allocation per decoded key.
-const MAX_EVENTS_PER_BLOCK: usize = KEYS_PER_ASCII_BLOCK - 4;
+const MAX_EVENTS_PER_BLOCK: usize = 8;
 const _: () = assert!(MAX_EVENTS_PER_BLOCK < KEYS_PER_ASCII_BLOCK);
 const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
 
@@ -57,16 +57,20 @@ fn decoded_shell_canonicalization_allocates_independently_of_key_count() {
 /// Every owned typed shell serializes `role` before `content` and each block's tag before its payload, so the canonicalizer takes the reorder-copy path for all of them.
 #[test]
 fn every_population_takes_the_reorder_copy_path() {
-    for population in populations() {
+    let populations: Vec<_> = populations().collect();
+    let messages: Vec<WireMessage> = populations.iter().map(Population::build).collect();
+    let references: Vec<Vec<u8>> = messages.iter().map(reference_bytes).collect();
+    assert!(
+        messages
+            .iter()
+            .zip(&references)
+            .all(|(message, reference)| !declaration_order_equals_canonical(message, reference)),
+        "an owned typed shell never serializes in canonical order"
+    );
+    for ((population, message), reference) in populations.iter().zip(&messages).zip(&references) {
         let label = population.label();
-        let message = population.build();
-        let reference = reference_bytes(&message);
-        assert!(
-            !declaration_order_equals_canonical(&message, &reference),
-            "{label}: an owned typed shell never serializes in canonical order"
-        );
-        let (bytes, ledger) = canonicalize_recorded(&message);
-        assert_eq!(bytes, reference, "{label}");
+        let (bytes, ledger) = canonicalize_recorded(message);
+        assert_eq!(&bytes, reference, "{label}");
         assert!(!ledger.overflow, "{label}: ledger overflow");
         let ptr = bytes.as_ptr() as usize;
         assert_eq!(
@@ -107,7 +111,7 @@ fn every_population_takes_the_reorder_copy_path() {
 }
 
 /// Bytes of the per-block receipt strings the no-projection constructor serializes.
-fn message_receipt_bytes(population: &served_output_fixtures::Population) -> usize {
+fn message_receipt_bytes(population: &Population) -> usize {
     population
         .build()
         .content()

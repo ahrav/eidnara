@@ -73,31 +73,38 @@ fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressM
         .collect()
 }
 
+/// The frozen request bodies of the typed-wire decode evidence, so every run of the `decode`
+/// group times the same bytes.
+const DECODE_CORPUS: [(usize, &[u8]); 2] = [
+    (
+        40,
+        include_bytes!(
+            "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-40msgs_2KiB_mixed.json"
+        ),
+    ),
+    (
+        200,
+        include_bytes!(
+            "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-200msgs_2KiB_mixed.json"
+        ),
+    ),
+];
+
 /// Typed request decode from the wire bytes a transform body carries, alone and
-/// followed by projection. The body is built once; each iteration decodes fresh.
-/// `EIDNARA_DECODE_CORPUS` names a directory of frozen bodies to decode instead of generated bodies, so comparison legs decode identical bytes.
+/// followed by projection. Each iteration decodes the frozen body afresh.
 fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode");
-    for &count in &[40usize, 200] {
-        let file_name = format!("decode-{count}msgs_2KiB_mixed.json");
-        let body = match std::env::var_os("EIDNARA_DECODE_CORPUS") {
-            Some(dir) => std::fs::read(std::path::Path::new(&dir).join(&file_name))
-                .expect("read the frozen decode corpus"),
-            None => {
-                let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
-                serde_json::to_vec(&request("bench-decode", &messages, false))
-                    .expect("bench request serializes")
-            }
-        };
-        // The evidence manifest needs the exact bytes each cell decodes.
+    for (count, body) in DECODE_CORPUS {
+        // The evidence manifest checks the bytes each cell decoded against the corpus digests.
         if let Some(dir) = std::env::var_os("EIDNARA_DUMP_DECODE_CORPUS") {
-            let path = std::path::Path::new(&dir).join(&file_name);
-            std::fs::write(&path, &body).expect("write decode corpus");
+            let path =
+                std::path::Path::new(&dir).join(format!("decode-{count}msgs_2KiB_mixed.json"));
+            std::fs::write(&path, body).expect("write decode corpus");
         }
         group.throughput(criterion::Throughput::Bytes(body.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("typed_request", format!("{count}msgs_2KiB_mixed")),
-            &body,
+            body,
             |b, body| {
                 b.iter_with_large_drop(|| {
                     serde_json::from_slice::<TransformRequest>(black_box(body)).expect("decode")
@@ -109,7 +116,7 @@ fn bench_decode(c: &mut Criterion) {
                 "typed_request_plus_projection",
                 format!("{count}msgs_2KiB_mixed"),
             ),
-            &body,
+            body,
             |b, body| {
                 b.iter_with_large_drop(|| {
                     let request = serde_json::from_slice::<TransformRequest>(black_box(body))
@@ -127,20 +134,6 @@ fn bench_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("projection/full");
     for &count in MESSAGE_COUNTS {
         let messages = ingress_messages(ContentClass::Mixed, count, 2_048);
-        let projection = project_messages(&messages).expect("projection");
-        assert!(
-            projection
-                .blocks
-                .iter()
-                .all(|block| messages.iter().any(|message| {
-                    std::ptr::eq(
-                        block.wire.as_ref(),
-                        &message.ck.content()[block.block_index],
-                    )
-                })),
-            "canonical bench shells must be shared into the projection, not copied"
-        );
-        drop(projection);
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{count}msgs_2KiB_mixed")),
             &messages,

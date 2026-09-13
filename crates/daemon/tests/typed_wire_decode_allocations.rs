@@ -37,42 +37,15 @@ const PEAK_MULTIPLE: usize = 3;
 const DECLARED_SCRATCH_POOL: usize =
     (MIN_RESIDENT_BYTES - 2 * MAX_BODY_LEN as u64 - HEADER_LEN as u64) as usize;
 
-/// Finds the first `"messages":` occurrence and returns its balanced JSON array slice, ignoring brackets inside strings.
+/// The exact source bytes of the request's `messages` array.
 fn messages_array_bytes(body: &[u8]) -> &[u8] {
-    let key = b"\"messages\":";
-    let start = body
-        .windows(key.len())
-        .position(|window| window == key)
-        .expect("the request carries a messages array")
-        + key.len();
-    assert_eq!(body[start], b'[');
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, &byte) in body[start..].iter().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b'[' | b'{' => depth += 1,
-            b']' | b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &body[start..=start + offset];
-                }
-            }
-            _ => {}
-        }
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow)]
+        messages: &'a serde_json::value::RawValue,
     }
-    panic!("the messages array is unterminated");
+    let envelope: Envelope<'_> = serde_json::from_slice(body).expect("request envelope");
+    envelope.messages.get().as_bytes()
 }
 
 struct Unmetered;
@@ -151,6 +124,7 @@ fn a_restored_envelope_tree_fails_the_gate() {
     drop(messages);
 }
 
+/// The struct bodies are compared to their exact field sets, so an envelope restored under any name or type alias fails here; the crate-wide scan catches callers of the removed entries by name.
 #[test]
 fn source_has_no_envelope_tree_or_replay_entry() {
     let wire = std::fs::read_to_string(concat!(
@@ -158,30 +132,40 @@ fn source_has_no_envelope_tree_or_replay_entry() {
         "/../memory-store/src/lib.rs"
     ))
     .expect("memory-store source");
-    for name in ["WireMessage", "WireBlock"] {
+    let field_lines = |name: &str| -> Vec<String> {
         let start = wire
             .find(&format!("pub struct {name} {{"))
             .unwrap_or_else(|| panic!("{name} is defined"));
         let end = start + wire[start..].find("\n}\n").expect("struct end");
-        let definition = &wire[start..end];
-        assert!(
-            !definition.contains("Value"),
-            "{name} holds a Value field:\n{definition}"
-        );
-        let attributes = &wire[..start];
-        let derive = attributes.rfind("#[derive(").expect("derive attribute");
-        assert!(
-            attributes[derive..].contains("Serialize")
-                && attributes[derive..].contains("Deserialize"),
-            "{name} derives its serde implementations"
-        );
-        for handwritten in [
-            format!("impl<'de> Deserialize<'de> for {name}"),
-            format!("impl Serialize for {name}"),
-            format!("struct {name}Data"),
-        ] {
-            assert!(!wire.contains(&handwritten), "{handwritten} exists");
-        }
+        wire[start..end]
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|line| !line.starts_with("///") && !line.starts_with("#["))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(
+        field_lines("WireMessage"),
+        [
+            "pub role: String,",
+            "content: Vec<WireBlock>,",
+            "pub origin: Option<MessageOrigin>,",
+            "pub provider_extras: ProviderExtras,",
+            "pub meta: HarnessMeta,",
+        ]
+    );
+    assert_eq!(
+        field_lines("WireBlock"),
+        ["kind: BlockKind,", "pub provider_extras: ProviderExtras,"]
+    );
+    for handwritten in [
+        "impl<'de> Deserialize<'de> for WireMessage",
+        "impl Serialize for WireMessage",
+        "impl<'de> Deserialize<'de> for WireBlock",
+        "impl Serialize for WireBlock",
+    ] {
+        assert!(!wire.contains(handwritten), "{handwritten} exists");
     }
     let crates = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
     let needles = [
@@ -219,7 +203,7 @@ fn source_has_no_envelope_tree_or_replay_entry() {
     }
     assert!(
         hits.is_empty(),
-        "dead replay references remain:\n{}",
+        "replay references remain (a comment or string literal naming one is also a hit):\n{}",
         hits.join("\n")
     );
 }
@@ -264,6 +248,11 @@ fn near_cap_text_request() -> Vec<u8> {
     body
 }
 
+/// Per request the decode-plus-projection peak is the decoded text once, the canonical block string's growth buffer at up to twice the text, and its `Arc<str>` copy: four times the decode charge at the text ceiling.
+const DECODE_PROJECTION_PEAK_MULTIPLE: usize = 4;
+/// Served output over the live request and projection adds the canonicalizer's growth buffer, its exact-size reorder copy, and the `Arc<[u8]>` copy: seven times the decode charge at the text ceiling, above the declared pool for one request.
+const SERVED_OWNER_SET_PEAK_MULTIPLE: usize = 7;
+
 #[test]
 fn decode_and_projection_fit_the_declared_pool() {
     let near_cap = near_cap_text_request();
@@ -282,29 +271,35 @@ fn decode_and_projection_fit_the_declared_pool() {
             (request, projection)
         });
         assert!(!ledger.overflow, "{label}: ledger overflow");
+        let charged = meter.needed();
         assert!(
             ledger.peak_live_bytes <= DECLARED_SCRATCH_POOL,
             "{label}: decode and projection peaked at {} bytes against a declared pool of \
              {DECLARED_SCRATCH_POOL}",
             ledger.peak_live_bytes
         );
+        assert!(
+            ledger.peak_live_bytes <= DECODE_PROJECTION_PEAK_MULTIPLE * charged,
+            "{label}: decode and projection peaked at {} bytes, above {DECODE_PROJECTION_PEAK_MULTIPLE} times the decode charge of {charged}",
+            ledger.peak_live_bytes
+        );
         let (request, projection) = owners;
         assert!(
             projection.blocks.iter().all(|block| {
                 request.messages.iter().any(|message| {
-                    std::ptr::eq(
-                        block.wire.as_ref(),
-                        &message.ck.content()[block.block_index],
-                    )
+                    message
+                        .ck
+                        .content()
+                        .get(block.block_index)
+                        .is_some_and(|shell| std::ptr::eq(block.wire.as_ref(), shell))
                 })
             }),
             "{label}: projection blocks share the request's shells"
         );
         eprintln!(
-            "{label}: decode+projection peak {} bytes, live at handoff {}, decode charge {}, body {} bytes, pool {DECLARED_SCRATCH_POOL}",
+            "{label}: decode+projection peak {} bytes, live at handoff {}, decode charge {charged}, body {} bytes, pool {DECLARED_SCRATCH_POOL}",
             ledger.peak_live_bytes,
             ledger.live_bytes_at_close,
-            meter.needed(),
             body.len()
         );
 
@@ -319,29 +314,16 @@ fn decode_and_projection_fit_the_declared_pool() {
                 .collect::<Vec<_>>()
         });
         assert!(!served_ledger.overflow, "{label}: ledger overflow");
+        let owner_set_peak =
+            ledger.live_bytes_at_close.max(0) as usize + served_ledger.peak_live_bytes;
+        assert!(
+            owner_set_peak <= SERVED_OWNER_SET_PEAK_MULTIPLE * charged,
+            "{label}: request, projection, and served output peaked at {owner_set_peak} bytes, above {SERVED_OWNER_SET_PEAK_MULTIPLE} times the decode charge of {charged}"
+        );
         eprintln!(
-            "{label}: served output over the live request and projection: peak {} more bytes, {} retained",
-            served_ledger.peak_live_bytes, served_ledger.live_bytes_at_close
+            "{label}: request, projection, and served output peak {owner_set_peak} bytes ({} retained by served output), pool {DECLARED_SCRATCH_POOL}",
+            served_ledger.live_bytes_at_close
         );
         drop((request, projection, served));
-    }
-}
-
-#[test]
-fn the_frozen_corpora_are_the_recorded_bodies() {
-    use sha2::{Digest, Sha256};
-    for (body, expected) in [
-        (
-            REQUEST_40,
-            "928e93739612f0033db4fe6d68afda1ebe458383a2b75b6257f6e3e2320b2acf",
-        ),
-        (
-            REQUEST_200,
-            "f45d91797f9f97807a06e4466fd4d09bbfb03a0edbd4394cc9590375fb07e8d1",
-        ),
-    ] {
-        let digest = Sha256::digest(body);
-        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        assert_eq!(hex, expected);
     }
 }

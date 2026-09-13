@@ -95,9 +95,14 @@ struct CountOnly {
 /// A reserve that grants everything, for entries that charge no pool.
 #[cfg(any(test, feature = "test-support"))]
 pub fn unbounded_reserve() -> impl ResidentReserve {
-    CountOnly {
-        capacity: usize::MAX,
-    }
+    count_only_reserve(usize::MAX)
+}
+
+/// A reserve that grants everything and refuses nothing itself; the meter's permanent
+/// refusal comes from `capacity` alone.
+#[cfg(any(test, feature = "test-support"))]
+pub fn count_only_reserve(capacity: usize) -> impl ResidentReserve {
+    CountOnly { capacity }
 }
 
 impl ResidentReserve for CountOnly {

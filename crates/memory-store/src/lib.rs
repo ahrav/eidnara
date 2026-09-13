@@ -15931,7 +15931,7 @@ mod tests {
     }
 
     /// Editing one block through the accessors re-encodes that block and leaves the
-    /// sibling's ingress bytes, including an unknown field, as they arrived.
+    /// sibling's typed value unchanged; unknown envelope fields never reach the value.
     #[test]
     fn a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded() {
         let ingress = serde_json::json!({
@@ -15954,6 +15954,54 @@ mod tests {
         assert_eq!(serialized["content"][1]["kind"]["text"], "second");
         assert_eq!(serialized["content"][1].get("sentinel_unknown_field"), None);
         assert_eq!(serialized.get("sentinel_unknown_field"), None);
+    }
+
+    /// Both decode lanes, `from_slice` on the bytes and `from_value` on a `Value` tree, give one typed value: unknown envelope keys at the message and block level are gone, and every key inside a retained payload (`input`, `raw`, `source`, `provider_extras`) survives.
+    #[test]
+    fn both_decode_lanes_discard_envelope_unknowns_and_keep_payload_keys() {
+        let body = br#"{"role":"assistant","future_envelope":{"deep":[1]},"content":[
+            {"kind":{"type":"tool_call","id":"c1","name":"t","input":{"nested":{"unknown_key":1,"future_envelope":2},"list":[{"k":null}]}},"future_block":true},
+            {"kind":{"type":"opaque","source":{"future_envelope":"kept","x":1},"kind":"blob","raw":{"future_envelope":[1,2],"data":"d"}},"provider_extras":{"ns":{"future_envelope":{"a":1}}}}
+        ],"meta":{"harness_id":"h","future_meta":1}}"#;
+        let direct: WireMessage = serde_json::from_slice(body).unwrap();
+        let tree: WireMessage =
+            serde_json::from_value(serde_json::from_slice::<Value>(body).unwrap()).unwrap();
+        assert_eq!(direct, tree);
+        let serialized = serde_json::to_value(&direct).unwrap();
+        assert_eq!(serialized.get("future_envelope"), None);
+        assert_eq!(serialized["content"][0].get("future_block"), None);
+        assert_eq!(serialized["meta"].get("future_meta"), None);
+        assert_eq!(
+            serialized["content"][0]["kind"]["input"],
+            serde_json::json!({"nested":{"unknown_key":1,"future_envelope":2},"list":[{"k":null}]})
+        );
+        assert_eq!(
+            serialized["content"][1]["kind"]["source"],
+            serde_json::json!({"future_envelope":"kept","x":1})
+        );
+        assert_eq!(
+            serialized["content"][1]["kind"]["raw"],
+            serde_json::json!({"future_envelope":[1,2],"data":"d"})
+        );
+        assert_eq!(
+            serialized["content"][1]["provider_extras"]["ns"]["future_envelope"],
+            serde_json::json!({"a":1})
+        );
+    }
+
+    /// Taking a mutable accessor without writing through it changes neither the value nor its bytes.
+    #[test]
+    fn a_no_op_mutable_access_preserves_identity() {
+        let mut message: WireMessage = serde_json::from_str(
+            r#"{"role":"user","content":[{"kind":{"type":"text","text":"same"},"provider_extras":{"p":{"k":1}}}],"meta":{"synthetic":true}}"#,
+        )
+        .unwrap();
+        let before = message.clone();
+        let bytes = serde_json::to_vec(&message).unwrap();
+        let _ = message.content_mut();
+        let _ = message.content_mut()[0].kind_mut();
+        assert_eq!(message, before);
+        assert_eq!(serde_json::to_vec(&message).unwrap(), bytes);
     }
 
     /// One walk decides everything: clean input comes back as the same bytes with

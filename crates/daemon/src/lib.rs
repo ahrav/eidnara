@@ -20572,326 +20572,391 @@ mod tests {
         }
     }
 
-    /// The string coefficient behind `FROZEN_CORPUS_OUTCOMES`: a typed field plus two trees.
+    /// The string coefficient the frozen corpus outcomes were recorded under: a typed field plus two retained envelope trees.
     const FROZEN_STRING_COPIES: usize = 3;
-    /// Each body's footprint at `FROZEN_STRING_COPIES` and its terminal code through both lanes with an unbounded pool, at that footprint, and one byte under it.
-    const FROZEN_CORPUS_OUTCOMES: &[(&str, usize, &str, &str, &str)] = &[
-        ("valid", 9089, "response", "response", "invalid_params"),
-        (
-            "method discriminator",
-            9095,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "unknown top-level field",
-            10030,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "null on an optional field",
-            9411,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "null on a defaulted field",
-            9378,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "wrong type on a defaulted field",
-            9405,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "float on an integer field",
-            9387,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "negative on an unsigned field",
-            9411,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "integer above u64",
-            9411,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "exponent on an integer field",
-            9387,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "negative zero",
-            9408,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "duplicate top-level key",
-            9390,
-            "session_mismatch",
-            "session_mismatch",
-            "invalid_params",
-        ),
-        (
-            "duplicate discriminator",
-            9384,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "duplicate nested key",
-            9360,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "missing required field",
-            8782,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "missing serializer profile",
-            8734,
-            "unknown_serializer_profile",
-            "unknown_serializer_profile",
-            "invalid_params",
-        ),
-        (
-            "unknown serializer profile",
-            9089,
-            "unknown_serializer_profile",
-            "unknown_serializer_profile",
-            "invalid_params",
-        ),
-        (
-            "null page field",
-            9396,
-            "invalid_params",
-            "invalid_params",
-            "invalid_params",
-        ),
-        (
-            "one page field",
-            9408,
-            "invalid_params",
-            "invalid_params",
-            "invalid_params",
-        ),
-        (
-            "non-string discriminator with kind",
-            9363,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "overlong method beside kind",
-            9558,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "other route",
-            9381,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "trailing bytes",
-            9089,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "malformed",
-            4677,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "array body",
-            4379,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "string body",
-            4251,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "empty body",
-            0,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-        ),
-        (
-            "messages as an object",
-            9369,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "dense unknown field",
-            2569485,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "object-form preset",
-            9679,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "number out of range under an ignored field",
-            9220,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "lone surrogate under an ignored field",
-            9220,
-            "unrecognized_request_shape",
-            "invalid_params",
-            "invalid_params",
-        ),
-        (
-            "invalid UTF-8 under an ignored field",
-            9220,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "raw-value token under an ignored field",
-            9566,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "raw-value token with a sibling key",
-            9697,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "raw-value token inside an ignored array",
-            9694,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
-        (
-            "raw-value token under the discriminator",
-            4716,
-            "unrecognized_request_shape",
-            "invalid_params",
-            "invalid_params",
-        ),
-        (
-            "raw-value token holding a document",
-            9703,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "raw-value token not in first position",
-            9953,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "raw-value token after a key under tail_delta",
-            9980,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "raw-value token after a key in a native message",
-            10123,
-            "bad_request",
-            "bad_request",
-            "invalid_params",
-        ),
-        (
-            "escaped discriminator",
-            9107,
-            "response",
-            "invalid_params",
-            "invalid_params",
-        ),
-        (
-            "escaped discriminator beside transform text",
-            9393,
-            "response",
-            "invalid_params",
-            "invalid_params",
-        ),
-        (
-            "raw-value token after a key inside a message",
-            9953,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "nesting at the tree limit",
-            25348,
-            "response",
-            "response",
-            "invalid_params",
-        ),
-        (
-            "nesting past the tree limit",
-            25348,
-            "unrecognized_request_shape",
-            "unrecognized_request_shape",
-            "invalid_params",
-        ),
+    const _: () = assert!(RETAINED_STRING_COPIES < FROZEN_STRING_COPIES);
+    /// The frozen table's admission expectations were derived for one retained copy.
+    const _: () = assert!(RETAINED_STRING_COPIES == 1);
+
+    /// One corpus body as recorded before the string charge changed: its footprint, the string bytes the meter visited, and its terminal code with an unbounded pool, at the footprint, and one byte under it.
+    struct FrozenOutcome {
+        name: &'static str,
+        footprint: usize,
+        string_bytes: usize,
+        unbounded: &'static str,
+        at_footprint: &'static str,
+        under_footprint: &'static str,
+    }
+
+    const FROZEN_CORPUS_OUTCOMES: &[FrozenOutcome] = &[
+        FrozenOutcome {
+            name: "valid",
+            footprint: 9089,
+            string_bytes: 171,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "method discriminator",
+            footprint: 9095,
+            string_bytes: 173,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "unknown top-level field",
+            footprint: 10030,
+            string_bytes: 186,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "null on an optional field",
+            footprint: 9411,
+            string_bytes: 193,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "null on a defaulted field",
+            footprint: 9378,
+            string_bytes: 182,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "wrong type on a defaulted field",
+            footprint: 9405,
+            string_bytes: 191,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "float on an integer field",
+            footprint: 9387,
+            string_bytes: 185,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "negative on an unsigned field",
+            footprint: 9411,
+            string_bytes: 193,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "integer above u64",
+            footprint: 9411,
+            string_bytes: 193,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "exponent on an integer field",
+            footprint: 9387,
+            string_bytes: 185,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "negative zero",
+            footprint: 9408,
+            string_bytes: 192,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "duplicate top-level key",
+            footprint: 9390,
+            string_bytes: 186,
+            unbounded: "session_mismatch",
+            at_footprint: "session_mismatch",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "duplicate discriminator",
+            footprint: 9384,
+            string_bytes: 184,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "duplicate nested key",
+            footprint: 9360,
+            string_bytes: 176,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "missing required field",
+            footprint: 8782,
+            string_bytes: 154,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "missing serializer profile",
+            footprint: 8734,
+            string_bytes: 138,
+            unbounded: "unknown_serializer_profile",
+            at_footprint: "unknown_serializer_profile",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "unknown serializer profile",
+            footprint: 9089,
+            string_bytes: 171,
+            unbounded: "unknown_serializer_profile",
+            at_footprint: "unknown_serializer_profile",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "null page field",
+            footprint: 9396,
+            string_bytes: 188,
+            unbounded: "invalid_params",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "one page field",
+            footprint: 9408,
+            string_bytes: 192,
+            unbounded: "invalid_params",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "non-string discriminator with kind",
+            footprint: 9363,
+            string_bytes: 177,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "overlong method beside kind",
+            footprint: 9558,
+            string_bytes: 242,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "other route",
+            footprint: 9381,
+            string_bytes: 183,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "trailing bytes",
+            footprint: 9089,
+            string_bytes: 171,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "malformed",
+            footprint: 4677,
+            string_bytes: 23,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "array body",
+            footprint: 4379,
+            string_bytes: 9,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "string body",
+            footprint: 4251,
+            string_bytes: 9,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "empty body",
+            footprint: 0,
+            string_bytes: 0,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "unrecognized_request_shape",
+        },
+        FrozenOutcome {
+            name: "messages as an object",
+            footprint: 9369,
+            string_bytes: 179,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "dense unknown field",
+            footprint: 2569485,
+            string_bytes: 175,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "object-form preset",
+            footprint: 9679,
+            string_bytes: 197,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "number out of range under an ignored field",
+            footprint: 9220,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "lone surrogate under an ignored field",
+            footprint: 9220,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "invalid UTF-8 under an ignored field",
+            footprint: 9220,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token under an ignored field",
+            footprint: 9566,
+            string_bytes: 202,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token with a sibling key",
+            footprint: 9697,
+            string_bytes: 203,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token inside an ignored array",
+            footprint: 9694,
+            string_bytes: 202,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token under the discriminator",
+            footprint: 4716,
+            string_bytes: 36,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token holding a document",
+            footprint: 9703,
+            string_bytes: 205,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token not in first position",
+            footprint: 9953,
+            string_bytes: 203,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token after a key under tail_delta",
+            footprint: 9980,
+            string_bytes: 212,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token after a key in a native message",
+            footprint: 10123,
+            string_bytes: 217,
+            unbounded: "bad_request",
+            at_footprint: "bad_request",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "escaped discriminator",
+            footprint: 9107,
+            string_bytes: 171,
+            unbounded: "response",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "escaped discriminator beside transform text",
+            footprint: 9393,
+            string_bytes: 181,
+            unbounded: "response",
+            at_footprint: "invalid_params",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "raw-value token after a key inside a message",
+            footprint: 9953,
+            string_bytes: 203,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "nesting at the tree limit",
+            footprint: 25348,
+            string_bytes: 172,
+            unbounded: "response",
+            at_footprint: "response",
+            under_footprint: "invalid_params",
+        },
+        FrozenOutcome {
+            name: "nesting past the tree limit",
+            footprint: 25348,
+            string_bytes: 172,
+            unbounded: "unrecognized_request_shape",
+            at_footprint: "unrecognized_request_shape",
+            under_footprint: "invalid_params",
+        },
     ];
 
     /// Bodies whose `Value` tree drops a repeated key or collapses a raw-value document.
@@ -20915,9 +20980,10 @@ mod tests {
         }
     }
 
-    /// Every body keeps its unbounded-pool terminal and both lanes still agree at every capacity.
+    /// Every body keeps its unbounded-pool terminal on the lane production selects for it.
     /// At its frozen footprint and one byte under, a body keeps its frozen terminal unless that terminal was too-large and the body carries string bytes.
     /// Such a body now takes its unbounded-pool terminal, and its footprint fell by exactly the removed string copies.
+    /// The node floor is coefficient-independent and decides the remaining refusals.
     #[tokio::test(flavor = "current_thread")]
     async fn frozen_corpus_footprints_replay_with_only_string_charge_changes() {
         let corpus = transform_decode_corpus();
@@ -20925,110 +20991,94 @@ mod tests {
             corpus.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             FROZEN_CORPUS_OUTCOMES
                 .iter()
-                .map(|(name, ..)| *name)
+                .map(|frozen| frozen.name)
                 .collect::<Vec<_>>(),
             "the frozen table names every corpus body in order"
         );
         let removed_copies = FROZEN_STRING_COPIES - RETAINED_STRING_COPIES;
         let too_large = comparable_outcome(request_too_large_error()).0;
         let mut admitted_by_lower_charge = Vec::new();
-        for ((name, body), (_, frozen, unbounded_code, frozen_code, under_code)) in
-            corpus.iter().zip(FROZEN_CORPUS_OUTCOMES)
-        {
-            let footprint = footprint_of(body);
-            assert!(footprint <= *frozen, "{name}: the footprint never rises");
-            let removed = frozen - footprint;
+        let mut expected = Vec::new();
+        for ((name, body), frozen) in corpus.iter().zip(FROZEN_CORPUS_OUTCOMES) {
             assert_eq!(
-                removed % removed_copies,
-                0,
-                "{name}: the removed bytes are whole string copies"
-            );
-            let visited_string_bytes = removed / removed_copies;
-            assert!(
-                visited_string_bytes <= body.len(),
-                "{name}: visited string bytes cannot exceed the body"
+                footprint_of(body),
+                frozen.footprint - removed_copies * frozen.string_bytes,
+                "{name}: the footprint fell by exactly the removed string copies"
             );
             if !VALUE_STRING_ORACLE_EXCLUDED.contains(name)
                 && let Ok(value) = serde_json::from_slice::<Value>(body)
             {
                 assert_eq!(
-                    visited_string_bytes,
+                    frozen.string_bytes,
                     value_string_bytes(&value),
-                    "{name}: the removed charge is the tree's string bytes"
+                    "{name}: the recorded string bytes are the tree's string bytes"
                 );
             }
 
-            let code_at = |capacity: usize| async move {
-                let mut codes = Vec::new();
-                for probe in [probe_request(body), None] {
-                    let (handler, _store, _dir, _project) = handler_with_store(
-                        Arc::new(ProducerState::default()),
-                        default_test_config(),
-                    );
-                    let pool = TestPool::with_capacity(capacity);
-                    let meter = ResidentMeter::new(&pool);
-                    let runner = transform_unit::DetachedRunner::default();
-                    let entry = PassEntry {
-                        core: &handler.core,
-                        route: test_route(7),
-                        probe: probe.as_ref(),
-                        meter: &meter,
-                        runner: &runner,
-                    };
-                    let (_, outcome) = handler.dispatch_body(&entry, body).await;
-                    codes.push(comparable_outcome(outcome).0);
-                }
-                assert_eq!(codes[0], codes[1], "{name}: both lanes agree");
-                codes.pop().unwrap()
+            let outcome_at = |capacity: usize| async move {
+                let (handler, _store, _dir, _project) =
+                    handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+                let pool = TestPool::with_capacity(capacity);
+                let meter = ResidentMeter::new(&pool);
+                let runner = transform_unit::DetachedRunner::default();
+                let probe = lane_probe(body);
+                let entry = PassEntry {
+                    core: &handler.core,
+                    route: test_route(7),
+                    probe: probe.as_ref(),
+                    meter: &meter,
+                    runner: &runner,
+                };
+                let (_, outcome) = handler.dispatch_body(&entry, body).await;
+                comparable_outcome(outcome)
             };
+            let unbounded = outcome_at(1 << 30).await;
             assert_eq!(
-                code_at(1 << 30).await,
-                *unbounded_code,
+                unbounded.0, frozen.unbounded,
                 "{name}: the unbounded-pool terminal is unchanged"
             );
-            for (capacity, expected) in [
-                (*frozen, frozen_code),
-                (frozen.saturating_sub(1), under_code),
+            for (capacity, recorded) in [
+                (frozen.footprint, frozen.at_footprint),
+                (frozen.footprint.saturating_sub(1), frozen.under_footprint),
             ] {
-                let actual = code_at(capacity).await;
-                if actual == *expected {
+                let actual = outcome_at(capacity).await;
+                if actual.0 == recorded {
+                    if recorded == frozen.unbounded {
+                        assert_eq!(
+                            actual, unbounded,
+                            "{name} at {capacity}: the admitted outcome is the unbounded one"
+                        );
+                    }
                     continue;
                 }
                 assert_eq!(
-                    *expected, too_large,
+                    recorded, too_large,
                     "{name} at {capacity}: only a frozen too-large terminal may change"
                 );
                 assert!(
-                    visited_string_bytes > 0,
+                    frozen.string_bytes > 0,
                     "{name} at {capacity}: only string bytes lower the charge"
                 );
                 assert_eq!(
-                    actual, *unbounded_code,
-                    "{name} at {capacity}: the lowered charge admits the body to its unbounded-pool terminal"
+                    actual, unbounded,
+                    "{name} at {capacity}: the lowered charge admits the body to its unbounded-pool outcome"
                 );
                 admitted_by_lower_charge.push((*name, capacity));
             }
+            for (capacity, recorded) in [
+                (frozen.footprint, frozen.at_footprint),
+                (frozen.footprint.saturating_sub(1), frozen.under_footprint),
+            ] {
+                let fits = frozen.footprint - removed_copies * frozen.string_bytes <= capacity;
+                if recorded == too_large
+                    && frozen.unbounded != too_large
+                    && fits
+                    && !footprint_floor_exceeds(body, capacity)
+                {
+                    expected.push((*name, capacity));
+                }
+            }
         }
-        let expected: Vec<(&str, usize)> = corpus
-            .iter()
-            .zip(FROZEN_CORPUS_OUTCOMES)
-            .flat_map(
-                |((name, body), (_, frozen, unbounded_code, frozen_code, under_code))| {
-                    [
-                        (*frozen, *frozen_code),
-                        (frozen.saturating_sub(1), *under_code),
-                    ]
-                    .into_iter()
-                    .filter(|(capacity, code)| {
-                        *code == too_large
-                            && *unbounded_code != too_large
-                            && !footprint_floor_exceeds(body, *capacity)
-                            && footprint_of(body) <= *capacity
-                    })
-                    .map(move |(capacity, _)| (*name, capacity))
-                },
-            )
-            .collect();
         assert_eq!(
             admitted_by_lower_charge, expected,
             "every frozen too-large terminal that the lowered charge now fits becomes an admission, and nothing else changes"
@@ -21088,14 +21138,15 @@ mod tests {
             footprint_of(quoted) < footprint_of(bare),
             "commas and colons inside a string must not count as values"
         );
-        // A large text block is charged for every copy the typed decode retains.
+        // A large text block is charged once: the typed decode owns one copy of it.
         let text = "t".repeat(1 << 20);
         let body = format!(
             r#"{{"kind":"transform","messages":[{{"role":"user","content":[{{"kind":{{"type":"text","text":"{text}"}}}}]}}]}}"#
         );
+        let footprint = footprint_of(body.as_bytes());
         assert!(
-            footprint_of(body.as_bytes()) >= RETAINED_STRING_COPIES * text.len(),
-            "the footprint must cover {RETAINED_STRING_COPIES} copies of {} string bytes",
+            footprint >= text.len() && footprint < 2 * text.len(),
+            "the footprint {footprint} must cover one copy of {} string bytes and not two",
             text.len()
         );
         // Each two wire bytes can produce one value, so the footprint of a scalar-dense body
@@ -23912,6 +23963,8 @@ mod tests {
     fn giant_degraded_snapshot_accepts_tail_delta_and_reuses_projection() {
         const GIANT_MESSAGE_COUNT: usize = 5_001;
         const GIANT_BLOCK_COUNT: usize = GIANT_MESSAGE_COUNT;
+        // The request holds each payload twice, as typed text and as a native `Value`, so
+        // the fixture needs more than half the 64 MiB snapshot budget in payload to exceed it.
         const GIANT_NATIVE_WIRE_BYTES: usize = 40 * 1024 * 1024;
         const SESSION_ID: &str = "native-giant-degraded";
 

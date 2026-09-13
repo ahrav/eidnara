@@ -2130,6 +2130,8 @@ impl<'a> TransformIngress<'a> {
         self.projection.is_synthetic(message)
     }
 
+    /// The served copy carries the effective synthetic flag, so its served bytes and identity
+    /// follow the pass-local decision rather than the ingress flag.
     fn rendered_message(&self, message: &IngressMessage) -> WireMessage {
         let mut rendered = message.ck.clone();
         rendered.meta.synthetic = self.is_synthetic(message);
@@ -12533,8 +12535,7 @@ pub(crate) mod tests {
         (absent, explicit)
     }
 
-    /// Wire deserialization preserves original pass-through bytes on each message and block; typed fixtures do not.
-    /// Typed fixtures cannot detect output-overlay bugs that drop pass-through bytes.
+    /// Builds the message through wire deserialization, the shape plugin ingress takes.
     fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> IngressMessage {
         let content: Vec<Value> = texts
             .iter()
@@ -12610,7 +12611,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Wire deserialization retains pass-through bytes on each tool-result block; `output_json` contains raw ToolOutput JSON.
+    /// Builds the tool-result message through wire deserialization; `output_json` is raw ToolOutput JSON.
     fn wire_tool_result(id: &str, ordinal: u64, output_json: Value) -> IngressMessage {
         let ck: WireMessage = serde_json::from_value(json!({
             "role": "user",
@@ -12662,8 +12663,7 @@ pub(crate) mod tests {
         serde_json::to_string(&second.messages).unwrap()
     }
 
-    /// Wire fixtures must preserve every prefixable tool-result output variant and each block's pass-through bytes through serialization.
-    /// Each case fails when the overlay no longer clears the retained bytes of the block it mutates.
+    /// Every prefixable tool-result output variant carries its tag through serialization.
     #[test]
     fn wire_tool_result_output_variants_keep_tags_through_serialization() {
         for (session, output, expected) in [
@@ -12717,7 +12717,7 @@ pub(crate) mod tests {
         run(&s, &req, &spine());
         s.seed_channel1_append_for_test("wire-ch1", "t1#0", "reminder: reduce spent outputs", 5)
             .unwrap();
-        // Ingress retains the original provider-wire bytes; tags exist only on the provider wire, so repeated requests replay identically and appends use the shared overlay-clear path.
+        // Tags exist only on the provider wire, so repeated requests replay identically and appends take the shared overlay path.
         let third = run(&s, &req, &spine());
         let joined = serde_json::to_string(&third.messages).unwrap();
         assert!(
@@ -14072,24 +14072,21 @@ pub(crate) mod tests {
             serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
         let mut identities = Vec::new();
         for message in messages {
-            {
-                for block in message.content() {
-                    identities.push((block.clone(), wire::block_identity_digest(block)));
-                }
-                let expected =
-                    serde_json::to_vec(&serde_json::to_value(&message).unwrap()).unwrap();
-                let served = ServedMessage::from_message(message);
-                assert_eq!(served.canonical_bytes(), expected);
-                let output = crate::dispatch::PreparedOutput::transform_segments(
-                    json!({"messages": null}),
-                    vec![crate::dispatch::PreparedSegment::served(served)],
-                )
-                .unwrap();
-                let mut expected_frame = b"{\"messages\":[".to_vec();
-                expected_frame.extend(expected);
-                expected_frame.extend(b"]}");
-                assert_eq!(output.as_ref(), expected_frame);
+            for block in message.content() {
+                identities.push((block.clone(), wire::block_identity_digest(block)));
             }
+            let expected = serde_json::to_vec(&serde_json::to_value(&message).unwrap()).unwrap();
+            let served = ServedMessage::from_message(message);
+            assert_eq!(served.canonical_bytes(), expected);
+            let output = crate::dispatch::PreparedOutput::transform_segments(
+                json!({"messages": null}),
+                vec![crate::dispatch::PreparedSegment::served(served)],
+            )
+            .unwrap();
+            let mut expected_frame = b"{\"messages\":[".to_vec();
+            expected_frame.extend(expected);
+            expected_frame.extend(b"]}");
+            assert_eq!(output.as_ref(), expected_frame);
         }
         for (left, left_digest) in &identities {
             for (right, right_digest) in &identities {
@@ -14110,7 +14107,11 @@ pub(crate) mod tests {
         latent
             .provider_extras
             .insert("provider".into(), BTreeMap::from([("x".into(), json!(1))]));
-        let typed = raw.clone();
+        // Built from parts rather than decoded: equal to `raw` by value, distinct in origin.
+        let typed = WireBlock::bare(wire::BlockKind::Text {
+            text: "same".into(),
+        });
+        assert_eq!(typed, raw);
         let mut unknown = serde_json::to_value(&raw).unwrap();
         unknown["unknown"]["x"] = json!(2);
         let unknown: WireBlock = serde_json::from_value(unknown).unwrap();
@@ -14143,64 +14144,62 @@ pub(crate) mod tests {
             positive.clone(),
         ];
         for positive_first in [false, true] {
-            {
-                let mut ordered = candidates.clone();
-                if positive_first {
-                    ordered.swap(6, 7);
-                }
-                let mut ingress = wire_item("user", "reference", 0, &[]);
-                *ingress.ck.content_mut() = ordered.to_vec();
-                let mut projection = project_messages(&[Arc::new(ingress)]).unwrap();
-                for flat in &mut projection.blocks {
-                    flat.block_index += 10;
-                }
-                let projected: Vec<_> = projection.blocks.iter().collect();
-                let mut message = wire_item("user", "served", 0, &[]).ck;
-                *message.content_mut() = ordered.to_vec();
-                message.content_mut().push(ordered[3].clone());
-                let reference = message
-                    .content()
-                    .iter()
-                    .enumerate()
-                    .map(|(served_index, block)| {
-                        let projected = projected
-                            .iter()
-                            .find(|flat| flat.block_index == served_index)
-                            .copied()
-                            .or_else(|| {
-                                projected
-                                    .iter()
-                                    .copied()
-                                    .find(|flat| flat.wire.as_ref() == block)
-                            });
-                        if let Some(flat) = projected.filter(|flat| flat.wire.as_ref() == block) {
-                            return (
-                                wire::fingerprint_digest(&flat.content_hash),
-                                flat.bytes.len(),
-                            );
-                        }
-                        let serialized = serde_json::to_string(block).unwrap();
-                        (wire::fingerprint(&serialized), serialized.len())
-                    })
-                    .collect::<Vec<_>>();
-                let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
-                let fresh = ServedMessage::from_message(message);
-                assert_eq!(served.block_fingerprints.as_ref(), reference);
-                assert_eq!(served.canonical_bytes(), fresh.canonical_bytes());
-                assert_eq!(served.block_fingerprints[7], served.block_fingerprints[6]);
-                assert_ne!(served.block_fingerprints[7], fresh.block_fingerprints[7]);
-                assert_eq!(served.block_fingerprints[8], served.block_fingerprints[3]);
-                assert_eq!(ordered[0].kind(), ordered[3].kind());
-                assert_ne!(ordered[0].provider_extras, ordered[3].provider_extras);
-                // Blocks that differed only in discarded envelope fields are equal typed
-                // values with equal equality digests.
-                assert_eq!(ordered[1], ordered[3]);
-                assert_eq!(ordered[2], ordered[3]);
-                assert_eq!(
-                    wire::block_identity_digest(&ordered[2]),
-                    wire::block_identity_digest(&ordered[3])
-                );
+            let mut ordered = candidates.clone();
+            if positive_first {
+                ordered.swap(6, 7);
             }
+            let mut ingress = wire_item("user", "reference", 0, &[]);
+            *ingress.ck.content_mut() = ordered.to_vec();
+            let mut projection = project_messages(&[Arc::new(ingress)]).unwrap();
+            for flat in &mut projection.blocks {
+                flat.block_index += 10;
+            }
+            let projected: Vec<_> = projection.blocks.iter().collect();
+            let mut message = wire_item("user", "served", 0, &[]).ck;
+            *message.content_mut() = ordered.to_vec();
+            message.content_mut().push(ordered[3].clone());
+            let reference = message
+                .content()
+                .iter()
+                .enumerate()
+                .map(|(served_index, block)| {
+                    let projected = projected
+                        .iter()
+                        .find(|flat| flat.block_index == served_index)
+                        .copied()
+                        .or_else(|| {
+                            projected
+                                .iter()
+                                .copied()
+                                .find(|flat| flat.wire.as_ref() == block)
+                        });
+                    if let Some(flat) = projected.filter(|flat| flat.wire.as_ref() == block) {
+                        return (
+                            wire::fingerprint_digest(&flat.content_hash),
+                            flat.bytes.len(),
+                        );
+                    }
+                    let serialized = serde_json::to_string(block).unwrap();
+                    (wire::fingerprint(&serialized), serialized.len())
+                })
+                .collect::<Vec<_>>();
+            let served = ServedMessage::from_message_reusing(message.clone(), Some(&projected));
+            let fresh = ServedMessage::from_message(message);
+            assert_eq!(served.block_fingerprints.as_ref(), reference);
+            assert_eq!(served.canonical_bytes(), fresh.canonical_bytes());
+            assert_eq!(served.block_fingerprints[7], served.block_fingerprints[6]);
+            assert_ne!(served.block_fingerprints[7], fresh.block_fingerprints[7]);
+            assert_eq!(served.block_fingerprints[8], served.block_fingerprints[3]);
+            assert_eq!(ordered[0].kind(), ordered[3].kind());
+            assert_ne!(ordered[0].provider_extras, ordered[3].provider_extras);
+            // Blocks that differed only in discarded envelope fields are equal typed
+            // values with equal equality digests.
+            assert_eq!(ordered[1], ordered[3]);
+            assert_eq!(ordered[2], ordered[3]);
+            assert_eq!(
+                wire::block_identity_digest(&ordered[2]),
+                wire::block_identity_digest(&ordered[3])
+            );
         }
         let mut ingress = wire_item("user", "fallback", 0, &[]);
         *ingress.ck.content_mut() = candidates.to_vec();

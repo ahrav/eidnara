@@ -1,11 +1,11 @@
-//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
+//! Included by `#[path]` from `tests/served_json_shell_allocations.rs` and
 //! `examples/canonical_output_evidence.rs`.
 
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
 pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
-/// Keys per decoded ASCII block on the wire: `extra`, `kind`, `text`, `type`, plus the extras.
-pub const KEYS_PER_ASCII_BLOCK: usize = KEYS_PER_EXTRA_OBJECT + 4;
+/// Keys per decoded ASCII block: `kind`, `provider_extras`, `text`, `type`, the `x` namespace, plus the extras.
+pub const KEYS_PER_ASCII_BLOCK: usize = KEYS_PER_EXTRA_OBJECT + 5;
 pub const BLOCK_COUNTS: [usize; 2] = [1, 65];
 
 /// The fixture orders keys by decoded strings, not JSON escape sequences.
@@ -21,10 +21,10 @@ const ESCAPED_KEYS: &[&str] = &[
     r#""😀""#,
 ];
 
-/// Every message is an owned typed value: decoded shells and built shells both
-/// serialize `role` before `content` and each block's tag before its payload, so
-/// the canonicalizer reorders all of them. The decoded populations keep the
-/// ingress key set, escaping, and payload shapes that plugin requests carry.
+/// Every message is an owned typed value that serializes `role` before `content`
+/// and each block's tag before its payload, so the canonicalizer reorders all of
+/// them. The decoded populations carry their discriminating keys inside
+/// `provider_extras`, the one block-level map the decode retains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Population {
     DecodedAscii { blocks: usize },
@@ -99,24 +99,23 @@ fn decoded(body: &str) -> WireMessage {
     serde_json::from_str(body).expect("fixture body parses")
 }
 
-fn passthrough_body(block_count: usize, mut extra_object: impl FnMut(&mut String)) -> String {
+fn decoded_body(block_count: usize, mut extra_object: impl FnMut(&mut String)) -> String {
     let mut body = String::from(r#"{"role":"user","content":["#);
     for block in 0..block_count {
         if block != 0 {
             body.push(',');
         }
-        body.push_str(r#"{"extra":{"#);
+        body.push_str(r#"{"kind":{"text":"t","type":"text"},"provider_extras":{"x":{"#);
         extra_object(&mut body);
-        body.push_str(r#"},"kind":{"text":"t","type":"text"}}"#);
+        body.push_str("}}}");
     }
     body.push_str("]}");
     body
 }
 
 /// Every key is unescaped ASCII, so no object needs the escape-aware decode path.
-/// Unknown `extra` keys are discarded on decode; the block's own keys remain.
 pub fn decoded_ascii_message(block_count: usize) -> WireMessage {
-    decoded(&passthrough_body(block_count, |body| {
+    decoded(&decoded_body(block_count, |body| {
         for key in 0..KEYS_PER_EXTRA_OBJECT {
             if key != 0 {
                 body.push(',');
@@ -127,7 +126,7 @@ pub fn decoded_ascii_message(block_count: usize) -> WireMessage {
 }
 
 pub fn decoded_escaped_message(block_count: usize) -> WireMessage {
-    decoded(&passthrough_body(block_count, |body| {
+    decoded(&decoded_body(block_count, |body| {
         for (index, key) in ESCAPED_KEYS.iter().enumerate() {
             if index != 0 {
                 body.push(',');
@@ -173,14 +172,14 @@ pub fn typed_shell_message(block_count: usize) -> WireMessage {
 
 pub fn one_edited_block_message(block_count: usize) -> WireMessage {
     let mut message = decoded_ascii_message(block_count);
-    let untouched: Vec<WireBlock> = message.content()[1..].to_vec();
+    let sibling_bytes = serde_json::to_vec(&message.content()[1..]).expect("to_vec");
     *message.content_mut()[0].kind_mut() = BlockKind::Text {
         text: "edited".to_string(),
     };
     assert_eq!(
-        &message.content()[1..],
-        untouched.as_slice(),
-        "an edit to one block leaves its siblings unchanged"
+        serde_json::to_vec(&message.content()[1..]).expect("to_vec"),
+        sibling_bytes,
+        "an edit to one block leaves its siblings' bytes unchanged"
     );
     message
 }
