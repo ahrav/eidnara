@@ -185,6 +185,8 @@ pub enum BuildEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error(transparent)]
+    UnresolvedDrain(#[from] crate::embedding_supervisor::Unresolved),
+    #[error(transparent)]
     Kernel(#[from] kernel::KernelError),
     #[error(transparent)]
     Hold(#[from] kernel::SourceHoldError),

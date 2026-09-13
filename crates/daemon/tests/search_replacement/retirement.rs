@@ -153,6 +153,192 @@ fn barrier_memberships(root: &Path) -> Vec<(String, String, i64, String, String)
         .collect::<rusqlite::Result<Vec<_>>>().unwrap()
 }
 
+#[tokio::test]
+async fn default_disable_uses_certified_retirement_then_preserves_the_selected_pending_obligation()
+{
+    use daemon::search_replacement::selection::disable::DisableEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
+    let selected = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let selected_path = selected.projection().path().to_owned();
+    drop(selected);
+    drop(case.old.take());
+    let original = case
+        .selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| ledger.push(event),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{result:?}"
+    );
+    assert!(ledger.contains(&DisableEvent::Retirement(RetirementEvent::Removed)));
+    assert!(!old_path.exists());
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint("second-consumer")
+            .unwrap(),
+        Some(case.target)
+    );
+    let raw = Connection::open(selected_path).unwrap();
+    assert_eq!(
+        raw.query_row(
+            "SELECT through_commit_seq FROM retirement_receipts WHERE old_consumer_id=?1",
+            [CONSUMER],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        case.target
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT count(*) FROM retirement_dispositions WHERE disposition='removed'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        case.expected.len() as i64
+    );
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => {
+            assert_eq!(current.handoff, original.handoff);
+            assert_eq!(current.through, Some(case.target));
+            assert!(!current.deregistered);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn disabled_receipt_refusal_retains_the_selected_owner_and_original_target() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    let interrupted = budget(Duration::from_secs(20));
+    assert!(matches!(
+        case.selection.retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &interrupted,
+            &mut |event| {
+                if event == RetirementEvent::LocalReleased {
+                    interrupted.cancel();
+                }
+            }
+        ),
+        Err(BuildError::Expired)
+    ));
+    let reader = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let path = reader.projection().path().to_owned();
+    let weak = Arc::downgrade(reader.projection());
+    reader.projection().write(|conn| {
+        assert_eq!(conn.execute("UPDATE retirement_receipts SET obligation_count=obligation_count+1 WHERE old_consumer_id=?1", [CONSUMER])?, 1);
+        Ok(())
+    }).unwrap();
+    drop(reader);
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    case.selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    assert!(
+        case.selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {}
+            )
+            .await
+            .is_err()
+    );
+    assert!(weak.upgrade().is_some());
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint)
+    );
+    let raw = Connection::open(path).unwrap();
+    assert_eq!(raw.execute("UPDATE retirement_receipts SET obligation_count=obligation_count-1 WHERE old_consumer_id=?1", [CONSUMER]).unwrap(), 1);
+    assert!(matches!(
+        case.selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {}
+            )
+            .await,
+        Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+    ));
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint("second-consumer")
+            .unwrap(),
+        Some(case.target)
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT through_commit_seq FROM retirement_receipts WHERE old_consumer_id=?1",
+            [CONSUMER],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        case.target
+    );
+}
+
 #[test]
 fn missing_corrupt_and_healthy_old_databases_retire_from_authority_not_new_checkpoint() {
     for damage in ["missing", "corrupt", "healthy"] {

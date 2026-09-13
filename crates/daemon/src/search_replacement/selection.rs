@@ -32,6 +32,7 @@ use crate::search_writer::QuarantineKind;
 const FAMILIES: &str = "search-families";
 const CERTIFICATE: &str = "bootstrap.json";
 
+pub mod disable;
 pub mod retirement;
 
 #[derive(Serialize, Deserialize)]
@@ -109,11 +110,12 @@ pub struct SearchReader {
 }
 
 struct SelectedFamily {
-    projection: SearchProjection,
+    projection: Arc<SearchProjection>,
     certificate: Bootstrap,
     incarnation: CommitReadIncarnation,
     bounds: CoverageBounds,
     _seed_pin: ValidatedGeneration,
+    unavailable: std::sync::atomic::AtomicBool,
 }
 
 pub struct SearchSelection {
@@ -121,6 +123,9 @@ pub struct SearchSelection {
     identity: ProjectionIdentity,
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
+    maintenance: Option<disable::Maintenance>,
+    #[cfg(feature = "test-support")]
+    disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
 }
 
 impl SearchSelection {
@@ -130,6 +135,9 @@ impl SearchSelection {
             identity,
             bounds,
             selected: ArcSwapOption::empty(),
+            maintenance: None,
+            #[cfg(feature = "test-support")]
+            disable_barrier: None,
         }
     }
 
@@ -158,6 +166,13 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
+        if matches!(
+            ProjectionLifecycle::read_at(&self.data_home),
+            crate::projection_lifecycle::ControlState::Disabled(_)
+                | crate::projection_lifecycle::ControlState::Unavailable(_)
+        ) {
+            return Err(crate::projection_lifecycle::IntentRefusal::Disabled.into());
+        }
         let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
         gate.check_limits(
             &grant,
@@ -418,7 +433,8 @@ impl SearchSelection {
             return Err(BuildError::Invalid("selected database missing"));
         }
         let family = SelectedFamily {
-            projection: SearchProjection::open(&home)?,
+            unavailable: std::sync::atomic::AtomicBool::new(false),
+            projection: Arc::new(SearchProjection::open(&home)?),
             certificate,
             incarnation: kernel
                 .capture_commit_read_target_within_budget(budget)?
@@ -659,8 +675,8 @@ impl SearchReader {
     pub fn handoff(&self) -> &LifecycleIntent {
         &self.family.certificate.intent
     }
-    /// The projection borrows the reader, so a physical worker must retain its reader clone for the entire execution.
-    pub fn projection(&self) -> &SearchProjection {
+    /// A connection clone retains the database lease; a reader clone also retains the seed pin.
+    pub fn projection(&self) -> &Arc<SearchProjection> {
         &self.family.projection
     }
 
@@ -670,7 +686,13 @@ impl SearchReader {
         budget: &EvalBudget,
         read: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, BuildError> {
-        if self.grant.invalidated.is_cancelled() || self.family.projection.quarantine().is_some() {
+        if self
+            .family
+            .unavailable
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.grant.invalidated.is_cancelled()
+            || self.family.projection.quarantine().is_some()
+        {
             return Err(BuildError::Invalid("pinned read unavailable"));
         }
         Ok(self

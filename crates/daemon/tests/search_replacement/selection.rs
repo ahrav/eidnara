@@ -3,6 +3,8 @@ use daemon::search_replacement::selection::{SearchReader, SearchSelection, Selec
 use host_runtime::generation::{GenerationError, ProfileEvent};
 use retrieval::coverage::CoverageBounds;
 
+#[path = "disable.rs"]
+pub(super) mod disable;
 #[path = "retirement.rs"]
 pub(super) mod retirement;
 

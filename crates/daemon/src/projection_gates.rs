@@ -1,6 +1,7 @@
 //! The fail-closed gate every projection hook consults before it runs. A hook is admitted only when the runtime manifest enables it and every evidence gate passes under the projection identity the daemon runs with; installing another manifest or identity cancels the grant's token and nothing further is admitted under the old evidence, while work already admitted keeps its owners until it joins.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use kernel::source_identity::OccurrenceClass;
@@ -395,6 +396,8 @@ pub struct Evidence {
 /// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes, never content.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Denial {
+    #[error("retrieval is stopped; explicit recovery is required")]
+    RecoveryRequired,
     #[error("the projection admission was invalidated")]
     Invalidated,
     #[error("no manifest is installed")]
@@ -596,6 +599,7 @@ pub struct LedgerEntry {
 
 struct GateState {
     evaluator: Option<EvidenceEvaluator>,
+    disabled: bool,
     /// The token every grant under `evaluator` carries; replaced with the evaluator.
     invalidated: CancellationToken,
 }
@@ -603,16 +607,32 @@ struct GateState {
 /// The shared gate every hook consults. It starts closed. `install` and `close` cancel the previous grant's token before the new state is visible, and a group of hooks is judged under one state, so no grant spans two manifests.
 pub struct HookGate {
     state: Mutex<GateState>,
+    data_home: Option<PathBuf>,
     #[cfg(feature = "test-support")]
     ledger: Mutex<Vec<LedgerEntry>>,
 }
 
 impl HookGate {
-    /// A gate with no manifest denies every hook.
-    pub fn closed() -> Self {
+    /// Stores the data home so admission checks consult durable lifecycle state.
+    pub fn for_home(data_home: &Path) -> Self {
         Self {
+            data_home: Some(data_home.to_owned()),
+            ..Self::empty()
+        }
+    }
+
+    /// A gate with no manifest denies every hook.
+    #[cfg(feature = "test-support")]
+    pub fn closed() -> Self {
+        Self::empty()
+    }
+
+    fn empty() -> Self {
+        Self {
+            data_home: None,
             state: Mutex::new(GateState {
                 evaluator: None,
+                disabled: false,
                 invalidated: CancellationToken::new(),
             }),
             #[cfg(feature = "test-support")]
@@ -627,6 +647,84 @@ impl HookGate {
     /// Removes the evaluator: nothing is admitted until another is installed.
     pub fn close(&self) {
         self.replace(None);
+    }
+
+    /// Cancels ordinary grants without discarding the limit evidence needed for cleanup.
+    pub(crate) fn disable(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.disabled = true;
+        state.invalidated.cancel();
+    }
+
+    fn observe_stop(&self) {
+        use crate::projection_lifecycle::{ControlState, ProjectionLifecycle};
+        if self.data_home.as_ref().is_some_and(|home| {
+            !matches!(
+                ProjectionLifecycle::read_at(home),
+                ControlState::Absent | ControlState::Intent(_)
+            )
+        }) {
+            self.disable();
+        }
+    }
+
+    /// Cleanup consumes resource evidence, not a query or hook grant.
+    pub(crate) fn cleanup_limits(
+        &self,
+        expected: &InvalidationIdentity,
+        requested: &[(&str, u64)],
+    ) -> Result<(), Denial> {
+        let state = self.cleanup_state(expected)?;
+        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+        for &(name, observed) in requested {
+            let max = evaluator.limit(name)?;
+            if observed > max {
+                return Err(Denial::LimitExceeded {
+                    limit: name.to_owned(),
+                    observed,
+                    max,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_envelope(
+        &self,
+        expected: &InvalidationIdentity,
+    ) -> Result<(u32, i64), Denial> {
+        let state = self.cleanup_state(expected)?;
+        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+        let attempts = u32::try_from(evaluator.limit("retry_attempts")?)
+            .ok()
+            .filter(|n| *n > 0);
+        let duration = i64::try_from(
+            evaluator
+                .limit("physical_drain_ms")?
+                .min(evaluator.limit("B_recovery_ms")?),
+        )
+        .ok()
+        .filter(|n| *n > 0);
+        attempts
+            .zip(duration)
+            .ok_or_else(|| Denial::Failed(Gate::Resource, "invalid cleanup envelope".to_owned()))
+    }
+
+    fn cleanup_state(
+        &self,
+        expected: &InvalidationIdentity,
+    ) -> Result<MutexGuard<'_, GateState>, Denial> {
+        let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
+        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+        if *expected != evaluator.current
+            || *expected != evaluator.manifest.identity
+            || *expected != evaluator.evidence.identity
+            || evaluator.manifest.protocol_version != expected.limit_manifest_protocol_version
+        {
+            return Err(Denial::EvidenceIdentity);
+        }
+        evaluator.resource()?;
+        Ok(state)
     }
 
     fn replace(&self, evaluator: Option<EvidenceEvaluator>) {
@@ -661,11 +759,15 @@ impl HookGate {
         if hooks.is_empty() {
             return Err(Denial::NoManifest);
         }
+        self.observe_stop();
         let state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
         let verdicts: Vec<Result<Admission, Denial>> = hooks
             .iter()
             .map(|hook| {
                 let state = state.as_deref().ok_or(Denial::NoManifest)?;
+                if state.disabled {
+                    return Err(Denial::RecoveryRequired);
+                }
                 let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
                 evaluator.judge(*hook)?;
                 Ok(Admission {
@@ -708,7 +810,11 @@ impl HookGate {
         expected: &InvalidationIdentity,
         requested: &[(&str, u64)],
     ) -> Result<(), Denial> {
+        self.observe_stop();
         let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
+        if state.disabled {
+            return Err(Denial::RecoveryRequired);
+        }
         if grant.invalidated.is_cancelled() {
             return Err(Denial::Invalidated);
         }

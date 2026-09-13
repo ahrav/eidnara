@@ -185,12 +185,34 @@ fn check_invariants(
 pub enum ControlState {
     Absent,
     Intent(LifecycleIntent),
+    Disabled(DisabledIntent),
     /// The record exists but cannot be trusted: not a regular owner-only file, over the size cap, malformed, or of another schema. Nothing is decided from it.
     Unavailable(String),
 }
 
+/// A durable admission stop. The construction handoff is evidence, not permission to recover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisabledIntent {
+    schema: u32,
+    pub handoff: Option<Box<LifecycleIntent>>,
+    pub recorded_at: i64,
+    pub episodes: Option<EpisodeAccounting>,
+    pub through: Option<i64>,
+    pub deregistered: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredIntent {
+    Active(LifecycleIntent),
+    Disabled(DisabledIntent),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IntentRefusal {
+    #[error("retrieval is durably disabled; operator recovery is required")]
+    Disabled,
     #[error("the consumer binding names no consumer")]
     InvalidConsumer,
     #[error("an authorized recovery needs an operator authorization reference")]
@@ -353,7 +375,20 @@ impl ProjectionLifecycle {
 
     /// Reads the record. Never fails: anything short of a complete owner-only record of this schema is [`ControlState::Unavailable`].
     pub fn read(&self) -> ControlState {
-        let path = self.dir.join(CONTROL_RECORD);
+        Self::read_at(&self.data_home)
+    }
+
+    pub(crate) fn read_at(data_home: &Path) -> ControlState {
+        let dir = data_home.join(CONTROL_DIR);
+        let metadata = match open_directory(&dir).and_then(|fd| fd.metadata()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return ControlState::Absent,
+            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+        };
+        if metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
+            return ControlState::Unavailable("insecure lifecycle directory".to_owned());
+        }
+        let path = dir.join(CONTROL_RECORD);
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK).bits() as i32)
@@ -379,11 +414,42 @@ impl ProjectionLifecycle {
         if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
             return ControlState::Unavailable(error.kind().to_string());
         }
-        match serde_json::from_slice::<LifecycleIntent>(&bytes) {
-            Ok(intent) if intent.schema != SCHEMA => {
+        match serde_json::from_slice::<StoredIntent>(&bytes) {
+            Ok(StoredIntent::Disabled(intent)) => {
+                if intent.schema != 3
+                    || intent.recorded_at < 0
+                    || intent.through.is_some_and(|n| n < 0)
+                    || (intent.deregistered && intent.through.is_none())
+                    || (intent.through.is_some() && intent.handoff.is_none())
+                    || intent.episodes.is_some_and(|e| {
+                        e.allowance == 0
+                            || e.consumed > e.allowance
+                            || e.deadline <= intent.recorded_at
+                    })
+                    || intent.handoff.as_deref().is_some_and(|h| {
+                        h.schema != SCHEMA
+                            || check_invariants(
+                                &h.consumer.consumer_id,
+                                h.transition,
+                                h.authorization_ref.as_deref(),
+                                h.cause,
+                            )
+                            .is_err()
+                            || !h
+                                .replacement_capture
+                                .as_deref()
+                                .is_none_or(ReplacementCapture::stage_is_bound)
+                    })
+                {
+                    ControlState::Unavailable("invalid disabled record".to_owned())
+                } else {
+                    ControlState::Disabled(intent)
+                }
+            }
+            Ok(StoredIntent::Active(intent)) if intent.schema != SCHEMA => {
                 ControlState::Unavailable(format!("schema {}", intent.schema))
             }
-            Ok(intent) => match check_invariants(
+            Ok(StoredIntent::Active(intent)) => match check_invariants(
                 &intent.consumer.consumer_id,
                 intent.transition,
                 intent.authorization_ref.as_deref(),
@@ -422,6 +488,10 @@ impl ProjectionLifecycle {
             ControlState::Absent => return Ok(BTreeSet::new()),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
             ControlState::Intent(intent) => intent,
+            ControlState::Disabled(disabled) => match disabled.handoff {
+                Some(intent) => *intent,
+                None => return Ok(BTreeSet::new()),
+            },
         };
         let mut protected = BTreeSet::new();
         if let Some(digest) = intent.staged_seed_digest {
@@ -468,6 +538,7 @@ impl ProjectionLifecycle {
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {
             ControlState::Absent => {}
+            ControlState::Disabled(_) => return Err(IntentRefusal::Disabled),
             ControlState::Intent(existing) if existing.is_replay_of(request) => {
                 self.sync_directory()?;
                 return Ok(Recorded {
@@ -619,6 +690,7 @@ impl ProjectionLifecycle {
     ) -> Result<(LifecycleIntent, Admission), IntentRefusal> {
         let intent = match self.read() {
             ControlState::Absent => return Err(IntentRefusal::NoIntent),
+            ControlState::Disabled(_) => return Err(IntentRefusal::Disabled),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
             ControlState::Intent(intent) => intent,
         };
@@ -759,8 +831,60 @@ impl ProjectionLifecycle {
         intent: &LifecycleIntent,
         admission: &Admission,
     ) -> Result<(), IntentRefusal> {
-        let io = io_refusal;
         let bytes = encode(intent)?;
+        self.write_record(&bytes, Some(admission))
+    }
+
+    /// Stops admission without requiring a serving grant or discarding construction obligations.
+    /// Replays sync the existing record and preserve its accounting.
+    pub fn disable(&self, gate: &HookGate, now: i64) -> Result<DisabledIntent, IntentRefusal> {
+        gate.disable();
+        let _lock = self.lock().map_err(io_refusal)?;
+        let handoff = match self.read() {
+            ControlState::Disabled(intent) => {
+                self.sync_directory()?;
+                return Ok(intent);
+            }
+            ControlState::Intent(intent) => Some(Box::new(intent)),
+            ControlState::Absent => None,
+            ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
+        };
+        let intent = DisabledIntent {
+            schema: 3,
+            handoff,
+            recorded_at: now,
+            episodes: None,
+            through: None,
+            deregistered: false,
+        };
+        self.write_disabled(&intent)?;
+        Ok(intent)
+    }
+
+    pub(crate) fn update_disabled(
+        &self,
+        expected: &DisabledIntent,
+        next: &DisabledIntent,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        if self.read() != ControlState::Disabled(expected.clone()) {
+            return Err(IntentRefusal::Disabled);
+        }
+        self.write_disabled(next)
+    }
+
+    fn write_disabled(&self, intent: &DisabledIntent) -> Result<(), IntentRefusal> {
+        let bytes =
+            serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+        self.write_record(&bytes, None)
+    }
+
+    fn write_record(
+        &self,
+        bytes: &[u8],
+        admission: Option<&Admission>,
+    ) -> Result<(), IntentRefusal> {
+        let io = io_refusal;
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(IntentRefusal::Oversized);
         }
@@ -779,7 +903,7 @@ impl ProjectionLifecycle {
                 .custom_flags(OFlags::CLOEXEC.bits() as i32)
                 .open(&temp)?;
             file.set_permissions(Permissions::from_mode(0o600))?;
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
             Ok(())
         })();
@@ -788,7 +912,7 @@ impl ProjectionLifecycle {
             return Err(io(error));
         }
         self.at(WriteBarrier::BeforeRename);
-        if admission.invalidated.is_cancelled() {
+        if admission.is_some_and(|grant| grant.invalidated.is_cancelled()) {
             let _ = fs::remove_file(&temp);
             return Err(IntentRefusal::Revoked);
         }

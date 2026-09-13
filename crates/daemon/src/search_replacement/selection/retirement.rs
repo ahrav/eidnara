@@ -12,6 +12,14 @@ pub enum RetirementEvent {
     Acknowledged,
 }
 
+pub(super) struct RetirementRun<'a> {
+    pub kernel: &'a KernelStore,
+    pub spec: &'a super::super::ReplacementSpec,
+    pub budget: &'a EvalBudget,
+    pub transaction: &'a LifecycleTransactionLock,
+    pub check: &'a dyn Fn() -> Result<(), BuildError>,
+}
+
 impl SearchSelection {
     pub(super) fn predecessor(
         &self,
@@ -51,9 +59,6 @@ impl SearchSelection {
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable"))?;
         let certificate = &family.certificate;
-        let Some(old) = &certificate.retiring else {
-            return Err(BuildError::Invalid("no durable old consumer binding"));
-        };
         let grants = spec.admit(gate, &certificate.intent)?;
         let remaining = certificate
             .intent
@@ -100,6 +105,37 @@ impl SearchSelection {
             family.check_kernel(kernel, budget)
         };
         check()?;
+        self.retire_bound(
+            &family,
+            RetirementRun {
+                kernel,
+                spec,
+                budget,
+                transaction: &transaction,
+                check: &check,
+            },
+            observer,
+        )
+    }
+
+    pub(super) fn retire_bound(
+        &self,
+        family: &SelectedFamily,
+        run: RetirementRun<'_>,
+        observer: &mut dyn FnMut(RetirementEvent),
+    ) -> Result<(), BuildError> {
+        let RetirementRun {
+            kernel,
+            spec,
+            budget,
+            transaction,
+            check,
+        } = run;
+        let certificate = &family.certificate;
+        let old = certificate
+            .retiring
+            .as_ref()
+            .ok_or(BuildError::Invalid("no durable old consumer binding"))?;
         spec.identity.require_compatible(&self.identity)?;
         let target = CommitReadTarget {
             through_commit: certificate.seed.checkpoint_commit_seq,
@@ -134,7 +170,7 @@ impl SearchSelection {
         let checkpoint =
             kernel.outbox_consumer_checkpoint_within_budget(budget, receipt.old_consumer)?;
         if recovered {
-            self.remove_retiring_family(old, &transaction)?;
+            self.remove_retiring_family(old, transaction)?;
         } else {
             let mut after =
                 checkpoint.ok_or(BuildError::Invalid("old consumer missing without receipt"))?;
@@ -172,7 +208,7 @@ impl SearchSelection {
             }
             observer(RetirementEvent::BeforeCleanup);
             check()?;
-            self.remove_retiring_family(old, &transaction)?;
+            self.remove_retiring_family(old, transaction)?;
             observer(RetirementEvent::Removed);
             check()?;
             family.projection.write_within(deadline(budget)?, |conn| {
