@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::PreparedOutcome;
-use crate::{Handler, StoreOpenPolicy, jittered_store_open_delay};
+use crate::{HandlerCore, StoreOpenPolicy, jittered_store_open_delay};
 pub(crate) use project::ProjectBinding;
 pub use state::{ConflictReason, InvalidReason, KernelOutcome, UnavailableReason};
 
@@ -401,7 +401,7 @@ pub(crate) struct RouteScope {
     pub(crate) project: ProjectBinding,
 }
 
-impl Handler {
+impl HandlerCore {
     pub(crate) fn kernel_route_scope(
         &self,
         channel: RouteHandle,
