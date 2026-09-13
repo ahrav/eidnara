@@ -661,11 +661,42 @@ impl HookGate {
         if self.data_home.as_ref().is_some_and(|home| {
             !matches!(
                 ProjectionLifecycle::read_at(home),
-                ControlState::Absent | ControlState::Intent(_)
+                ControlState::Absent | ControlState::Intent(_) | ControlState::Current(_)
             )
         }) {
             self.disable();
         }
+    }
+
+    pub(crate) fn authorized_recovery(
+        &self,
+        home: &Path,
+        expected: &InvalidationIdentity,
+        persist: impl FnOnce() -> Result<(), crate::projection_lifecycle::IntentRefusal>,
+    ) -> Result<(), crate::projection_lifecycle::IntentRefusal> {
+        use crate::projection_lifecycle::IntentRefusal;
+        if self.data_home.as_deref().is_some_and(|bound| bound != home) {
+            return Err(IntentRefusal::Revoked);
+        }
+        let mut state = self.state.lock().map_err(|_| IntentRefusal::Revoked)?;
+        let evaluator = state
+            .evaluator
+            .as_ref()
+            .ok_or(IntentRefusal::Denied(Denial::NoManifest))?;
+        if evaluator.current != *expected {
+            return Err(IntentRefusal::Denied(Denial::EvidenceIdentity));
+        }
+        for hook in [
+            ProjectionHook::EmbeddingBootstrap,
+            ProjectionHook::EmbeddingBackfill,
+        ] {
+            evaluator.judge(hook).map_err(IntentRefusal::Denied)?;
+        }
+        persist()?;
+        state.invalidated.cancel();
+        state.invalidated = CancellationToken::new();
+        state.disabled = false;
+        Ok(())
     }
 
     /// Cleanup consumes resource evidence, not a query or hook grant.

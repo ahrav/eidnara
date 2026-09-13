@@ -499,6 +499,7 @@ fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
         staged_seed_digest: None,
         replacement_capture: None,
         recorded_at: NOW,
+        prior_disabled: None,
     }
 }
 

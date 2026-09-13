@@ -172,14 +172,34 @@ impl SearchSelection {
         if recovered {
             self.remove_retiring_family(old, transaction)?;
         } else {
-            let mut after =
-                checkpoint.ok_or(BuildError::Invalid("old consumer missing without receipt"))?;
+            let retired = certificate
+                .intent
+                .prior_disabled
+                .as_deref()
+                .is_some_and(|disabled| {
+                    disabled.deregistered
+                        && disabled
+                            .through
+                            .is_some_and(|t| t >= old.seed.checkpoint_commit_seq)
+                        && disabled.handoff.as_deref().is_some_and(|handoff| {
+                            handoff.consumer == old.consumer
+                                && handoff.staged_seed_digest.as_deref() == Some(&old_digest)
+                        })
+                });
+            let mut after = match checkpoint {
+                Some(after) => after,
+                None if retired => target.through_commit,
+                None => return Err(BuildError::Invalid("old consumer missing without receipt")),
+            };
             if after > target.through_commit {
                 return Err(BuildError::Invalid(
                     "old checkpoint exceeds retirement target",
                 ));
             }
             for _ in 0..spec.episode.max_source_pages.get() {
+                if after == target.through_commit {
+                    break;
+                }
                 check()?;
                 let page = kernel
                     .read_complete_commits_within_budget(

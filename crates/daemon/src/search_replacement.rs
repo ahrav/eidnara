@@ -516,7 +516,10 @@ impl<'a> ReplacementBuilder<'a> {
         } else {
             self.cleanup(budget)?;
         }
-        self.lifecycle.consume_episode(self.gate, wall_ms()?)?;
+        let mut expected = intent.clone();
+        expected.replacement_capture = self.capture.clone().map(Box::new);
+        self.lifecycle
+            .consume_expected_episode(self.gate, &expected, wall_ms()?)?;
         let run = Run {
             budget: budget.clone(),
             grants,
@@ -551,11 +554,17 @@ impl<'a> ReplacementBuilder<'a> {
             actor: "daemon".to_owned(),
             cause: "replacement capture".to_owned(),
         };
-        self.kernel
-            .commit_within_budget(&run.budget, registration, |envelope| {
-                envelope.register_outbox_consumer(&binding.consumer_id, run.now())?;
-                Ok(String::new())
-            })?;
+        if self
+            .kernel
+            .outbox_consumer_checkpoint_within_budget(&run.budget, &binding.consumer_id)?
+            .is_none()
+        {
+            self.kernel
+                .commit_within_budget(&run.budget, registration, |envelope| {
+                    envelope.register_outbox_consumer(&binding.consumer_id, run.now())?;
+                    Ok(String::new())
+                })?;
+        }
         if self
             .kernel
             .outbox_consumer_checkpoint_within_budget(&run.budget, &binding.consumer_id)?

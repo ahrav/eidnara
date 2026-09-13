@@ -33,6 +33,7 @@ const FAMILIES: &str = "search-families";
 const CERTIFICATE: &str = "bootstrap.json";
 
 pub mod disable;
+pub mod recovery;
 pub mod retirement;
 
 #[derive(Serialize, Deserialize)]
@@ -124,8 +125,11 @@ pub struct SearchSelection {
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
     maintenance: Option<disable::Maintenance>,
+    recovery_incarnation: Option<CommitReadIncarnation>,
     #[cfg(feature = "test-support")]
     disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
+    #[cfg(feature = "test-support")]
+    recovery_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
 }
 
 impl SearchSelection {
@@ -136,8 +140,11 @@ impl SearchSelection {
             bounds,
             selected: ArcSwapOption::empty(),
             maintenance: None,
+            recovery_incarnation: None,
             #[cfg(feature = "test-support")]
             disable_barrier: None,
+            #[cfg(feature = "test-support")]
+            recovery_barrier: None,
         }
     }
 
@@ -639,6 +646,14 @@ fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
 }
 
 impl SelectedFamily {
+    fn names_operation(&self, intent: &LifecycleIntent) -> bool {
+        let bound = &self.certificate.intent;
+        bound.attempt_id == intent.attempt_id
+            && bound.consumer == intent.consumer
+            && bound.staged_seed_digest == intent.staged_seed_digest
+            && bound.recovery_target == intent.recovery_target
+    }
+
     fn generation(&self) -> VectorGeneration {
         let seed = &self.certificate.seed;
         VectorGeneration {

@@ -22,7 +22,9 @@ pub const CONTROL_RECORD: &str = "intent.json";
 const TEMP_PREFIX: &str = "intent.";
 const TEMP_SUFFIX: &str = ".tmp";
 /// Schema 2 adds `staged_seed_digest`; a record of another schema is unavailable rather than read with defaults.
-const SCHEMA: u32 = 2;
+const ACTIVE_SCHEMA: u32 = 2;
+const DISABLED_SCHEMA: u32 = 3;
+const CURRENT_SCHEMA: u32 = 4;
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
@@ -45,6 +47,7 @@ impl Transition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cause {
+    Corruption,
     SchemaMismatch,
     TokenizerMismatch,
     EmbeddingModelMismatch,
@@ -135,6 +138,8 @@ pub struct LifecycleIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_capture: Option<Box<ReplacementCapture>>,
     pub recorded_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_disabled: Option<Box<DisabledIntent>>,
 }
 
 impl LifecycleIntent {
@@ -185,6 +190,8 @@ fn check_invariants(
 pub enum ControlState {
     Absent,
     Intent(LifecycleIntent),
+    /// Current stores completion history; it does not prove live inventory or query authorization.
+    Current(LifecycleIntent),
     Disabled(DisabledIntent),
     /// The record exists but cannot be trusted: not a regular owner-only file, over the size cap, malformed, or of another schema. Nothing is decided from it.
     Unavailable(String),
@@ -207,6 +214,14 @@ pub struct DisabledIntent {
 enum StoredIntent {
     Active(LifecycleIntent),
     Disabled(DisabledIntent),
+    Current(CurrentIntent),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentIntent {
+    schema: u32,
+    current: LifecycleIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -415,8 +430,38 @@ impl ProjectionLifecycle {
             return ControlState::Unavailable(error.kind().to_string());
         }
         match serde_json::from_slice::<StoredIntent>(&bytes) {
+            Ok(StoredIntent::Current(record)) => {
+                let intent = record.current;
+                if record.schema != CURRENT_SCHEMA
+                    || intent.schema != ACTIVE_SCHEMA
+                    || intent.recovery_target.is_none()
+                    || intent
+                        .recovery_target
+                        .is_some_and(|target| target.commit_seq < 0)
+                    || intent.episodes.allowance == 0
+                    || intent.episodes.consumed > intent.episodes.allowance
+                    || intent.recorded_at < 0
+                    || intent.episodes.deadline < intent.recorded_at
+                    || intent
+                        .staged_seed_digest
+                        .as_deref()
+                        .is_none_or(|d| !is_canonical_payload_digest(d))
+                    || intent.replacement_capture.is_some()
+                    || check_invariants(
+                        &intent.consumer.consumer_id,
+                        intent.transition,
+                        intent.authorization_ref.as_deref(),
+                        intent.cause,
+                    )
+                    .is_err()
+                {
+                    ControlState::Unavailable("invalid completion record".to_owned())
+                } else {
+                    ControlState::Current(intent)
+                }
+            }
             Ok(StoredIntent::Disabled(intent)) => {
-                if intent.schema != 3
+                if intent.schema != DISABLED_SCHEMA
                     || intent.recorded_at < 0
                     || intent.through.is_some_and(|n| n < 0)
                     || (intent.deregistered && intent.through.is_none())
@@ -427,7 +472,7 @@ impl ProjectionLifecycle {
                             || e.deadline <= intent.recorded_at
                     })
                     || intent.handoff.as_deref().is_some_and(|h| {
-                        h.schema != SCHEMA
+                        h.schema != ACTIVE_SCHEMA
                             || check_invariants(
                                 &h.consumer.consumer_id,
                                 h.transition,
@@ -446,7 +491,7 @@ impl ProjectionLifecycle {
                     ControlState::Disabled(intent)
                 }
             }
-            Ok(StoredIntent::Active(intent)) if intent.schema != SCHEMA => {
+            Ok(StoredIntent::Active(intent)) if intent.schema != ACTIVE_SCHEMA => {
                 ControlState::Unavailable(format!("schema {}", intent.schema))
             }
             Ok(StoredIntent::Active(intent)) => match check_invariants(
@@ -487,7 +532,7 @@ impl ProjectionLifecycle {
         let intent = match lifecycle.read() {
             ControlState::Absent => return Ok(BTreeSet::new()),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
-            ControlState::Intent(intent) => intent,
+            ControlState::Intent(intent) | ControlState::Current(intent) => intent,
             ControlState::Disabled(disabled) => match disabled.handoff {
                 Some(intent) => *intent,
                 None => return Ok(BTreeSet::new()),
@@ -538,6 +583,16 @@ impl ProjectionLifecycle {
         let _lock = self.lock().map_err(io_refusal)?;
         match self.read() {
             ControlState::Absent => {}
+            ControlState::Current(existing)
+                if existing.attempt_id != request.attempt_id
+                    && existing.staged_seed_digest.as_deref()
+                        == Some(&request.selected_generation)
+                    && existing.consumer.consumer_id != request.consumer.consumer_id => {}
+            ControlState::Current(existing) => {
+                return Err(IntentRefusal::Conflict {
+                    attempt_id: existing.attempt_id,
+                });
+            }
             ControlState::Disabled(_) => return Err(IntentRefusal::Disabled),
             ControlState::Intent(existing) if existing.is_replay_of(request) => {
                 self.sync_directory()?;
@@ -553,25 +608,7 @@ impl ProjectionLifecycle {
             }
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
         }
-        let intent = LifecycleIntent {
-            schema: SCHEMA,
-            transition: request.transition,
-            selected_generation: request.selected_generation.clone(),
-            kernel_incarnation_id: request.kernel_incarnation_id.clone(),
-            consumer: request.consumer.clone(),
-            cause: request.cause,
-            attempt_id: request.attempt_id.clone(),
-            recovery_target: request.recovery_target,
-            episodes: EpisodeAccounting {
-                allowance: request.allowance,
-                consumed: 0,
-                deadline: request.deadline,
-            },
-            authorization_ref: request.authorization_ref.clone(),
-            staged_seed_digest: None,
-            replacement_capture: None,
-            recorded_at: now,
-        };
+        let intent = new_intent(request, now);
         fits_when_exhausted(&intent)?;
         self.replace(&intent, &admission)?;
         Ok(Recorded {
@@ -590,8 +627,23 @@ impl ProjectionLifecycle {
         gate: &HookGate,
         now: i64,
     ) -> Result<EpisodeAccounting, IntentRefusal> {
+        let (expected, _) = self.admitted_intent(gate)?;
+        self.consume_expected_episode(gate, &expected, now)
+    }
+
+    pub(crate) fn consume_expected_episode(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        now: i64,
+    ) -> Result<EpisodeAccounting, IntentRefusal> {
         let _lock = self.lock().map_err(io_refusal)?;
         let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
         if now > intent.episodes.deadline {
             return Err(IntentRefusal::DeadlineExpired);
         }
@@ -690,6 +742,7 @@ impl ProjectionLifecycle {
     ) -> Result<(LifecycleIntent, Admission), IntentRefusal> {
         let intent = match self.read() {
             ControlState::Absent => return Err(IntentRefusal::NoIntent),
+            ControlState::Current(_) => return Err(IntentRefusal::NoIntent),
             ControlState::Disabled(_) => return Err(IntentRefusal::Disabled),
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
             ControlState::Intent(intent) => intent,
@@ -757,18 +810,67 @@ impl ProjectionLifecycle {
                 attempt_id: intent.attempt_id,
             });
         }
+        self.delete_private_family(
+            || {
+                if admission.invalidated.is_cancelled() {
+                    Err(IntentRefusal::Revoked)
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                release_lease();
+                Ok(())
+            },
+        )
+    }
+
+    pub(crate) fn delete_owned_replacement(
+        &self,
+        gate: &HookGate,
+        expected: &ControlState,
+        identity: &crate::projection_gates::InvalidationIdentity,
+        prepare: impl FnOnce() -> Result<(), crate::search_replacement::BuildError>,
+    ) -> Result<(), crate::search_replacement::BuildError> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let admission = match expected {
+            ControlState::Intent(intent) => {
+                Some(gate.admit(intent.transition.hook(), EntryPoint::Reload)?)
+            }
+            ControlState::Disabled(disabled) if disabled.handoff.is_some() => None,
+            _ => return Err(IntentRefusal::NoIntent.into()),
+        };
+        self.delete_private_family(
+            || {
+                if self.read() != *expected {
+                    return Err(IntentRefusal::Revoked.into());
+                }
+                match &admission {
+                    Some(grant) => gate.check_limits(grant, identity, &[])?,
+                    None => gate.cleanup_limits(identity, &[])?,
+                }
+                Ok(())
+            },
+            prepare,
+        )
+    }
+
+    fn delete_private_family<E: From<IntentRefusal>>(
+        &self,
+        check: impl Fn() -> Result<(), E>,
+        prepare: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        check()?;
         self.sync_directory()?;
         let home = self.data_home.join(CONTROL_DIR).join("replacement");
         let descriptor = search_descriptor(&home).map_err(store_refusal)?;
         self.at(WriteBarrier::BeforeFamilyRemoval);
-        if admission.invalidated.is_cancelled() {
-            return Err(IntentRefusal::Revoked);
-        }
-        release_lease();
-        if admission.invalidated.is_cancelled() {
-            return Err(IntentRefusal::Revoked);
-        }
-        delete_sqlite_family(&descriptor).map_err(store_refusal)
+        check()?;
+        prepare()?;
+        check()?;
+        delete_sqlite_family(&descriptor)
+            .map_err(store_refusal)
+            .map_err(E::from)
     }
 
     /// Caller must hold the data home's lifecycle transaction lock while changing capture ownership.
@@ -845,12 +947,12 @@ impl ProjectionLifecycle {
                 self.sync_directory()?;
                 return Ok(intent);
             }
-            ControlState::Intent(intent) => Some(Box::new(intent)),
+            ControlState::Intent(intent) | ControlState::Current(intent) => Some(Box::new(intent)),
             ControlState::Absent => None,
             ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
         };
         let intent = DisabledIntent {
-            schema: 3,
+            schema: DISABLED_SCHEMA,
             handoff,
             recorded_at: now,
             episodes: None,
@@ -877,6 +979,96 @@ impl ProjectionLifecycle {
         let bytes =
             serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
         self.write_record(&bytes, None)
+    }
+
+    pub(crate) fn authorize_recovery(
+        &self,
+        gate: &HookGate,
+        expected: &DisabledIntent,
+        request: &LifecycleRequest,
+        identity: &crate::projection_gates::InvalidationIdentity,
+        now: i64,
+    ) -> Result<(), IntentRefusal> {
+        check_invariants(
+            &request.consumer.consumer_id,
+            request.transition,
+            request.authorization_ref.as_deref(),
+            request.cause,
+        )?;
+        if request.transition != Transition::AuthorizedRecovery
+            || request.allowance == 0
+            || now >= request.deadline
+            || expected
+                .handoff
+                .as_ref()
+                .is_some_and(|old| old.attempt_id == request.attempt_id)
+        {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        let _lock = self.lock().map_err(io_refusal)?;
+        if self.read() != ControlState::Disabled(expected.clone()) {
+            return Err(IntentRefusal::Disabled);
+        }
+        let mut intent = new_intent(request, now);
+        intent.prior_disabled = Some(Box::new(expected.clone()));
+        fits_when_exhausted(&intent)?;
+        gate.authorized_recovery(&self.data_home, identity, || {
+            self.write_record(&encode(&intent)?, None)
+        })
+    }
+
+    pub(crate) fn finish_construction(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        intent.replacement_capture = None;
+        intent.prior_disabled = None;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    pub(crate) fn complete(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected || intent.replacement_capture.is_some() {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        let bytes = serde_json::to_vec(&CurrentIntent {
+            schema: CURRENT_SCHEMA,
+            current: intent,
+        })
+        .map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+        self.write_record(&bytes, Some(&admission))
+    }
+
+    pub(crate) fn unpin_construction(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        intent.staged_seed_digest = None;
+        self.replace(&intent, &admission)
     }
 
     fn write_record(
@@ -924,6 +1116,29 @@ impl ProjectionLifecycle {
         self.sync_directory()?;
         self.at(WriteBarrier::AfterDirectorySync);
         Ok(())
+    }
+}
+
+fn new_intent(request: &LifecycleRequest, now: i64) -> LifecycleIntent {
+    LifecycleIntent {
+        schema: ACTIVE_SCHEMA,
+        transition: request.transition,
+        selected_generation: request.selected_generation.clone(),
+        kernel_incarnation_id: request.kernel_incarnation_id.clone(),
+        consumer: request.consumer.clone(),
+        cause: request.cause,
+        attempt_id: request.attempt_id.clone(),
+        recovery_target: request.recovery_target,
+        episodes: EpisodeAccounting {
+            allowance: request.allowance,
+            consumed: 0,
+            deadline: request.deadline,
+        },
+        authorization_ref: request.authorization_ref.clone(),
+        staged_seed_digest: None,
+        replacement_capture: None,
+        recorded_at: now,
+        prior_disabled: None,
     }
 }
 
