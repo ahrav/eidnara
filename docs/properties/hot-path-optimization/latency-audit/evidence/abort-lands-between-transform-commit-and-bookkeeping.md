@@ -1,7 +1,17 @@
 # abort-lands-between-transform-commit-and-bookkeeping
 
-Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`, 2026-09-10.
+## Rebase status, 2026-09-13
+
+Relocation anchors refer to the formatted working tree atop `e451a2b4`.
+The abort witness is included in the passing rebased blocking group. Historical
+`d6060f79` gates remain separate; no green full-workspace gate is claimed.
+
+## Historical baseline, 2026-09-10
+
+Baseline: `913234433ae36a80a6e22c6aac14c7f9aab74386`.
 The [scope and provenance](../catalog.md#scope-and-provenance) apply here.
+The discovery and investigation below retain their baseline scope. The dated
+implementation section records the replacement seam and its actual witness.
 
 ## Discovery trigger
 
@@ -15,20 +25,20 @@ a campaign that never opens the window.
 
 ## Evidence trail
 
-- The first `run_transform()` call is at [`:8296-8299`][commit-call]; the store
-  commit inside it is at [`commit_transform:4947-4985`][store-commit]. The
+- The first `run_transform()` call is at [`:8202`][commit-call]; the store
+  commit inside it is at [`commit_transform:4939-4971`][store-commit]. The
   first in-memory update after it is the lineage-root insert at
-  [`:8305-8310`][roots-insert].
+  [`:8209-8214`][roots-insert].
 - Between those two points there is no `.await`. The next `.await` on the
-  handler task is [`:8337`][await-a], then [`:8361`][await-b] and
-  [`:8385`][await-c], all inside the Emergency95 branch at
-  [`:8337-8441`][emergency]. Each is followed by another `run_transform()`
+  handler task is [`:8263`][await-a], then [`:8289`][await-b] and
+  [`:8315`][await-c], all inside the Emergency95 branch at
+  [`:8244-8334`][emergency]. Each is followed by another `run_transform()`
   and a floor reload before control reaches the projection-cache store at
-  [`:8452-8459`][pc-store] and the `guidance_dates` removal at
-  [`:8482-8487`][guidance-remove].
+  [`:8387`][pc-store] and the `guidance_dates` removal at
+  [`:8398-8403`][guidance-remove].
 - The only seam after the commit is the `#[cfg(test)]`
-  [`between_transform_and_prepare`][hook] hook at [`:8316-8324`][hook],
-  declared at [`:2929-2932`][hook-field] as a test-only interleave point. It
+  [`between_transform_and_prepare`][hook] hook at [`:8224-8232`][hook],
+  declared at [`:2908-2911`][hook-field] as a test-only interleave point. It
   runs after the roots insert and before `prepare_historian_fire`, so it can
   separate the commit from every update except the first. No `test-support`
   feature exposes it to `crates/daemon/tests/` or the benches.
@@ -40,7 +50,7 @@ a campaign that never opens the window.
   observes abort only when it yields.
 - The commit is observable independently: [`MemoryStore::load`][load]
   returns `row_version`, and `commit_transform` returns the new version to
-  the closure at [`:4947-4985`][store-commit].
+  the closure at [`:4936-4974`][store-commit].
 - The parent's [E3][e3] carries the open question of which abort events a
   future worker can expose without equating waiter cancellation with
   completion.
@@ -65,7 +75,7 @@ can hit while the worker has already committed.
 
 A pass whose transform commits (observe `row_version` advance through a
 second store handle), then an abort of the handler task before
-[`:8305-8310`][roots-insert] executes, then a marker recording both facts and
+[`:8209`][roots-insert] executes, then a marker recording both facts and
 their order. At HEAD the [hook][hook] is the seam for everything after the
 roots insert; the Emergency95 awaits are the only seam for the roots insert
 itself. A relocation-era seam must be added by the specification. No existing
@@ -82,7 +92,7 @@ with completion.
 
 - Sources examined: [`dispatch.rs:938-955`][host-cancel],
   [`:1239-1259`][host-close], the `run_transform` closure at
-  [`:8203-8269`][h-run], the parent's [E3][e3].
+  [`:8139-8193`][h-run], the parent's [E3][e3].
 - Findings: The host has one abort primitive, `JoinHandle::abort`, and one
   observable, the tracker emptying. A blocking worker does not observe abort;
   the handler task does, at the join await. The worker's completion, the
@@ -93,19 +103,57 @@ with completion.
 - Missing evidence: A worker design and its completion channel.
 - Conclusion: needs human input.
 
-[hook-field]: ../../../../../crates/daemon/src/lib.rs#L2929-L2932
-[h-run]: ../../../../../crates/daemon/src/lib.rs#L8203-L8269
-[commit-call]: ../../../../../crates/daemon/src/lib.rs#L8296-L8299
-[roots-insert]: ../../../../../crates/daemon/src/lib.rs#L8305-L8310
-[hook]: ../../../../../crates/daemon/src/lib.rs#L8316-L8324
-[emergency]: ../../../../../crates/daemon/src/lib.rs#L8337-L8441
-[await-a]: ../../../../../crates/daemon/src/lib.rs#L8337
-[await-b]: ../../../../../crates/daemon/src/lib.rs#L8361
-[await-c]: ../../../../../crates/daemon/src/lib.rs#L8385
-[pc-store]: ../../../../../crates/daemon/src/lib.rs#L8452-L8459
-[guidance-remove]: ../../../../../crates/daemon/src/lib.rs#L8482-L8487
-[store-commit]: ../../../../../crates/daemon/src/transform.rs#L4947-L4985
-[load]: ../../../../../crates/memory-store/src/lib.rs#L6640-L6667
-[host-cancel]: ../../../../../crates/host-runtime/src/dispatch.rs#L938-L955
-[host-close]: ../../../../../crates/host-runtime/src/dispatch.rs#L1239-L1259
+[hook-field]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L2908-L2911
+[h-run]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8139-L8193
+[commit-call]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8202
+[roots-insert]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8209-L8214
+[hook]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8224-L8232
+[emergency]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8244-L8334
+[await-a]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8263
+[await-b]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8289
+[await-c]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8315
+[pc-store]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8387
+[guidance-remove]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8398-L8403
+[store-commit]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/transform.rs#L4936-L4974
+[load]: https://github.com/ahrav/eidnara/blob/9132344/crates/memory-store/src/lib.rs#L6196-L6223
+[host-cancel]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L938-L955
+[host-close]: https://github.com/ahrav/eidnara/blob/9132344/crates/host-runtime/src/dispatch.rs#L1239-L1259
 [e3]: ../../catalog.md#request-close-overlaps-live-work
+
+## Implementation evidence, 2026-09-13
+
+[#438](https://github.com/ahrav/eidnara/issues/438) gives abort and panic tests a
+dedicated `after_transform_commit` hook in [first_transform][first-live], after
+the transform returns and before lineage insertion, guidance-pin removal, and
+the first publication-floor read. The separate `between_transform_and_prepare`
+hook stays after the first floor read for C5, matching upstream. Both hooks are
+`#[cfg(test)]`, not production fault-injection APIs.
+
+[`aborted_waiter_preserves_commit_bookkeeping_and_worker_charges`][abort-test]
+constructs the witness on a current-thread runtime. The blocking gate signals
+entry, the test reads a committed and initialized row, confirms the lineage
+map lacks the session, and aborts the waiter. Awaiting the waiter confirms
+its cancelled `JoinError` while the independent work tracker still has one
+join and the worker remains held. Only then does the test release the gate.
+This establishes commit, waiter abort, and pending bookkeeping as separate
+observations. It does not infer physical completion from waiter cancellation.
+The test also checks W8's lineage and guidance consequences on the next pass.
+
+The [real-host cancel and route-close tests][host-tests] hold the same hook
+while observing the actual host cancellation signal and the retained route
+binding. They establish production-path overlap, but explicit client cancel
+locally discards the pending receiver. Its server publication hook checks an
+Error frame after completion, not the decoded `cancelled` code.
+
+The worker ownership and event questions are resolved for transform units.
+W11 stays test-only because the deterministic gate is test-only, even though
+the handler and host path are production code. No generation-retirement or
+power-loss campaign is claimed. [The execution receipt][receipt] records the
+focused results, workspace exit 101 from the two known baseline deadline
+failures, their passing isolated reruns, and the passing Bun repository gate;
+checks remain unaudited.
+
+[first-live]: ../../../../../crates/daemon/src/lib.rs#L8856-L8883
+[abort-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
+[host-tests]: ../../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
+[receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13

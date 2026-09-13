@@ -295,6 +295,12 @@ impl InputBuffer {
     pub fn as_slice(&self) -> &[u8] {
         &self.body
     }
+
+    /// The observer outlives the buffer without retaining its charge or permitting budget mutation.
+    #[cfg(feature = "test-support")]
+    pub fn ingress_charge_for_test(&self) -> (usize, impl Fn() -> usize + Send + Sync + 'static) {
+        (self._charge.bytes(), self._charge.observe_pool())
+    }
 }
 
 impl std::ops::Deref for InputBuffer {
@@ -498,6 +504,13 @@ pub struct CancelSignal {
 }
 
 impl CancelSignal {
+    /// A signal over `token`. The signal observes the token and cannot cancel it, so handing
+    /// one out grants nothing beyond the read.
+    #[cfg(feature = "test-support")]
+    pub fn observing(token: CancellationToken) -> Self {
+        Self { token }
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
     }

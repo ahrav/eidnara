@@ -1,5 +1,14 @@
 # Existing checks for the latency audit supplement
 
+## Rebase status, 2026-09-13
+
+Relocation anchors refer to the formatted working tree rebased onto `e451a2b4`.
+Upstream metadata-load, escape-scratch, footprint-floor, and stage-timing checks
+remain in the inventory. The [rebased receipt](../existing-checks.md#rebased-working-tree-verification-2026-09-13)
+is separate from historical `d6060f79` results. Final Bun passes. The earlier
+rebased full workspace failed two daemon deadlines and an additional embedding
+timing-sensitive case; no workspace pass is claimed.
+
 The system is `/local/home/ahrav/scratch/eidnara`, at
 `913234433ae36a80a6e22c6aac14c7f9aab74386`, checked on 2026-09-10.
 The [catalog scope](catalog.md#scope-and-provenance) governs this inventory.
@@ -15,6 +24,63 @@ runs no checks. Dated implementation evidence below is separate from that audit.
 This is a working-tree inventory against the source baseline. Each section
 ends with an explicit "none found" list and the areas the lenses flagged as
 suspiciously quiet, so an omitted category is not mistaken for absent tests.
+
+Historical citations retain the source that supports each claim. The database
+override check is pinned to discovery baseline `9132344`; its former live
+range pointed into unrelated model tests. The unpaged-number and session-hook
+checks use pre-consolidation baseline
+`fe1d267b5e2dd254631d27c2cb3535c71082582a` (2026-09-11), not a relocated test.
+The catalog's logging check uses that same pre-consolidation baseline.
+
+## Transform-unit implementation evidence, 2026-09-13
+
+[#438](https://github.com/ahrav/eidnara/issues/438) adds production transform
+placement through `RequestCtx::run_blocking`, first recorded in `d6060f79` over
+`f2c8eab0` and now preserved in the working tree atop `e451a2b4`.
+The parent's [unit inventory](../existing-checks.md#transform-unit-checks-2026-09-13)
+lists all eleven group tests, the parent-run ignored child, and both transfer tests.
+Its [execution receipt](../existing-checks.md#transform-unit-execution-receipt-2026-09-13)
+records the historical focused passes and failed workspace runs on `d6060f79`,
+including its Bun pass and isolated deadline reruns. The separate
+[rebased receipt](../existing-checks.md#rebased-working-tree-verification-2026-09-13)
+records final focused, Bun, corpus, direct-host, build, formatting, and clippy
+passes after the test-only hook separation. The earlier
+full workspace has 3735 passes, three failures, and 25 ignores across 142 groups.
+Its additional embedding failure is not proven baseline. No workspace pass or
+performance gain is claimed.
+
+| Check | Scoped assertion | Status |
+| --- | --- | --- |
+| [`aborted_waiter_preserves_commit_bookkeeping_and_worker_charges`][u-abort] | W11 observes commit and waiter abort before lineage insertion. W8 checks later lineage and guidance-pin settlement, reopened core state, and fresh guidance on the next HARD pass. | unaudited |
+| [`emergency_cancellation_between_units_preserves_commit_and_releases_scratch`][u-emergency] | A commit survives cancellation during the live historian wait. No unit permit spans that wait; a later cancelled unit releases retained scratch. | unaudited |
+| [`route_close_keeps_binding_and_scratch_until_transform_finishes`][u-host-close] | E1/E3 observe a real host close while the committed transform is held, then cleanup and exact scratch reacquisition only after completion. Ingress availability equals baseline minus held body bytes at the gate and returns exactly to baseline after route-gone. | unaudited |
+| [`request_cancel_waits_for_committed_transform_and_releases_scratch`][u-host-cancel] | A server Error is published after completion with all permits available and ingress restored to baseline. Explicit client cancel discards its pending receiver locally; this check does not decode the cancelled code. | unaudited |
+| [`transform_panic_is_redacted_and_maps_to_wire_internal_error`][u-panic] and [`transform_panic_child`][u-child] | W12's transform arm checks the actual host path, post-commit panic, fixed diagnostic, no canary, terminal `host.internal_error`, exact ingress baseline, returned scratch, and cleanup. The ignored child runs from the parent. | unaudited |
+| [`synthetic_unit_failures_map_to_internal_error_and_release_resources`][u-failure] | Six cases deliver the three BlockingWorkFailed variants at submissions one and two. The failed closure is dropped without running. Submission-two cases follow a real Emergency95 transform and inline publication. The checks cover internal_error mapping, exact scratch return, unit permits, and durable state, not actual runtime-stop or route-closing races. | unaudited |
+| [`spent_meter_cannot_reenter_admitted_body`][u-spent-admission] | Reentry after charge transfer refuses before the already-admitted shortcut, makes no new reserve call, and releases the exact pool capacity when owners drop. | unaudited |
+| [`handler_emergency_inline_drive_folds_in_the_same_response`][u-inline] | Inline success returns the historian summary in the same HARD response. | unaudited |
+| [`handler_emergency_busy_waits_for_the_active_run_and_then_refolds`][u-busy] | A completed first unit still waits for the active historian, then returns its summary. This Busy path requires six scalar reads, distinct from the four-read post-publish hook witness. | unaudited |
+| [`handler_emergency_refolds_when_active_run_publishes_before_live_wait_capture`][u-foreign] | C5 records ordered transform/publish versions independently of the pass read, returns the published summary, and observes exactly four scalar reads. | unaudited |
+| [`handler_emergency_inline_failure_degrades_to_the_emergency_selection_output`][u-failed] | Inline failure preserves the emergency selection output against the direct transform comparison. | unaudited |
+
+None found in this campaign: an exhaustive derived-cache recovery matrix,
+power-loss evidence, an allocator-RSS bound, full-cap paged or slow-disk
+duration measurements, or a kernel-route worker-panic test. The transform
+redaction evidence does not repair `kernel_routes::blocking`. The W2 note
+documents timer placement only and leaves W2 invalidated.
+
+[u-abort]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
+[u-spent-admission]: ../../../../crates/daemon/src/transform_unit/tests.rs#L11-L25
+[u-emergency]: ../../../../crates/daemon/src/transform_unit/tests.rs#L504-L570
+[u-host-close]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L367
+[u-host-cancel]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L245-L372
+[u-panic]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L402
+[u-child]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L404-L439
+[u-failure]: ../../../../crates/daemon/src/transform_unit/tests.rs#L572-L662
+[u-inline]: ../../../../crates/daemon/src/lib.rs#L37901-L37914
+[u-busy]: ../../../../crates/daemon/src/lib.rs#L37916-L37972
+[u-foreign]: ../../../../crates/daemon/src/lib.rs#L37974-L38076
+[u-failed]: ../../../../crates/daemon/src/lib.rs#L38078-L38134
 
 ## Ingress admission and decode
 
@@ -45,7 +111,7 @@ suspiciously quiet, so an omitted category is not mistaken for absent tests.
 | [`both_lanes_charge_the_same_footprint_and_refuse_the_same_bodies`][t-lanes] | Every corpus body, one with twenty thousand values under an ignored field among them, gives one outcome and one counted footprint through both lanes with a pool one byte short and a pool that just fits; the short pool refuses as too large. | unaudited |
 | [`a_drained_pool_refuses_a_fitting_body_as_transient_and_records_the_shortfall`][t-drain] | A held charge makes a fitting body's decode a transient refusal that releases its bytes, records the meter's shortfall marker, and returns `queue_full`; the body decodes once the holder releases; a body the pool could never hold is transient while the pool is held and too large once it has room to count it. | unaudited |
 | [`a_refused_decode_has_no_dispatch_side_effect`][t-effect] | A permanent and a transient refusal through `dispatch_body` return the prior codes and leave the handler's route table and the store row untouched, checked directly on the tested route; the body is served with room and only then binds the route. | unaudited |
-| [`refused_bodies_emit_one_terminal_and_leave_no_dispatch_state`][t-ring] | Through the direct-host fixture, a body over each byte cap and two dense bodies the byte-derived floor refuses before either decode each return `host.invalid_params` to the managed client, which settles on the first terminal and drops a later one; the session shows no pass trace or row; a transform is then served and counted once. In-decode refusal and charge release are not exercised at ring level. | unaudited |
+| [`refused_bodies_emit_one_terminal_and_leave_no_dispatch_state`][t-direct-ring] | Through the direct-host fixture, a body over each byte cap and two dense bodies the byte-derived floor refuses before either decode each return `host.invalid_params` to the managed client, which settles on the first terminal and drops a later one; the session shows no pass trace or row; a transform is then served and counted once. In-decode refusal and charge release are not exercised at ring level. | unaudited |
 | [`dispatch_routes_each_envelope_class_to_a_distinct_arm`][t-dispatch] | `kind` routing, `facade_envelope_not_supported`, `unrecognized_request_shape` for object and non-object bodies. | unaudited |
 | [`management_drop_alias_routes_are_rejected`][t-shape] | Retired aliases return `unrecognized_request_shape`. | unaudited |
 | [`indexing_embedding_git_and_mural_are_unreachable_from_every_route_shape`][t-shape2] | Internal names are not routable by `method`, `kind`, or facade. | unaudited |
@@ -315,7 +381,7 @@ attachment; that mechanism is unavailable on the tested Bun and Node runtimes.
 [serialized-writer]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L55
 [serialized-transport]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire-frame.test.ts#L97
 [serialized-client]: ../../../../packages/opencode-plugin/src/shared/host-client/client.test.ts#L108-L175
-[serialized-unpaged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1509
+[serialized-unpaged]: https://github.com/ahrav/eidnara/blob/fe1d267b5e2dd254631d27c2cb3535c71082582a/packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1509-L1526
 [serialized-pager]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.test.ts#L1427
 [serialized-hook]: ../../../../packages/opencode-plugin/src/hooks/context/hook.test.ts#L1435
 [serialized-host]: ../../../../crates/daemon/tests/serialized_transform_pages.rs#L11
@@ -452,6 +518,10 @@ delta in any fault table.
 | [`handler_panic_payload_is_redacted_from_process_stderr`][t-panic-stderr] | In a child process, stderr carries the fixed redacted diagnostic, not the handler payload, and an unrelated panic still reaches the prior hook. | unaudited |
 | [`panic_redaction_subprocess_child`][t-panic-child] | The child role: installs a prior hook, drives a panicking handler, asserts `internal_error`. | unaudited |
 
+The following quiet-area inventory retains its discovery scope. The dated
+transform-unit section above supplies the new abort and transform-panic checks;
+it does not close the kernel-route gap.
+
 None found: a daemon benchmark that records build, host, and workload
 identity; any bench reaching `Handler::handle` or a production-sized steady
 session; a check that `DECLARED_RETAINED_RESIDENT_BYTES` includes every
@@ -511,7 +581,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-drain]: ../../../../crates/daemon/src/lib.rs#L20181-L20238
 [t-effect]: ../../../../crates/daemon/src/lib.rs#L20300-L20348
 [t-lanes]: ../../../../crates/daemon/src/lib.rs#L19954-L20000
-[t-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L558
+[t-direct-ring]: ../../../../crates/daemon/tests/direct_host.rs#L437-L558
 [t-meta]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L21-L96
 [directhost]: ../../../../crates/daemon/tests/direct_host.rs#L49-L128
 [t-prep]: ../../../../crates/daemon/tests/prepared_output.rs#L103-L115
@@ -581,10 +651,10 @@ not a claim that no related check exists anywhere in the repository.
 [hyg-bench-loop]: ../../../../crates/daemon/benches/hot_path.rs#L161-L199
 [t-seldiff]: ../../../../crates/daemon/tests/selection_differential.rs#L1-L5
 
-[hook]: ../../../../crates/daemon/src/lib.rs#L8276-L8284
+[hook]: ../../../../crates/daemon/src/lib.rs#L8884-L8897
 [no-fire-doc]: ../../../../crates/daemon/src/lib.rs#L5520-L5534
 [t-no-fire]: ../../../../crates/daemon/src/lib.rs#L38196-L38240
-[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37403-L37477
+[t-emergency]: ../../../../crates/daemon/src/lib.rs#L37974-L38076
 [t-cas]: ../../../../crates/daemon/src/lib.rs#L24684-L24755
 [t-snap-resist]: ../../../../crates/memory-store/src/lib.rs#L18542
 [t-snap-keeps]: ../../../../crates/memory-store/src/lib.rs#L18596
@@ -617,9 +687,9 @@ not a claim that no related check exists anywhere in the repository.
 [tavaildb]: ../../../../packages/opencode-plugin/src/hooks/context/ctx-reduce-availability.test.ts#L29-L125
 [tmidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L57-L892
 [tismidturn]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1138-L1169
-[tdbpath]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L1171-L1239
+[tdbpath]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/read-session-db.test.ts#L953-L1021
 [session-db-cache]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/session-db-cache-contract.ts#L1-L392
-[session-db-hook]: ../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1616-L1670
+[session-db-hook]: https://github.com/ahrav/eidnara/blob/fe1d267b5e2dd254631d27c2cb3535c71082582a/packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1616-L1670
 [tordinal]: ../../../../packages/opencode-plugin/src/hooks/context/read-session-raw.test.ts#L173
 [tsqlite]: ../../../../packages/opencode-plugin/src/shared/sqlite.test.ts#L279
 [tbind]: ../../../../packages/opencode-plugin/src/shared/sqlite-bind-style.test.ts#L32

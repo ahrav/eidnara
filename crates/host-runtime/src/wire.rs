@@ -464,6 +464,19 @@ impl ByteCharge {
             .map_or(0, OwnedSemaphorePermit::num_permits)
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn observe_pool(&self) -> impl Fn() -> usize + Send + Sync + 'static {
+        let semaphore = self
+            .permit
+            .as_ref()
+            .map(|permit| Arc::clone(permit.semaphore()));
+        move || {
+            semaphore
+                .as_ref()
+                .map_or(0, |pool| pool.available_permits())
+        }
+    }
+
     /// A failed split leaves the permit count unchanged.
     pub(crate) fn split(&mut self, bytes: usize) -> Option<ByteCharge> {
         if bytes == 0 {

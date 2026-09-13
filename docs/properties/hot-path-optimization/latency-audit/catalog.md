@@ -1,11 +1,23 @@
 # Hot-path latency audit supplement
 
+## Rebase status, 2026-09-13
+
+Relocation source anchors describe the implementation rebased onto
+`e451a2b4`. Upstream's metadata-only load and
+`pass_state_load` timing field are preserved. C5 keeps separate six-read Busy
+and four-read post-publish checks. The [rebased receipt](../existing-checks.md#rebased-working-tree-verification-2026-09-13)
+records final focused and Bun passes. The earlier full-workspace run failed
+with two known daemon deadlines and one additional timing-sensitive embedding
+failure. No workspace pass is claimed. Earlier `d6060f79` results stay historical.
+
 ## Scope and provenance
 
 This area extends the [parent supplement](../catalog.md) with the remaining
 surfaces of a per-turn latency audit. It supplies reusable
 `/property-discovery-and-catalog` input for a specification; it does not
 authorize implementation or create tickets.
+
+### Historical discovery baseline, 2026-09-10
 
 - The system is `/local/home/ahrav/scratch/eidnara`.
 - The baseline is `913234433ae36a80a6e22c6aac14c7f9aab74386`.
@@ -45,6 +57,20 @@ Generic lifecycle, fencing, snapshot, redaction, punch-soundness, and
 tokenizer obligations remain in their canonical catalogs, named under
 "Relationships and retained canonical obligations".
 
+## Transform-unit implementation evidence, 2026-09-13
+
+[#438](https://github.com/ahrav/eidnara/issues/438) updates W8, W11, W12, and C5
+first collected over `f2c8eab0`, above base `96709d0e`, and retained in `d6060f79`.
+Relocation anchors now refer to the rebased working tree. The scoped evidence
+files preserve the 2026-09-10 discovery prose under historical headings with
+pinned source links. W2 stays invalidated; its dated note records timing
+boundaries without a speedup claim. The [execution receipt](../existing-checks.md#transform-unit-execution-receipt-2026-09-13)
+separates focused passes from the workspace's two known baseline deadline
+failures and the passing Bun repository gate. Both deadline tests pass in
+isolated reruns; the full workspace still exits 101. Historical
+citations keep their discovery or pre-consolidation baseline, as recorded in
+the [check inventory](existing-checks.md).
+
 ## Reachability and boundaries
 
 | Records | Class | Evidence and limit |
@@ -64,19 +90,31 @@ tokenizer obligations remain in their canonical catalogs, named under
 | W2-W5, W7-W10 | default-production | The handler populates `timings`, injects the token cache, prepares `meta`, fires the historian, and merges config on ordinary passes; SOFT pressure needs workload. |
 | W6 | explicit-config-only | The dreamer schedule [defaults to `None`][sched-default]; smart notes need a cron on the note. |
 | W13 | explicit-config-only | The same gate as W6 for the scheduler consumer: [`scheduled_projects`][sched-projects] drops a project with no schedule ([`:14133`][sched-filter]) or outside `MODULE` authority, so a default campaign never calls `next_due`. |
-| W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the only abort seam after commit is the `#[cfg(test)]` [hook][hook]. |
-| W12 | default-production | Every `kernel.*` route that reaches the store runs its work through [`kernel_routes::blocking`][blocking] on a `spawn_blocking` worker with the redaction guard at depth `0`; the panic itself is the injected fault. |
+| W1, W11 | test-only | Benches need `bench-internals` or manual `--ignored` runs; the deterministic abort seam is `#[cfg(test)]` [`after_transform_commit`][unit-after-hook]. |
+| W12 | default-production | Transform units use [the guarded host runner][unit-runner-live]. [`kernel_routes::blocking`][blocking] still runs without that guard; the panic itself is the injected fault. |
 
-Execution topology is unresolved at this HEAD, as the parent records. W8 and
-W11 state the failure class a `spawn_blocking` relocation opens; they do not
-prove such a worker is ready. W12 records the one worker-thread boundary the
-daemon already crosses in production, for kernel routes. T3 and T4 are
+Transform execution topology is resolved by the host-owned unit runner. W8 and
+W11 retain separate safety and overlap obligations, now with post-commit abort
+evidence. W12 has transform-specific redaction evidence but an unresolved
+kernel-route boundary. T3 and T4 are
 test-only at HEAD because the
 direct path has no production sender; the specification would move them to
 default-production for whichever routes it moves to the direct path,
 transform responses first. T3's check applies unchanged to a
 `MeasuredSource::Json` response, which the owned path serializes twice at
 HEAD (`crates/daemon/src/dispatch.rs:132-148` measures, `:237-249` writes).
+
+[unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
+[unit-host-live]: ../../../../crates/host-runtime/src/handler.rs#L606-L673
+[unit-first-live]: ../../../../crates/daemon/src/lib.rs#L8846-L8903
+[unit-after-hook]: ../../../../crates/daemon/src/lib.rs#L8856-L8883
+[unit-between-hook]: ../../../../crates/daemon/src/lib.rs#L8884-L8897
+[unit-prepare-live]: ../../../../crates/daemon/src/lib.rs#L5268
+[unit-settle-live]: ../../../../crates/daemon/src/lib.rs#L8934-L8952
+[unit-abort-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L143-L246
+[unit-emergency-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L504-L570
+[unit-panic-test]: ../../../../crates/daemon/src/transform_unit/host_tests.rs#L374-L439
+[unit-failure-test]: ../../../../crates/daemon/src/transform_unit/tests.rs#L572-L662
 
 ## Index
 
@@ -1025,33 +1063,47 @@ Exercised: yes - The
 [emergency interleave test](evidence/foreign-write-lands-between-pass-loads.md#marker-evidence)
 records the transform's committed `row_version` and the publish's committed
 `row_version` from the store inside the hook and asserts the publish landed
-after the transform and after the Emergency95 pre-hook floor read, before
-`prepare_historian_fire`'s load and the final floor check.
+after the transform. In upstream `e451a2b4`, publication follows the Emergency95
+pre-hook floor read and precedes `prepare_historian_fire`'s load and the final
+floor check. In relocation commit `d6060f79`, the hook instead precedes the
+first floor read; that test requires four scalar reads and a response containing
+the published fold. The final source restores `between_transform_and_prepare`
+after the first floor read and gives abort/panic tests their own earlier
+`after_transform_commit` gate. Its four Emergency95 tests pass with separate oracles:
+six reads for Busy and four for this post-publish witness. One count does not
+replace the other.
+The post-publish witness therefore constructs the between-two-post-commit-reads
+window required by the retained upstream check.
+The witness reads through an Arc clone of the shared store, not an independently
+opened connection or the publisher's captured return value.
 Guarantee: A state-load campaign reaches the interleaving that distinguishes
 one-load-per-pass from per-consumer loads.
 Check: `sometimes` - For some pass, a foreign commit by another actor
 (historian publish, wrapup recut, or state sync) through a second store
 handle returns a `row_version` greater than the one the pass's transform
 committed, and that commit returns between two of the pass's post-commit
-`cache_state` reads (the hook sits after the Emergency95 pre-floor read at
-[`:8267-8275`][floor-a] and before `prepare_historian_fire`'s load and the
-final floor check); both versions and the ordering are recorded from
+`cache_state` reads (the [upstream hook](evidence/foreign-write-lands-between-pass-loads.md#marker-evidence)
+sits after the Emergency95 pre-floor read and before `prepare_historian_fire`'s
+load and the final floor check); both versions and the ordering are recorded from
 the store and the actor, never from the pass's own read, which is what C1
-tests. `sometimes` rather than `reachable` because the rerun
-lines at [`:8409-8428`][floor-b] execute on every Emergency95 pass while the
+tests. `sometimes` rather than `reachable` because the [final floor check][unit-settle-live]
+executes on every non-subagent Emergency95 pass while the
 interleaving that makes C1 meaningful may never occur.
 Fault/timing angle: The window between `commit_transform` and
-[`prepare_historian_fire`][prepare] or the floor check.
+[`prepare_historian_fire`][unit-prepare-live] or the floor check.
 Required faults and enabling state: A concurrent publish or recut committed
 through a second handle inside that window; the
-[`between_transform_and_prepare`][hook] hook is the existing seam.
+[`between_transform_and_prepare`][unit-between-hook] hook is the existing seam.
 Confidence: high - [Evidence](evidence/foreign-write-lands-between-pass-loads.md).
-The rerun logic and the hook are source-verified.
+The rerun logic and separated hooks are source-verified. C5's hook follows the
+first floor read, matching upstream; W11's gate precedes lineage and guidance.
 Existing check: [Emergency interleave test](existing-checks.md#cache-state-load-pass-trace-side-channel-and-meta-preparation)
-constructs the interleaving; unaudited.
+constructs the between-two-post-commit-reads interleaving in the final source.
+Unaudited.
 Impact: A single-load design and the current design are indistinguishable to
 the suite.
-Open questions: None.
+Open questions: None. Separate test-only gates preserve the C5 and W11 windows
+without weakening either oracle.
 
 ### side-channel-row-is-due-during-a-drain
 
@@ -1826,43 +1878,40 @@ Open questions:
 
 Type: safety
 Reachability: default-production
-Status: invalidated - the one recorded stage delta, the single pass-state
-load ([C1][c1]), gave the moved read its own `pass_state_load` field and key
-instead of leaving it inside `delta_expand` and `projection_cache_lookup`,
-so no existing field changed what it brackets; the record is kept as
-authored for traceability.
+Status: invalidated
 Exercised: partial - The line's key set and the default deserialization are
 pinned; nothing ties the TypeScript key list to the Rust struct or asserts
-what a field brackets.
+what a field brackets. The [2026-09-13 implementation note](evidence/stage-timing-fields-keep-their-boundaries.md#implementation-evidence-2026-09-13)
+records unchanged field meanings and same-thread transform counter sampling.
+`handler_total` includes admission queueing and worker hops before settlement,
+not the final return hop or wire publication. No stage delta reactivates W2.
 Guarantee: A stage that reports a smaller number after the change got faster
 rather than moving out from under its timer.
-Check: `always` - Every key printed by [`format_pass_timing_line`][fmt] and
-every key the plugin's [`rust module stages:` line][ts-stages] reads resolves
-to a field of [`TransformTimings`][tt] under a pinned key-to-field map, which
-at HEAD is the identity except `post_attach_ms` for `post_attach`
-(`transform.rs:1264`, `:1342`, field at `:1172`); each field's start and stop
+Check: `always` - Every key printed by `format_pass_timing_line` and every key
+the plugin's `rust module stages:` line reads resolves to a `TransformTimings`
+field under the [historical key-to-field map](evidence/stage-timing-fields-keep-their-boundaries.md#evidence-trail).
+Upstream adds `pass_state_load` as its own field and key for the single-load
+stage rather than hiding that read's cost in smaller `delta_expand` and
+`projection_cache_lookup` values. The identity map still has the `post_attach_ms`
+exception. Each field's start and stop
 instants are stated in a per-field table beside the struct and a relocation
 changes the table in the same change (a review gate, not a runtime
 assertion); a field for a removed or merged stage
 is removed from the struct and both consumers rather than left to report
 `0.0` through `#[serde(default)]`; and the two `local_stats` reads that form
-the token-cache delta ([`record_token_cache_delta`][rtcd]) run on one thread.
+the token-cache delta (`record_token_cache_delta`) run on one thread.
 `always` because the handler populates `timings` on every ordinary pass and
-[`respond_transform`][respond] emits the line for every response.
-Fault/timing angle: The transform moves to a blocking thread while the
-handler-level `Instant` pairs at [`:8514-8539`][h-timings] stay on the
-handler task; a stage split across an `.await` splits its
-[thread-local counter][tc-local] delta. Both reads sit inside the synchronous
-[`apply_additive_only`][snap-add] and [`apply_once`][snap-once] bodies today.
-Every field carries `#[serde(default)]`, so a dropped field deserializes as
-zero and the plugin prints `n/a` only when the key is absent
-([`:1019-1024`][ts-stage-fn]).
+`respond_transform` emits the line for every response.
+Fault/timing angle: The historical risk is a relocation that separates a stage
+from its timer or splits a thread-local counter delta across an await. #438
+keeps both samples in each synchronous transform attempt. Defaults can still
+hide a removed producer field as zero; the implementation note does not prove
+the historical per-field review gate.
 Required faults and enabling state: A pass that populates `timings`; a code
 change that relocates or splits a stage.
 Confidence: high - [Evidence](evidence/stage-timing-fields-keep-their-boundaries.md).
-The struct, the formatter, the handler assignments, and the plugin reader
-([`:999-1012`][ts-read]) are source-verified. The wire contract has no
-`timings` statement; the field is a daemon-to-plugin convention.
+The evidence separates pinned discovery claims from current timing brackets.
+No field-schema change or full per-field timing test is claimed.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
 include the line test, the default test, and the plugin's stage-log test; all
 unaudited.
@@ -2144,52 +2193,58 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No test aborts between commit and bookkeeping and
-inspects the next pass's derived inputs.
+Exercised: partial - [The aborted-waiter test][unit-abort-test] observes a real
+commit before lineage insertion, aborts the waiter while the unit remains held,
+then checks lineage, guidance-pin removal, reopened core state, and fresh
+guidance on the next HARD pass. [The Emergency95 cancellation test][unit-emergency-test]
+checks a committed first unit followed by cancellation during the historian
+wait. The full derived-cache recovery matrix is not exercised.
 Guarantee: A committed transform's derived in-memory state is applied on the
 pass that committed it or provably recomputed on the next pass for that
 session.
 Check: `always` - After any pass whose `commit_transform` succeeded, at the
 next pass's `ProducerContext` construction for the same session:
 `transform_session_roots` contains the lineage root, or
-[`module_knows_transform_session`][knows] repopulates it from the durable
-table; the projection cache holds the entry [`store_projection_cache`][store-pc]
-would have stored, or the next pass takes the full projection path;
+`module_knows_transform_session` repopulates it from the durable table;
+the projection cache holds the entry settlement would have stored, or the
+next pass takes the full projection path;
 `guidance_dates` holds no entry for the session, or the next pass's
-`ProducerContext.guidance_date` ([`:8227`][guidance-use]) equals a fresh
+`ProducerContext.guidance_date` equals a fresh
 computation; and the serialized-output cache holds no entry from a pass the
 store rejected, which the transform catalog's
 [output-cache record][tc-output] already constrains. `always` because the
 four updates run on every committing pass whatever the execution topology.
-Fault/timing angle: On the ordinary path there is no `.await` between the
-commit at [`:8246`][commit-call] and the bookkeeping at
-[`:8261-8266`][roots-insert], [`:8438-8445`][pc-store], and
-[`:8449-8454`][guidance-remove]; the awaits at `:8263`, `:8289`, and `:8315`
-sit inside the Emergency95 branch. Moving `run_transform` to
-`spawn_blocking` introduces an await after the commit, and a blocking task
-cannot be cancelled once started, so an abort landing there leaves the
-transform committed and the bookkeeping skipped. Lineage roots self-heal
-([roots doc][roots-doc]); `guidance_dates` does not, because
-[`guidance_date_for_transform`][guidance-fn] returns the pinned entry until
-it is removed. The serialized-output cache is replaced inside
-`run_transform` after the store commit, so a relocation of the whole closure
-does not separate them; a relocation that splits the closure does.
+Fault/timing angle: Waiter cancellation can land while the worker is committed
+but held before bookkeeping. [The first unit][unit-first-live] keeps lineage
+and guidance removal on the worker; ordinary settlement shares that unit.
+Each committing rerun removes its guidance pin. Emergency95 waits split units,
+so later cancelled units can skip recomputable settlement. A panic is a
+different interruption and is not proof of successful bookkeeping.
 Required faults and enabling state: A committing pass with a pinned guidance
 date; an abort injected between commit and bookkeeping (W11); a second pass
 on the same session that reads `ProducerContext.guidance_date` and the
 projection cache.
 Confidence: high - [Evidence](evidence/committed-transform-bookkeeping-is-applied-or-recomputed.md).
-The commit call, the three post-commit updates, the self-healing lookup, the
-non-healing guidance read, and the Emergency95 awaits are source-verified.
-Existing check: none found for derived-state consistency after an abort;
-[E1][e1] and [E2][e2] cover route state and resource charges, not these
-structures.
+The first unit, reloaded reruns, guidance invalidation, settlement, and owned
+environment are source-verified. The first permit precedes snapshot `begin` on
+both unit-backed lanes, so aborting a queued waiter cannot invalidate Ready.
+Unpaged typed acceptance follows the permit; paged staging accepts before the
+Apply arm reaches typed admission and preserves that ordering.
+`PassContinuation.env` is last and holds charges behind pending pass/action
+values. Snapshot generations can be superseded; projection and native state
+can be recomputed. The test proves the specific
+lineage/guidance path, not every recovery branch. The executed negative control
+that replaced guidance-pin removal with lookup failed at the pin-absence
+assertion; the removal was restored before the workspace runs.
+Existing check: [Transform-unit checks](existing-checks.md#transform-unit-implementation-evidence-2026-09-13)
+cover the abort, Emergency95 cancellation, and real-host cleanup; unaudited.
 Impact: The next pass carries a stale guidance line or a stale projection
 cache entry after a relocated transform is aborted mid-bookkeeping.
-Open questions:
-
-- What owns and joins any proposed off-worker transform work? This is the
-  parent's E1 question and remains unresolved. (needs human input)
+Open questions: None for transform ownership or late-cancel policy. The host
+joins units. On 2026-09-13 the owner accepts cancellation after durable commit,
+skipped later Emergency95 units with recomputed or superseded derived state,
+and fatal close when physical work exceeds the budget. Slow-disk and full-cap
+paged durations remain unmeasured; reopen does not establish power-loss safety.
 
 ### soft-pressure-refold-predicate-preserves-its-classification
 
@@ -2284,39 +2339,49 @@ provenance.
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: not yet - The only seam after commit is the `#[cfg(test)]` hook,
-and no test aborts inside it.
+Exercised: yes - [The aborted-waiter test][unit-abort-test] observes committed
+store state and absent lineage while a gate holds the unit, awaits the aborted
+waiter's cancelled result, and only then releases physical work. Real-host
+cancel and route-close tests also reach the held post-commit window.
 Guarantee: A relocation campaign reaches the window in which a transform is
 committed and its in-memory bookkeeping has not run.
 Check: `sometimes` - For some pass, `commit_transform` has returned success
 and the handler's abort (cancellation, route close, or generation
-retirement) is observed before [`:8261-8266`][roots-insert] executes. The marker
+retirement) is observed before lineage insertion executes. The marker
 asserts the commit and the abort ordering, not the next pass's state.
-Fault/timing angle: At HEAD the window exists only in the Emergency95 branch
-at the awaits `:8263`, `:8289`, and `:8315`; it exists on every pass once a
-blocking worker separates commit from bookkeeping.
-Required faults and enabling state: The [`between_transform_and_prepare`][hook]
-hook, or its relocation-era equivalent, triggering an abort; independent
+Fault/timing angle: The waiter can abort at the unit await while the physical
+thread remains held after commit and before bookkeeping. The thread completes
+its unit after release rather than treating waiter abort as physical completion.
+Required faults and enabling state: The [`after_transform_commit`][unit-after-hook]
+hook triggering an abort; independent
 observation of the commit through the store's `row_version`.
 Confidence: medium - [Evidence](evidence/abort-lands-between-transform-commit-and-bookkeeping.md).
-The window and the hook are source-verified; a production seam does not
-exist at HEAD.
-Existing check: none found.
+The dedicated hook runs after `run_transform` and before lineage insertion,
+guidance removal, and the first floor read. It remains
+test-only, so deterministic construction retains that reachability class even
+when the surrounding host and handler are production code.
+Existing check: [Transform-unit checks](existing-checks.md#transform-unit-implementation-evidence-2026-09-13)
+include the explicit waiter abort and host cancel/close cases; unaudited.
 Impact: W8 passes without the window ever opening.
-Open questions:
-
-- Which abort events can a future worker expose without equating waiter
-  cancellation with completion? This is the parent's E3 question. (needs
-  human input)
+Open questions: None for the constructed witness. Gate entry, store state,
+waiter join, host cancellation, and independent physical joins provide separate
+observations. Generation-retirement coverage is not claimed.
 
 ### worker-thread-panics-stay-inside-the-redaction-boundary
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No test panics inside a `spawn_blocking` closure entered
-from a daemon handler and reads the worker thread's stderr; the host-runtime
-redaction tests panic on the runtime worker only.
+Exercised: partial - [The transform panic parent and child][unit-panic-test]
+run a real daemon transform through the host, panic after its commit, decode
+terminal `host.internal_error`, and check fixed stderr output without the
+canary on stdout or stderr. The test verifies exact ingress baseline return,
+scratch reacquisition, and the permit counts reported by publication and
+route-gone callbacks. [Synthetic delivery cases][unit-failure-test] also cover
+all three BlockingWorkFailed variants at submissions one and two, with a real
+Emergency95 inline publication before the second-submission failure. They test
+prepared error mapping and resource release, not actual runtime or route-loss
+faults. No kernel-route worker-panic check is supplied.
 Guarantee: Moving handler work to a worker thread never moves a panic out of
 the redacting hook and never changes the terminal the request settles with.
 Check: `always` - For every panic raised on a worker thread that carries
@@ -2325,37 +2390,21 @@ including a relocated transform), the hook that runs on the panicking thread
 is the redacting hook: stderr receives exactly
 [`REDACTED_DIAGNOSTIC`][pb-redacted] and no byte of the panic payload, the
 panic message, or a backtrace; and the request settles with the same terminal
-code as an in-handler panic on the runtime worker, which at HEAD is
-`internal_error` with `handler request task failed`
-([`dispatch.rs:985-989`][panic-terminal]). `always` because the hook decides
+code as an in-handler panic on the runtime worker, `internal_error`.
+The transform's error message is not required to equal the host callback's
+message. `always` because the hook decides
 per panic from the panicking thread's [`CALLBACK_POLL_DEPTH`][pb-tls]
 ([`callback_is_polling`][pb-polling], the branch at [`:36-50`][pb-hook]), so
 every worker-thread panic is either redacted or forwarded; the check is on
 the thread the panic runs on, not on a defect.
-Fault/timing angle: The guard is a thread-local depth counter
-([`panic_boundary.rs:11-13`][pb-tls]) that [`redact_sync`][pb-sync] and
-[`redact`][pb-async] raise on the thread that constructs and polls the
-handler future ([`dispatch.rs:928-934`][wrap-callback]). A
-`tokio::task::spawn_blocking` worker never runs either, so its depth is the
-initial `0` and the hook forwards the full panic info to the previously
-installed hook ([`:36-50`][pb-hook]), the Rust default because the only other
-`std::panic::set_hook` in the tree is in a test
-([`tests/dispatch.rs:631-660`][t-panic-child]). Tokio catches the unwinding panic
-as a `JoinError` after the hook has printed. At HEAD the daemon runs kernel
-work this way through [`kernel_routes::blocking`][blocking] at eight sites
-([`commit.rs:1013`][blk-commit-preview], [`:1038`][blk-commit-run],
-[`egress.rs:201`][blk-egress], [`eligibility.rs:346`][blk-eligibility],
-[`ingest.rs:722`][blk-ingest-decode], [`:797`][blk-ingest-finish],
-[`read.rs:291`][blk-read-gate], [`:311`][blk-read-rows]) and directly at
-[`health.rs:224`][spawn-health], [`mod.rs:358-362`][spawn-kernel-open], and
-[`lib.rs:3866-3874`][spawn-store-open]. The ingest finish closure calls
-[`store.ingest_artifact`][route-ingest] with the upload payload and the page
-decode closure holds the base64 page; a relocated transform carries the whole
-request. The same boundary crosses the token-cache counters
-([`token_cache.rs:57-76`][tc-local], W2); the third `thread_local!` in the
-inspected crates is test-only ([`transform.rs:495-498`][tl-test]).
+Fault/timing angle: The hook reads thread-local guard depth on the panicking
+thread before a JoinError mapping can handle the panic. Transform units enter
+`redact_sync` inside [RequestCtx::run_blocking][unit-host-live], including guarded
+result delivery or discard. A bare `spawn_blocking`, such as the kernel helper,
+does not inherit the async handler's guard. Catching its JoinError cannot undo
+an earlier unredacted print.
 Required faults and enabling state: A panic injected inside the relocated
-work (a `kernel_routes::blocking` closure at HEAD, or the relocated
+work (a `kernel_routes::blocking` closure or the relocated
 transform) whose payload carries a unique long sentinel that appears nowhere
 else in the process; the process's stderr captured from a child process, on
 the pattern of
@@ -2363,42 +2412,29 @@ the pattern of
 the terminal frame the request settles with, recorded beside it; a second
 injection on the runtime worker for the same route as the control.
 Confidence: high - [Evidence](evidence/worker-thread-panics-stay-inside-the-redaction-boundary.md).
-The thread-local, the hook branch, the two guard entry points, the handler
-wrap, the eight `blocking` sites, the three direct `spawn_blocking` sites,
-and the `JoinError` mappings are source-verified. The terminal clause
-disagrees with HEAD for kernel routes: `blocking` maps a worker panic to
+The thread-local, guard placement, and transform error mapping were checked
+for the pre-rebase evidence. The terminal clause still disagrees with the
+kernel helper: `blocking` maps a worker panic to
 `KernelOutcome::unavailable(StoreUnavailable)` ([`mod.rs:462-468`][blocking]),
 which the route returns as a `Response` body
 `{"kind":"unavailable","reason":"store_unavailable"}` by the documented
 intent at [`:460-461`][blocking-doc], not as an `internal_error` terminal;
 `open_once` maps it to `KernelError::Fault` after an `eprintln!`
 ([`mod.rs:358-362`][spawn-kernel-open]); the store opener re-panics
-([`lib.rs:3866-3874`][spawn-store-open]). Both sides are cited; the record does not
-resolve which terminal is the contract.
+([`lib.rs:4061-4069`][spawn-store-open]). The historical evidence retains the
+broader worker-site inventory. Transform redaction does not settle the
+kernel-route contract disagreement.
 Existing check: [Wildcard checks](existing-checks.md#wildcard-and-cross-cutting)
-list the three host-runtime redaction tests
-([`a_handler_panic_maps_to_one_redacted_internal_error`][t-panic-internal],
-[`handler_panic_payload_is_redacted_from_process_stderr`][t-panic-stderr],
-and its [child][t-panic-child]); all panic on the runtime worker inside the
-guard; none found for a worker-thread panic in `crates/daemon/tests/` or in
-`kernel_routes`; all unaudited. The host-runtime records
-[every-callback-invocation-is-inside-the-redaction-guard][hr-redact] and
-[the-panic-hook-cannot-itself-fail][hr-hook] enumerate host call sites and
-the hook's own failure; neither reaches a daemon-spawned thread.
+retain host-runtime redaction coverage. The dated transform-unit inventory
+adds the real-handler panic parent and child; all remain unaudited.
 Impact: A panic message or payload built from request bytes, or a backtrace
-naming them, reaches stderr unredacted; a relocated transform also settles
-with a different terminal than today.
+naming them, reaches stderr unredacted; a relocated transform can change its
+terminal code if it bypasses the selected host seam.
 Open questions:
-
-- Which terminal is the contract for a worker-thread panic: the host's
-  `internal_error`, or the kernel routes' documented
-  `{"kind":"unavailable","reason":"store_unavailable"}` response? A relocated
-  transform must pick one. (needs human input)
-- Does the relocation carry the guard across (enter `redact_sync` inside the
-  closure) or move the redaction decision to a process-wide rule? Either
-  changes the inventory in
-  [every-callback-invocation-is-inside-the-redaction-guard][hr-redact].
-  (needs human input)
+- The transform choice is resolved: host-owned `run_blocking` enters the guard
+  on the worker and maps failure to `internal_error`, without a new process-wide
+  rule. Should kernel routes move to that seam, or retain their unjoined,
+  unredacted unavailable-response path? (needs human input)
 
 ### cron-schedule-is-evaluated-for-a-configured-project
 
@@ -2806,7 +2842,7 @@ evaluation of this area and its disposition are recorded in
 [midturn-reference]: ../../../../packages/opencode-plugin/src/hooks/context/__tests__/mid-turn-reference.ts#L5-L143
 [paged]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [sessionlog]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L183-L236
-[log-gate-checks]: ../../../../packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
+[log-gate-checks]: https://github.com/ahrav/eidnara/blob/fe1d267b5e2dd254631d27c2cb3535c71082582a/packages/opencode-plugin/src/shared/logger.test.ts#L377-L730
 [sanitize]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L14-L34
 [ensuredir]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L98-L109
 [appendpriv]: ../../../../packages/opencode-plugin/src/shared/logger.ts#L117-L134
@@ -3014,7 +3050,7 @@ evaluation of this area and its disposition are recorded in
 [blk-read-rows]: ../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L3866-L3874
+[spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L4061-L4069
 [tl-test]: ../../../../crates/daemon/src/transform.rs#L495-L498
 [t-panic-internal]: ../../../../crates/host-runtime/tests/dispatch.rs#L551
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
