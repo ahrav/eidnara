@@ -2376,9 +2376,13 @@ mod tests {
             );
             assert!(measured.u <= measured.t, "{} violated U subset T", case.id);
         }
+        // The fixture messages are daemon-built typed blocks, so their part hashes
+        // follow the canonical block bytes: span-sorted key order with a false
+        // `provider_executed` omitted. Plugin-shaped blocks keep their bytes; see the
+        // projection golden.
         assert_eq!(
             format!("{:x}", frozen.finalize()),
-            "01a4b82d5f0ce2853388f8c5e4f81509ca4e8b0bef4cb98d964f24ffd3deb4bf"
+            "e389d854cae0657e21c2fe9f18461430b449ae749b675670828c47668feb0404"
         );
     }
 

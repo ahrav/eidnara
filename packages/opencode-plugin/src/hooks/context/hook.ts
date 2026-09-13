@@ -38,6 +38,13 @@ import { resolveSessionDirectory, type SessionDirectoryResolver } from "./sessio
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
+import {
+    assertCapturedMessagesUnchanged,
+    type CapturedMessages,
+    captureMessages,
+    readOwnDataProperty,
+    SourceRejected,
+} from "./transform-capture";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
 
@@ -89,10 +96,9 @@ export interface EidnaraDeps {
 
 /** The transform receives no session id of its own; every message carries it in `info.sessionID`. */
 function resolveSessionId(messages: readonly MessageLike[]): string | undefined {
-    const info = messages[0]?.info as { sessionID?: unknown } | undefined;
-    return typeof info?.sessionID === "string" && info.sessionID.length > 0
-        ? info.sessionID
-        : undefined;
+    const info = readOwnDataProperty(readOwnDataProperty(messages, "0"), "info");
+    const sessionId = readOwnDataProperty(info, "sessionID");
+    return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
 }
 
 export function createEidnaraHook(deps: EidnaraDeps) {
@@ -327,18 +333,29 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     // `ts` mode leaves messages untouched; the plugin-level adapter passes them through.
     const messagesTransform = rustMode
         ? async (_input: unknown, output: { messages: unknown[] }): Promise<void> => {
-              const messages = output.messages as MessageLike[];
+              const messages = readOwnDataProperty(output, "messages") as MessageLike[];
               const sessionId = resolveSessionId(messages);
-              if (!sessionId) return;
-              if (deletedSessions.has(sessionId)) return;
-              // Hidden `eidnara-` children run Eidnara's own prompts and receive no project context; the directory read classifies a child restored after a restart.
-              await sessionDirectoryFor(sessionId);
+              if (sessionId && deletedSessions.has(sessionId)) return;
+              let captured: CapturedMessages;
+              try {
+                  captured = captureMessages(messages);
+                  if (!sessionId) return;
+                  // Hidden children receive no project context; the directory lookup identifies restored children.
+                  await sessionDirectoryFor(sessionId);
+                  assertCapturedMessagesUnchanged(messages, captured);
+              } catch (error) {
+                  if (!(error instanceof SourceRejected)) throw error;
+                  log[error.logLevel](
+                      `[eidnara] transform declined ${error.name}: ${error.message}`,
+                  );
+                  return;
+              }
               if (deletedSessions.has(sessionId)) {
                   clearDeletedSessionRoutingState(sessionId);
                   return;
               }
               if (internalChildSessions.has(sessionId)) return;
-              await rustTransform.run(sessionId, messages, output);
+              await rustTransform.run(sessionId, messages, output, captured);
           }
         : async (): Promise<void> => {};
 

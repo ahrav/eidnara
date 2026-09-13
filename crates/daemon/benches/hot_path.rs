@@ -96,6 +96,55 @@ fn reattached_messages(class: ContentClass, count: usize, bytes: usize) -> Ingre
         .collect()
 }
 
+/// Both benchmark legs decode these identical EG1 request bytes; the input is
+/// never rebuilt through the serializer under test.
+const DECODE_CORPUS: [(usize, &[u8]); 2] = [
+    (
+        40,
+        include_bytes!(
+            "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-40msgs_2KiB_mixed.json"
+        ),
+    ),
+    (
+        200,
+        include_bytes!(
+            "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-200msgs_2KiB_mixed.json"
+        ),
+    ),
+];
+
+fn bench_decode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("decode");
+    for &(count, body) in &DECODE_CORPUS {
+        group.throughput(criterion::Throughput::Bytes(body.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("typed_request", format!("{count}msgs_2KiB_mixed")),
+            &body,
+            |b, body| {
+                b.iter_with_large_drop(|| {
+                    serde_json::from_slice::<TransformRequest>(black_box(body)).expect("decode")
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new(
+                "typed_request_plus_projection",
+                format!("{count}msgs_2KiB_mixed"),
+            ),
+            &body,
+            |b, body| {
+                b.iter_with_large_drop(|| {
+                    let request = serde_json::from_slice::<TransformRequest>(black_box(body))
+                        .expect("decode");
+                    let projection = project_messages(&request.messages).expect("projection");
+                    (request, projection)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("projection/full");
     for &count in MESSAGE_COUNTS {
@@ -417,6 +466,7 @@ fn bench_e2e_steady_caveman(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_tokenizer,
+    bench_decode,
     bench_projection,
     bench_projection_reattached,
     bench_tail_hygiene,

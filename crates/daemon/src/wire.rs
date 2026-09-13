@@ -728,10 +728,12 @@ fn flatten_block(
     arc_id: Option<String>,
 ) -> Result<FlatBlock, WireError> {
     let block = &msg.ck.content()[index];
-    let bytes = serde_json::to_string(block).map_err(|_| WireError::UnsupportedBlock {
-        mid: msg.mid.clone(),
-        block_index: index,
-        kind: block.kind().tag().to_string(),
+    let bytes = crate::served_json::canonical_block_bytes(block).map_err(|_| {
+        WireError::UnsupportedBlock {
+            mid: msg.mid.clone(),
+            block_index: index,
+            kind: block.kind().tag().to_string(),
+        }
     })?;
     let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
     let (name, file_path, provider_executed, tool_call_id, output_kind) = match block.kind() {
