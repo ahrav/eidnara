@@ -327,6 +327,7 @@ impl<'a> ClaimMaterializer<'a> {
     /// Captures a target and processes complete commits from the consumer checkpoint toward it one bounded page at a time, acknowledging each page after its decisions are published or retired.
     ///
     /// `now` is Unix-epoch milliseconds, recorded as the descriptors' observation time and the acknowledgement's `updated_at`.
+    /// Page reads carry no budget: kernel waits block as they do for every other unbudgeted caller.
     ///
     /// # Errors
     ///
@@ -379,6 +380,7 @@ impl<'a> ClaimMaterializer<'a> {
         let outcome = drive_commit_pages(
             self.kernel,
             CommitWalk {
+                budget: None,
                 consumer_id: CLAIM_CONSUMER,
                 incarnation: target.incarnation,
                 now,

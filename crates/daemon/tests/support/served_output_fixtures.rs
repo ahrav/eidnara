@@ -1,6 +1,3 @@
-//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
-//! `examples/canonical_output_evidence.rs`.
-
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
 pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
@@ -78,14 +75,6 @@ impl Population {
         self.expects_canonical_miss()
     }
 
-    /// The large scalar payload keeps the span tables far below the output
-    /// length, so every allocation of at least N bytes must belong to the
-    /// returned buffer's chain. Small outputs cannot make that claim: their
-    /// span-table vectors alone exceed N.
-    pub fn has_small_span_tables(&self) -> bool {
-        matches!(self, Self::RetainedLargePayload { .. })
-    }
-
     pub fn build(&self) -> WireMessage {
         match *self {
             Self::RetainedAscii { blocks } => retained_ascii_message(blocks),
@@ -116,6 +105,12 @@ pub fn reference_bytes(message: &WireMessage) -> Vec<u8> {
 /// object needs reordering.
 pub fn declaration_order_equals_canonical(message: &WireMessage, canonical: &[u8]) -> bool {
     serde_json::to_vec(message).expect("to_vec") == canonical
+}
+
+pub fn serialization_buffer_root_bytes() -> usize {
+    let mut probe: Vec<u8> = Vec::new();
+    probe.extend_from_slice(b"{");
+    probe.capacity()
 }
 
 fn retained(body: &str) -> WireMessage {

@@ -48,6 +48,149 @@ const CHILD_CUT: &str = "EIDNARA_SEARCH_CATCHUP_CHILD_CUT";
 const CHILD_BARRIER: &str = "EIDNARA_SEARCH_CATCHUP_BARRIER";
 const CHILD_LEDGER: &str = "EIDNARA_SEARCH_CATCHUP_LEDGER";
 
+#[test]
+fn kernel_contention_at_page_extension_and_ack_preserves_complete_prefix() {
+    for phase in ["page", "extension", "ack"] {
+        let at_ack = phase == "ack";
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+        let first = corpus.publish("first", &[("a", "1", "first message")]);
+        let target = corpus.publish("second", &[("b", "1", "second message")]);
+        let fixed = corpus.fixed(target);
+        let kernel = &corpus.kernel;
+        let (start, started) = mpsc::channel();
+        let (locked, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (done, wait) = mpsc::channel();
+        let report = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                if started.recv_timeout(Duration::from_secs(2)).is_ok() {
+                    let wait_for_release = || {
+                        locked.send(()).unwrap();
+                        released.recv_timeout(Duration::from_secs(3)).unwrap();
+                    };
+                    if phase == "page" {
+                        kernel.with_readers_held_for_test(wait_for_release);
+                    } else {
+                        let result = kernel.commit(intent("held-writer"), |_| {
+                            wait_for_release();
+                            Err(kernel::KernelError::Fault)
+                        });
+                        assert_eq!(result, Err(kernel::KernelError::Fault));
+                    }
+                }
+            });
+            let projection = &projection;
+            let consumer = &consumer;
+            let search = search_path(dir.path());
+            scope.spawn(move || {
+                let budget = EvalBudget::new(
+                    Some(Instant::now() + Duration::from_millis(200)),
+                    Arc::new(AtomicBool::new(false)),
+                );
+                let mut events = Vec::new();
+                let mut held = false;
+                let result = SearchCatchUp::new(kernel, projection)
+                    .with_budget(budget)
+                    .run_episode_toward(
+                        consumer,
+                        &two_commit_windows(),
+                        fixed,
+                        hold.captured_at,
+                        &mut |event| {
+                            events.push(event);
+                            let point = if phase == "page" {
+                                EpisodeEvent::Acknowledged { through: first }
+                            } else if at_ack {
+                                EpisodeEvent::AcknowledgementRequested { through: target }
+                            } else {
+                                EpisodeEvent::HoldExtensionRequested { through: target }
+                            };
+                            if event == point {
+                                if at_ack {
+                                    let projection_write_lock_probe = hold_write_lock(&search);
+                                    drop(projection_write_lock_probe);
+                                }
+                                start.send(()).unwrap();
+                                ready.recv_timeout(Duration::from_secs(1)).unwrap();
+                                held = true;
+                            }
+                        },
+                    );
+                done.send((result, events, held)).unwrap();
+            });
+            let observed = wait.recv_timeout(Duration::from_secs(2));
+            release.send(()).unwrap();
+            let (result, events, held) =
+                observed.expect("driver refuses before the kernel guard holder is released");
+            assert!(held, "contention point fired");
+            assert_eq!(windows(&events), vec![first]);
+            let report = result.unwrap();
+            assert_eq!(blocked(&report), &Blocked::Cancelled);
+            assert_eq!(report.acknowledged_through, first);
+            assert_eq!(report.batches_applied, if at_ack { 2 } else { 1 });
+            assert_eq!(report.commits_consumed, if at_ack { 4 } else { 2 });
+            report
+        });
+        assert!(projection.quarantine().is_none());
+        assert_eq!(corpus.kernel_checkpoint(), report.acknowledged_through);
+        assert_matches_ledger(
+            dir.path(),
+            &corpus.ledger(),
+            if at_ack { target } else { first },
+        );
+    }
+}
+
+#[test]
+fn lost_ack_with_cancelled_reconciliation_keeps_unknown_outcome_and_local_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish("first", &[("a", "1", "first message")]);
+    let budget = EvalBudget::unbounded();
+    let mut events = Vec::new();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .with_budget(budget.clone())
+        .run_episode_with_fault_for_test(
+            &consumer,
+            &bounds(),
+            hold.captured_at,
+            &mut |event| events.push(event),
+            EpisodeFault::LoseAcknowledgementReplyAndCancel,
+        )
+        .unwrap();
+    assert!(budget.is_exhausted());
+    assert_eq!(
+        blocked(&report),
+        &Blocked::AcknowledgementReconciliationFailed {
+            through: target,
+            error: kernel::KernelError::Deadline
+        }
+    );
+    assert_eq!(report.acknowledged_through, hold.snapshot);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert!(windows(&events).is_empty());
+    assert!(projection.quarantine().is_none());
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+    let recovered = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode_toward(
+            &consumer,
+            &bounds(),
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |event| panic!("committed prefix replayed: {event:?}"),
+        )
+        .unwrap();
+    reached(&recovered);
+    assert_eq!(recovered.acknowledged_through, target);
+    assert_eq!(recovered.batches_applied, 0);
+}
+
 fn intent(key: &str) -> CommitIntent {
     CommitIntent {
         producer: "daemon-search-catchup-test".to_string(),
