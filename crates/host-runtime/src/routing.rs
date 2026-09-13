@@ -322,7 +322,7 @@ impl RouteRegistry {
         &self,
         handle: RouteHandle,
         gen_id: u64,
-    ) -> Option<(TaskTracker, RouteClass)> {
+    ) -> Option<(TaskTracker, RouteClass, CancellationToken)> {
         let inner = self.lock();
         let occupant = inner
             .slots
@@ -331,7 +331,13 @@ impl RouteRegistry {
         (occupant.epoch == handle.epoch
             && occupant.generation.id == gen_id
             && occupant.state == OccState::Live)
-            .then(|| (occupant.tracker.clone(), occupant.class))
+            .then(|| {
+                (
+                    occupant.tracker.clone(),
+                    occupant.class,
+                    occupant.cancel.child_token(),
+                )
+            })
     }
 
     /// A generation's teardown includes every binding, live, and closing route the generation owns.
@@ -554,7 +560,7 @@ mod tests {
             .reserve(&generation, RouteClass::General)
             .expect("reserve");
         registry.install_bound(handle);
-        let (live_tracker, _) = registry
+        let (live_tracker, _, _) = registry
             .route_tracker(handle, generation.id)
             .expect("live route");
         assert!(!live_tracker.is_closed());
