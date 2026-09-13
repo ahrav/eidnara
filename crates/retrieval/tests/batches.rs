@@ -364,6 +364,36 @@ fn construction_verification_uses_occurrence_identity_and_shared_content_equalit
             ));
             conn.execute("DELETE FROM payloads WHERE payload_id='surplus'", [])?;
             verify_construction(conn, &batch, &generation(), limits).unwrap();
+            // Jobs must be as construction inserted them, with no recovery history.
+            for (stale, restore) in [
+                (
+                    "UPDATE embedding_jobs SET attempts=1",
+                    "UPDATE embedding_jobs SET attempts=0",
+                ),
+                (
+                    "UPDATE embedding_jobs SET stop_reason='exhausted'",
+                    "UPDATE embedding_jobs SET stop_reason=NULL",
+                ),
+                (
+                    "UPDATE embedding_jobs SET episode_id='e1',authorization_ref='auth-1'",
+                    "UPDATE embedding_jobs SET episode_id=NULL,authorization_ref=NULL",
+                ),
+                (
+                    "INSERT INTO embedding_recovery_authorizations SELECT job_id,'auth-1' FROM embedding_jobs",
+                    "DELETE FROM embedding_recovery_authorizations",
+                ),
+            ] {
+                conn.execute(stale, [])?;
+                assert!(
+                    matches!(
+                        verify_construction(conn, &batch, &generation(), limits),
+                        Err(ProjectionError::CorruptRow)
+                    ),
+                    "{stale}"
+                );
+                conn.execute(restore, [])?;
+                verify_construction(conn, &batch, &generation(), limits).unwrap();
+            }
             Ok(())
         })
         .unwrap();

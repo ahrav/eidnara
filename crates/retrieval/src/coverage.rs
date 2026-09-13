@@ -327,7 +327,9 @@ pub fn verify_construction(
         .iter()
         .map(|row| &row.occurrence_id)
         .collect();
-    let (rows, payload_rows, tombstones, vectors, pending, admitted): (
+    let (rows, payload_rows, tombstones, vectors, jobs, fresh_pending, obsolete, authorizations): (
+        i64,
+        i64,
         i64,
         i64,
         i64,
@@ -339,8 +341,12 @@ pub fn verify_construction(
          (SELECT count(*) FROM payloads),
          (SELECT count(*) FROM occurrence_tombstones),
          (SELECT count(*) FROM occurrence_vectors),
-         (SELECT count(*) FROM embedding_jobs WHERE state='pending'),
-         (SELECT count(*) FROM embedding_jobs WHERE state='admitted')",
+         (SELECT count(*) FROM embedding_jobs),
+         (SELECT count(*) FROM embedding_jobs WHERE state='pending' AND attempts=0
+            AND episode_id IS NULL AND episode_deadline IS NULL AND next_attempt_at IS NULL
+            AND host_job_id IS NULL AND stop_reason IS NULL AND authorization_ref IS NULL),
+         (SELECT count(*) FROM embedding_jobs WHERE state='obsolete'),
+         (SELECT count(*) FROM embedding_recovery_authorizations)",
         [],
         |row| {
             Ok((
@@ -350,6 +356,8 @@ pub fn verify_construction(
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
             ))
         },
     )?;
@@ -374,7 +382,8 @@ pub fn verify_construction(
         || usize::try_from(payload_rows).ok() != Some(payloads.len())
         || usize::try_from(tombstones).ok() != Some(batch.invalidations.len())
         || vectors != 0
-        || admitted != 0
+        || jobs != fresh_pending + obsolete
+        || authorizations != 0
         || excluded_jobs
         || batch.generation_id != Some(generation.generation_id.as_str())
         || report.checkpoint.checkpoint_commit_seq != batch.identity.through_commit_seq
@@ -382,7 +391,7 @@ pub fn verify_construction(
             .classes
             .iter()
             .any(|class| class.missing_without_pending != 0)
-        || usize::try_from(pending).ok()
+        || usize::try_from(fresh_pending).ok()
             != Some(
                 report
                     .classes
