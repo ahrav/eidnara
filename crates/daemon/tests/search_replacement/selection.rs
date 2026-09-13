@@ -925,12 +925,18 @@ fn concurrent_queries_observe_one_family_for_rows_checkpoint_and_job_set() {
     std::thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
-                let pinned = selection.pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)));
-                let seen = pinned.as_ref().ok().map(observe);
+                // Nothing before the barriers may panic, or the other parties wait forever.
+                let seen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let pinned = selection
+                        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                        .unwrap();
+                    (observe(&pinned), pinned)
+                }));
                 ready.wait();
                 published.wait();
-                let pinned = pinned.unwrap();
-                assert_eq!(seen.unwrap(), before);
+                let (seen, pinned) =
+                    seen.unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+                assert_eq!(seen, before);
                 for _ in 0..20 {
                     assert_eq!(observe(&pinned), before);
                     let current = selection
