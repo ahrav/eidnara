@@ -31,9 +31,10 @@ Read-back confirms its body exactly matches the local
 Publication creates one specification, not implementation tickets. This local
 catalog and its evidence remain uncommitted documentation artifacts.
 
-All nine records are **Exercised: not yet**. No runtime test, benchmark,
-mutation, or implementation gate ran on this HEAD or a candidate in this pass.
-Inspected tests remain **unaudited**, even where older catalogs report runs.
+Seven records remain **Exercised: not yet**; S5 and C2 are **partial** after
+the plan U0 harness landed at `5b54ecd6` and captured the
+[baseline record](evidence/u0-baseline-measurement.md) on the unchanged
+canonicalizer. No candidate ran. Inspected pre-U0 tests remain **unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
 not proof that an implementation satisfies it.
 
@@ -89,11 +90,11 @@ authorize the fast path from `original().is_some()`, or admit arbitrary
 | S2 | [served-order-decision-visits-every-object](#served-order-decision-visits-every-object) | safety | default-production | always | not yet |
 | S3 | [served-unchanged-span-copy-is-identity](#served-unchanged-span-copy-is-identity) | safety | default-production | always | not yet |
 | S4 | [served-serialization-is-single-pass-and-error-terminal](#served-serialization-is-single-pass-and-error-terminal) | safety | test-only | always | not yet |
-| S5 | [served-canonical-return-retains-a-without-b](#served-canonical-return-retains-a-without-b) | safety | default-production | always | not yet |
+| S5 | [served-canonical-return-retains-a-without-b](#served-canonical-return-retains-a-without-b) | safety | default-production | always | partial |
 | S6 | [served-output-cache-hit-skips-construction](#served-output-cache-hit-skips-construction) | safety | default-production | always-or-unreached | not yet |
 | S7 | [prepared-output-diagnostics-preserved](#prepared-output-diagnostics-preserved) | safety | default-production | always | not yet |
 | C1 | [served-canonicalization-campaign-reaches-risk-classes](#served-canonicalization-campaign-reaches-risk-classes) | reachability | test-only | sometimes | not yet |
-| C2 | [served-cache-campaign-reaches-miss-and-hit](#served-cache-campaign-reaches-miss-and-hit) | reachability | default-production | sometimes | not yet |
+| C2 | [served-cache-campaign-reaches-miss-and-hit](#served-cache-campaign-reaches-miss-and-hit) | reachability | default-production | sometimes | partial |
 
 ## Records
 
@@ -225,7 +226,9 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - HEAD always allocates B; candidate ownership is unmeasured.
+Exercised: partial - The U0 baseline observer records one exact-N B allocation
+and A's release for every population at `5b54ecd6`; candidate ownership is
+unmeasured.
 Guarantee: A successful encode with only identity field permutations returns
 A by ownership transfer without B or replacement output-sized scratch.
 Check: `always` - Independently establish identity permutations, then require
@@ -357,7 +360,9 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet - No campaign proves all required cache populations here.
+Exercised: partial - The U0 driver constructs cold canonical misses, typed and
+edited unordered misses, and warm positive hits and records their frequencies;
+completed-output page replay is not constructed.
 Guarantee: A cache campaign constructs cold canonical misses, typed and edited
 disordered misses, warm positive hits, and separate prepared-result replay.
 Check: `sometimes` - Accumulate all independent [C2 preconditions](evidence/served-cache-campaign-reaches-miss-and-hit.md#what-a-test-must-construct)
