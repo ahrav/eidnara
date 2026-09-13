@@ -17,13 +17,23 @@ revision created through that target, not just sources seen by the old consumer.
 Its barrier census is consumer-specific and includes satisfied memberships.
 Wholesale removal of the old family safely covers the source superset. Source
 and evidence invalidations are bounded by that target. A missing joined authority
-row is an error. Before the first receipt, complete-commit reads verify the old
-consumer's retained prefix.
+row is an error. Before the first receipt, the old consumer's retained prefix is
+verified from commit shapes alone; no outbox payload is read.
+
+The census has its own bounds, `RetirementBounds`, separate from the per-batch
+persist limits. `object_registry` is append-only, so the census through a fixed
+target grows with corpus history and never shrinks. A census over its bound
+fails with `InventoryBound` before any cleanup, and a retry with the same bounds
+fails the same way. Size the bounds for the whole corpus. The kernel checks the
+bound over at most one row more than it admits before materializing anything.
 
 The database lease and immutable seed pin must drain physically. Cancellation
 does not release them. Cleanup removes the old SQLite family and immutable seed,
 then checks for unknown residue. Lease sidecars remain to preserve writer epochs;
-they contain no projection payload. Any cleanup failure prevents certification.
+they contain no projection payload. A process killed while inspecting the old
+database leaves a private scratch copy beside it; the storage crate removes that
+copy with the family under the same exclusive lease. Any other residue prevents
+certification.
 
 One replacement-local transaction commits the old consumer/generation binding,
 selected family, target, and every completed removal disposition. Recovery checks

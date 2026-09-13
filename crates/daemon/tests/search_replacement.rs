@@ -20,7 +20,9 @@ use daemon::projection_lifecycle::{
     Transition,
 };
 use daemon::search_catchup::{EpisodeBounds, EpisodeEvent};
-use daemon::search_replacement::{BuildError, BuildEvent, ReplacementBuilder, ReplacementSpec};
+use daemon::search_replacement::{
+    BuildError, BuildEvent, ReplacementBuilder, ReplacementSpec, RetirementBounds,
+};
 use daemon::search_seed::SeedBounds;
 use host_runtime::generation::{CurrentProfile, GenerationStore};
 use kernel::{
@@ -87,6 +89,10 @@ fn spec_with_identity(identity: retrieval::ProjectionIdentity) -> ReplacementSpe
             checkpoint_attempts: NonZeroU32::new(2).unwrap(),
             attempt_wait: Duration::from_millis(20),
             max_bytes: 64 << 20,
+        },
+        retirement: RetirementBounds {
+            max_obligations: NonZeroUsize::new(256).unwrap(),
+            max_obligation_bytes: NonZeroU64::new(1 << 20).unwrap(),
         },
     }
 }

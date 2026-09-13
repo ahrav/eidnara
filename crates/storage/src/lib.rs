@@ -1924,7 +1924,7 @@ mod sqlite_backend {
 
     /// Removes the descriptor's database and journals under the store's exclusive lease. A WAL-mode connection left open across the removal would keep committing into the unlinked inodes and, on close, unlink by path whatever replacement had been opened since; holding the exclusive lease excludes every live store, opener, and inspection of this descriptor for the duration.
     ///
-    /// The parent directory is synced after the removal. The lease sidecar stays and its epoch is advanced by the acquisition. A missing parent directory removes nothing.
+    /// The parent directory is synced after the removal. Stale inspection copies of this database are removed with it. The lease sidecar stays and its epoch is advanced by the acquisition. A missing parent directory removes nothing.
     ///
     /// # Errors
     ///
@@ -1972,9 +1972,38 @@ mod sqlite_backend {
                 Err(e) => return Err(StoreError::Io(e)),
             }
         }
+        remove_stale_inspection_copies(parent, &db_file_name)?;
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(StoreError::DurabilityUnknown)
+    }
+
+    /// Callers hold the exclusive lease, which excludes the shared lease `inspect_existing` runs under.
+    /// A directory that cannot be listed is left to the directory sync that follows, whose open needs
+    /// the same permission and whose failure reports the removed family's durability as unknown.
+    fn remove_stale_inspection_copies(parent: &Path, db_file_name: &str) -> Result<(), StoreError> {
+        let entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(StoreError::Io)?;
+            if !entry.file_name().to_string_lossy().starts_with(".inspect-") {
+                continue;
+            }
+            let scratch = entry.path();
+            let is_directory = std::fs::symlink_metadata(&scratch)
+                .map_err(StoreError::Io)?
+                .is_dir();
+            let holds_this_database = std::fs::symlink_metadata(scratch.join(db_file_name))
+                .map(|meta| meta.is_file())
+                .unwrap_or(false);
+            if is_directory && holds_this_database {
+                std::fs::remove_dir_all(&scratch).map_err(StoreError::Io)?;
+            }
+        }
+        Ok(())
     }
 
     /// Requires the SQLite database's parent directory to contain no entries except its lease sidecar.
@@ -1989,18 +2018,22 @@ mod sqlite_backend {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| StoreError::Baseline("invalid database path".to_owned()))?;
-        let key = lease_key(descriptor, name)?;
-        let sidecar = format!("{}.lease", lease::fnv1a_hex(&key.identity()));
-        let entries = match std::fs::read_dir(
-            path.parent()
-                .ok_or_else(|| StoreError::Baseline("missing parent".to_owned()))?,
-        ) {
+        let parent = path
+            .parent()
+            .ok_or_else(|| StoreError::Baseline("missing parent".to_owned()))?;
+        let sidecar = FileLeaseStore::new(parent)
+            .map_err(StoreError::Io)?
+            .lease_path(&lease_key(descriptor, name)?)
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .ok_or_else(|| StoreError::Baseline("invalid lease path".to_owned()))?;
+        let entries = match std::fs::read_dir(parent) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(StoreError::Io(error)),
         };
         for entry in entries {
-            if entry.map_err(StoreError::Io)?.file_name() != std::ffi::OsStr::new(&sidecar) {
+            if entry.map_err(StoreError::Io)?.file_name() != sidecar {
                 return Err(StoreError::Baseline(
                     "unreconciled database directory residue".to_owned(),
                 ));
@@ -2956,6 +2989,44 @@ mod tests {
             "the next writer epoch exceeds the deleted store's {held_epoch}"
         );
         drop(reopened);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_sqlite_family_sweeps_this_databases_stale_inspection_copies_only() {
+        let (root, d) = tmp();
+        let StorageBackend::Sqlite { path } = &d.backend else {
+            panic!("sqlite descriptor");
+        };
+        let path = Path::new(path);
+        drop(open_sqlite(&d, KV_BASELINE).expect("create the database"));
+        let name = path.file_name().expect("database file name");
+        let stale = root.join(".inspect-1-1");
+        std::fs::create_dir(&stale).expect("plant a stale inspection directory");
+        std::fs::copy(path, stale.join(name)).expect("copy the database into it");
+        std::fs::write(stale.join(format!("{}-wal", name.to_string_lossy())), b"w")
+            .expect("plant a copied journal");
+        let foreign = root.join(".inspect-2-2");
+        std::fs::create_dir(&foreign).expect("plant another database's inspection directory");
+        std::fs::write(foreign.join("other.db"), b"other").expect("plant the other copy");
+
+        delete_sqlite_family(&d).expect("delete the released family");
+        assert!(
+            !stale.exists(),
+            "this family's stale inspection copy is removed"
+        );
+        assert!(
+            foreign.join("other.db").exists(),
+            "another database's inspection copy is not this family's residue"
+        );
+        match verify_sqlite_family_removed(&d) {
+            Err(StoreError::Baseline(message)) => {
+                assert!(message.contains("residue"), "{message}");
+            }
+            other => panic!("foreign residue must still be reported, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&foreign).expect("clear the foreign directory");
+        verify_sqlite_family_removed(&d).expect("only the lease sidecar remains");
         let _ = std::fs::remove_dir_all(&root);
     }
 

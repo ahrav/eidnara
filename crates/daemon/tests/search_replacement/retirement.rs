@@ -312,6 +312,28 @@ fn native_worker_cancellation_and_cleanup_failure_do_not_certify_removal() {
 }
 
 #[test]
+fn a_stale_inspection_copy_of_the_old_database_is_owned_residue_not_a_permanent_wedge() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    let database = case.old.as_ref().unwrap().projection().path().to_owned();
+    drop(case.old.take());
+    let scratch = database.parent().unwrap().join(".inspect-4242-1");
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::copy(&database, scratch.join(database.file_name().unwrap())).unwrap();
+    case.retire(root.path(), &mut |_| {}).unwrap();
+    case.assert_receipt();
+    assert!(!scratch.exists());
+    assert!(!database.exists());
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn ownership_certificate_survives_a_missing_database_before_replacement_selection() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
@@ -527,7 +549,7 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
                 NonZeroUsize::new(rows).unwrap(),
                 NonZeroU64::new(bytes).unwrap(),
             ),
-            Err(kernel::KernelError::InvalidInput)
+            Err(kernel::ConsumerObligationError::InventoryBound)
         );
     }
     let cancelled = budget(Duration::from_secs(10));
@@ -547,6 +569,54 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
             .outbox_consumer_checkpoint(CONSUMER)
             .unwrap(),
         Some(case.old_checkpoint)
+    );
+}
+
+#[test]
+fn census_bound_is_independent_of_the_per_batch_persist_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    drop(case.old.take());
+    assert!(case.expected.len() > 1);
+    let mut config = spec(root.path());
+    config.retirement.max_obligations = NonZeroUsize::new(case.expected.len() - 1).unwrap();
+    let error = case
+        .selection
+        .retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &config,
+            &budget(Duration::from_secs(30)),
+            &mut |event| panic!("premature effect {event:?}"),
+        )
+        .unwrap_err();
+    assert!(matches!(error, BuildError::InventoryBound), "{error:?}");
+    case.assert_no_receipt();
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        Some(case.old_checkpoint)
+    );
+    config.retirement.max_obligations = NonZeroUsize::new(case.expected.len()).unwrap();
+    config.episode.batch.persist.max_records = NonZeroUsize::MIN;
+    case.selection
+        .retire(
+            &case.corpus.kernel,
+            &case.gate,
+            &config,
+            &budget(Duration::from_secs(30)),
+            &mut |_| {},
+        )
+        .unwrap();
+    case.assert_receipt();
+    assert_eq!(
+        case.corpus
+            .kernel
+            .outbox_consumer_checkpoint(CONSUMER)
+            .unwrap(),
+        None
     );
 }
 
@@ -796,6 +866,7 @@ fn completeness_walk_requires_every_page_before_certifying_exact_target() {
         Some(case.old_checkpoint)
     );
     config.episode.max_source_pages = NonZeroUsize::new(commits as usize).unwrap();
+    let materialized = case.corpus.kernel.materialized_outbox_rows_for_test();
     case.selection
         .retire(
             &case.corpus.kernel,
@@ -805,6 +876,11 @@ fn completeness_walk_requires_every_page_before_certifying_exact_target() {
             &mut |_| {},
         )
         .unwrap();
+    assert_eq!(
+        case.corpus.kernel.materialized_outbox_rows_for_test(),
+        materialized,
+        "the completeness walk selected outbox payloads"
+    );
     case.assert_receipt();
     assert_eq!(
         case.corpus

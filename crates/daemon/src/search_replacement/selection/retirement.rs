@@ -1,5 +1,5 @@
 use super::*;
-use kernel::{CommitIntent, CommitReadRequest, CommitReadTarget, PageEnd};
+use kernel::{CommitIntent, CommitReadRequest, CommitReadTarget, ConsumerObligationError, PageEnd};
 use retrieval::retirement::{RetirementReceipt, record_receipt, verify_receipt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,12 +77,12 @@ impl SearchSelection {
                     ("physical_drain_ms", remaining),
                     (
                         "local_transaction_rows",
-                        spec.episode.batch.persist.max_records.get() as u64 + 1,
+                        spec.retirement.max_obligations.get() as u64 + 1,
                     ),
                     (
                         "local_transaction_bytes",
-                        spec.episode
-                            .max_source_encoded_bytes
+                        spec.retirement
+                            .max_obligation_bytes
                             .get()
                             .checked_add(MAX_RECORD_BYTES)
                             .ok_or(BuildError::InventoryBound)?,
@@ -113,13 +113,18 @@ impl SearchSelection {
         {
             return Err(BuildError::Invalid("retirement binding mismatch"));
         }
-        let obligations = kernel.consumer_obligations_within_budget(
-            budget,
-            &old.consumer.consumer_id,
-            target,
-            spec.episode.batch.persist.max_records,
-            spec.episode.max_source_encoded_bytes,
-        )?;
+        let obligations = kernel
+            .consumer_obligations_within_budget(
+                budget,
+                &old.consumer.consumer_id,
+                target,
+                spec.retirement.max_obligations,
+                spec.retirement.max_obligation_bytes,
+            )
+            .map_err(|error| match error {
+                ConsumerObligationError::InventoryBound => BuildError::InventoryBound,
+                ConsumerObligationError::Kernel(error) => BuildError::Kernel(error),
+            })?;
         let receipt = RetirementReceipt {
             old_consumer: &old.consumer.consumer_id,
             old_generation: &old.consumer.generation_id,
@@ -145,8 +150,8 @@ impl SearchSelection {
             }
             for _ in 0..spec.episode.max_source_pages.get() {
                 check()?;
-                let page = kernel
-                    .read_complete_commits_within_budget(
+                let span = kernel
+                    .verify_complete_commits_within_budget(
                         budget,
                         &CommitReadRequest {
                             consumer_id: receipt.old_consumer.to_owned(),
@@ -157,8 +162,8 @@ impl SearchSelection {
                         spec.episode.commits,
                     )
                     .map_err(|error| BuildError::Blocked(super::super::Blocked::Read(error)))?;
-                after = page.through;
-                match page.end {
+                after = span.through;
+                match span.end {
                     PageEnd::Exhausted => {
                         after = target.through_commit;
                         break;
