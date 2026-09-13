@@ -272,7 +272,7 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         })
     };
     while foreign_allocations.load(Ordering::Relaxed) == 0 {
-        std::hint::spin_loop();
+        std::thread::yield_now();
     }
     let (grown, foreign_during_window, ledger) = {
         let before = foreign_allocations.load(Ordering::Relaxed);
@@ -281,10 +281,10 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
             grown.extend(std::iter::repeat_n(7u8, 100));
             let scratch = vec![1u8; 17];
             drop(scratch);
-            // Spin until the other thread has allocated at least 16 times inside
+            // Wait until the other thread has allocated at least 16 times inside
             // this window, so the exclusion below is exercised rather than assumed.
             while foreign_allocations.load(Ordering::Relaxed) < before + 16 {
-                std::hint::spin_loop();
+                std::thread::yield_now();
             }
             (grown, foreign_allocations.load(Ordering::Relaxed))
         });
@@ -333,6 +333,19 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         "a shrunk buffer is not a growth chain"
     );
     drop(shrunk);
+
+    // A one-shot over-allocation never grew, so it is neither fresh-exact nor a chain.
+    let (slack, ledger) = record_window(|| {
+        let mut slack: Vec<u8> = Vec::with_capacity(64);
+        slack.extend(std::iter::repeat_n(1u8, 10));
+        slack
+    });
+    assert_eq!(
+        ledger.buffer_provenance(slack.as_ptr() as usize, slack.len(), slack.capacity()),
+        BufferProvenance::Unattributed,
+        "a single over-allocated alloc is not a growth chain"
+    );
+    drop(slack);
 }
 
 #[test]

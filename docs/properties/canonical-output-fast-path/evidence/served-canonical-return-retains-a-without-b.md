@@ -81,16 +81,18 @@ Confirm exactly one test executes in each process. Serial invocation alone
 does not replace owner-thread filtering. Keep the same harness revision for
 baseline and candidate binaries, without an old in-tree production variant.
 
-Full-constructor peak needs a separate observer. U0 must search/reuse allocator
-fixtures first, then establish nonallocating thread-owned test-only recording
-in an isolated, filtered in-crate (`--lib`) test process. Existing
-[transform module tests][shell-test] can call the private constructor directly.
-Use an exact one-test filter under libtest or nextest with owner-thread gating.
-Implement and verify this observer before U1; this is a feasible route, not
-executed proof. If no compatible test-only observation exists, stop U0 and
-obtain seam approval rather than weaken the peak gate. No public constructor
+Full-constructor peak needs a separate observer. An in-crate (`--lib`) test
+observer is infeasible: `crates/daemon/src/lib.rs` declares
+`#![forbid(unsafe_code)]`, so the crate cannot declare a `GlobalAlloc`. The
+retained harness installs `RecordingAlloc` in the integration test binary and
+observes the no-projection constructor arm through the `test-support` entry
+`daemon::transform::served_message_for_test`, in
+`full_constructor_observation_covers_receipts_hashing_and_arc_conversion`
+(`crates/daemon/tests/served_json_passthrough_allocations.rs`). Run it with the
+same exact one-test filter and owner-thread gating as the invocations above.
+The entry compiles only under `test-support`; no public constructor
 wrapper/API, production hook, harness framework, dependency, or disabling of
-the cfg(test) fresh differential is required.
+the cfg(test) fresh differential is added.
 
 Measure peak live bytes and A capacity/length through fingerprints, hashing,
 and Arc conversion. B1 preserves final Arc payload bytes/length; transient A
@@ -126,4 +128,3 @@ user-visible latency, not to establish this local resource invariant.
 [entry]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/served_json.rs#L111-L119
 [constructor]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L164-L224
 [peak]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/tests/parse_charge_covers_typed_decode.rs#L25-L87
-[shell-test]: https://github.com/ahrav/eidnara/blob/2e4433e6b511ae74944df8a9669c428e73915d29/crates/daemon/src/transform.rs#L13713-L13757
