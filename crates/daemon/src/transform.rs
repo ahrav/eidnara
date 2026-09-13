@@ -48,10 +48,10 @@ use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
-    BlockIdentity, Channel1AppendRow, DeferredExecuteState, LineageAnchor, LineageConstituent,
-    LineageDescentDisposition, LineageDescentRequest, MemoryStore, MemoryStoreError, ModuleMeta,
-    ModuleUsage, NoteDelivery, PassSchedulerObservation, PendingAgentDrop,
-    PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
+    BlockIdentity, BlockIdentityBasis, Channel1AppendRow, DeferredExecuteState, LineageAnchor,
+    LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
+    MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassSchedulerObservation,
+    PendingAgentDrop, PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
     ServedBlockFingerprint, StoredCompartment, TagCacheSummary, TagMintInput, TagRow,
     TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
     TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
@@ -2609,7 +2609,14 @@ fn apply_additive_only(
     }
     let provisional_tail_mid =
         provisional_tail_mid(&wire::MessageProjection::new(&req.messages), req.mid_turn);
-    apply_ingress_meta(&mut meta, req, &projection, provisional_tail_mid, None, &[]);
+    apply_ingress_meta(
+        &mut meta,
+        req,
+        &projection,
+        provisional_tail_mid,
+        None,
+        &IdentityEnforcement::default(),
+    );
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -3427,7 +3434,7 @@ fn apply_once(
 
     let provisional_tail_mid = provisional_tail_mid(&req.projection, req.mid_turn);
     let identity_enforce_started_at = Instant::now();
-    let tail_identity_re_adoptions = enforce_block_identity(
+    let identity_enforcement = enforce_block_identity(
         &loaded.meta,
         req,
         &projection,
@@ -3968,7 +3975,7 @@ fn apply_once(
         &projection,
         provisional_tail_mid,
         lineage_anchor_mid,
-        &tail_identity_re_adoptions,
+        &identity_enforcement,
     );
     timings.ingress_meta = elapsed_ms(ingress_meta_started_at);
     meta.cc_u1_active = cc_u1_active;
@@ -5052,7 +5059,7 @@ fn apply_once(
                 output_cache_stats,
             );
     }
-    for re_adoption in &tail_identity_re_adoptions {
+    for re_adoption in &identity_enforcement.tail_re_adoptions {
         eprintln!(
             "daemon: identity re-adopted for tail mid {} old_hash={} new_hash={}",
             re_adoption.mid, re_adoption.old_hash_prefix, re_adoption.new_hash_prefix
@@ -5154,6 +5161,22 @@ struct TailIdentityReAdoption {
     new_hash_prefix: String,
 }
 
+#[derive(Debug, Default)]
+struct IdentityEnforcement {
+    tail_re_adoptions: Vec<TailIdentityReAdoption>,
+    /// `None` when enforcement did not run, so the stored basis stamp is left alone.
+    basis_re_adoptions: Option<Vec<String>>,
+}
+
+/// A fingerprint basis change never alters a vector's length or block tags.
+fn same_block_tags(stored: &[BlockIdentity], vector: &[BlockIdentity]) -> bool {
+    stored.len() == vector.len()
+        && stored
+            .iter()
+            .zip(vector)
+            .all(|(stored, vector)| stored.kind_tag == vector.kind_tag)
+}
+
 fn trailing_blank_identity_replays_stored(
     req: &TransformRequest,
     core: &CoreState,
@@ -5191,8 +5214,10 @@ fn enforce_block_identity(
     core: &CoreState,
     provisional_tail_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
-) -> Result<Vec<TailIdentityReAdoption>, TransformError> {
+) -> Result<IdentityEnforcement, TransformError> {
     let mut re_adoptions = Vec::new();
+    let mut basis_re_adoptions = Vec::new();
+    let replay_basis = meta.block_identity_basis == BlockIdentityBasis::Replay;
     for (mid, vector) in &projection.identity_by_mid {
         if provisional_tail_mid == Some(mid.as_str()) || lineage_anchor_mid == Some(mid.as_str()) {
             continue;
@@ -5214,6 +5239,12 @@ fn enforce_block_identity(
                     new_hash_prefix: block_identity_hash_prefix(vector),
                 });
             }
+            continue;
+        }
+        // Replay and typed fingerprints can differ for identical block bytes.
+        // Matching tags on replay-basis rows indicate a basis change, not identity drift.
+        if replay_basis && same_block_tags(stored, vector) {
+            basis_re_adoptions.push(mid.clone());
             continue;
         }
         if identity_drift_requires_reject(meta, req, core, mid) {
@@ -5248,7 +5279,10 @@ fn enforce_block_identity(
             return Err(TransformError::FrozenRedTargetVanish(target));
         }
     }
-    Ok(re_adoptions)
+    Ok(IdentityEnforcement {
+        tail_re_adoptions: re_adoptions,
+        basis_re_adoptions: Some(basis_re_adoptions),
+    })
 }
 
 fn identity_drift_requires_reject(
@@ -5296,22 +5330,32 @@ fn apply_ingress_meta(
     projection: &FlatProjection,
     provisional_tail_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
-    re_adoptions: &[TailIdentityReAdoption],
+    enforcement: &IdentityEnforcement,
 ) {
     if let Some(mid) = provisional_tail_mid {
         meta.block_identity_by_mid.remove(mid);
     }
-    for re_adoption in re_adoptions {
-        let vector = projection
+    let projected_vector = |mid: &str| {
+        projection
             .identity_by_mid
-            .get(&re_adoption.mid)
-            .expect("identity enforcement only re-adopts projected messages");
+            .get(mid)
+            .cloned()
+            .expect("identity enforcement only re-adopts projected messages")
+    };
+    for re_adoption in &enforcement.tail_re_adoptions {
         meta.block_identity_by_mid
-            .insert(re_adoption.mid.clone(), vector.clone());
+            .insert(re_adoption.mid.clone(), projected_vector(&re_adoption.mid));
     }
     meta.tail_identity_re_adopt_count = meta
         .tail_identity_re_adopt_count
-        .saturating_add(re_adoptions.len() as u64);
+        .saturating_add(enforcement.tail_re_adoptions.len() as u64);
+    if let Some(basis_re_adoptions) = &enforcement.basis_re_adoptions {
+        for mid in basis_re_adoptions {
+            meta.block_identity_by_mid
+                .insert(mid.clone(), projected_vector(mid));
+        }
+        meta.block_identity_basis = BlockIdentityBasis::Typed;
+    }
     for (mid, vector) in &projection.identity_by_mid {
         if provisional_tail_mid == Some(mid.as_str()) || lineage_anchor_mid == Some(mid.as_str()) {
             continue;
@@ -15024,7 +15068,7 @@ pub(crate) mod tests {
             vec![item("covered", 1, "covered"), item("tail", 2, "after")],
         );
         let mutated_projection = project_messages(&mutated_request.messages).unwrap();
-        let re_adoptions = enforce_block_identity(
+        let enforcement = enforce_block_identity(
             &before.meta,
             &normalize_synthetic_todo_ingress(&mutated_request),
             &mutated_projection,
@@ -15040,7 +15084,7 @@ pub(crate) mod tests {
             &mutated_projection,
             None,
             None,
-            &re_adoptions,
+            &enforcement,
         );
         assert_eq!(speculative_meta.tail_identity_re_adopt_count, 1);
         assert_eq!(
@@ -15091,6 +15135,161 @@ pub(crate) mod tests {
             s.load(session).unwrap().meta.tail_identity_re_adopt_count,
             1,
             "a replay of the adopted bytes is not another re-adoption"
+        );
+    }
+
+    fn replay_basis_covered_item(mid: &str, ordinal: u64) -> IngressMessage {
+        let ck: WireMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": [{
+                "kind": {
+                    "type": "tool_call",
+                    "id": "web_1",
+                    "name": "websearch",
+                    "input": {"query": "q"},
+                    "provider_executed": false
+                },
+                "future_block_field": 1
+            }],
+            "meta": {"harness_id": mid},
+        }))
+        .unwrap();
+        IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck,
+        }
+    }
+
+    const REPLAY_BASIS_COVERED_BYTES: &str = r#"{"future_block_field":1,"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":false,"type":"tool_call"}}"#;
+
+    /// A replayed-envelope identity vector includes bytes omitted by the typed basis.
+    /// Legacy rows re-adopt under `typed` only when `kind_tag` values match; typed rows
+    /// reject covered drift.
+    #[test]
+    fn replay_basis_identity_rows_re_adopt_once_under_the_typed_basis() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "identity-basis-upgrade";
+        s.replace_compartments(session, &[comp(1, 1, 1, "covered", "SUMMARY")])
+            .unwrap();
+        let messages = || {
+            vec![
+                replay_basis_covered_item("covered", 1),
+                wire_item("tool", "result", 2, &["r"]),
+                item("tail", 3, "tail"),
+            ]
+        };
+        run(&s, &req(session, "cfg0", messages()), &spine());
+        let mut loaded = s.load(session).unwrap();
+        let typed_identity = loaded.meta.block_identity_by_mid["covered"].clone();
+        let replay_identity = vec![BlockIdentity {
+            kind_tag: "tool_call".to_string(),
+            byte_fingerprint: wire::fingerprint(REPLAY_BASIS_COVERED_BYTES),
+        }];
+        assert_eq!(typed_identity.len(), 1);
+        assert_eq!(typed_identity[0].kind_tag, "tool_call");
+        assert_ne!(
+            typed_identity, replay_identity,
+            "the typed basis omits the unknown key and the false flag"
+        );
+        let mut legacy = serde_json::to_value(&loaded.meta).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("block_identity_basis");
+        loaded.meta = serde_json::from_value(legacy).unwrap();
+        loaded
+            .meta
+            .block_identity_by_mid
+            .insert("covered".to_string(), replay_identity.clone());
+        s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let legacy_row_version = s.load(session).unwrap().row_version;
+
+        let response = transform(
+            &s,
+            &req(session, "cfg0", messages()),
+            &pctx("git:proj", "/nonexistent-docs", 1),
+        )
+        .unwrap_or_else(|error| {
+            panic!("a replay-basis row must re-adopt under the typed basis, got {error:?}")
+        });
+        assert_eq!(response.first_divergence, None);
+        let after = s.load(session).unwrap();
+        assert!(after.row_version.unwrap() > legacy_row_version.unwrap());
+        assert_eq!(after.meta.block_identity_by_mid["covered"], typed_identity);
+        assert_eq!(
+            after.meta.tail_identity_re_adopt_count, 0,
+            "a basis re-adoption is not a live-tail identity change"
+        );
+        assert_eq!(
+            serde_json::to_value(&after.meta).unwrap()["block_identity_basis"],
+            "typed"
+        );
+
+        let replay = transform(
+            &s,
+            &req(session, "cfg0", messages()),
+            &pctx("git:proj", "/nonexistent-docs", 2),
+        )
+        .unwrap();
+        assert_eq!(replay.first_divergence, None);
+        assert_eq!(
+            s.load(session).unwrap().row_version,
+            after.row_version,
+            "a replay of the re-adopted bytes commits nothing"
+        );
+
+        let drift = transform(
+            &s,
+            &req(
+                session,
+                "cfg0",
+                vec![
+                    wire_item("assistant", "covered", 1, &["changed"]),
+                    wire_item("tool", "result", 2, &["r"]),
+                    item("tail", 3, "tail"),
+                ],
+            ),
+            &pctx("git:proj", "/nonexistent-docs", 3),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "covered"),
+            "a stamped row rejects covered drift, got {drift:?}"
+        );
+
+        let mut tags_differ = s.load(session).unwrap();
+        let mut legacy = serde_json::to_value(&tags_differ.meta).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("block_identity_basis");
+        tags_differ.meta = serde_json::from_value(legacy).unwrap();
+        tags_differ.meta.block_identity_by_mid.insert(
+            "covered".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: wire::fingerprint(REPLAY_BASIS_COVERED_BYTES),
+            }],
+        );
+        s.commit(
+            session,
+            tags_differ.row_version,
+            &tags_differ.core,
+            &tags_differ.meta,
+        )
+        .unwrap();
+        let drift = transform(
+            &s,
+            &req(session, "cfg0", messages()),
+            &pctx("git:proj", "/nonexistent-docs", 4),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(drift, TransformError::IdentityDrift(ref mid) if mid == "covered"),
+            "a replay-basis row whose block tags differ still rejects, got {drift:?}"
         );
     }
 

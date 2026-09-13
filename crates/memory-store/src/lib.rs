@@ -1139,6 +1139,26 @@ pub struct BlockIdentity {
     pub byte_fingerprint: String,
 }
 
+/// Identifies the serialization used to produce a stored `byte_fingerprint`.
+///
+/// `Replay` fingerprints hash each decoded block's ingress envelope, so they cover
+/// unknown envelope keys and explicit default values that typed serialization omits.
+/// `Typed` fingerprints hash the derived [`WireBlock`] serialization.
+/// Missing from stored JSON deserializes as `Replay`; `Default` is `Typed`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockIdentityBasis {
+    Replay,
+    #[default]
+    Typed,
+}
+
+impl BlockIdentityBasis {
+    fn replay() -> Self {
+        Self::Replay
+    }
+}
+
 /// Frozen harness-native synthetic todowrite pair persisted in module metadata.
 ///
 /// The pair is replayed exactly at its stored anchor until the todo content changes.
@@ -1436,6 +1456,8 @@ pub struct ModuleMeta {
     /// a later request that changes a live message's block layout fails closed.
     #[serde(default)]
     pub block_identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
+    #[serde(default = "BlockIdentityBasis::replay")]
+    pub block_identity_basis: BlockIdentityBasis,
     /// Number of accepted live-tail identity changes. Covered and frozen identities still
     /// reject, but OpenCode may legitimately rewrite an uncovered queued message in place.
     #[serde(default)]
@@ -16000,6 +16022,23 @@ mod tests {
         let _ = message.content_mut()[0].kind_mut();
         assert_eq!(message, before);
         assert_eq!(serde_json::to_vec(&message).unwrap(), bytes);
+    }
+
+    #[test]
+    fn module_meta_basis_stamp_defaults_split_stored_rows_from_built_metas() {
+        let unstamped: ModuleMeta = serde_json::from_str(
+            r#"{"initialized":true,"last_render_config":"","coverage_ordinal":null}"#,
+        )
+        .unwrap();
+        assert_eq!(unstamped.block_identity_basis, BlockIdentityBasis::Replay);
+        assert_eq!(
+            ModuleMeta::default().block_identity_basis,
+            BlockIdentityBasis::Typed
+        );
+        let stamped = serde_json::to_value(ModuleMeta::default()).unwrap();
+        assert_eq!(stamped["block_identity_basis"], "typed");
+        let reloaded: ModuleMeta = serde_json::from_value(stamped).unwrap();
+        assert_eq!(reloaded.block_identity_basis, BlockIdentityBasis::Typed);
     }
 
     /// One walk decides everything: clean input comes back as the same bytes with
