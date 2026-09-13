@@ -3,8 +3,8 @@
   "gate": "EG1 decode-projection payoff (docs/properties/typed-wire-decode/resources/evidence-gates.md)",
   "leg": "before",
   "source": {
-    "production_revision": "b73ca464",
-    "production_revision_note": "projection-golden before-image commit on branch perf/typed-wire-u2-canonical-block-bytes: production code before canonical_block_bytes; stacked on the canonical-output U0/U1 branches, whose served_json change does not reach flatten_block's serde_json::to_string path",
+    "production_revision": "85accd89",
+    "production_revision_note": "projection-golden before-image commit on branch perf/typed-wire-u2-canonical-block-bytes: production code before canonical_block_bytes. The bench binary was built from the pre-rebase form of this commit (b73ca464); `git diff b73ca464 85accd89 -- crates ':!crates/daemon/tests' ':!crates/daemon/examples'` is empty, so every input of the bench binary is identical. The branch is stacked on the canonical-output U0/U1 branches, whose served_json change does not reach flatten_block's serde_json::to_string path.",
     "harness_patch": "harness.patch",
     "harness_patch_sha256": "a864ac466e36f17e5eaacb8e2d9099d303f82ccb32e876cdfc1b68fb06f5facd",
     "harness_patch_scope": "crates/daemon/benches/hot_path.rs only: decode group and corpus dump"

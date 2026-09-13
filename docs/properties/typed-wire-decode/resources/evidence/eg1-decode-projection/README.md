@@ -9,7 +9,7 @@ The `before/` directory is the frozen before leg of the
 - `manifest.json`: source and binary identities, toolchain, build, host, corpus
   checksums and distributions, exact operation boundaries, replication,
   per-process estimates, and the predeclared gain/noise rule.
-- `harness.patch`: the only change applied over production revision `b73ca464`
+- `harness.patch`: the only change applied over production revision `85accd89`
   to obtain the bench binary (the `decode` group and the corpus dump in
   `crates/daemon/benches/hot_path.rs`). Its SHA-256 is in the manifest.
 - `corpus/`: the exact request bodies each cell decodes, with SHA-256 in the
@@ -18,7 +18,7 @@ The `before/` directory is the frozen before leg of the
   `benchmark.json` for each of five independent processes.
 
 Collection command, run once per process from a detached worktree at
-`b73ca464` with `harness.patch` applied:
+`85accd89` with `harness.patch` applied:
 
 ```sh
 cargo +1.98 bench -p daemon --locked --features bench-internals --bench hot_path --no-run
