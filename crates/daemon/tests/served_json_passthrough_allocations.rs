@@ -193,8 +193,11 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
         let message = population.build();
         let reference = reference_bytes(&message);
         let arc_size = arc_layout(reference.len());
-        let (_, canonicalizer) = canonicalize_recorded(&message);
+        let (canonical, canonicalizer) = canonicalize_recorded(&message);
         let canonicalizer_peak = canonicalizer.peak_live_bytes;
+        // `return_capacity` includes `canonical`'s unused capacity.
+        let return_capacity = canonical.capacity();
+        drop(canonical);
         let (served, ledger) =
             record_window(|| daemon::transform::served_message_for_test(message));
         assert!(!ledger.overflow, "{label}: ledger overflow");
@@ -220,7 +223,7 @@ fn full_constructor_observation_covers_receipts_hashing_and_arc_conversion() {
             ledger.live_bytes_at_close, retained as isize,
             "{label}: the constructor retains the message, fingerprints, identity, and payload"
         );
-        let live_after_canonicalizer = reference.len() + fingerprint_vec + digests;
+        let live_after_canonicalizer = return_capacity + fingerprint_vec + digests;
         let hashing_peak = live_after_canonicalizer + largest_receipt_capacity(&population);
         let conversion_peak = live_after_canonicalizer + HEX_DIGEST_BYTES + message_arc + arc_size;
         let bound = canonicalizer_peak.max(hashing_peak).max(conversion_peak);
@@ -275,20 +278,18 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         std::thread::yield_now();
     }
     let (grown, foreign_during_window, ledger) = {
-        let before = foreign_allocations.load(Ordering::Relaxed);
-        let ((grown, seen), ledger) = record_window(|| {
+        let ((grown, foreign_during_window), ledger) = record_window(|| {
+            let before = foreign_allocations.load(Ordering::Relaxed);
             let mut grown: Vec<u8> = Vec::with_capacity(8);
             grown.extend(std::iter::repeat_n(7u8, 100));
             let scratch = vec![1u8; 17];
             drop(scratch);
-            // Wait until the other thread has allocated at least 16 times inside
-            // this window, so the exclusion below is exercised rather than assumed.
             while foreign_allocations.load(Ordering::Relaxed) < before + 16 {
                 std::thread::yield_now();
             }
-            (grown, foreign_allocations.load(Ordering::Relaxed))
+            (grown, foreign_allocations.load(Ordering::Relaxed) - before)
         });
-        (grown, seen - before, ledger)
+        (grown, foreign_during_window, ledger)
     };
     stop.store(true, Ordering::Relaxed);
     noisy.join().unwrap();
@@ -374,10 +375,13 @@ fn recorder_aggregates_follow_a_scripted_sequence_and_report_overflow() {
     assert_eq!(ledger.peak_live_bytes, 0);
 
     // More events than the ledger holds: aggregates stay exact, events truncate.
-    let (boxes, ledger) = record_window(|| (0..70_000).map(|_| Box::new(1u8)).collect::<Vec<_>>());
+    // `boxes` is preallocated outside the window, so only its `Box<u8>` allocations are recorded.
+    let mut boxes: Vec<Box<u8>> = Vec::with_capacity(70_000);
+    let ((), ledger) = record_window(|| boxes.extend((0..70_000).map(|_| Box::new(1u8))));
     assert!(ledger.overflow);
-    assert!(ledger.requested_bytes >= 70_000);
-    assert!(ledger.peak_live_bytes >= 70_000);
+    assert_eq!(ledger.requested_bytes, 70_000);
+    assert_eq!(ledger.peak_live_bytes, 70_000);
+    assert_eq!(ledger.live_bytes_at_close, 70_000);
     assert!(ledger.events.len() < 70_000);
     drop(boxes);
 }

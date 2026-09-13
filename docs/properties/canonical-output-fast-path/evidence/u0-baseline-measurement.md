@@ -202,9 +202,16 @@ the `ipc_budget` echo benchmark is only a transport control.
 A candidate can pass byte checks while allocating a replacement output-sized
 scratch buffer, shrinking A, or keeping a full copy. The provenance
 classification in `canonical_miss_return_buffer_provenance_is_classified`
-rejects each: the returned buffer must be a growth chain that ends at its
-reported capacity, stay live through return, no second buffer rooted like A
-may reach N outside that chain, and no exact-N allocation may sit beside it.
+rejects a shrunk or replaced return buffer, an exact-N allocation beside it,
+and a second buffer rooted like A that reaches N outside the returned chain:
+the returned buffer must be a growth chain that ends at its reported capacity
+and stay live through return. Replacement scratch of another shape is not
+rejected by these checks. A temporary `Vec<u8>` with capacity `N + 1` that
+receives a copy and is dropped before return has neither the required root
+nor exact size N and leaves live-at-close unchanged; only the paired ledger
+counts (`allocation_events`, `requested_bytes`) would show it as a difference.
+General replacement-scratch rejection stays unverified until a negative
+control and oracle cover it.
 Span metadata that reaches N is not counted, since it roots differently and
 is not a copy of the output. Direct pointer identity between the
 post-serialization buffer and the returned buffer needs the private
