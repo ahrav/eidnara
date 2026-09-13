@@ -988,22 +988,24 @@ impl GenerationStore {
     /// The protected digests include the active candidate.
     /// `prune` preserves entries with unknown manifest schemas or foreign names.
     /// `prune` returns `UnsupportedStateSchema` when the current profile is quarantined.
+    /// A quarantined search profile may name any digest, so `prune` then counts it as quarantined
+    /// and removes only temps, which no selector can reference.
     /// One unremovable entry does not stop the sweep: every reclaimable entry is removed first,
     /// then the first removal error is returned.
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
         let mut protected = protected.clone();
-        match self.read_search_current()? {
+        let mut report = PruneReport::default();
+        let search_quarantined = match self.read_search_current()? {
             CurrentProfile::Current(digest) => {
                 protected.insert(digest);
+                false
             }
             CurrentProfile::Quarantined => {
-                return Ok(PruneReport {
-                    quarantined: 1,
-                    ..PruneReport::default()
-                });
+                report.quarantined += 1;
+                true
             }
-            CurrentProfile::Absent => {}
-        }
+            CurrentProfile::Absent => false,
+        };
         match self.read_current()? {
             CurrentProfile::Absent => {}
             CurrentProfile::Current(digest) => {
@@ -1011,7 +1013,6 @@ impl GenerationStore {
             }
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
         }
-        let mut report = PruneReport::default();
         let mut first_error = None;
         // `prune` enumerates `generations_fd` instead of its pathname so a replacement directory cannot select retained-store deletions.
         // `prune` removes through `generations_fd` so a replaced pathname cannot redirect deletions.
@@ -1033,7 +1034,7 @@ impl GenerationStore {
                 report.quarantined += 1;
                 continue;
             }
-            if protected.contains(&name) {
+            if search_quarantined || protected.contains(&name) {
                 continue;
             }
             let pin = open_child_dir(&self.generations_fd, &name);
@@ -2637,17 +2638,42 @@ mod tests {
             store.select_search(&digest, &transaction, &mut |_| Ok(())),
             Err(GenerationError::UnsupportedStateSchema)
         ));
+        let staging_temp = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(format!("{STAGING_TEMP_PREFIX}0011223344556677"));
+        std::fs::create_dir(&staging_temp).unwrap();
+        let profile_temp = store.root().join(format!(
+            "{PROFILE_TEMP_PREFIX}0011223344556677{PROFILE_TEMP_SUFFIX}"
+        ));
+        std::fs::write(&profile_temp, b"{\"torn\":true}").unwrap();
+        age_past_stale_threshold(&profile_temp);
         assert_eq!(
             store.prune(&BTreeSet::new()).unwrap(),
             PruneReport {
                 quarantined: 1,
-                ..PruneReport::default()
+                removed_temps: 1,
+                removed_profile_temps: 1,
+                removed_generations: 0,
             }
         );
+        assert!(!staging_temp.exists());
+        assert!(!profile_temp.exists());
         assert_eq!(
             std::fs::read(store.root().join(CURRENT_PROFILE_NAME)).unwrap(),
             profile
         );
+        store.validate(&other).unwrap();
+        store.validate(&digest).unwrap();
+        std::fs::write(
+            store.root().join(CURRENT_PROFILE_NAME),
+            br#"{"schema":999,"current":"unknown"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            store.prune(&BTreeSet::new()),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
         store.validate(&other).unwrap();
         store.validate(&digest).unwrap();
     }

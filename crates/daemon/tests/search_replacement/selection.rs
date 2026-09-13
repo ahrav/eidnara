@@ -31,18 +31,27 @@ fn next_candidate<'a>(
     corpus: &'a Corpus,
     gate: &'a HookGate,
 ) -> daemon::search_replacement::VerifiedReplacement<'a> {
+    candidate_for(root, corpus, gate, "second")
+}
+
+fn candidate_for<'a>(
+    root: &Path,
+    corpus: &'a Corpus,
+    gate: &'a HookGate,
+    label: &str,
+) -> daemon::search_replacement::VerifiedReplacement<'a> {
     // The prior-family fixture archives its unfinished episode; it does not model coordinator completion.
     std::fs::rename(
         root.join("search-lifecycle/intent.json"),
-        root.join("search-lifecycle/prior-fixture-intent.json"),
+        root.join(format!("search-lifecycle/prior-{label}-intent.json")),
     )
     .unwrap();
     let mut config = spec(root);
-    config.generation.generation_id = "second-vector-generation".to_owned();
+    config.generation.generation_id = format!("{label}-vector-generation");
     let mut next = request(None, &config.identity);
-    next.consumer.consumer_id = "second-consumer".to_owned();
+    next.consumer.consumer_id = format!("{label}-consumer");
     next.consumer.generation_id = config.generation.generation_id.clone();
-    next.attempt_id = "second-attempt".to_owned();
+    next.attempt_id = format!("{label}-attempt");
     next.selected_generation = match GenerationStore::open(Some(root))
         .unwrap()
         .read_search_current()
@@ -734,6 +743,7 @@ fn incomplete_candidate_with_incompatible_prior_remains_unavailable_and_gates_st
 
 #[test]
 fn active_vector_coverage_survives_reopen_and_invalid_vectors_are_refused() {
+    use sha2::Digest;
     for state in [
         "pending",
         "embedded",
@@ -741,11 +751,15 @@ fn active_vector_coverage_survives_reopen_and_invalid_vectors_are_refused() {
         "missing-vector",
         "wrong-dimension",
         "foreign-jobs",
+        "excluded-class-job",
     ] {
         let root = tempfile::tempdir().unwrap();
         let corpus = Corpus::open(root.path());
         corpus.seed();
         corpus.publish("base", "bytes");
+        if state == "excluded-class-job" {
+            corpus.publish_class("tool", "tool bytes", "raw_tool_spans");
+        }
         let gate = open_gate();
         let selection = build_selected(root.path(), &corpus, &gate);
         let reader = selection
@@ -762,6 +776,18 @@ fn active_vector_coverage_survives_reopen_and_invalid_vectors_are_refused() {
                 conn.execute("INSERT INTO vector_generations SELECT 'foreign',embedding_model,tokenizer_fingerprint,vector_dimension,generation_epoch,state,created_at,updated_at FROM vector_generations", [])?;
                 conn.execute("UPDATE embedding_jobs SET generation_id='foreign',state='pending'", [])?;
             }
+            if state == "excluded-class-job" {
+                let tool: String = conn.query_row("SELECT occurrence_id FROM occurrences WHERE class='raw_tool_spans'", [], |row| row.get(0))?;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(tool.as_bytes());
+                hasher.update([0x1f]);
+                hasher.update(fixtures::GENERATION.as_bytes());
+                conn.execute(
+                    "INSERT INTO embedding_jobs(job_id,occurrence_id,generation_id,state,created_at,updated_at)
+                     SELECT ?1,?2,generation_id,'pending',created_at,updated_at FROM embedding_jobs LIMIT 1",
+                    rusqlite::params![format!("{:x}", hasher.finalize()), tool],
+                )?;
+            }
             Ok(())
         }).unwrap();
         drop(reader);
@@ -771,7 +797,11 @@ fn active_vector_coverage_survives_reopen_and_invalid_vectors_are_refused() {
             let result = selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)));
             if matches!(
                 state,
-                "nonfinite" | "missing-vector" | "wrong-dimension" | "foreign-jobs"
+                "nonfinite"
+                    | "missing-vector"
+                    | "wrong-dimension"
+                    | "foreign-jobs"
+                    | "excluded-class-job"
             ) {
                 assert!(result.is_err(), "{state}");
             } else {
@@ -1130,6 +1160,168 @@ fn same_manager_reopen_reuses_live_pins_and_quarantines_corruption() {
         selection
             .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
             .is_err()
+    );
+}
+
+#[test]
+fn transient_reopen_failures_keep_the_live_family_without_quarantine() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let before = observe(&old);
+    let reopen_reuses_live_family = || {
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap();
+        let current = selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap();
+        assert!(std::ptr::eq(old.projection(), current.projection()));
+        assert_eq!(observe(&current), before);
+    };
+
+    let cancelled = budget(Duration::from_secs(10));
+    cancelled.cancel();
+    assert!(matches!(
+        selection.reopen(&corpus.kernel, &gate, &cancelled),
+        Err(BuildError::Expired)
+    ));
+    assert_eq!(observe(&old), before);
+    reopen_reuses_live_family();
+
+    assert!(matches!(
+        selection.reopen(
+            &corpus.kernel,
+            &gate,
+            &kernel::applicability::EvalBudget::unbounded()
+        ),
+        Err(BuildError::Invalid("selection requires a finite budget"))
+    ));
+    assert_eq!(observe(&old), before);
+    reopen_reuses_live_family();
+
+    // The reader releases after 1.5 seconds, so a quarantine that waits for the connection
+    // completes and fails the assertion below instead of deadlocking the scope.
+    let held = std::sync::Barrier::new(2);
+    let contended = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            old.projection()
+                .read(|_| {
+                    held.wait();
+                    std::thread::sleep(Duration::from_millis(1500));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        held.wait();
+        selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_millis(300)))
+    });
+    assert!(matches!(
+        contended,
+        Err(BuildError::Projection(
+            daemon::search_projection::SearchProjectionError::Store(storage::StoreError::Deadline)
+        ))
+    ));
+    assert!(old.projection().quarantine().is_none());
+    assert_eq!(observe(&old), before);
+    reopen_reuses_live_family();
+
+    // Installing an evaluator invalidates `old`'s grant, so only the family is checked afterwards.
+    let denied = spec(root.path()).identity;
+    gate.install(support::projection_gate::passing_evaluator(&denied, 0, &[]));
+    assert!(matches!(
+        selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
+        Err(BuildError::Denied(_))
+    ));
+    gate.install(support::projection_gate::passing_evaluator(
+        &spec(root.path()).identity,
+        0,
+        &daemon::projection_gates::ProjectionHook::ALL,
+    ));
+    assert!(old.projection().quarantine().is_none());
+    reopen_reuses_live_family();
+}
+
+#[test]
+fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_leased_ones() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let families = root.path().join("search-families");
+    let family = |digest: &str| families.join(digest);
+    let old_digest = old.digest().to_owned();
+
+    corpus.publish("late", "late bytes");
+    let candidate = next_candidate(root.path(), &corpus, &gate);
+    let selected_digest = candidate.staged().digest.clone();
+    selection.select(candidate, &mut |_| Ok(())).unwrap();
+
+    corpus.publish("later", "later bytes");
+    let candidate = candidate_for(root.path(), &corpus, &gate, "third");
+    let partial_digest = candidate.staged().digest.clone();
+    let failure = selection
+        .select(candidate, &mut |event| {
+            if event == SelectionEvent::Copied {
+                return Err(GenerationError::NativePayloadInvalid {
+                    detail: "lost copy reply",
+                });
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(family(&partial_digest).join("bootstrap.json").is_file());
+    drop(failure);
+
+    // The partial family is protected by the live intent; the old one is leased by `old`.
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (0, 1));
+    for digest in [&old_digest, &selected_digest, &partial_digest] {
+        assert!(family(digest).is_dir(), "{digest}");
+    }
+
+    std::fs::rename(
+        root.path().join("search-lifecycle/intent.json"),
+        root.path().join("search-lifecycle/abandoned-intent.json"),
+    )
+    .unwrap();
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (1, 1));
+    assert!(!family(&partial_digest).exists());
+    assert!(family(&old_digest).is_dir());
+    assert!(family(&selected_digest).is_dir());
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_ok()
+    );
+
+    drop(old);
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (1, 0));
+    assert!(!family(&old_digest).exists());
+    assert!(family(&selected_digest).is_dir());
+    assert_eq!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap()
+            .digest(),
+        selected_digest
+    );
+    assert_eq!(
+        std::fs::read_dir(&families).unwrap().count(),
+        1,
+        "only the selected family remains"
     );
 }
 

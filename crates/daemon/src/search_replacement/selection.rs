@@ -13,7 +13,7 @@ use host_runtime::generation::{
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
 use retrieval::batch::VectorGeneration;
-use retrieval::coverage::{CoverageBounds, CoverageReport, verify_active};
+use retrieval::coverage::{CoverageBounds, CoverageReport, observe, verify_active, verify_pages};
 use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
 use storage::GuardedConn;
@@ -25,7 +25,11 @@ use crate::projection_gates::{
 use crate::projection_lifecycle::{
     ConsumerBinding, LifecycleIntent, MAX_RECORD_BYTES, ProjectionLifecycle,
 };
-use crate::search_projection::{SearchProjection, search_descriptor};
+use crate::search_catchup::{Refusal, classify};
+use crate::search_projection::{
+    SearchProjection, SearchProjectionError, StoreFailure, classify_store_failure,
+    search_descriptor,
+};
 use crate::search_seed::{SEED_FILE, SeedVerification};
 use crate::search_writer::QuarantineKind;
 
@@ -296,48 +300,47 @@ impl SearchSelection {
         budget: &EvalBudget,
         transaction: &LifecycleTransactionLock,
     ) -> Result<(), BuildError> {
-        let result = (|| {
-            self.admit(gate, budget)?;
-            let store = GenerationStore::open(Some(&self.data_home))?;
-            match store.reconcile_search(transaction)? {
-                CurrentProfile::Absent => {
-                    self.selected.store(None);
-                    Ok(())
-                }
-                CurrentProfile::Quarantined => {
-                    Err(BuildError::Invalid("search selector quarantined"))
-                }
-                CurrentProfile::Current(digest) => {
-                    let family = match self
-                        .selected
-                        .load_full()
-                        .filter(|family| family._seed_pin.digest == digest)
-                    {
-                        Some(family) => {
-                            self.validate_family(&family, kernel, budget)
-                                .inspect_err(|error| {
-                                    if matches!(
-                                        error,
-                                        BuildError::Mutation(_)
-                                            | BuildError::Projection(_)
-                                            | BuildError::Invalid(_)
-                                    ) {
-                                        family
-                                            .projection
-                                            .enter_quarantine(QuarantineKind::Integrity, error);
-                                    }
-                                })?;
-                            family
-                        }
-                        None => Arc::new(self.open_family(&digest, kernel, budget)?),
-                    };
-                    self.admit(gate, budget)?;
-                    self.selected.store(Some(family));
-                    Ok(())
-                }
+        // Refusing an infinite budget here keeps `family_damage`'s `Invalid` arm exact: past this
+        // point the only `Invalid` `validate_family` can raise is one of its own prefix checks.
+        self.admit(gate, budget)?;
+        let store = GenerationStore::open(Some(&self.data_home))?;
+        match store.reconcile_search(transaction)? {
+            CurrentProfile::Absent => {
+                self.selected.store(None);
+                Ok(())
             }
-        })();
-        result.inspect_err(|_| self.selected.store(None))
+            CurrentProfile::Quarantined => {
+                self.selected.store(None);
+                Err(BuildError::Invalid("search selector quarantined"))
+            }
+            CurrentProfile::Current(digest) => {
+                let family = match self
+                    .selected
+                    .load_full()
+                    .filter(|family| family._seed_pin.digest == digest)
+                {
+                    Some(family) => {
+                        if let Err(error) = self.validate_family(&family, kernel, budget) {
+                            if let Some(kind) = family_damage(&error) {
+                                family.projection.enter_quarantine(kind, &error);
+                                self.selected.store(None);
+                            }
+                            return Err(error);
+                        }
+                        family
+                    }
+                    None => {
+                        // The durable pointer names a family this manager does not hold, so
+                        // whatever is cached is stale whether or not the open succeeds.
+                        self.selected.store(None);
+                        Arc::new(self.open_family(&digest, kernel, budget)?)
+                    }
+                };
+                self.admit(gate, budget)?;
+                self.selected.store(Some(family));
+                Ok(())
+            }
+        }
     }
 
     fn family_home(&self, digest: &str) -> Result<PathBuf, BuildError> {
@@ -386,6 +389,10 @@ impl SearchSelection {
             bounds: self.bounds,
             _seed_pin: seed_pin,
         };
+        // Run the page scan before readers share the family's connection.
+        family
+            .projection
+            .read_within(deadline(budget)?, verify_pages)?;
         self.validate_family(&family, kernel, budget)?;
         Ok(family)
     }
@@ -467,16 +474,74 @@ impl SearchSelection {
         {
             return Err(BuildError::Invalid("lifecycle pinned family"));
         }
+        match self.reclaim_locked(digest)? {
+            Reclaimed::Removed | Reclaimed::Absent => Ok(()),
+            Reclaimed::Uncertified => Err(BuildError::Invalid("uncertified family")),
+        }
+    }
+
+    /// Removes every family that neither the durable search pointer nor the lifecycle intent
+    /// references and that no reader leases. A leased or uncertified family is retained and
+    /// visited again by the next sweep; any other failure stops the sweep at that entry.
+    pub fn sweep(&self) -> Result<SweepReport, BuildError> {
+        let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
+        let families = self.data_home.join(FAMILIES);
+        if !families.try_exists()? {
+            return Ok(SweepReport::default());
+        }
+        let directory = open_directory(&families)?;
+        let selected = match GenerationStore::open(Some(&self.data_home))?.read_search_current()? {
+            CurrentProfile::Current(digest) => Some(digest),
+            CurrentProfile::Quarantined => {
+                return Err(BuildError::Invalid("unknown selector references"));
+            }
+            CurrentProfile::Absent => None,
+        };
+        let protected = ProjectionLifecycle::protected_generations(&self.data_home, &transaction)?;
+        let mut report = SweepReport::default();
+        for entry in fs::read_dir(&families)? {
+            let name = entry?.file_name();
+            let Some(digest) = name
+                .to_str()
+                .filter(|digest| host_runtime::lifecycle::is_canonical_payload_digest(digest))
+            else {
+                report.retained += 1;
+                continue;
+            };
+            if selected.as_deref() == Some(digest) || protected.contains(digest) {
+                continue;
+            }
+            match self.reclaim_locked(digest) {
+                Ok(Reclaimed::Removed) => report.removed += 1,
+                Ok(Reclaimed::Absent) => {}
+                Ok(Reclaimed::Uncertified)
+                | Err(BuildError::Projection(SearchProjectionError::Store(
+                    storage::StoreError::Lease(_),
+                ))) => report.retained += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        directory.sync_all()?;
+        Ok(report)
+    }
+
+    fn reclaim_locked(&self, digest: &str) -> Result<Reclaimed, BuildError> {
         let home = self.family_home(digest)?;
-        if !home.try_exists()?
-            || (!home.join(CERTIFICATE).try_exists()?
-                && !home.join("search").join(SEED_FILE).try_exists()?)
-        {
-            return Ok(());
+        if !home.try_exists()? {
+            return Ok(Reclaimed::Absent);
+        }
+        if !home.join(CERTIFICATE).try_exists()? {
+            if home.join("search").join(SEED_FILE).try_exists()? {
+                return Ok(Reclaimed::Uncertified);
+            }
+            open_directory(&home)?;
+            self.remove_family_dirs(&home)?;
+            return Ok(Reclaimed::Removed);
         }
         let certificate: Bootstrap = serde_json::from_slice(&certificate_bytes(&home)?)
             .map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
-        self.remove_family(digest, &certificate)
+        self.remove_family(digest, &certificate)?;
+        Ok(Reclaimed::Removed)
     }
 
     pub fn recover_partial(&self, gate: &HookGate) -> Result<LifecycleIntent, BuildError> {
@@ -540,8 +605,28 @@ impl SearchSelection {
         if home.join(CERTIFICATE).try_exists()? {
             fs::remove_file(home.join(CERTIFICATE))?;
         }
-        open_directory(&home)?.sync_all()?;
-        for path in [home.join("search"), home.clone()] {
+        self.remove_family_dirs(&home)
+    }
+
+    fn remove_family_dirs(&self, home: &Path) -> Result<(), BuildError> {
+        open_directory(home)?.sync_all()?;
+        let search = home.join("search");
+        if search.try_exists()? {
+            open_directory(&search)?;
+            for entry in fs::read_dir(&search)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file()
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        std::path::Path::new(name)
+                            .extension()
+                            .is_some_and(|ext| ext == "lease")
+                    })
+                {
+                    fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        for path in [search, home.to_owned()] {
             match fs::remove_dir(path) {
                 Ok(()) => {}
                 Err(error)
@@ -555,6 +640,20 @@ impl SearchSelection {
         open_directory(&self.data_home.join(FAMILIES))?.sync_all()?;
         Ok(())
     }
+}
+
+enum Reclaimed {
+    Removed,
+    Absent,
+    /// A database without its certificate: ownership cannot be proven, so nothing is deleted.
+    Uncertified,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SweepReport {
+    pub removed: usize,
+    /// Families a reader still leases, whose ownership is unproven, or whose name is foreign.
+    pub retained: usize,
 }
 
 fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
@@ -640,12 +739,13 @@ impl SearchReader {
 
     pub fn coverage(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         self.read(budget, |conn| {
-            verify_active(
+            observe(
                 conn,
-                &self.family.certificate.seed.identity(),
+                &self.family.certificate.seed.kernel_incarnation_id,
                 &self.family.generation(),
                 self.family.bounds,
-            )
+            )?
+            .map_err(|_| ProjectionError::CorruptRow)
         })
     }
 
@@ -678,6 +778,33 @@ fn deadline(budget: &EvalBudget) -> Result<std::time::Instant, BuildError> {
     budget
         .deadline()
         .ok_or(BuildError::Invalid("selection requires a finite budget"))
+}
+
+/// The quarantine a `validate_family` failure earns, or `None` when the family's own state is
+/// not in evidence. `None` keeps the cached `Arc`: dropping it would release this manager's file
+/// lease while reader clones keep theirs, and the next `reopen` would then fail with
+/// `LeaseError::Held` until every reader drained.
+fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
+    match error {
+        BuildError::Projection(SearchProjectionError::Store(store)) => {
+            match classify_store_failure(store) {
+                StoreFailure::Integrity => Some(QuarantineKind::Integrity),
+                StoreFailure::Deadline | StoreFailure::Rejected | StoreFailure::Unknown => None,
+            }
+        }
+        BuildError::Projection(SearchProjectionError::Connection(_)) => {
+            Some(QuarantineKind::Integrity)
+        }
+        BuildError::Projection(SearchProjectionError::Quarantined(_)) => None,
+        BuildError::Projection(SearchProjectionError::Projection(error))
+        | BuildError::Mutation(error) => match classify(error) {
+            Refusal::Integrity | Refusal::OperatorRepair => Some(QuarantineKind::Integrity),
+            Refusal::Storage => Some(QuarantineKind::Storage),
+            Refusal::Admission | Refusal::Identity => None,
+        },
+        BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
+        _ => None,
+    }
 }
 
 fn create_directory(parent: &Path, name: &str) -> Result<(), BuildError> {
