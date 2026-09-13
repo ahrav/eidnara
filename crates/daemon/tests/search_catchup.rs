@@ -9,8 +9,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use daemon::embedding_publication::{EmbeddingPublisher, PublicationError, VectorPublication};
 use daemon::search_catchup::{
@@ -18,16 +19,17 @@ use daemon::search_catchup::{
     EpisodeReport, QuarantineKind, SearchCatchUp,
 };
 use daemon::search_projection::SearchProjection;
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
 use kernel::{
     ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest,
-    ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
-    CommitPageBounds, CommitReadError, CommitReadRequest, CurrentInputDescriptor, DomainSpec,
-    EligibilityBinding, ExportWindow, KernelStore, ProjectScope, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceDescriptorRequest, SourceHold, SourceHoldAdmission,
-    SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourcePageBounds, SourceRow,
+    ArtifactDeletionResult, ArtifactDestination, ArtifactIngestRequest, BackupRequest,
+    CommitIntent, CommitPageBounds, CommitReadError, CommitReadRequest, CommitReadTarget,
+    CurrentInputDescriptor, DomainSpec, EligibilityBinding, ExportWindow, KernelStore,
+    ProjectScope, ProviderEgress, RepositoryProvenance, Sensitivity, SourceDescriptorRequest,
+    SourceExportError, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourceHoldError, SourcePageBounds, SourceRow,
 };
-use retrieval::ProjectionError;
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
     row_identities,
@@ -119,6 +121,7 @@ fn bounds() -> EpisodeBounds {
         hold_admission: hold_admission(),
         source_page: source_page_bounds(),
         max_source_pages: NonZeroUsize::new(8).unwrap(),
+        max_source_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
         batch: batch_bounds(),
     }
 }
@@ -535,6 +538,37 @@ impl Corpus {
     fn kernel_checkpoint(&self) -> i64 {
         kernel_checkpoint(&self.root)
     }
+
+    /// A target fixed at `through` under the current incarnation.
+    fn fixed(&self, through: i64) -> CommitReadTarget {
+        CommitReadTarget {
+            through_commit: through,
+            incarnation: self
+                .kernel
+                .capture_commit_read_target()
+                .unwrap()
+                .incarnation,
+        }
+    }
+
+    /// Publishes a backup of the current history; the returned directory keeps it alive.
+    fn backup(&self) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let manifest = self
+            .kernel
+            .backup(BackupRequest {
+                destination_directory: dir.path().to_path_buf(),
+                deadline: Instant::now() + Duration::from_secs(10),
+                capture_pin_expires_at: None,
+            })
+            .unwrap();
+        let path = manifest.destination_path;
+        (dir, path)
+    }
 }
 
 fn export_all(
@@ -828,6 +862,108 @@ fn the_episode_consumes_every_commit_kind_and_the_ledger_predicts_each_window() 
 }
 
 #[test]
+fn fixed_target_rejects_invalid_ranges_before_reconciling_a_lost_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let local = corpus.publish("unacked", &[("msg-b", "1", "unacknowledged message")]);
+    apply_without_acknowledging(&corpus, &projection, &consumer, &hold, local);
+    let before = durable(dir.path());
+    let acknowledged = corpus.kernel_checkpoint();
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    for (target, error) in [
+        (-1, CommitReadError::InvalidRequest),
+        (local - 1, CommitReadError::InvalidRequest),
+        (corpus.tip() + 1, CommitReadError::TargetBeyondTip),
+    ] {
+        let mut events = Vec::new();
+        let report = driver
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                3,
+                &mut |event| {
+                    events.push(event);
+                },
+            )
+            .unwrap();
+        assert_eq!(blocked(&report), &Blocked::Read(error));
+        assert_eq!(report.target, target);
+        assert_eq!(report.acknowledged_through, acknowledged);
+        assert_eq!(report.batches_applied, 0);
+        assert_eq!(report.commits_consumed, 0);
+        assert!(events.is_empty());
+        assert_eq!(corpus.kernel_checkpoint(), acknowledged);
+        assert_eq!(durable(dir.path()), before);
+    }
+    let report = driver
+        .run_episode_toward(&consumer, &bounds(), corpus.fixed(local), 4, &mut |_| {})
+        .unwrap();
+    reached(&report);
+    assert_eq!(corpus.kernel_checkpoint(), local);
+    assert_eq!(durable(dir.path()), before);
+}
+
+#[test]
+fn fixed_target_excludes_later_commits_and_replay_does_not_chase_the_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("first", &[("msg-a", "1", "first message")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    grow(&corpus, true);
+    let target = corpus.tip();
+    let commits = corpus.commits_in(hold.snapshot, target);
+    corpus.publish("beyond-target", &[("msg-late", "1", "not in this target")]);
+    let mut limits = two_commit_windows();
+    limits.source_page.max_rows = NonZeroUsize::MIN;
+    let mut grown = false;
+    let mut events = Vec::new();
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let report = driver
+        .run_episode_toward(&consumer, &limits, corpus.fixed(target), 3, &mut |event| {
+            events.push(event);
+            if !grown && matches!(event, EpisodeEvent::HoldExtensionRequested { .. }) {
+                corpus.publish(
+                    "during-catchup",
+                    &[("msg-new", "1", "also outside the target")],
+                );
+                grown = true;
+            }
+        })
+        .unwrap();
+    reached(&report);
+    assert_eq!(report.target, target);
+    assert_eq!(report.commits_consumed, commits);
+    assert!(grown);
+    assert_eq!(windows(&events).len(), commits.div_ceil(2));
+    assert!(corpus.tip() > target);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+    let before = durable(dir.path());
+    let mut events = Vec::new();
+    let replay = driver
+        .run_episode_toward(
+            &consumer,
+            &bounds(),
+            corpus.fixed(target),
+            4,
+            &mut |event| {
+                events.push(event);
+            },
+        )
+        .unwrap();
+    reached(&replay);
+    assert_eq!(replay.commits_consumed, 0);
+    assert!(events.is_empty());
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_eq!(durable(dir.path()), before);
+}
+
+#[test]
 fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
@@ -863,13 +999,16 @@ fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
         }
     );
 
-    // The whole window is one batch that exceeds the local record bound.
+    // The complete window cannot fit the retained-row allowance.
     let mut narrow = bounds();
     narrow.batch.persist.max_records = NonZeroUsize::new(1).unwrap();
-    assert!(matches!(
+    assert_eq!(
         refused("admission", &consumer, &narrow),
-        Blocked::Admission(ProjectionError::TooManyRecords { .. })
-    ));
+        Blocked::SourceCapacityExceeded {
+            through: target,
+            bound: "rows"
+        }
+    );
 
     // The delta needs more source pages than one window may span.
     let mut paged = bounds();
@@ -954,6 +1093,909 @@ fn refused_inputs_leave_checkpoint_and_acknowledgement_unchanged() {
         .unwrap();
     assert_eq!(*blocked(&report), Blocked::NoLocalBaseline);
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
+fn aggregate_source_admission_precedes_decode_and_accepts_the_exact_terminal_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish(
+        "three",
+        &[("a", "1", "aaaa"), ("b", "1", "bbbb"), ("c", "1", "cccc")],
+    );
+    corpus
+        .kernel
+        .extend_source_hold(
+            &consumer.binding,
+            &consumer.hold_id,
+            target,
+            hold_admission(),
+        )
+        .unwrap();
+    let exported = export_all(
+        &corpus.kernel,
+        &consumer.binding,
+        &consumer.hold_id,
+        hold.captured_at,
+        ExportWindow::Delta {
+            after: hold.snapshot,
+            through: target,
+        },
+    );
+    assert_eq!(exported.len(), 3);
+    assert_eq!(
+        exported
+            .iter()
+            .map(|row| row.text.as_ref().unwrap().len())
+            .sum::<usize>(),
+        12
+    );
+    let victim = &exported[1];
+    let digest = &victim.detail.artifact_digest;
+    let path = dir
+        .path()
+        .join("kernel/artifacts/objects")
+        .join(&digest[..2])
+        .join(&digest[2..]);
+    let hidden = path.with_extension("hidden");
+    std::fs::rename(&path, &hidden).unwrap();
+    let before = durable(dir.path());
+    for dimension in [
+        "records",
+        "mutations",
+        "text",
+        "encoded",
+        "row_page",
+        "decoded_page",
+        "encoded_page",
+    ] {
+        let mut limits = bounds();
+        limits.source_page.max_rows = NonZeroUsize::MIN;
+        let (expected, reads) = match dimension {
+            "records" | "mutations" => {
+                limits.source_page.max_rows = NonZeroUsize::new(2).unwrap();
+                if dimension == "records" {
+                    limits.batch.persist.max_records = NonZeroUsize::MIN;
+                } else {
+                    limits.batch.max_local_mutations = NonZeroUsize::MIN;
+                }
+                (
+                    Blocked::SourceCapacityExceeded {
+                        through: target,
+                        bound: "rows",
+                    },
+                    2,
+                )
+            }
+            "text" | "encoded" => {
+                if dimension == "text" {
+                    limits.batch.max_source_bytes = NonZeroUsize::new(7).unwrap();
+                } else {
+                    limits.max_source_encoded_bytes = NonZeroU64::new(7).unwrap();
+                }
+                (
+                    Blocked::SourceCapacityExceeded {
+                        through: target,
+                        bound: dimension,
+                    },
+                    3,
+                )
+            }
+            dimension => {
+                let bound = match dimension {
+                    "row_page" => {
+                        limits.source_page.max_row_bytes = NonZeroU64::new(3).unwrap();
+                        kernel::PageBound::Row
+                    }
+                    "decoded_page" => {
+                        limits.source_page.max_decoded_bytes = NonZeroU64::new(3).unwrap();
+                        kernel::PageBound::Decoded
+                    }
+                    "encoded_page" => {
+                        limits.source_page.max_encoded_bytes = NonZeroU64::new(3).unwrap();
+                        kernel::PageBound::Encoded
+                    }
+                    _ => unreachable!(),
+                };
+                (
+                    Blocked::Export(SourceExportError::OversizedRow {
+                        object_id: exported[0].object_id.clone(),
+                        bound,
+                        bytes: 4,
+                    }),
+                    1,
+                )
+            }
+        };
+        KernelStore::take_source_export_row_reads_for_test();
+        let mut events = Vec::new();
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode_toward(
+                &consumer,
+                &limits,
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |event| events.push(event),
+            )
+            .unwrap();
+        assert_eq!(blocked(&report), &expected, "{dimension}");
+        assert_eq!(
+            KernelStore::take_source_export_row_reads_for_test(),
+            reads,
+            "{dimension}: row admission and lookahead"
+        );
+        assert_eq!(
+            events,
+            vec![EpisodeEvent::HoldExtensionRequested { through: target }]
+        );
+        assert_eq!(report.batches_applied, 0);
+        assert_eq!(durable(dir.path()), before);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert!(projection.quarantine().is_none());
+    }
+    std::fs::rename(&hidden, &path).unwrap();
+    let mut exact = bounds();
+    exact.source_page.max_rows = NonZeroUsize::MIN;
+    exact.max_source_pages = NonZeroUsize::new(3).unwrap();
+    exact.batch.persist.max_records = NonZeroUsize::new(3).unwrap();
+    exact.batch.max_local_mutations = NonZeroUsize::new(3).unwrap();
+    exact.batch.max_source_bytes = NonZeroUsize::new(12).unwrap();
+    exact.source_page.max_decoded_bytes = NonZeroU64::new(4).unwrap();
+    exact.source_page.max_encoded_bytes = NonZeroU64::new(4).unwrap();
+    exact.max_source_encoded_bytes = NonZeroU64::new(12).unwrap();
+    KernelStore::take_source_export_row_reads_for_test();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode_toward(
+            &consumer,
+            &exact,
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |_| {},
+        )
+        .unwrap();
+    reached(&report);
+    assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 5);
+    assert_eq!(report.batches_applied, 1);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+#[test]
+fn cancellation_at_write_boundaries_never_quarantines_or_acknowledges() {
+    for cut in ["hold", "staged", "released", "ack"] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+        let target = corpus.publish("next", &[("a", "1", "next message")]);
+        let before = durable(dir.path());
+        let budget = EvalBudget::unbounded();
+        let mut driver =
+            SearchCatchUp::new(&corpus.kernel, &projection).with_budget(budget.clone());
+        let mut probe = LockProbe::default();
+        let mut hit = false;
+        let report = driver
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |event| {
+                    probe.observe(&search_path(dir.path()), event);
+                    let phase = match event {
+                        EpisodeEvent::HoldExtensionRequested { .. } => "hold",
+                        EpisodeEvent::LocalStaged { .. } => "staged",
+                        EpisodeEvent::LocalReleased { .. } => "released",
+                        EpisodeEvent::AcknowledgementRequested { .. } => "ack",
+                        EpisodeEvent::Acknowledged { .. } => {
+                            panic!("cancelled window was acknowledged")
+                        }
+                    };
+                    if phase == cut {
+                        hit = true;
+                        budget.cancel();
+                    }
+                },
+            )
+            .unwrap();
+        assert!(hit, "{cut}");
+        assert_eq!(blocked(&report), &Blocked::Cancelled);
+        assert_eq!(report.acknowledged_through, hold.snapshot);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert!(projection.quarantine().is_none());
+        assert!(probe.all_free());
+        assert!(released_before_every_acknowledgement(&probe.events));
+        if matches!(cut, "released" | "ack") {
+            assert_eq!(report.batches_applied, 1);
+            assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+        } else {
+            assert_eq!(report.batches_applied, 0);
+            assert_eq!(durable(dir.path()), before);
+        }
+        let again = driver
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |_| panic!("cancelled budget was renewed"),
+            )
+            .unwrap();
+        assert_eq!(blocked(&again), &Blocked::Cancelled);
+        let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode_toward(
+                &consumer,
+                &bounds(),
+                corpus.fixed(target),
+                hold.captured_at,
+                &mut |_| {},
+            )
+            .unwrap();
+        reached(&replay);
+        assert_eq!(
+            replay.batches_applied,
+            usize::from(matches!(cut, "hold" | "staged"))
+        );
+        assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+    }
+}
+
+#[test]
+fn shared_artifact_encoded_work_is_charged_once_per_page() {
+    for page_rows in [1, 2, 3] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+        let target = corpus.publish(
+            "shared",
+            &[("a", "1", "same"), ("b", "1", "same"), ("c", "1", "same")],
+        );
+        let encoded_work = 3_usize.div_ceil(page_rows) as u64 * 4;
+        let mut limits = bounds();
+        limits.source_page.max_rows = NonZeroUsize::new(page_rows).unwrap();
+        limits.source_page.max_decoded_bytes = NonZeroU64::new(page_rows as u64 * 4).unwrap();
+        limits.source_page.max_encoded_bytes = NonZeroU64::new(4).unwrap();
+        limits.batch.max_source_bytes = NonZeroUsize::new(12).unwrap();
+        limits.max_source_encoded_bytes = NonZeroU64::new(encoded_work - 1).unwrap();
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            blocked(&report),
+            &Blocked::SourceCapacityExceeded {
+                through: target,
+                bound: "encoded"
+            }
+        );
+        assert_eq!((report.batches_applied, report.commits_consumed), (0, 0));
+        assert_eq!(report.acknowledged_through, hold.snapshot);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert_matches_ledger(dir.path(), &corpus.ledger(), hold.snapshot);
+        limits.max_source_encoded_bytes = NonZeroU64::new(encoded_work).unwrap();
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+            .unwrap();
+        reached(&report);
+        assert_eq!(report.batches_applied, 1);
+        assert_eq!(
+            report.commits_consumed,
+            corpus.commits_in(hold.snapshot, target)
+        );
+        assert_eq!(corpus.kernel_checkpoint(), target);
+        assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+    }
+}
+
+#[test]
+fn created_and_retired_rows_are_admitted_as_two_mutations_before_local_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    corpus.publish("pair", &[("a", "1", "aaaa"), ("b", "1", "bbbb")]);
+    corpus.retire("a", "aaaa");
+    let target = corpus.retire("b", "bbbb");
+    let mut limits = bounds();
+    limits.source_page.max_rows = NonZeroUsize::MIN;
+    limits.batch.max_local_mutations = NonZeroUsize::new(3).unwrap();
+    mutate(&search_path(dir.path()))
+        .execute_batch(
+            "CREATE TRIGGER refuse_record BEFORE INSERT ON occurrences
+             BEGIN SELECT RAISE(ABORT, 'record written before admission'); END;
+             CREATE TRIGGER refuse_tombstone BEFORE INSERT ON occurrence_tombstones
+             BEGIN SELECT RAISE(ABORT, 'tombstone written before admission'); END;",
+        )
+        .unwrap();
+    let mut events = Vec::new();
+    KernelStore::take_source_export_row_reads_for_test();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &limits, hold.captured_at, &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
+    assert_eq!(
+        blocked(&report),
+        &Blocked::Admission(retrieval::ProjectionError::BatchOverBound {
+            bound: "local_mutations",
+            size: 4,
+        })
+    );
+    assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 3);
+    assert_eq!(
+        events,
+        vec![
+            EpisodeEvent::HoldExtensionRequested { through: target },
+            EpisodeEvent::LocalReleased { through: target }
+        ]
+    );
+    assert_eq!((report.batches_applied, report.commits_consumed), (0, 0));
+    assert_eq!(report.acknowledged_through, hold.snapshot);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+    limits.batch.max_local_mutations = NonZeroUsize::new(4).unwrap();
+    mutate(&search_path(dir.path()))
+        .execute_batch("DROP TRIGGER refuse_record; DROP TRIGGER refuse_tombstone;")
+        .unwrap();
+    reached(
+        &SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+            .unwrap(),
+    );
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+#[test]
+fn invalidation_only_rows_obey_the_aggregate_row_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("pair", &[("a", "1", "aaaa"), ("b", "1", "bbbb")]);
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    corpus.retire("a", "aaaa");
+    let target = corpus.retire("b", "bbbb");
+    let mut limits = bounds();
+    limits.source_page.max_rows = NonZeroUsize::MIN;
+    limits.batch.max_source_bytes = NonZeroUsize::MIN;
+    limits.max_source_encoded_bytes = NonZeroU64::MIN;
+    limits.batch.max_local_mutations = NonZeroUsize::MIN;
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+        .unwrap();
+    assert_eq!(
+        blocked(&report),
+        &Blocked::SourceCapacityExceeded {
+            through: target,
+            bound: "rows"
+        }
+    );
+    assert_eq!((report.batches_applied, report.commits_consumed), (0, 0));
+    assert_eq!(report.acknowledged_through, hold.snapshot);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), hold.snapshot);
+    limits.batch.max_local_mutations = NonZeroUsize::new(2).unwrap();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+        .unwrap();
+    reached(&report);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+/// An invalidation-only row charges no text and no encoded bytes, so a byte allowance the text rows spent exactly still admits it; only the row allowance may refuse it.
+#[test]
+fn zero_charge_rows_after_an_exactly_spent_byte_allowance_are_admitted() {
+    for dimension in ["text", "encoded"] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        // Keyset order follows digest-derived object ids, so the pool supplies an invalidation-only row after the text rows.
+        let pool: Vec<(String, String)> = (0..12)
+            .map(|index| (format!("pool-{index}"), format!("pool text {index}")))
+            .collect();
+        let messages: Vec<(&str, &str, &str)> = pool
+            .iter()
+            .map(|(message_id, text)| (message_id.as_str(), "1", text.as_str()))
+            .collect();
+        corpus.publish("pool", &messages);
+        let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+        corpus.publish(
+            "three",
+            &[("a", "1", "aaaa"), ("b", "1", "bbbb"), ("c", "1", "cccc")],
+        );
+        let mut target = 0;
+        for (key, text) in &pool {
+            target = corpus.retire(key, text);
+        }
+        let ledger = corpus.ledger();
+        let object_of = |text: &str| {
+            let occurrence = ledger.occurrence_of(text);
+            ledger
+                .objects
+                .iter()
+                .find(|(_, id)| **id == occurrence)
+                .map(|(object, _)| object.clone())
+                .unwrap()
+        };
+        let last_text = ["aaaa", "bbbb", "cccc"]
+            .into_iter()
+            .map(object_of)
+            .max()
+            .unwrap();
+        assert!(
+            pool.iter().any(|(_, text)| object_of(text) > last_text),
+            "{dimension}: no invalidation-only row sorts after the text rows; widen the pool"
+        );
+        let mut limits = bounds();
+        limits.source_page.max_rows = NonZeroUsize::MIN;
+        limits.max_source_pages = NonZeroUsize::new(32).unwrap();
+        if dimension == "text" {
+            limits.batch.max_source_bytes = NonZeroUsize::new(12).unwrap();
+        } else {
+            limits.max_source_encoded_bytes = NonZeroU64::new(12).unwrap();
+        }
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            report.end,
+            EpisodeEnd::ReachedTarget,
+            "{dimension}: {report:?}"
+        );
+        reached(&report);
+        assert_eq!(report.batches_applied, 1, "{dimension}");
+        assert_eq!(corpus.kernel_checkpoint(), target, "{dimension}");
+        assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+    }
+}
+
+#[test]
+fn cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let first = corpus.publish("first", &[("a", "1", "first message")]);
+    let target = corpus.publish("second", &[("b", "1", "second message")]);
+    let budget = EvalBudget::unbounded();
+    let mut events = Vec::new();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .with_budget(budget.clone())
+        .run_episode_toward(
+            &consumer,
+            &two_commit_windows(),
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |event| {
+                events.push(event);
+                if event == (EpisodeEvent::LocalStaged { through: target }) {
+                    assert_eq!(corpus.kernel_checkpoint(), first);
+                    budget.cancel();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert_eq!(report.acknowledged_through, first);
+    assert_eq!(windows(&events), vec![first]);
+    assert_eq!(
+        events.last(),
+        Some(&EpisodeEvent::LocalReleased { through: target })
+    );
+    assert_eq!(corpus.kernel_checkpoint(), first);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), first);
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode_toward(
+            &consumer,
+            &two_commit_windows(),
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |_| {},
+        )
+        .unwrap();
+    reached(&report);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+#[test]
+fn cancellation_before_lost_ack_reconciliation_preserves_both_prefixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let local = corpus.publish("unacked", &[("a", "1", "unacknowledged message")]);
+    apply_without_acknowledging(&corpus, &projection, &consumer, &hold, local);
+    let target = corpus.publish("next", &[("b", "1", "next message")]);
+    let budget = EvalBudget::unbounded();
+    let mut events = Vec::new();
+    KernelStore::take_source_export_row_reads_for_test();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .with_budget(budget.clone())
+        .run_episode_toward(
+            &consumer,
+            &bounds(),
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |event| {
+                events.push(event);
+                if event == (EpisodeEvent::HoldExtensionRequested { through: local }) {
+                    budget.cancel();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert_eq!((report.batches_applied, report.commits_consumed), (0, 0));
+    assert_eq!(report.acknowledged_through, hold.snapshot);
+    assert_eq!(
+        events,
+        vec![EpisodeEvent::HoldExtensionRequested { through: local }]
+    );
+    assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 0);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), local);
+    events.clear();
+    let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode_toward(
+            &consumer,
+            &bounds(),
+            corpus.fixed(target),
+            hold.captured_at,
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+    reached(&report);
+    assert_eq!((report.batches_applied, report.commits_consumed), (1, 2));
+    assert_eq!(windows(&events), vec![local, target]);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+#[test]
+fn cancelled_or_expired_budget_admits_no_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    corpus.publish("next", &[("a", "1", "next message")]);
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
+    let expired = EvalBudget::new(Some(Instant::now()), Arc::new(AtomicBool::new(false)));
+    let before = durable(dir.path());
+    for budget in [cancelled, expired] {
+        KernelStore::take_source_export_row_reads_for_test();
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .with_budget(budget)
+            .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {
+                panic!("exhausted budget admitted work")
+            })
+            .unwrap();
+        assert_eq!(blocked(&report), &Blocked::Cancelled);
+        assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 0);
+        assert_eq!(durable(dir.path()), before);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert!(projection.quarantine().is_none());
+    }
+}
+
+#[test]
+fn cancellation_during_export_stops_before_the_next_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    corpus.publish(
+        "three",
+        &[("a", "1", "aaaa"), ("b", "1", "bbbb"), ("c", "1", "cccc")],
+    );
+    let budget = EvalBudget::unbounded();
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection).with_budget(budget.clone());
+    let mut limits = bounds();
+    limits.source_page.max_rows = NonZeroUsize::MIN;
+    let before = durable(dir.path());
+    KernelStore::take_source_export_row_reads_for_test();
+    let mut events = Vec::new();
+    let report = KernelStore::with_source_export_after_snapshot_hook_for_test(
+        move || budget.cancel(),
+        || {
+            driver
+                .run_episode(&consumer, &limits, hold.captured_at, &mut |event| {
+                    events.push(event)
+                })
+                .unwrap()
+        },
+    );
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 2);
+    assert_eq!(
+        events,
+        vec![EpisodeEvent::HoldExtensionRequested {
+            through: corpus.tip()
+        }]
+    );
+    assert_eq!(durable(dir.path()), before);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+}
+
+#[test]
+fn exhausted_budget_is_refused_before_kernel_readers_are_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    corpus.publish("next", &[("a", "1", "next message")]);
+    let budget = EvalBudget::unbounded();
+    budget.cancel();
+    let before = durable(dir.path());
+    let held = std::sync::Barrier::new(2);
+    let waited = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            corpus
+                .kernel
+                .hold_readers_for_test(&held, Duration::from_secs(3))
+        });
+        held.wait();
+        let started = Instant::now();
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .with_budget(budget.clone())
+            .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {
+                panic!("exhausted budget admitted work")
+            })
+            .unwrap();
+        assert_eq!(blocked(&report), &Blocked::Cancelled);
+        started.elapsed()
+    });
+    assert!(
+        waited < Duration::from_secs(1),
+        "an exhausted episode waited {waited:?} for a kernel reader"
+    );
+    assert_eq!(durable(dir.path()), before);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+}
+
+#[test]
+fn target_fixed_before_a_restore_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let (_backup_dir, backup) = corpus.backup();
+    let target = corpus.publish("displaced", &[("a", "1", "displaced message")]);
+    let fixed = corpus.fixed(target);
+    corpus.kernel.restore(&backup).unwrap();
+    let before = durable(dir.path());
+    // The restored tip is below the fixed sequence first, then a later commit reuses it.
+    for phase in ["below tip", "reused"] {
+        if phase == "reused" {
+            let reused = corpus.publish("reused", &[("b", "1", "restored message")]);
+            assert_eq!(
+                reused, target,
+                "the restore let a later commit reuse the fixed sequence"
+            );
+        } else {
+            assert!(corpus.tip() < target);
+        }
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode_toward(&consumer, &bounds(), fixed, hold.captured_at, &mut |_| {
+                panic!("a target from the displaced history admitted work")
+            })
+            .unwrap();
+        assert_eq!(
+            blocked(&report),
+            &Blocked::Read(CommitReadError::IncarnationMismatch),
+            "{phase}"
+        );
+        assert_eq!(report.target, target);
+        assert_eq!(durable(dir.path()), before);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert!(projection.quarantine().is_none());
+    }
+}
+
+#[test]
+fn original_deadline_bounds_the_initial_checkpoint_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish("next", &[("a", "1", "next message")]);
+    let before = durable(dir.path());
+    let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+    let (deadline, report, finished) = std::thread::scope(|scope| {
+        // Another task holds the projection's only connection while the episode starts.
+        let projection = &projection;
+        scope.spawn(move || {
+            projection
+                .read(|_| {
+                    acquired_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_secs(4));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+        let report = SearchCatchUp::new(&corpus.kernel, projection)
+            .with_budget(budget)
+            .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {
+                panic!("a blocked checkpoint read admitted work")
+            });
+        (deadline, report.unwrap(), Instant::now())
+    });
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert!(finished.duration_since(deadline) < Duration::from_secs(1));
+    assert_eq!(durable(dir.path()), before);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+    let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {})
+        .unwrap();
+    reached(&replay);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+}
+
+#[test]
+fn original_deadline_bounds_lost_commit_reconciliation() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish("next", &[("a", "1", "next message")]);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+    let (start_tx, start_rx) = mpsc::channel::<()>();
+    let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+    let (report, finished) = std::thread::scope(|scope| {
+        // Another task takes the projection's only connection once the local transaction has released it.
+        // A dropped `start_tx` lets the helper exit when the episode ends before that release.
+        let projection = &projection;
+        scope.spawn(move || {
+            if start_rx.recv().is_err() {
+                return;
+            }
+            projection
+                .read(|_| {
+                    acquired_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_secs(4));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        let report = SearchCatchUp::new(&corpus.kernel, projection)
+            .with_budget(budget.clone())
+            .run_episode_with_fault_for_test(
+                &consumer,
+                &bounds(),
+                hold.captured_at,
+                &mut |event| {
+                    if matches!(event, EpisodeEvent::LocalReleased { .. }) {
+                        start_tx.send(()).unwrap();
+                        acquired_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("the helper acquired the projection connection");
+                    }
+                },
+                EpisodeFault::LoseLocalCommitReply,
+            );
+        drop(start_tx);
+        (report.unwrap(), Instant::now())
+    });
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert!(budget.is_exhausted());
+    assert!(finished.duration_since(deadline) < Duration::from_secs(1));
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+    // The committed batch is reconciled and acknowledged by the next episode.
+    let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {})
+        .unwrap();
+    reached(&replay);
+    assert_eq!(replay.batches_applied, 0);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+#[test]
+fn original_deadline_bounds_write_lock_wait_and_staged_rollback() {
+    for cut in ["lock", "staged"] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+        corpus.publish("next", &[("a", "1", "next message")]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+        let mut driver =
+            SearchCatchUp::new(&corpus.kernel, &projection).with_budget(budget.clone());
+        let before = durable(dir.path());
+        let mut blocker = None;
+        let mut events = Vec::new();
+        let report = driver
+            .run_episode(&consumer, &bounds(), hold.captured_at, &mut |event| {
+                events.push(event);
+                match (cut, event) {
+                    ("lock", EpisodeEvent::HoldExtensionRequested { .. }) => {
+                        blocker = Some(hold_write_lock(&search_path(dir.path())));
+                    }
+                    ("staged", EpisodeEvent::LocalStaged { .. }) => {
+                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    }
+                    _ => {}
+                }
+            })
+            .unwrap();
+        assert_eq!(blocked(&report), &Blocked::Cancelled);
+        assert!(budget.is_exhausted());
+        assert!(Instant::now().duration_since(deadline) < Duration::from_secs(1));
+        assert!(events.contains(&EpisodeEvent::LocalReleased {
+            through: corpus.tip()
+        }));
+        assert_eq!(
+            events.contains(&EpisodeEvent::LocalStaged {
+                through: corpus.tip()
+            }),
+            cut == "staged"
+        );
+        assert_eq!(durable(dir.path()), before);
+        assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+        assert!(projection.quarantine().is_none());
+        drop(blocker);
+    }
+}
+
+#[test]
+fn audit_time_advances_before_export_and_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish("next", &[("a", "1", "next message")]);
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    KernelStore::take_source_export_row_reads_for_test();
+    let report = driver
+        .run_episode(&consumer, &bounds(), hold.expires_at - 10, &mut |event| {
+            if matches!(event, EpisodeEvent::HoldExtensionRequested { .. }) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .unwrap();
+    assert!(matches!(
+        blocked(&report),
+        Blocked::Export(SourceExportError::Hold(SourceHoldError::Invalid(
+            kernel::SourceHoldInvalidity::Expired
+        )))
+    ));
+    assert_eq!(KernelStore::take_source_export_row_reads_for_test(), 0);
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), hold.snapshot);
+    let audit_start = 1_000_000;
+    let report = driver
+        .run_episode(&consumer, &bounds(), audit_start, &mut |event| {
+            if matches!(event, EpisodeEvent::AcknowledgementRequested { .. }) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .unwrap();
+    reached(&report);
+    let updated_at: i64 = inspect(&corpus.kernel_db())
+        .query_row(
+            "SELECT updated_at FROM outbox_consumers WHERE consumer_id=?1",
+            [CONSUMER],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(updated_at >= audit_start + 20);
+    assert!(updated_at < hold.captured_at - DAY_MS);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
 }
 
 /// Acknowledging past a deletion would satisfy the search consumer's deletion barrier while the projection still serves the deleted text, so the window is refused and none of its commits move.
@@ -1779,18 +2821,21 @@ fn quarantine_between_ack_request_and_kernel_write_preserves_the_checkpoint() {
     let (projection, consumer, hold) = corpus.bootstrap(dir.path());
     grow(&corpus, true);
     let mut quarantined = false;
-    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection);
+    let budget = EvalBudget::unbounded();
+    let mut driver = SearchCatchUp::new(&corpus.kernel, &projection).with_budget(budget.clone());
 
     let error = driver
         .run_episode(&consumer, &bounds(), 3, &mut |event| {
             if matches!(event, EpisodeEvent::AcknowledgementRequested { .. }) && !quarantined {
                 projection
                     .enter_quarantine_for_test(QuarantineKind::Integrity, &"checkpoint doubt");
+                budget.cancel();
                 quarantined = true;
             }
         })
         .unwrap_err();
     assert!(matches!(error, CatchUpError::Quarantined(_)));
+    assert!(budget.is_exhausted());
     assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
 }
 
