@@ -1180,6 +1180,140 @@ async fn a_supervisor_stopped_before_disable_still_reconciles() {
     assert_eq!(admissions(&selection, &corpus, &gate), (0, 0));
 }
 
+/// A kernel restored between releasing the local prefix and acknowledging it names a different history for the same sequence numbers, so the acknowledgement and deregistration are refused and the consumer keeps its obligations. A later attempt against the settled kernel completes.
+#[tokio::test]
+async fn a_restore_after_local_release_refuses_the_acknowledgement() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let mut ledger = Vec::new();
+    let result = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::LocalReleased {
+                    corpus.kernel.restore(&saved.destination_path).unwrap();
+                }
+                ledger.push(event);
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Mutation(
+                retrieval::ProjectionError::IdentityMismatch
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(ledger.contains(&DisableEvent::LocalReleased));
+    assert!(!ledger.contains(&DisableEvent::Acknowledged));
+    let record = disabled(root.path());
+    assert!(record.through.is_some());
+    assert!(!record.deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
+    );
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+}
+
+/// The last allowed attempt can commit deregistration and die before recording it. Reopen finishes from the kernel's receipt without charging an episode it no longer has.
+#[tokio::test]
+async fn a_deregistration_committed_on_the_last_attempt_completes_without_a_new_episode() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    // Construction charges its own attempts; the single cleanup attempt is installed afterwards.
+    let single = || {
+        let mut evaluator = cleanup_evaluator(root.path());
+        evaluator
+            .manifest
+            .limits
+            .insert("retry_attempts".to_owned(), 1);
+        evaluator
+    };
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    gate.install(single());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    let episodes = done.episodes.unwrap();
+    assert_eq!((episodes.allowance, episodes.consumed), (1, 1));
+    // The cut after `Deregistered`: the kernel holds the receipt, the record does not.
+    let path = root.path().join("search-lifecycle/intent.json");
+    let mut cut: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    cut["deregistered"] = serde_json::Value::Bool(false);
+    std::fs::write(&path, serde_json::to_vec(&cut).unwrap()).unwrap();
+    for _ in 0..2 {
+        let gate = Arc::new(HookGate::for_home(root.path()));
+        gate.install(single());
+        let mut selection = selector(root.path());
+        let result = selection
+            .reconcile_disabled(
+                &corpus.kernel,
+                &gate,
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+        assert!(result.deregistered);
+        assert_eq!(result.episodes.unwrap().consumed, 1);
+        assert_eq!(disabled(root.path()), result);
+        assert_eq!(
+            corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+            None
+        );
+    }
+}
+
 /// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
