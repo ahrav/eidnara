@@ -574,19 +574,24 @@ impl KernelStore {
             consumer_id,
             checkpoint_commit_seq,
             updated_at,
+            None,
         )
     }
 
-    /// Callers must release local transactions before acknowledging.
+    /// Callers must release local transactions before acknowledging. The writer detects a
+    /// restore after the caller's last incarnation check and before this write.
     pub fn acknowledge_outbox_within_budget(
         &self,
         budget: &crate::applicability::EvalBudget,
         consumer: &str,
         through: i64,
         now: i64,
+        incarnation: crate::CommitReadIncarnation,
     ) -> Result<(), KernelError> {
         let limit = budget.acquire_limit();
-        limit.run(|| self.acknowledge_outbox_inner(&limit, consumer, through, now))
+        limit.run(|| {
+            self.acknowledge_outbox_inner(&limit, consumer, through, now, Some(incarnation))
+        })
     }
 
     fn acknowledge_outbox_inner(
@@ -595,12 +600,16 @@ impl KernelStore {
         consumer: &str,
         through: i64,
         now: i64,
+        incarnation: Option<crate::CommitReadIncarnation>,
     ) -> Result<(), KernelError> {
         if through < 0 || now < 0 {
             return Err(KernelError::InvalidInput);
         }
         let consumer = consumer_identity(consumer)?;
         let mut writer = self.writer_with_limit(limit)?;
+        if let Some(incarnation) = incarnation {
+            self.require_incarnation(incarnation)?;
+        }
         let tx = writer.transaction(TransactionBehavior::Immediate)?;
         crate::envelope::check_fence(&tx, self.lease_epoch())?;
         acknowledge_outbox_in_tx(&tx, &consumer, through, now)?;

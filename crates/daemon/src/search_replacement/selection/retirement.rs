@@ -202,6 +202,7 @@ impl SearchSelection {
             receipt.old_consumer,
             receipt.through,
             super::super::wall_ms()?,
+            target.incarnation,
         )?;
         observer(RetirementEvent::Acknowledged);
         check()?;
@@ -215,6 +216,7 @@ impl SearchSelection {
                 cause: "certified consumer retirement".to_owned(),
             },
             |envelope| {
+                kernel.require_incarnation(target.incarnation)?;
                 envelope.deregister_outbox_consumer(
                     receipt.old_consumer,
                     super::super::wall_ms().map_err(|_| kernel::KernelError::InvalidInput)?,

@@ -617,7 +617,8 @@ fn inventory_bounds_and_cancelled_acknowledgement_preserve_old_checkpoint() {
             &cancelled,
             CONSUMER,
             case.target,
-            now()
+            now(),
+            target.incarnation,
         ),
         Err(kernel::KernelError::Deadline)
     );
