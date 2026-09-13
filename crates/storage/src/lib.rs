@@ -219,6 +219,13 @@ mod sqlite_backend {
             self.epoch
         }
 
+        /// Closes the connection and keeps the database lease. While the returned lease is held, no other store can open the file, so a closed database stays exactly as the close left it.
+        pub fn close(self) -> Option<HeldFileLease> {
+            let SqliteStore { conn, _lease, .. } = self;
+            drop(conn);
+            _lease
+        }
+
         /// Construct a store over an open connection without acquiring a lease.
         ///
         /// Tests use this to model stale and replacement connections at different
@@ -412,6 +419,34 @@ mod sqlite_backend {
             f(&MaintenanceConn::new(&guard)).map_err(|e| StoreError::Backend(e.to_string()))
         }
 
+        /// Limits the connection-lock wait and SQLite's busy wait of one unfenced callback to
+        /// `deadline`. The connection lock is polled until `deadline`; the busy timeout is set to
+        /// the remaining time for `f` and restored to the standing busy timeout afterward.
+        ///
+        /// The busy timeout is computed once, before `f` runs, so `f` is one blocking statement:
+        /// a callback that runs several statements can wait past `deadline` by the time it spent
+        /// before the statement that contended.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StoreError::Deadline`] when the connection is still held at `deadline`, when
+        /// no time remains before `f` runs, or when the statement ends with `SQLITE_BUSY` or
+        /// `SQLITE_LOCKED`; [`StoreError::Backend`] for any other failure of `f`.
+        pub fn with_conn_unfenced_within<T>(
+            &self,
+            deadline: Instant,
+            f: impl FnOnce(&MaintenanceConn<'_>) -> rusqlite::Result<T>,
+        ) -> Result<T, StoreError> {
+            let guard = self.lock_conn_within(deadline)?;
+            let _exit = MaintenanceExit {
+                conn: &guard,
+                gate: &self.gate,
+            };
+            with_busy_timeout_until(&guard, deadline, |conn| {
+                f(&MaintenanceConn::new(conn)).map_err(deadline_on_lock_wait)
+            })
+        }
+
         /// Run a closure inside an epoch-fenced write transaction. The write is
         /// rejected ([`StoreError::Fenced`]) if a newer writer has taken over the
         /// database; otherwise it commits atomically.
@@ -543,9 +578,13 @@ mod sqlite_backend {
         conn.busy_timeout(remaining).map_err(backend_error)?;
         #[cfg(test)]
         observe_busy_wait_for_test();
-        let result = f(conn);
+        // The standing timeout is restored whether `f` returns or unwinds; a caller's callback runs under it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(conn)));
         let restored = conn.busy_timeout(BUSY_TIMEOUT).map_err(backend_error);
-        with_cleanup_failure(result, restored)
+        match result {
+            Ok(result) => with_cleanup_failure(result, restored),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// `DatabaseBusy` and `DatabaseLocked` return [`StoreError::Deadline`] after the
@@ -1727,7 +1766,7 @@ mod sqlite_backend {
     /// `-wal`, and creates no sidecar. Every byte outside the unreserved ASCII set is
     /// percent-encoded, so `%`, `?`, `#`, spaces, and each byte of a non-ASCII name reach
     /// SQLite's decoder as the bytes the filesystem holds.
-    pub(crate) fn immutable_uri(path: &Path) -> String {
+    pub fn immutable_uri(path: &Path) -> String {
         let mut out = String::from("file:");
         for byte in path.as_os_str().as_encoded_bytes() {
             match byte {
@@ -2000,6 +2039,27 @@ mod sqlite_backend {
         pub name: String,
         pub table: String,
         pub sql: Option<String>,
+    }
+
+    /// Checks that `conn`'s database presents exactly what [`open_sqlite`] requires of a file for `consumer`: the store's application and user versions, the format marker of this baseline, the full schema inventory, and the fence row the epoch floor is read from. Reads only, so a closed file can be judged on an immutable connection before a store reopens it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Baseline`] naming the difference, including for a pristine (empty) database, [`StoreError::FenceMissing`] when the schema is right but the fence row is absent, [`StoreError::FenceExhausted`] when no successor epoch is representable, and [`StoreError::Backend`] when a read fails.
+    pub fn verify_baseline(conn: &Connection, consumer: &str) -> Result<(), StoreError> {
+        match ExpectedIdentity::for_baseline(consumer)?.classify(conn)? {
+            FileState::Baseline => {
+                let db_epoch = read_fence_epoch_in(conn)?.ok_or(StoreError::FenceMissing)?;
+                // The same bound `open_sqlite` applies: the lease issues at least `db_epoch + 1`, which must be storable.
+                if db_epoch >= i64::MAX as u64 {
+                    return Err(StoreError::FenceExhausted { db_epoch });
+                }
+                Ok(())
+            }
+            FileState::Pristine => Err(StoreError::Baseline(
+                "the database is pristine; the baseline was never applied".into(),
+            )),
+        }
     }
 
     /// `sqlite_schema` of `conn`'s main database in a fixed order.
@@ -2748,7 +2808,7 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
     SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    delete_sqlite_family, open_sqlite, schema_inventory,
+    delete_sqlite_family, immutable_uri, open_sqlite, schema_inventory, verify_baseline,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -4509,6 +4569,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A bounded maintenance callback that unwinds leaves the connection's standing busy timeout in place, not the shortened per-call one.
+    #[test]
+    fn a_panicking_bounded_callback_restores_the_busy_timeout() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let standing: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA busy_timeout", [], |r| r.get(0)))
+            .expect("read the standing timeout");
+        assert_eq!(standing, 5_000);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_unfenced_within(
+                Instant::now() + Duration::from_millis(50),
+                |_| -> rusqlite::Result<()> { panic!("the bounded callback unwinds") },
+            )
+        }));
+        assert!(panicked.is_err());
+        let after: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA busy_timeout", [], |r| r.get(0)))
+            .expect("read the timeout after the unwind");
+        assert_eq!(
+            after, standing,
+            "the unwind restored the standing busy timeout"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_read_callback_cannot_lower_fence_durability() {
         let (root, d) = tmp();
@@ -4556,6 +4643,26 @@ mod tests {
         assert_eq!(
             after_second, 2,
             "the first fenced write after each maintenance callback re-pins synchronous=FULL"
+        );
+
+        // The bounded maintenance variant exits maintenance the same way.
+        store
+            .with_conn_unfenced_within(Instant::now() + Duration::from_secs(5), |c| {
+                c.pragma_update(None, "synchronous", "OFF")
+            })
+            .expect("bounded maintenance may lower it");
+        store
+            .with_conn_fenced(|tx| {
+                tx.execute("INSERT INTO kv (k, v) VALUES ('bounded', 'v')", [])
+                    .map(|_| ())
+            })
+            .expect("fenced write after bounded maintenance");
+        let after_bounded: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA synchronous", [], |r| r.get(0)))
+            .expect("read synchronous");
+        assert_eq!(
+            after_bounded, 2,
+            "the first fenced write after a bounded maintenance callback re-pins synchronous=FULL"
         );
 
         store

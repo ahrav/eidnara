@@ -691,7 +691,7 @@ async fn every_entry_path_reaches_the_ledger_and_a_closed_gate_does_nothing() {
     assert_eq!(engine.calls(), 0);
 
     let kernel_incarnation_id = projection
-        .read(retrieval::read_identity)
+        .read(|conn| retrieval::read_identity(conn))
         .unwrap()
         .expect("the bootstrap installed an identity")
         .kernel_incarnation_id;

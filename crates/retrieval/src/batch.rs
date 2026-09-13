@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 use storage::GuardedConn;
 
 use crate::{
-    OccurrenceRecord, Payload, PersistBounds, ProjectionError, Tombstone, TombstoneReason,
-    persist_occurrences, tombstone_occurrence,
+    OccurrenceRecord, Payload, PersistBounds, ProjectionError, QueryRow, Tombstone,
+    TombstoneReason, persist_occurrences, tombstone_occurrence,
 };
 
 /// The batch's source prefix does not depend on vector generation.
@@ -294,7 +294,7 @@ pub struct ProjectionCheckpoint {
 /// Returns [`ProjectionError::IdentityMismatch`] when no identity is installed
 /// or the installed identity names another kernel incarnation.
 pub fn read_checkpoint(
-    conn: &GuardedConn<'_>,
+    conn: &impl QueryRow,
     kernel_incarnation_id: &str,
 ) -> Result<Option<ProjectionCheckpoint>, ProjectionError> {
     let installed = crate::read_identity(conn)?.ok_or(ProjectionError::IdentityMismatch)?;

@@ -18,7 +18,8 @@ pub const CONTROL_DIR: &str = "search-lifecycle";
 pub const CONTROL_RECORD: &str = "intent.json";
 const TEMP_PREFIX: &str = "intent.";
 const TEMP_SUFFIX: &str = ".tmp";
-const SCHEMA: u32 = 1;
+/// Schema 2 adds `staged_seed_digest`; a record of another schema is unavailable rather than read with defaults.
+const SCHEMA: u32 = 2;
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
@@ -105,6 +106,8 @@ pub struct LifecycleIntent {
     pub recovery_target: Option<RecoveryTarget>,
     pub episodes: EpisodeAccounting,
     pub authorization_ref: Option<String>,
+    /// The lifecycle-store digest of the closed seed staged for this transition; the reclaimer protects it while the intent stands.
+    pub staged_seed_digest: Option<String>,
     pub recorded_at: i64,
 }
 
@@ -417,21 +420,10 @@ impl ProjectionLifecycle {
                 deadline: request.deadline,
             },
             authorization_ref: request.authorization_ref.clone(),
+            staged_seed_digest: None,
             recorded_at: now,
         };
-        // `consumed` grows to `allowance`; the record must still fit once it has.
-        if encode(&LifecycleIntent {
-            episodes: EpisodeAccounting {
-                consumed: request.allowance,
-                ..intent.episodes
-            },
-            ..intent.clone()
-        })?
-        .len() as u64
-            > MAX_RECORD_BYTES
-        {
-            return Err(IntentRefusal::Oversized);
-        }
+        fits_when_exhausted(&intent)?;
         self.replace(&intent, &admission)?;
         Ok(Recorded {
             intent,
@@ -460,6 +452,37 @@ impl ProjectionLifecycle {
         intent.episodes.consumed += 1;
         self.replace(&intent, &admission)?;
         Ok(intent.episodes)
+    }
+
+    /// Pins the staged seed `digest` to the recorded intent under the gate's admission, so the reclaimer keeps that object while the intent stands. Pinning the same digest again changes nothing; another digest is refused, since one transition builds from one seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], [`IntentRefusal::Conflict`] with the recorded attempt when another seed is already pinned, [`IntentRefusal::Oversized`] when the pinned record would not fit once its allowance is consumed, or [`IntentRefusal::Revoked`] when the gate invalidated the admission before the write; the record is unchanged in every refused case.
+    pub fn pin_seed(
+        &self,
+        gate: &HookGate,
+        digest: &str,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        match intent.staged_seed_digest.as_deref() {
+            // A prior pin may have renamed the record and failed its directory sync; the replay syncs before reporting the pin durable, as `record` does.
+            Some(pinned) if pinned == digest => {
+                self.sync_directory()?;
+                return Ok(intent);
+            }
+            Some(_) => {
+                return Err(IntentRefusal::Conflict {
+                    attempt_id: intent.attempt_id,
+                });
+            }
+            None => {}
+        }
+        intent.staged_seed_digest = Some(digest.to_owned());
+        fits_when_exhausted(&intent)?;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
     }
 
     /// The gate admits the intent's transition before callers modify the control record or remove the disposable family.
@@ -565,6 +588,30 @@ impl ProjectionLifecycle {
 
 fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
     serde_json::to_vec(intent).map_err(|_| IntentRefusal::Io("encode".to_owned()))
+}
+
+/// The hex SHA-256 a staged seed's digest takes; the record reserves room for one before any is pinned.
+const DIGEST_HEX_LEN: usize = 64;
+
+/// `consumed` grows to `allowance` and a seed digest may be pinned; every write of the record checks that it still fits with both, so neither a granted episode nor the pin of an accepted intent is refused as [`IntentRefusal::Oversized`].
+fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
+    let exhausted = LifecycleIntent {
+        episodes: EpisodeAccounting {
+            consumed: intent.episodes.allowance,
+            ..intent.episodes
+        },
+        staged_seed_digest: Some(
+            intent
+                .staged_seed_digest
+                .clone()
+                .unwrap_or_else(|| "0".repeat(DIGEST_HEX_LEN)),
+        ),
+        ..intent.clone()
+    };
+    if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
+        return Err(IntentRefusal::Oversized);
+    }
+    Ok(())
 }
 
 /// Fields drop in declaration order, so the `flock` is released before `_threads`.

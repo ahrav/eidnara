@@ -605,7 +605,10 @@ async fn pending_rows_reach_guarded_completion_through_one_job_table() {
         );
     }
     // The identity the projection was built under is the lane the dispatcher bound to.
-    let identity = projection.read(retrieval::read_identity).unwrap().unwrap();
+    let identity = projection
+        .read(|conn| retrieval::read_identity(conn))
+        .unwrap()
+        .unwrap();
     let bound = lane_binding(&lane(FINGERPRINT), synapse.host_incarnation());
     assert_eq!(
         (

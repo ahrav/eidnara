@@ -55,7 +55,7 @@ fn recovery_request() -> LifecycleRequest {
 /// The record the test expects, built from the request alone.
 fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
     LifecycleIntent {
-        schema: 1,
+        schema: 2,
         transition: request.transition,
         selected_generation: request.selected_generation.clone(),
         kernel_incarnation_id: request.kernel_incarnation_id.clone(),
@@ -69,6 +69,7 @@ fn expected(request: &LifecycleRequest, consumed: u32) -> LifecycleIntent {
             deadline: request.deadline,
         },
         authorization_ref: request.authorization_ref.clone(),
+        staged_seed_digest: None,
         recorded_at: NOW,
     }
 }
@@ -85,7 +86,7 @@ fn raw_record(data_home: &Path) -> Value {
 /// The recovery record as the ledger spells it, every persisted field written out by hand.
 fn recovery_ledger(consumed: u32) -> Value {
     json!({
-        "schema": 1,
+        "schema": 2,
         "transition": "AuthorizedRecovery",
         "selected_generation": "gen-2",
         "kernel_incarnation_id": "incarnation-a",
@@ -95,6 +96,7 @@ fn recovery_ledger(consumed: u32) -> Value {
         "recovery_target": { "commit_seq": 41 },
         "episodes": { "allowance": 2, "consumed": consumed, "deadline": NOW + 60_000 },
         "authorization_ref": "ops:ticket-77",
+        "staged_seed_digest": null,
         "recorded_at": NOW,
     })
 }
@@ -193,7 +195,9 @@ fn intent_survives_deleting_the_disposable_family_and_matches_the_ledger_after_r
     }
     // The projection reopens as a fresh database; the intent, not the database, carries the episode.
     let projection = SearchProjection::open(dir.path()).unwrap();
-    let identity = projection.read(retrieval::read_identity).unwrap();
+    let identity = projection
+        .read(|conn| retrieval::read_identity(conn))
+        .unwrap();
     assert_eq!(identity, None);
     drop(projection);
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
@@ -590,7 +594,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         }),
         ("other schema", |path: &Path| {
             let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-            value["schema"] = Value::from(2);
+            value["schema"] = Value::from(3);
             fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         }),
         ("world readable", |path: &Path| {
@@ -670,7 +674,7 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     let slack = 64 * 1024 - serde_json::to_vec(&expected(&base, 0)).unwrap().len();
     let near_cap = LifecycleRequest {
         attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
-        ..base
+        ..base.clone()
     };
     assert_eq!(
         serde_json::to_vec(&expected(&near_cap, 0)).unwrap().len(),
@@ -681,6 +685,43 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         Err(IntentRefusal::Oversized)
     );
     assert_eq!(lifecycle.read(), ControlState::Absent);
+
+    // The record reserves the seed digest it may later pin as well as the terminal `consumed`: a request that fits only without the digest is refused up front, so an accepted intent can always be pinned and every episode consumed.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let digest = "d".repeat(64);
+    let terminal = LifecycleIntent {
+        staged_seed_digest: Some(digest.clone()),
+        ..expected(&base, base.allowance)
+    };
+    // One byte short of fitting with the digest at the terminal size; without the digest it fits.
+    let slack = 64 * 1024 + 1 - serde_json::to_vec(&terminal).unwrap().len();
+    let pin_cap = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
+        ..base.clone()
+    };
+    assert!(
+        serde_json::to_vec(&expected(&pin_cap, base.allowance))
+            .unwrap()
+            .len()
+            <= 64 * 1024
+    );
+    assert_eq!(
+        lifecycle.record(&open, &pin_cap, NOW),
+        Err(IntentRefusal::Oversized)
+    );
+    assert_eq!(lifecycle.read(), ControlState::Absent);
+    // One byte less padding fits with the digest: the record is accepted, pinned, and consumed to its allowance.
+    let fits = LifecycleRequest {
+        attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack - 1)),
+        ..base.clone()
+    };
+    lifecycle.record(&open, &fits, NOW).unwrap();
+    let pinned = lifecycle.pin_seed(&open, &digest).unwrap();
+    assert_eq!(pinned.staged_seed_digest.as_deref(), Some(digest.as_str()));
+    for _ in 0..base.allowance {
+        lifecycle.consume_episode(&open, NOW).unwrap();
+    }
 
     // A well-formed record the daemon did not write: a symlink to one.
     let dir = tempfile::tempdir().unwrap();
@@ -696,6 +737,21 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
         lifecycle.consume_episode(&open, NOW),
         Err(IntentRefusal::Unavailable(_))
     ));
+
+    // A schema 1 record has no `staged_seed_digest`; it is another schema, not a corrupt record.
+    let dir = tempfile::tempdir().unwrap();
+    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    lifecycle.record(&open, &rebuild_request(), NOW).unwrap();
+    let path = record_path(dir.path());
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["schema"] = Value::from(1);
+    value.as_object_mut().unwrap().remove("staged_seed_digest");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(
+        lifecycle.read(),
+        ControlState::Unavailable("schema 1".to_owned()),
+        "a schema 1 record is refused through the schema arm"
+    );
 
     // Authorization withdrawn after the fact: a gate that no longer enables the backfill hook stops the recorded recovery from spending episodes or deleting the database.
     let dir = tempfile::tempdir().unwrap();

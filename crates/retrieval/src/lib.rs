@@ -336,9 +336,38 @@ pub fn install_identity(
     Ok(())
 }
 
-pub fn read_identity(
-    conn: &GuardedConn<'_>,
-) -> Result<Option<ProjectionIdentity>, ProjectionError> {
+/// `QueryRow` lets the projection's control-row readers accept [`GuardedConn`] and standalone [`rusqlite::Connection`] values.
+pub trait QueryRow {
+    /// # Errors
+    ///
+    /// Returns the SQLite error from preparing or running `sql`, or from `f`.
+    fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl QueryRow for GuardedConn<'_> {
+    fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        GuardedConn::query_row(self, sql, params, f)
+    }
+}
+
+impl QueryRow for rusqlite::Connection {
+    fn query_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        rusqlite::Connection::query_row(self, sql, params, f)
+    }
+}
+
+pub fn read_identity(conn: &impl QueryRow) -> Result<Option<ProjectionIdentity>, ProjectionError> {
     let row: Option<(ProjectionIdentity, i64)> = conn
         .query_row(
             "SELECT schema_version,kernel_incarnation_id,projection_policy_version,
