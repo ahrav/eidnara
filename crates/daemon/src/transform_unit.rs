@@ -156,5 +156,12 @@ impl Drop for PageApplyGuard {
 /// Permits cover executing units and their store-lock waits, but not async historian waits.
 pub(crate) const TRANSFORM_UNITS_AT_ONCE: usize = 4;
 
+pub(crate) const TRANSFORM_WAITERS_AT_MOST: usize = 12;
+
+pub(crate) const TRANSFORM_ADMISSION_PERMITS: usize =
+    TRANSFORM_UNITS_AT_ONCE + TRANSFORM_WAITERS_AT_MOST;
+
 /// The permit a unit holds while it runs.
 pub(crate) type UnitPermit = OwnedSemaphorePermit;
+
+pub(crate) type AdmissionPermit = OwnedSemaphorePermit;

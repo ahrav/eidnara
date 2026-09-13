@@ -533,6 +533,104 @@ async fn four_parked_units_keep_fifth_waiter_off_the_blocking_pool() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn admission_refuses_the_request_past_the_waiter_bound_and_declares_it() {
+    let (handler, store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let handler = Arc::new(handler);
+    let runner = Arc::new(JoinedUnitRunner::default());
+    let mut parked = Vec::new();
+    for index in 0..TRANSFORM_UNITS_AT_ONCE {
+        let route = test_route(20 + index as u16);
+        let session = format!("unit-{index}");
+        handler.bind_route(route, binding(project.to_str().unwrap(), &session));
+        let mut input = request(vec![ck("m1", 1, "one bounded unit")]);
+        input["session_id"] = json!(session);
+        let (mut gate, hook) = BlockingGate::new();
+        runner.before_unit.lock().unwrap().push_back(hook);
+        let waiter = {
+            let handler = Arc::clone(&handler);
+            let runner = Arc::clone(&runner);
+            tokio::spawn(async move {
+                handler
+                    .handle_transform_with_runner(route, input, &*runner)
+                    .await
+            })
+        };
+        gate.wait_entered().await;
+        parked.push((gate, waiter));
+    }
+    assert_eq!(handler.transform_units.available_permits(), 0);
+
+    let input = request(vec![ck("m1", 1, "queued unit")]);
+    let pool = TestPool::unbounded();
+    let mut waiting = Vec::new();
+    for _ in TRANSFORM_UNITS_AT_ONCE..TRANSFORM_ADMISSION_PERMITS {
+        let mut queued = Box::pin(metered_transform(&handler, input.clone(), &*runner, &pool));
+        poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        waiting.push(queued);
+    }
+    assert_eq!(
+        runner.submitted.load(Ordering::SeqCst),
+        TRANSFORM_UNITS_AT_ONCE
+    );
+
+    let refused_pool = TestPool::with_capacity(footprint_of(&serde_json::to_vec(&input).unwrap()));
+    let refused = watchdog(metered_transform(
+        &handler,
+        input.clone(),
+        &*runner,
+        &refused_pool,
+    ))
+    .await;
+    assert_eq!(error_code(refused), "queue_full");
+    assert_pool_released(&refused_pool);
+    assert_eq!(
+        runner.submitted.load(Ordering::SeqCst),
+        TRANSFORM_UNITS_AT_ONCE
+    );
+    assert!(matches!(
+        handler.transform_snapshots.lock().unwrap().get("ses"),
+        TransformSnapshotLookup::Missing
+    ));
+
+    drop(waiting.pop());
+    let mut readmitted = Box::pin(metered_transform(&handler, input, &*runner, &pool));
+    poll_fn(|cx| {
+        assert!(readmitted.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    waiting.push(readmitted);
+
+    drop(waiting);
+    for (gate, waiter) in parked {
+        drop(gate);
+        assert_eq!(
+            tool_body(watchdog(waiter).await.unwrap())["committed"],
+            true
+        );
+    }
+    runner.join_all().await;
+    assert_eq!(
+        handler.transform_units.available_permits(),
+        TRANSFORM_UNITS_AT_ONCE
+    );
+    assert_eq!(
+        handler.transform_admission.available_permits(),
+        TRANSFORM_ADMISSION_PERMITS
+    );
+    assert!(store.load("ses").unwrap().row_version.is_none());
+    assert_eq!(
+        Handler::new().resources().general_task_hold_bound,
+        TRANSFORM_ADMISSION_PERMITS
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancelled_unit_releases_its_charges_without_store_work() {
     let (handler, store, _dir, _project) =
         handler_with_store(Arc::new(ProducerState::default()), default_test_config());

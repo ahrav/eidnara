@@ -118,8 +118,8 @@ use crate::metered_decode::{
 use host_runtime::{BlockingWorkFailed, CancelSignal};
 
 use crate::transform_unit::{
-    HistorianFollowup, PageApplyGuard, PassContinuation, PassEntry, PassHold,
-    TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
+    AdmissionPermit, HistorianFollowup, PageApplyGuard, PassContinuation, PassEntry, PassHold,
+    TRANSFORM_ADMISSION_PERMITS, TRANSFORM_UNITS_AT_ONCE, UnitOutcome, UnitPermit,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -3017,6 +3017,8 @@ pub struct HandlerCore {
     transform_pages: Mutex<TransformPageCoordinator>,
     /// Admits the pass units that run at once; see [`TRANSFORM_UNITS_AT_ONCE`].
     transform_units: Arc<tokio::sync::Semaphore>,
+    /// Admits the passes that may run or wait for a unit; see [`TRANSFORM_ADMISSION_PERMITS`].
+    transform_admission: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
     /// The durable classify protocol behind `dreamer.run_task`; the scheduler
@@ -3820,6 +3822,7 @@ impl Handler {
             state_sync_seeds: Mutex::new(StateSyncSeedCoordinator::default()),
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
+            transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -4160,6 +4163,7 @@ impl Handler {
             state_sync_seeds: Mutex::new(StateSyncSeedCoordinator::default()),
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             transform_units: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_UNITS_AT_ONCE)),
+            transform_admission: Arc::new(tokio::sync::Semaphore::new(TRANSFORM_ADMISSION_PERMITS)),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -8386,6 +8390,10 @@ impl HandlerCore {
                 message: "transform is blocked until all transform pages arrive".to_string(),
             };
         }
+        let _admission = match self.admit_pass() {
+            Ok(admission) => admission,
+            Err(outcome) => return outcome,
+        };
         let permit = match self.acquire_unit_permit().await {
             Ok(permit) => permit,
             Err(outcome) => return outcome,
@@ -8439,6 +8447,18 @@ impl HandlerCore {
             .acquire_owned()
             .await
             .map_err(|_| unit_failed_error(BlockingWorkFailed::RuntimeStopped))
+    }
+
+    /// Takes an admission permit without waiting; the admission permit counts the pass while
+    /// its handler runs or waits for a unit.
+    fn admit_pass(&self) -> Result<AdmissionPermit, PreparedOutcome> {
+        match Arc::clone(&self.transform_admission).try_acquire_owned() {
+            Ok(admission) => Ok(admission),
+            Err(tokio::sync::TryAcquireError::NoPermits) => Err(transform_admission_error()),
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                Err(unit_failed_error(BlockingWorkFailed::RuntimeStopped))
+            }
+        }
     }
 
     /// Unit one of a pass: the store work before the transform, the transform and its
@@ -12368,6 +12388,7 @@ impl CompositeComponent for Handler {
     fn resources(&self) -> ResourceDeclaration {
         ResourceDeclaration {
             retained_resident_bytes: DECLARED_RETAINED_RESIDENT_BYTES,
+            general_task_hold_bound: TRANSFORM_ADMISSION_PERMITS,
             ..ResourceDeclaration::default()
         }
     }
@@ -16387,6 +16408,13 @@ fn resident_capacity_error() -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "queue_full".to_string(),
         message: "resident capacity for request parsing is exhausted".to_string(),
+    }
+}
+
+fn transform_admission_error() -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "queue_full".to_string(),
+        message: "transform admission capacity is exhausted".to_string(),
     }
 }
 
