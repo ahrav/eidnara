@@ -21,9 +21,11 @@ export interface MessageContentSnapshot {
 
 export class SourceRejected extends Error {
     override name = "SourceRejected";
+    readonly logLevel: "debug" | "warn" = "debug";
 }
 export class SourceWalkLimitExceeded extends SourceRejected {
     override name = "SourceWalkLimitExceeded";
+    override readonly logLevel = "warn";
 }
 
 // Own-slot definitions bypass inherited numeric setters on private arrays.

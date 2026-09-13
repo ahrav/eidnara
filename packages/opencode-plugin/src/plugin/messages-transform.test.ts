@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import * as logger from "../shared/logger";
 import { createMessagesTransformHandler } from "./messages-transform";
 
 type Handler = ReturnType<typeof createMessagesTransformHandler>;
@@ -103,6 +104,30 @@ describe("createMessagesTransformHandler — rust mode", () => {
         expect(output.messages).toBe(array);
         expect(array).toHaveLength(1);
         expect(array[0]).toBe(member);
+    });
+
+    it("logs a walk-limit decline at warn before the inner hook runs", async () => {
+        const warn = spyOn(logger.log, "warn");
+        let hookCalls = 0;
+        const handler = createMessagesTransformHandler({
+            eidnara: {
+                "experimental.chat.messages.transform": async () => {
+                    hookCalls += 1;
+                },
+            },
+            transformMode: "rust",
+        });
+        // A sparse array exercises the walk-limit path without allocating its elements.
+        const output = { messages: new Array(2 ** 22 + 1) as Output["messages"] };
+        try {
+            expect(await handler({}, output)).toBeUndefined();
+            expect(hookCalls).toBe(0);
+            expect(
+                warn.mock.calls.some((call) => String(call[0]).includes("SourceWalkLimitExceeded")),
+            ).toBe(true);
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it("checks only the return container after the hook publishes", async () => {

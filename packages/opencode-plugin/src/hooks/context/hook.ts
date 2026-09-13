@@ -345,7 +345,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                   assertCapturedMessagesUnchanged(messages, captured);
               } catch (error) {
                   if (!(error instanceof SourceRejected)) throw error;
-                  log(`[eidnara] transform declined ${error.name}: ${error.message}`);
+                  log[error.logLevel](`[eidnara] transform declined ${error.name}: ${error.message}`);
                   return;
               }
               if (deletedSessions.has(sessionId)) {

@@ -52,7 +52,6 @@ import {
     type MessageContentSnapshot,
     readOwnDataProperty,
     SourceRejected,
-    SourceWalkLimitExceeded,
     snapshotFieldsEqual,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -749,8 +748,10 @@ export function createRustModeTransform(
     ): Promise<void> => {
         const passStartedAt = performance.now();
         const logSourceDecline = (error: SourceRejected): void => {
-            const level = error instanceof SourceWalkLimitExceeded ? "warn" : "debug";
-            sessionLog[level](sessionId, `rust transform declined ${error.name}: ${error.message}`);
+            sessionLog[error.logLevel](
+                sessionId,
+                `rust transform declined ${error.name}: ${error.message}`,
+            );
         };
         let captured: CapturedMessages;
         try {

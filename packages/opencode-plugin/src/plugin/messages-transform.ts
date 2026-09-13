@@ -15,7 +15,7 @@ type MessageWithParts = {
 type MessagesTransformOutput = { messages: MessageWithParts[] };
 
 function logSourceDecline(error: SourceRejected, stage: string): void {
-    log(`[eidnara] transform declined ${error.name}: ${error.message} (${stage})`);
+    log[error.logLevel](`[eidnara] transform declined ${error.name}: ${error.message} (${stage})`);
 }
 
 /**

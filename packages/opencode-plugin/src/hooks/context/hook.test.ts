@@ -242,6 +242,29 @@ describe("eidnara hook", () => {
         }
     }
 
+    it("logs a walk-limit decline at warn before preflight", async () => {
+        useTempDataHome("hook-source-limit-");
+        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const client = createClientMock();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        const warn = spyOn(logger.log, "warn");
+        try {
+            await hook["experimental.chat.messages.transform"](
+                {},
+                { messages: new Array(2 ** 22 + 1) },
+            );
+            expect(
+                warn.mock.calls.some((call) => String(call[0]).includes("SourceWalkLimitExceeded")),
+            ).toBe(true);
+        } finally {
+            warn.mockRestore();
+        }
+        expect(client.session.get).not.toHaveBeenCalled();
+        expect(fake.calls).toHaveLength(0);
+    });
+
     it("captures the source once per pass and hands that capture to the direct transform", async () => {
         useTempDataHome("hook-single-capture-");
         const sessionId = "ses-single-capture";

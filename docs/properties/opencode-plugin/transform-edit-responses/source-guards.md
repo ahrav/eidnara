@@ -52,7 +52,11 @@ properties. Harmless hidden data is accepted and nested hidden data participates
 in the guard. Optional undefined object fields are omitted; array holes and
 undefined array entries are rejected. Dense readonly input arrays are accepted
 when the destination is mutable. Neither capture nor recheck freezes or
-deep-clones source payloads.
+deep-clones source payloads. The guard runs in the host's realm and calls
+built-in `Array.prototype` methods and `Object` reflection functions itself, so a
+replaced built-in is a compromised process, not a source hook it can detect;
+inherited `then` and inherited numeric slots are checked because the host's
+promise assimilation and array holes read them from source values.
 
 Exact field tapes, not hashes, decide whether the existing inbound cache prefix
 and terminal message can be reused. The old recursive traversal and snapshot
