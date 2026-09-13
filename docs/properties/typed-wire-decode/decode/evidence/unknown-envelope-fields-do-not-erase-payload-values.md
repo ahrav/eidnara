@@ -110,7 +110,7 @@ Branch `perf/typed-wire-u1-owned-decode`, `cargo test -p daemon --locked
 on the aarch64 host). Unknown message and block envelope
 fields are discarded on both lanes; retained payload `Value`s keep their keys.
 Witnesses: `a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded`
-(memory-store), `reattach_discards_unknown_envelope_fields_and_rebuilds_the_message_shell`
+(memory-store), `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
 and the reattach sharing test (wire.rs), `overlay_canonicalizes_only_the_mutated_block`
 (the opaque payload survives; `sentinel_unknown_field` does not), and
 `decoded_envelope_charges_only_typed_fields`. A nested unknown key inside a

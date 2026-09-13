@@ -41,7 +41,7 @@ median of the five process means), which fix each cell's noise floor:
 ## After leg
 
 The `after/` directory holds the paired comparison for the typed-wire U1 tree
-(commit `1e95407b` on `perf/typed-wire-u1-owned-decode`):
+(commit `bc9e8216` on `perf/typed-wire-u1-owned-decode`):
 
 - `manifest.json`: after-tree and before-tree identities, both binary digests,
   the frozen corpus digests and each binary's own dump of the bytes it decoded,
@@ -54,25 +54,26 @@ The `after/` directory holds the paired comparison for the typed-wire U1 tree
 The before binary was rebuilt from `85accd89` plus `harness.patch` in a
 detached worktree. Its SHA-256 equals the before-leg manifest's binary digest,
 so the reproduction is the same artifact. The after binary was built from the
-U1 tree with the same command. The after tree's `bench_decode` reads each
-cell's body from `EIDNARA_DECODE_CORPUS` when that variable is set, so both
-legs decoded the frozen `before/corpus/` bytes; the timing boundaries,
-iteration schedule, and drop placement are those of `harness.patch`. Both
-binaries dumped the bytes they decoded, and the digests match the frozen
-corpus.
+U1 tree with the same command. The after tree's `bench_decode` embeds the
+frozen `before/corpus/` bodies with `include_bytes!`, so both legs decoded the
+same bytes; the timing boundaries, iteration schedule, and drop placement are
+those of `harness.patch`. Both binaries dumped the bytes they decoded, and the
+digests match the frozen corpus.
 
 Ten fresh processes ran in the order AB, BA, AB, BA, AB (A before, B after),
 each with its own `CRITERION_HOME`:
 
 ```sh
-EIDNARA_DECODE_CORPUS=<before/corpus> EIDNARA_DUMP_DECODE_CORPUS=<dump-dir> \
-CRITERION_HOME=<criterion-dir> <binary> --bench decode --save-baseline <leg>-r<N> --noplot
+EIDNARA_DUMP_DECODE_CORPUS=<dump-dir> CRITERION_HOME=<criterion-dir> \
+  <binary> --bench decode --save-baseline <leg>-r<N> --noplot
 ```
 
-An earlier after-leg run was discarded before analysis because the after
-binary generated its own bodies, which lack the twenty `provider_executed:false`
-members the frozen bodies carry (520 fewer bytes at 40 messages). The corpus
-switch above made both legs decode identical bytes; only that run is reported.
+Two earlier after-leg runs were discarded before analysis. In the first the
+after binary generated its own bodies, which lack the twenty
+`provider_executed:false` members the frozen bodies carry (520 fewer bytes at
+40 messages). The second read the frozen bodies through an environment
+variable; the bench was then changed to embed them so the artifact does not
+depend on the environment, and only the run against that binary is reported.
 
 Per cell, medians of the five process means (ns), the after leg's relative
 spread, the median per-pair after/before ratio, the predeclared proceed
@@ -81,10 +82,10 @@ whose after mean is below the before mean by more than twice the noise floor:
 
 | Cell | Before rerun median | After median | After spread | Median ratio | Threshold | Pairs clearing | Verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `decode/typed_request/40msgs_2KiB_mixed` | 223300 | 122793 | 0.0023 | 0.5507 | 0.9895 | 5/5 | proceed |
-| `decode/typed_request/200msgs_2KiB_mixed` | 1277825 | 608842 | 0.0144 | 0.4744 | 0.9245 | 5/5 | proceed |
-| `decode/typed_request_plus_projection/40msgs_2KiB_mixed` | 682510 | 517419 | 0.0049 | 0.7578 | 0.9576 | 5/5 | proceed |
-| `decode/typed_request_plus_projection/200msgs_2KiB_mixed` | 3335568 | 2511507 | 0.0017 | 0.7533 | 0.9536 | 5/5 | proceed |
+| `decode/typed_request/40msgs_2KiB_mixed` | 223692 | 123256 | 0.0179 | 0.5506 | 0.9895 | 5/5 | proceed |
+| `decode/typed_request/200msgs_2KiB_mixed` | 1313136 | 607338 | 0.0200 | 0.4656 | 0.9245 | 5/5 | proceed |
+| `decode/typed_request_plus_projection/40msgs_2KiB_mixed` | 701702 | 517366 | 0.0095 | 0.7364 | 0.9576 | 5/5 | proceed |
+| `decode/typed_request_plus_projection/200msgs_2KiB_mixed` | 3346128 | 2509362 | 0.0026 | 0.7484 | 0.9536 | 5/5 | proceed |
 
 The before rerun medians sit within each cell's original noise floor of the
 frozen before-leg medians. The predeclared rule clears on every cell, so the

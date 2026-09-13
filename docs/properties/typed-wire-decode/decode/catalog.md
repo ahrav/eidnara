@@ -246,7 +246,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `a_block_edit_leaves_its_sibling_unchanged_and_envelope_unknowns_are_discarded`
-(memory-store), `reattach_discards_unknown_envelope_fields_and_rebuilds_the_message_shell`
+(memory-store), `reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded`
 (wire.rs), `overlay_canonicalizes_only_the_mutated_block` (transform.rs), and
 `decoded_envelope_charges_only_typed_fields` (retained_size.rs) show message- and
 block-level unknown fields discarded while payload values survive; a
@@ -321,7 +321,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `wire.rs` sharing tests pass with the owned model
-(`reattach_discards_unknown_envelope_fields_and_rebuilds_the_message_shell` and
+(`reattach_shares_the_decoded_shell_and_unknown_envelope_fields_are_discarded` and
 the shared-shell checks at `wire.rs:1749-1814`), and
 `decode_and_projection_fit_the_declared_pool` checks every projection block
 points into the request's shells; the projection now shares the shell whenever

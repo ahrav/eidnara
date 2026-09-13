@@ -131,7 +131,7 @@ order (`role` before `content`, a block's `type` tag before its payload) is not
 canonical order. The served-output fixture populations that previously replayed
 retained originals now decode to typed shells, and
 `every_population_takes_the_reorder_copy_path` in
-`crates/daemon/tests/served_json_passthrough_allocations.rs` asserts that none of
+`crates/daemon/tests/served_json_shell_allocations.rs` (the renamed passthrough allocation test) asserts that none of
 them serializes canonically. The A-return path keeps its unit coverage in
 `served_json.rs` (`canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not`),
 but no production `WireMessage` shape reaches it after this change. The live

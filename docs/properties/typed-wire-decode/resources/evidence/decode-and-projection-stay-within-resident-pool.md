@@ -131,16 +131,25 @@ request's shell:
 
 All fit the pool. The 31 MiB case is the text ceiling under the 32 MiB length
 cap; its projection peak is the decoded text plus the canonical block string
-grown to twice the text plus the `Arc<str>` copy.
+grown to twice the text plus the `Arc<str>` copy. The test pins the per-request
+ratio at `DECODE_PROJECTION_PEAK_MULTIPLE = 4` times the decode charge.
 
-Observation for the egress plan: constructing one served message per ingress
-message over the live request and projection adds a further 162,530,100 peak
-bytes on the 31 MiB body (65,012,492 retained), so request, projection, and
-served output together reach about 227.5 MB of requested layout bytes, above
-the declared pool. The excess is the served canonicalizer's serialization
-buffer, its exact-size reorder copy, and the `Arc<[u8]>` copy. Response
-encoding is outside this specification (canonical-output egress plan), and
-requested layout bytes are not an RSS bound, so this is recorded, not gated.
+Full owner set: constructing one served message per ingress message over the
+live request and projection adds a further 162,530,100 peak bytes on the 31 MiB
+body (65,012,492 retained), so request, projection, and served output together
+reach 227,545,066 requested layout bytes, above the 184,878,336-byte declared
+pool, at `SERVED_OWNER_SET_PEAK_MULTIPLE = 7` times the decode charge (pinned
+by the same test). The excess is the served canonicalizer's serialization
+buffer, its exact-size reorder copy, and the retained `Arc<[u8]>` copy.
+
+This is a gap against the record's guarantee, not a fit: one near-cap request
+holds seven times its charge, and the pool's charge accounting admits about
+five such requests concurrently. The gap predates this change (the same served
+copies existed beside two envelope trees) and is not produced by the string
+coefficient; closing it means charging serializer workspace and served copies
+before construction or lowering the admitted text ceiling, which the
+canonical-output egress plan owns together with `ServedMessage.canonical_bytes`.
+Requested layout bytes are not an RSS bound. Owner decision needed.
 
 Not measured: concurrent requests, an eviction with an active lease, and the
 above-cap probe's own allocation.

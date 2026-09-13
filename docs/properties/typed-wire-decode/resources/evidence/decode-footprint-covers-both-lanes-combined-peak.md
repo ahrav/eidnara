@@ -124,8 +124,8 @@ before the parse through the returned value or the failure cleanup.
 | 4 MiB plain text, 4 MiB escaped, 64 KiB escaped | direct and tree, upfront scratch charge taken | `peak <= needed` (`parse_charge_covers_text_heavy_peaks_on_both_lanes`) |
 | dense native values, 65,536 / 65,537 / 262,144 elements | tree then direct, metered ignored field | `peak <= charge` (`parse_charge_covers_dense_native_typed_decode_peak`) |
 | 4 MiB text then a duplicate `mid` in the last message, plain and escaped | walk, typed failure, restart, tree, conversion | `peak <= max(footprint, typed needed, tree needed)` (`parse_charge_covers_a_failed_typed_prefix_and_its_tree_fallback`) |
-| 64 and 4,096 tool-call blocks with nested input and extras | direct | `peak <= needed`: 216,033 <= 239,675 at 64 blocks (`parse_charge_covers_payload_heavy_direct_decode_peak`) |
-| same bodies | tree | exceeds: 309,426 against 239,675 at 64 blocks; 19,645,338 against 14,930,339 at 4,096 blocks |
+| 64 and 4,096 tool-call blocks with nested input and extras | direct | `peak <= needed`: 216,033 <= 239,675 at 64 blocks (`parse_charge_covers_payload_heavy_direct_decode_peak_and_pins_the_tree_lane_gap`) |
+| same bodies | tree | exceeds: 309,426 against 239,675 at 64 blocks; 19,645,338 against 14,930,339 at 4,096 blocks; the same test pins the excess at no more than one third of the charge (`TREE_LANE_CONTAINER_SLACK_DENOMINATOR`) and fails if the gap closes, so the pin can be removed |
 
 The tree-lane excess on payload-heavy bodies is container storage: every small
 object becomes a `BTreeMap` leaf node (eleven slots) before conversion, and the

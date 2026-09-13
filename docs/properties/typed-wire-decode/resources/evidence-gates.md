@@ -13,10 +13,10 @@ its instrumentation validity rules do not create a second evidence gate.
 Status: required; both legs collected in
 [`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md).
 The before leg was taken at production revision `85accd89` with the retained
-harness patch; the after leg at `1e95407b` on the typed-wire U1 branch, paired
+harness patch; the after leg at `bc9e8216` on the typed-wire U1 branch, paired
 with a byte-identical rebuild of the before binary in five alternating process
 pairs over the frozen corpus bytes. The predeclared rule clears on all four
-cells (median per-pair after/before mean ratios 0.55 and 0.47 for decode, 0.76
+cells (median per-pair after/before mean ratios 0.55 and 0.47 for decode, 0.74
 and 0.75 for decode plus projection, five of five pairs each), so the verdict
 is `proceed` and the whole-plan stop does not fire. The result is the narrow
 decode-plus-projection operation on one host, not a production latency claim.
@@ -103,5 +103,5 @@ plan-local evidence requirements without silently reactivating that record.
   reactivate W1's handler-level record; P:L213's requested W1 update is
   satisfied by that grouping and nothing more. (owner may revisit)
 - Both binaries, all raw records, and the executed schedule are retained; the
-  after leg reads the frozen bodies through `EIDNARA_DECODE_CORPUS` because the
-  after tree's own generator omits the false `provider_executed` members.
+  after tree's bench embeds the frozen bodies because its own corpus generator
+  omits the false `provider_executed` members the frozen bodies carry.

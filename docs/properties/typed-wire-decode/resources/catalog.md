@@ -95,7 +95,8 @@ holds `P_decode <= F_1` on both lanes for 4 MiB plain and escaped text, 64 KiB
 escaped text, dense native values, a typed prefix that fails at a late duplicate
 key followed by its tree fallback, and payload-heavy blocks on the direct lane;
 the tree lane's payload-heavy peak exceeds `F_1` by container storage that no
-string coefficient covers (see the [evidence](evidence/decode-footprint-covers-both-lanes-combined-peak.md#typed-wire-u1-execution-2026-09-13)).
+string coefficient covers, pinned at no more than one third of the charge (see
+the [evidence](evidence/decode-footprint-covers-both-lanes-combined-peak.md#typed-wire-u1-execution-2026-09-13)).
 Guarantee: The selected decode estimate covers the complete simultaneous
 decode heap on both lanes.
 Check: `always` - For every corpus case and lane, assert `P_decode <= F_k_max`,
@@ -220,11 +221,12 @@ Reachability: default-production
 Status: active
 Exercised: partial - `decode_and_projection_fit_the_declared_pool` holds
 decode plus projection, with shared shells checked, under the declared scratch
-pool for the frozen 40/200 corpora and a 31 MiB text body (peak 130.0 MB
-against 184.9 MB); served-output construction on top of the live request and
-projection is recorded as an observation for the egress plan (see the
-[evidence](evidence/decode-and-projection-stay-within-resident-pool.md#typed-wire-u1-execution-2026-09-13)).
-The above-cap probe remains outside the meter.
+pool and under four times the decode charge for the frozen 40/200 corpora and a
+31 MiB text body (peak 130.0 MB against 184.9 MB); with served output the full
+owner set reaches seven times the charge (227.5 MB) at the ceiling, above the
+pool, which the test pins and the
+[evidence](evidence/decode-and-projection-stay-within-resident-pool.md#typed-wire-u1-execution-2026-09-13)
+records as an open owner decision. The above-cap probe remains outside the meter.
 Guarantee: Full decode plus projection fits the existing declared logical
 resident budget without omitting transient demand or changing ownership policy.
 Check: `always` - Throughout entry, decode, projection, cleanup, and existing
