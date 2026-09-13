@@ -279,6 +279,7 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "UPDATE occurrences SET sensitivity='secret'",
         "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
         "UPDATE embedding_jobs SET stop_reason='stopped' WHERE state='pending'",
+        "UPDATE embedding_jobs SET state='admitted' WHERE state='pending'",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -924,12 +925,12 @@ fn concurrent_queries_observe_one_family_for_rows_checkpoint_and_job_set() {
     std::thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
-                let pinned = selection
-                    .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
-                    .unwrap();
-                assert_eq!(observe(&pinned), before);
+                let pinned = selection.pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)));
+                let seen = pinned.as_ref().ok().map(observe);
                 ready.wait();
                 published.wait();
+                let pinned = pinned.unwrap();
+                assert_eq!(seen.unwrap(), before);
                 for _ in 0..20 {
                     assert_eq!(observe(&pinned), before);
                     let current = selection
@@ -1296,18 +1297,18 @@ fn transient_reopen_failures_keep_the_live_family_without_quarantine() {
 
     // The reader releases after 1.5 seconds, so a quarantine that waits for the connection
     // completes and fails the assertion below instead of deadlocking the scope.
-    let held = std::sync::Barrier::new(2);
+    let (held, entered) = std::sync::mpsc::sync_channel(1);
     let contended = std::thread::scope(|scope| {
         scope.spawn(|| {
             old.projection()
-                .read(|_| {
-                    held.wait();
+                .read(move |_| {
+                    held.send(()).unwrap();
                     std::thread::sleep(Duration::from_millis(1500));
                     Ok(())
                 })
                 .unwrap();
         });
-        held.wait();
+        entered.recv().expect("the reader entered its callback");
         selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_millis(300)))
     });
     assert!(matches!(

@@ -2650,13 +2650,18 @@ mod tests {
             staged.push(store.stage(&sources, &meta(), &BTreeSet::new()).unwrap());
         }
         let generations = store.root().join(GENERATIONS_DIR_NAME);
-        let unopenable = generations.join(&staged[0]);
+        // `prune` visits entries in enumeration order; the unopenable one must come first.
+        let (names, _) =
+            crate::store_fs::read_dir_names_partitioned(&store.generations_fd).unwrap();
+        let first = names.iter().find(|name| staged.contains(name)).unwrap();
+        let later = staged.iter().find(|name| *name != first).unwrap();
+        let unopenable = generations.join(first);
         std::fs::set_permissions(&unopenable, std::fs::Permissions::from_mode(0o000)).unwrap();
         let result = store.prune(&BTreeSet::new());
         std::fs::set_permissions(&unopenable, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err(), "{result:?}");
         assert!(unopenable.join("search.sqlite").is_file());
-        assert!(!generations.join(&staged[1]).exists());
+        assert!(!generations.join(later).exists());
     }
 
     #[test]

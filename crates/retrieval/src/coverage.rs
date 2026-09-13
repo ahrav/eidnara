@@ -170,10 +170,10 @@ pub fn observe(
 const VALID_VECTOR: &str = "EXISTS(SELECT 1 FROM occurrence_vectors v
     WHERE v.occurrence_id=o.occurrence_id AND v.generation_id=?1 AND v.vector_dimension=?2)";
 
-/// Durable work that still stands for the observed generation.
+/// Durable work the dispatcher would still hand out for the observed generation.
 const CURRENT_PENDING: &str = "EXISTS(SELECT 1 FROM embedding_jobs j
-    WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.state IN ('pending','admitted')
-      AND j.stop_reason IS NULL)";
+    WHERE j.occurrence_id=o.occurrence_id AND j.generation_id=?1 AND j.stop_reason IS NULL
+      AND (j.state='pending' OR (j.state='admitted' AND j.host_job_id IS NOT NULL)))";
 
 fn class_coverage(
     conn: &GuardedConn<'_>,

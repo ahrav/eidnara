@@ -2349,6 +2349,14 @@ fn a_same_process_failure_before_recording_the_capture_still_cleans_up_and_retri
         })
         .err()
         .expect("a revoked gate refuses the capture record");
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Intent(daemon::projection_lifecycle::IntentRefusal::Denied(_))
+        ),
+        "{:?}",
+        failure.error
+    );
     assert!(control(root.path()).replacement_capture.is_none());
     let mut failure = failure;
     gate.install(support::projection_gate::passing_evaluator(
@@ -2396,6 +2404,16 @@ fn a_same_lineage_restore_from_before_the_capture_lets_cleanup_release_the_missi
         })
         .err()
         .expect("a restored kernel aborts construction");
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Blocked(daemon::search_catchup::Blocked::Read(
+                kernel::CommitReadError::IncarnationMismatch
+            ))
+        ),
+        "{:?}",
+        failure.error
+    );
     assert_eq!(
         kernel_incarnation_id(root.path()),
         control(root.path()).kernel_incarnation_id
