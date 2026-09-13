@@ -254,14 +254,17 @@ impl SearchSelection {
             retiring: prior.map(Bootstrap::into_retiring),
             intent,
         };
+        let bytes = serde_json::to_vec(&certificate)
+            .map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
+        if bytes.len() as u64 > MAX_RECORD_BYTES {
+            return Err(BuildError::Invalid("bootstrap certificate too large"));
+        }
         let home = self.family_home(&candidate.staged.digest)?;
         create_directory(&self.data_home, FAMILIES)?;
         if home.try_exists()? {
             self.remove_family(&candidate.staged.digest, &certificate)?;
         }
         create_directory(&self.data_home.join(FAMILIES), &candidate.staged.digest)?;
-        let bytes = serde_json::to_vec(&certificate)
-            .map_err(|_| BuildError::Invalid("bootstrap encoding"))?;
         let mut manifest = create_file(&home.join(CERTIFICATE))?;
         manifest.write_all(&bytes)?;
         observer(SelectionEvent::MetadataWritten)?;

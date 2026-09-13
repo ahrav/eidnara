@@ -1,4 +1,5 @@
 use super::*;
+use daemon::projection_lifecycle::MAX_RECORD_BYTES;
 use daemon::search_replacement::selection::{SearchReader, SearchSelection, SelectionEvent};
 use host_runtime::generation::{GenerationError, ProfileEvent};
 use retrieval::coverage::CoverageBounds;
@@ -43,6 +44,16 @@ fn candidate_for<'a>(
     gate: &'a HookGate,
     label: &str,
 ) -> daemon::search_replacement::VerifiedReplacement<'a> {
+    candidate_with_attempt(root, corpus, gate, label, format!("{label}-attempt"))
+}
+
+fn candidate_with_attempt<'a>(
+    root: &Path,
+    corpus: &'a Corpus,
+    gate: &'a HookGate,
+    label: &str,
+    attempt_id: String,
+) -> daemon::search_replacement::VerifiedReplacement<'a> {
     // The prior-family fixture archives its unfinished episode; it does not model coordinator completion.
     std::fs::rename(
         root.join("search-lifecycle/intent.json"),
@@ -54,7 +65,7 @@ fn candidate_for<'a>(
     let mut next = request(None, &config.identity);
     next.consumer.consumer_id = format!("{label}-consumer");
     next.consumer.generation_id = config.generation.generation_id.clone();
-    next.attempt_id = format!("{label}-attempt");
+    next.attempt_id = attempt_id;
     next.selected_generation = match GenerationStore::open(Some(root))
         .unwrap()
         .read_search_current()
@@ -1373,6 +1384,35 @@ fn transient_reopen_failures_keep_the_live_family_without_quarantine() {
     ));
     assert!(old.projection().quarantine().is_none());
     reopen_reuses_live_family();
+}
+
+#[test]
+fn an_oversized_certificate_is_refused_before_a_family_is_created() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    corpus.publish("late", "late bytes");
+    // The intent itself fits its record cap with a little room; the certificate adds two seeds.
+    let intent_len = std::fs::metadata(root.path().join("search-lifecycle/intent.json"))
+        .unwrap()
+        .len();
+    let padding = usize::try_from(MAX_RECORD_BYTES - intent_len - 256).unwrap();
+    let candidate =
+        candidate_with_attempt(root.path(), &corpus, &gate, "second", "a".repeat(padding));
+    let digest = candidate.staged().digest.clone();
+    let failure = selection.select(candidate, &mut |_| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Invalid("bootstrap certificate too large")
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert!(!root.path().join("search-families").join(&digest).exists());
 }
 
 #[test]
