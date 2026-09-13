@@ -382,6 +382,10 @@ fn construction_verification_uses_occurrence_identity_and_shared_content_equalit
                     "INSERT INTO embedding_recovery_authorizations SELECT job_id,'auth-1' FROM embedding_jobs",
                     "DELETE FROM embedding_recovery_authorizations",
                 ),
+                (
+                    "INSERT INTO retirement_receipts SELECT 'r1',generation_id,'retired',NULL,1,1 FROM vector_generations",
+                    "DELETE FROM retirement_receipts",
+                ),
             ] {
                 conn.execute(stale, [])?;
                 assert!(

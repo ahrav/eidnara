@@ -327,7 +327,7 @@ pub fn verify_construction(
         .iter()
         .map(|row| &row.occurrence_id)
         .collect();
-    let (rows, payload_rows, tombstones, vectors, jobs, fresh_pending, obsolete, authorizations): (
+    let (rows, payload_rows, tombstones, vectors, jobs, fresh_pending, obsolete, history): (
         i64,
         i64,
         i64,
@@ -346,7 +346,8 @@ pub fn verify_construction(
             AND episode_id IS NULL AND episode_deadline IS NULL AND next_attempt_at IS NULL
             AND host_job_id IS NULL AND stop_reason IS NULL AND authorization_ref IS NULL),
          (SELECT count(*) FROM embedding_jobs WHERE state='obsolete'),
-         (SELECT count(*) FROM embedding_recovery_authorizations)",
+         (SELECT count(*) FROM embedding_recovery_authorizations)
+           + (SELECT count(*) FROM retirement_receipts)",
         [],
         |row| {
             Ok((
@@ -383,7 +384,7 @@ pub fn verify_construction(
         || usize::try_from(tombstones).ok() != Some(batch.invalidations.len())
         || vectors != 0
         || jobs != fresh_pending + obsolete
-        || authorizations != 0
+        || history != 0
         || excluded_jobs
         || batch.generation_id != Some(generation.generation_id.as_str())
         || report.checkpoint.checkpoint_commit_seq != batch.identity.through_commit_seq
