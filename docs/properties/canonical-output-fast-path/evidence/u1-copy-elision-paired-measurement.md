@@ -70,8 +70,11 @@ Observations:
 
 - Every canonical-miss population now returns A: zero exact-N allocations,
   zero logical reorder bytes, one allocation event fewer, and canonicalizer
-  requested bytes and peak fall by N. Typed and one-edited-block populations
-  are unchanged in every column.
+  requested bytes fall by exactly N. Canonicalizer peak residency falls by
+  less than N or not at all: 105 of 137 bytes for `retained_ascii/1blocks`,
+  0 of 141 for `retained_escaped/1blocks`, and N minus 32 bytes for the other
+  four cells. Typed and one-edited-block populations are unchanged in every
+  column.
 - A's spare capacity is real: `cap/len` is 1.10 to 2.00 on the ownership path.
   For a single 64 KiB scalar the returned buffer holds 2N.
 - The first candidate (canonicalizer change only, before the constructor
@@ -183,9 +186,9 @@ the `Arc` copy, block-receipt strings, and identity formatting; the early
 ## What a test must construct
 
 Later changes to the canonicalizer or constructor rerun
-`scripts/perf/canonical-output-paired-runs.sh paired c1dafa76 <candidate>` and
-compare against this record's B column, keeping the baseline binary in the
-comparison.
+`scripts/perf/canonical-output-paired-runs.sh paired 2a415271 <candidate> <out-dir>`
+and compare against this record's B column. The A leg must stay on `2a415271`,
+not `c1dafa76`, so both legs share the recorder described above.
 
 ## Investigation log
 

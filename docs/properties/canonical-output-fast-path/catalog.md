@@ -32,11 +32,12 @@ Publication creates one specification, not implementation tickets. This
 catalog, its evidence, and the specification copy are tracked with the U0
 harness.
 
-S1 through S6 are **Exercised: yes** after plan U1 landed the copy elision;
-S7 and C1 remain **not yet** and C2 **partial**. The U0 harness at `c1dafa76`
-captured the [baseline record](evidence/u0-baseline-measurement.md) and the
-[U1 paired record](evidence/u1-copy-elision-paired-measurement.md) compares it
-against candidate `8a1fb166`. Inspected pre-U0 tests remain **unaudited**.
+S1 through S5 are **Exercised: yes** after plan U1 landed the copy elision;
+S6 and C2 are **partial**; S7 and C1 remain **not yet**. The U0 harness at
+`c1dafa76` captured the [baseline record](evidence/u0-baseline-measurement.md)
+and the [U1 paired record](evidence/u1-copy-elision-paired-measurement.md)
+compares it against candidate `8a1fb166`. Inspected pre-U0 tests remain
+**unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
 not proof that an implementation satisfies it.
 
@@ -94,7 +95,7 @@ authorize the fast path from `original().is_some()`, or admit arbitrary
 | S3 | [served-unchanged-span-copy-is-identity](#served-unchanged-span-copy-is-identity) | safety | default-production | always | yes |
 | S4 | [served-serialization-is-single-pass-and-error-terminal](#served-serialization-is-single-pass-and-error-terminal) | safety | test-only | always | yes |
 | S5 | [served-canonical-return-retains-a-without-b](#served-canonical-return-retains-a-without-b) | safety | default-production | always | yes |
-| S6 | [served-output-cache-hit-skips-construction](#served-output-cache-hit-skips-construction) | safety | default-production | always-or-unreached | yes |
+| S6 | [served-output-cache-hit-skips-construction](#served-output-cache-hit-skips-construction) | safety | default-production | always-or-unreached | partial |
 | S7 | [prepared-output-diagnostics-preserved](#prepared-output-diagnostics-preserved) | safety | default-production | always | not yet |
 | C1 | [served-canonicalization-campaign-reaches-risk-classes](#served-canonicalization-campaign-reaches-risk-classes) | reachability | test-only | sometimes | not yet |
 | C2 | [served-cache-campaign-reaches-miss-and-hit](#served-cache-campaign-reaches-miss-and-hit) | reachability | default-production | sometimes | partial |
@@ -286,11 +287,14 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `positive_output_cache_hit_reuses_owned_artifacts_without_constructing`
+Exercised: partial - `positive_output_cache_hit_reuses_owned_artifacts_without_constructing`
 feeds a clean matching positive entry to `cached_or_serialize_output` with a
 constructor closure that panics, requires pointer-equal message, canonical
 bytes, identity, and fingerprint Arcs, and constructs for `Some(None)`, dirty,
-foreign-identity, and absent-key items.
+foreign-identity, and absent-key items. The live-tail caller reaches
+`cached_output_item` through its own branch in `transform.rs` and has no
+constructor spy or pointer-equality observation; warm-run hit counters do not
+supply one.
 Guarantee: Selecting a clean matching positive output-cache entry reuses its
 owned artifacts without constructing or canonicalizing that message.
 Check: `always-or-unreached` - For each selected positive hit, require zero

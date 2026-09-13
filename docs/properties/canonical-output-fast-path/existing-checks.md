@@ -137,7 +137,8 @@ transform driver is not retained; host latency remains unmeasured.
 
 Plan U1 lands at candidate `8a1fb166` with the checks below. The
 [paired record](evidence/u1-copy-elision-paired-measurement.md) retains the
-ten-pair AB/BA comparison against baseline `c1dafa76`.
+ten-pair AB/BA comparison against the harness tip `2a415271`, whose
+allocation ledgers equal the `c1dafa76` baseline record.
 
 | Check | What it observes | Status | Execution evidence |
 | --- | --- | --- | --- |
