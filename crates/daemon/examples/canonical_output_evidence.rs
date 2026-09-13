@@ -82,14 +82,26 @@ fn process_cpu_ns() -> u128 {
     ts.tv_sec as u128 * 1_000_000_000 + ts.tv_nsec as u128
 }
 
+/// x86 exposes `model name`; arm64 exposes only implementer/part codes.
 fn cpu_model() -> String {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|info| {
-            info.lines()
-                .find(|line| line.starts_with("model name"))
-                .and_then(|line| line.split_once(':'))
-                .map(|(_, model)| model.trim().to_string())
+    let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") else {
+        return "unknown".to_string();
+    };
+    let field = |name: &str| {
+        info.lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.split_once(':'))
+            .map(|(_, value)| value.trim().to_string())
+    };
+    field("model name")
+        .or_else(|| {
+            Some(format!(
+                "implementer {} part {} variant {} revision {}",
+                field("CPU implementer")?,
+                field("CPU part")?,
+                field("CPU variant")?,
+                field("CPU revision")?
+            ))
         })
         .unwrap_or_else(|| "unknown".to_string())
 }

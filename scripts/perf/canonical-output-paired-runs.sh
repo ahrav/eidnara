@@ -30,6 +30,23 @@ repo_root() {
   git rev-parse --show-toplevel
 }
 
+# x86 exposes `model name`; arm64 exposes only implementer/part codes.
+cpu_model() {
+  local model
+  model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')
+  if [ -n "$model" ]; then
+    echo "$model"
+    return
+  fi
+  awk -F': *' '
+    /^CPU implementer/ && !imp { imp = $2 }
+    /^CPU part/ && !part { part = $2 }
+    /^CPU variant/ && !var { var = $2 }
+    /^CPU revision/ && !rev { rev = $2 }
+    END { printf "implementer %s part %s variant %s revision %s", imp, part, var, rev }
+  ' /proc/cpuinfo
+}
+
 # The detached worktree and separate target directory keep the caller's working
 # tree and build cache untouched.
 build_revision() {
@@ -75,7 +92,7 @@ write_provenance() {
     echo "  \"micro_samples\": $MICRO_SAMPLES,"
     echo "  \"transform_samples\": $TRANSFORM_SAMPLES,"
     echo "  \"pairs\": $PAIRS,"
-    echo "  \"cpu_model\": \"$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')\","
+    echo "  \"cpu_model\": \"$(cpu_model)\","
     echo "  \"nproc\": $(nproc),"
     echo "  \"kernel\": \"$(uname -sr)\","
     echo "  \"schedule\": $schedule,"
@@ -92,7 +109,7 @@ main() {
   [ $# -ge 3 ] || usage
   local mode="$1"
   cd "$(repo_root)"
-  local scratch
+
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/eidnara-canonical-output.XXXXXX")
   trap 'rm -rf "$scratch"' EXIT
 
