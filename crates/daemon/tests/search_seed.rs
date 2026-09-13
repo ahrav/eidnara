@@ -287,7 +287,43 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
     let store = GenerationStore::open(Some(root.path())).unwrap();
     // Staging mutates the host lifecycle store, so it runs under the store's transaction lock; a host mutator arriving meanwhile is refused rather than reclaiming the seed's staging temp under it.
     let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
+    let report_bytes = seed.verification().canonical_bytes();
+    let compatibility = serde_json::to_vec(&json!([
+        retrieval::SCHEMA_VERSION,
+        support::projection_gate::POLICY,
+        support::projection_gate::CONTRACT,
+        support::projection_gate::LIMITS,
+        support::projection_gate::MODEL,
+        support::projection_gate::FINGERPRINT,
+        8,
+        1,
+    ]))
+    .unwrap();
+    let expected_manifest = host_runtime::generation::GenerationManifest {
+        schema: 1,
+        target: "search-projection-seed".to_owned(),
+        release_contract_sha256: format!("{:x}", Sha256::digest(&compatibility)),
+        inputs_lock_sha256: format!("{:x}", Sha256::digest(&report_bytes)),
+        source_payload_manifest_sha256: Some(digest.clone()),
+        files: vec![
+            host_runtime::generation::ManifestFile {
+                path: "search.sqlite".to_owned(),
+                mode: 0o600,
+                size: fs::metadata(&path).unwrap().len(),
+                sha256: sha256_of(&path),
+            },
+            host_runtime::generation::ManifestFile {
+                path: "seed-report.json".to_owned(),
+                mode: 0o600,
+                size: report_bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&report_bytes)),
+            },
+        ],
+    };
+    assert_eq!(seed.verification().stage_manifest(), expected_manifest);
+    let predicted = expected_manifest.digest();
     let staged = stage(&seed, &store, &tx, dir.path(), &BTreeSet::new()).unwrap();
+    assert_eq!(staged.digest, predicted);
     assert!(
         matches!(
             LifecycleTransactionLock::acquire_exclusive(Some(root.path())),
@@ -301,6 +337,7 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
         "staging selects nothing"
     );
     let validated = store.validate(&staged.digest).unwrap();
+    assert_eq!(validated.manifest, expected_manifest);
     assert_eq!(validated.manifest.target, SEED_TARGET);
     assert_eq!(
         validated.manifest.source_payload_manifest_sha256.as_deref(),
@@ -406,7 +443,7 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
         "linux-x64-gnu"
     );
     // The seed's digest is pinned to the lifecycle intent; the reclaimer's protected set is read from there.
-    let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
+    let lifecycle = ProjectionLifecycle::open(root.path()).unwrap();
     lifecycle
         .record(
             &gate,
@@ -430,13 +467,13 @@ async fn a_quiesced_seed_reopens_without_its_wal_and_stages_exactly_its_verified
             NOW,
         )
         .unwrap();
-    let pinned = lifecycle.pin_seed(&gate, &staged.digest).unwrap();
+    let pinned = lifecycle.pin_seed(&gate, &tx, &staged.digest).unwrap();
     assert_eq!(
         pinned.staged_seed_digest.as_deref(),
         Some(staged.digest.as_str())
     );
     assert_eq!(
-        lifecycle.pin_seed(&gate, &host_digest).unwrap_err(),
+        lifecycle.pin_seed(&gate, &tx, &host_digest).unwrap_err(),
         IntentRefusal::Conflict {
             attempt_id: "attempt-seed".to_owned()
         },

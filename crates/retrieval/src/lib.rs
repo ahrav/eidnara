@@ -502,6 +502,21 @@ impl OccurrenceRecord<'_> {
     }
 }
 
+impl StoredOccurrence {
+    fn content(&self) -> OccurrenceContent<'_> {
+        OccurrenceContent {
+            tuple: &self.tuple,
+            payload_id: &self.payload_id,
+            domain_id: &self.domain_id,
+            sensitivity: self.sensitivity.as_str(),
+            source_object_id: &self.source_object_id,
+            source_evidence_id: &self.source_evidence_id,
+            source_artifact_digest: &self.source_artifact_digest,
+            created_commit_seq: self.created_commit_seq,
+        }
+    }
+}
+
 /// A batch prepares these statements once rather than once per record.
 struct Statements<'c> {
     occurrence_lookup: CachedStatement<'c>,

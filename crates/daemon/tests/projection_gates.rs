@@ -203,6 +203,53 @@ fn gate_tables_match_the_frozen_construction_contract() {
     );
 }
 
+#[test]
+fn requested_limits_require_the_live_grant_and_concrete_manifest_bounds() {
+    let gate = HookGate::closed();
+    let mut evaluator = passing();
+    evaluator
+        .manifest
+        .limits
+        .insert("export_page_rows".to_owned(), 4);
+    gate.install(evaluator.clone());
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+        .unwrap();
+    let expected = InvalidationIdentity::from(&identity("k", 8));
+    gate.check_limits(&grant, &expected, &[("export_page_rows", 4)])
+        .unwrap();
+    gate.check_limits(&grant, &expected, &[("export_page_rows", 1)])
+        .unwrap();
+    let mut other_identity = expected.clone();
+    other_identity.generation_epoch += 1;
+    assert_eq!(
+        gate.check_limits(&grant, &other_identity, &[("export_page_rows", 1)]),
+        Err(Denial::EvidenceIdentity)
+    );
+    assert_eq!(
+        gate.check_limits(&grant, &expected, &[("export_page_rows", 5)]),
+        Err(Denial::LimitExceeded {
+            limit: "export_page_rows".to_owned(),
+            observed: 5,
+            max: 4
+        })
+    );
+    assert!(matches!(
+        gate.check_limits(&grant, &expected, &[("unknown-limit", 1)]),
+        Err(Denial::Failed(Gate::Resource, _))
+    ));
+    gate.install(evaluator);
+    assert_eq!(
+        gate.check_limits(&grant, &expected, &[("export_page_rows", 1)]),
+        Err(Denial::Invalidated)
+    );
+    gate.close();
+    assert_eq!(
+        gate.check_limits(&grant, &expected, &[]),
+        Err(Denial::Invalidated)
+    );
+}
+
 /// The durable rows of every projection table a hook may write, so "no new durable work" is a comparison rather than a claim.
 fn durable_work(conn: &Connection) -> Vec<(String, i64)> {
     [

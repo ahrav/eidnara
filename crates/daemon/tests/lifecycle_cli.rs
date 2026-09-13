@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+mod support;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -1262,6 +1264,108 @@ fn spawn_failures_name_their_cause_on_stderr() {
         "stopped",
         "a spawn failure before fork leaves no daemon"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn host_reclaimer_preserves_projection_pins_and_skips_unknown_references() {
+    use daemon::projection_lifecycle::{
+        Cause, ConsumerBinding, LifecycleRequest, ProjectionLifecycle, Transition,
+    };
+    use host_runtime::generation::{GenerationStore, SourceSpec, StageMeta};
+    use std::collections::BTreeSet;
+    require_debug_build();
+    for scenario in ["pinned", "malformed", "contended"] {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let payload = root.path().join("payload");
+        write_payload(&payload);
+        let transaction =
+            host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&data)).unwrap();
+        let store = GenerationStore::open(Some(&data)).unwrap();
+        let source = root.path().join("seed");
+        std::fs::write(&source, b"retained seed fixture").unwrap();
+        let meta = StageMeta {
+            target: "search-projection-seed".to_owned(),
+            release_contract_sha256: "a".repeat(64),
+            inputs_lock_sha256: "b".repeat(64),
+            source_payload_manifest_sha256: "c".repeat(64),
+        };
+        let stage = |name: &str| {
+            store
+                .stage(
+                    &[SourceSpec {
+                        rel_path: name.to_owned(),
+                        source: source.clone(),
+                        executable: false,
+                        expected_size: None,
+                        expected_sha256: None,
+                    }],
+                    &meta,
+                    &BTreeSet::new(),
+                )
+                .unwrap()
+        };
+        let pinned = stage("pinned");
+        let unreferenced = stage("unreferenced");
+        let lifecycle = ProjectionLifecycle::open(&data).unwrap();
+        let gate = support::projection_gate::open_gate();
+        lifecycle
+            .record(
+                &gate,
+                &LifecycleRequest {
+                    transition: Transition::Rebuilding,
+                    selected_generation: "vector-generation-not-a-host-digest".to_owned(),
+                    kernel_incarnation_id: "test-kernel".to_owned(),
+                    consumer: ConsumerBinding {
+                        consumer_id: "replacement".to_owned(),
+                        generation_id: "vector-generation".to_owned(),
+                    },
+                    cause: Cause::DeletedAfterPruning,
+                    attempt_id: "reclaimer-test".to_owned(),
+                    recovery_target: None,
+                    allowance: 1,
+                    deadline: 1_000,
+                    authorization_ref: None,
+                },
+                1,
+            )
+            .unwrap();
+        lifecycle.pin_seed(&gate, &transaction, &pinned).unwrap();
+        if scenario == "malformed" {
+            std::fs::write(data.join("search-lifecycle/intent.json"), b"not json").unwrap();
+        }
+        drop(transaction);
+        let control_lock = std::fs::File::open(data.join("search-lifecycle")).unwrap();
+        if scenario == "contended" {
+            rustix::fs::flock(
+                &control_lock,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive,
+            )
+            .unwrap();
+        }
+        let mut janitor = DaemonJanitor {
+            root: data.clone(),
+            active: true,
+        };
+        let out = run(
+            &data,
+            &["start", "--payload-dir", payload.to_str().unwrap()],
+        );
+        assert_eq!(out.code, 0, "{scenario}: {} {}", out.stdout, out.stderr);
+        assert_result(&out.json(), "start", true, "running", "started");
+        store.validate(&pinned).unwrap();
+        assert_eq!(
+            store.validate(&unreferenced).is_ok(),
+            scenario != "pinned",
+            "valid intent reaches pruning; unknown intent blocks it"
+        );
+        drop(control_lock);
+        let stopped = run(&data, &["stop"]);
+        assert_eq!(stopped.code, 0, "{} {}", stopped.stdout, stopped.stderr);
+        janitor.active = false;
+    }
 }
 
 #[cfg(target_os = "linux")]

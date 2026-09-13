@@ -315,6 +315,201 @@ fn occurrence_id(record: &OccurrenceRecord<'_>) -> String {
 }
 
 #[test]
+fn construction_verification_uses_occurrence_identity_and_shared_content_equality() {
+    use retrieval::coverage::{CoverageBounds, verify_construction};
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    setup(&store);
+    let sources = ["messages", "canonical_claims"].map(|class| Source {
+        class,
+        key: "shared-object".to_owned(),
+        revision: 1,
+        text: "shared payload".to_owned(),
+        created: 1,
+    });
+    let arena = Arena::new(&sources);
+    let fields = borrow(&arena);
+    let mut batch = ProjectionBatch {
+        identity: mutation(1, 1),
+        records: records(&sources, &arena, &fields),
+        invalidations: Vec::new(),
+        generation_id: Some(GENERATION),
+    };
+    apply(&store, &batch, 1).unwrap();
+    let limits = CoverageBounds {
+        max_live_per_class: NonZeroUsize::new(2).unwrap(),
+        max_tombstoned_per_class: NonZeroUsize::new(2).unwrap(),
+    };
+    store
+        .with_conn(|conn| {
+            let report = verify_construction(conn, &batch, &generation(), limits).unwrap();
+            assert_eq!(
+                report
+                    .classes
+                    .iter()
+                    .map(|class| class.pending)
+                    .sum::<usize>(),
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+    // A payload row the inventory does not reference is surplus content, not a fresh construction.
+    store
+        .with_conn_fenced(|conn| {
+            conn.execute("INSERT INTO payloads VALUES ('surplus',x'61',1,0)", [])?;
+            assert!(matches!(
+                verify_construction(conn, &batch, &generation(), limits),
+                Err(ProjectionError::CorruptRow)
+            ));
+            conn.execute("DELETE FROM payloads WHERE payload_id='surplus'", [])?;
+            verify_construction(conn, &batch, &generation(), limits).unwrap();
+            // Jobs must be as construction inserted them, with no recovery history.
+            for (stale, restore) in [
+                (
+                    "UPDATE embedding_jobs SET attempts=1",
+                    "UPDATE embedding_jobs SET attempts=0",
+                ),
+                (
+                    "UPDATE embedding_jobs SET episode_allowance=1",
+                    "UPDATE embedding_jobs SET episode_allowance=0",
+                ),
+                (
+                    "UPDATE embedding_jobs SET admitted_epoch=1,host_incarnation='h',last_failure_kind='k'",
+                    "UPDATE embedding_jobs SET admitted_epoch=NULL,host_incarnation=NULL,last_failure_kind=NULL",
+                ),
+                (
+                    "UPDATE embedding_jobs SET stop_reason='exhausted'",
+                    "UPDATE embedding_jobs SET stop_reason=NULL",
+                ),
+                (
+                    "UPDATE embedding_jobs SET episode_id='e1',authorization_ref='auth-1'",
+                    "UPDATE embedding_jobs SET episode_id=NULL,authorization_ref=NULL",
+                ),
+                (
+                    "INSERT INTO embedding_recovery_authorizations SELECT job_id,'auth-1' FROM embedding_jobs",
+                    "DELETE FROM embedding_recovery_authorizations",
+                ),
+                (
+                    "INSERT INTO retirement_receipts SELECT 'r1',generation_id,'retired',NULL,1,1 FROM vector_generations",
+                    "DELETE FROM retirement_receipts",
+                ),
+            ] {
+                conn.execute(stale, [])?;
+                assert!(
+                    matches!(
+                        verify_construction(conn, &batch, &generation(), limits),
+                        Err(ProjectionError::CorruptRow)
+                    ),
+                    "{stale}"
+                );
+                conn.execute(restore, [])?;
+                verify_construction(conn, &batch, &generation(), limits).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn_fenced(|conn| {
+            use rusqlite::types::Value;
+            for (field, changed, original) in [
+                (
+                    "domain_id",
+                    Value::Text("wrong-domain".to_owned()),
+                    Value::Text("domain".to_owned()),
+                ),
+                (
+                    "sensitivity",
+                    Value::Text("sensitive".to_owned()),
+                    Value::Text("normal".to_owned()),
+                ),
+                (
+                    "source_object_id",
+                    Value::Text("wrong-object".to_owned()),
+                    Value::Text("shared-object".to_owned()),
+                ),
+                (
+                    "source_evidence_id",
+                    Value::Text("wrong-evidence".to_owned()),
+                    Value::Text("shared-object".to_owned()),
+                ),
+                (
+                    "source_artifact_digest",
+                    Value::Text("a".repeat(64)),
+                    Value::Text("0".repeat(64)),
+                ),
+                ("created_commit_seq", Value::Integer(2), Value::Integer(1)),
+            ] {
+                assert_eq!(
+                    batch_status(conn, &batch).unwrap(),
+                    BatchStatus::Applied,
+                    "clean control before {field}"
+                );
+                let before = batch
+                    .records
+                    .iter()
+                    .map(|record| read_occurrence(conn, &occurrence_id(record)).unwrap())
+                    .collect::<Vec<_>>();
+                conn.execute(&format!("UPDATE occurrences SET {field}=?1"), [changed])?;
+                assert!(
+                    matches!(
+                        batch_status(conn, &batch),
+                        Err(ProjectionError::OccurrenceCollision { .. })
+                    ),
+                    "{field}"
+                );
+                assert!(
+                    matches!(
+                        verify_construction(conn, &batch, &generation(), limits),
+                        Err(ProjectionError::OccurrenceCollision { .. })
+                    ),
+                    "{field}"
+                );
+                conn.execute(&format!("UPDATE occurrences SET {field}=?1"), [original])?;
+                let restored = batch
+                    .records
+                    .iter()
+                    .map(|record| read_occurrence(conn, &occurrence_id(record)).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(restored, before, "independent row restoration for {field}");
+                verify_construction(conn, &batch, &generation(), limits).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+    batch.identity.through_commit_seq = 2;
+    batch.invalidations = batch
+        .records
+        .iter()
+        .map(|record| Invalidation {
+            occurrence_id: occurrence_id(record),
+            tombstone: Tombstone {
+                invalidated_commit_seq: 2,
+                reason: TombstoneReason::Retired,
+            },
+        })
+        .collect();
+    apply(&store, &batch, 2).unwrap();
+    store
+        .with_conn(|conn| {
+            verify_construction(conn, &batch, &generation(), limits).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    batch.invalidations[1] = batch.invalidations[0].clone();
+    store
+        .with_conn(|conn| {
+            assert_eq!(batch_status(conn, &batch).unwrap(), BatchStatus::Applied);
+            assert!(matches!(
+                verify_construction(conn, &batch, &generation(), limits),
+                Err(ProjectionError::CorruptRow)
+            ));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn a_ledger_predicts_the_reopened_state_after_multi_ordinal_empty_and_control_batches() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path());

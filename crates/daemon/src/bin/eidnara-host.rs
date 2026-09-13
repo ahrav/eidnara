@@ -588,6 +588,7 @@ enum SuccessorGeneration<'a> {
     Resolve {
         payload_dir: Option<&'a Path>,
         payload_manifest_digest: Option<&'a str>,
+        transaction: &'a LifecycleTransactionLock,
     },
     Preflighted(ResolvedGeneration),
 }
@@ -626,7 +627,8 @@ fn start_phase(
         SuccessorGeneration::Resolve {
             payload_dir,
             payload_manifest_digest,
-        } => match resolve_generation(payload_dir, payload_manifest_digest, None) {
+            transaction,
+        } => match resolve_generation(payload_dir, payload_manifest_digest, None, transaction) {
             Ok(resolved) => resolved,
             Err((state, reason)) => return unresolved(state, reason),
         },
@@ -954,6 +956,7 @@ fn resolve_generation(
     payload_dir: Option<&Path>,
     payload_manifest_digest: Option<&str>,
     running_generation: Option<&str>,
+    transaction: &LifecycleTransactionLock,
 ) -> Result<ResolvedGeneration, (&'static str, &'static str)> {
     // `unsupported_platform` takes precedence over `native_payload_missing`, so `supported_target()` runs before payload inspection.
     let target = supported_target()?;
@@ -971,10 +974,20 @@ fn resolve_generation(
             if let Some(digest) = running_generation {
                 protected.insert(digest.to_owned());
             }
-            // The staging transaction prunes unreferenced complete generations and stale staging directories while holding the transaction lock.
-            store
-                .prune(&protected)
-                .map_err(|e| generation_failure(&e))?;
+            let data_home = host_runtime::data_dir_path(None)
+                .map_err(|_| ("stopped", "native_payload_invalid"))?;
+            // Unknown projection references forbid reclamation, not validation or launch of a host.
+            if let Ok(pins) =
+                daemon::projection_lifecycle::ProjectionLifecycle::protected_generations(
+                    &data_home,
+                    transaction,
+                )
+            {
+                protected.extend(pins);
+                store
+                    .prune(&protected)
+                    .map_err(|e| generation_failure(&e))?;
+            }
             let meta = StageMeta {
                 target: target.to_owned(),
                 release_contract_sha256: release_contract::release_contract_sha256().to_owned(),
@@ -1346,6 +1359,7 @@ fn cmd_start(
             SuccessorGeneration::Resolve {
                 payload_dir,
                 payload_manifest_digest,
+                transaction: &_tx,
             },
             &anchor,
             outer,
@@ -1651,15 +1665,19 @@ fn cmd_restart(
         .filter(|_| observed.state == LifecycleState::Running)
         .map(|record| record.payload_manifest_digest.as_str())
         .filter(|digest| !digest.is_empty());
-    let resolved =
-        match resolve_generation(payload_dir, payload_manifest_digest, running_generation) {
-            Ok(resolved) => resolved,
-            Err((_, reason)) => {
-                // On a resolution failure, the function reports the observed state because the incumbent did not change.
-                return DaemonResult::new(command, false, probe_state(observed.state), reason)
-                    .with_effects(effects(false, false));
-            }
-        };
+    let resolved = match resolve_generation(
+        payload_dir,
+        payload_manifest_digest,
+        running_generation,
+        &_tx,
+    ) {
+        Ok(resolved) => resolved,
+        Err((_, reason)) => {
+            // On a resolution failure, the function reports the observed state because the incumbent did not change.
+            return DaemonResult::new(command, false, probe_state(observed.state), reason)
+                .with_effects(effects(false, false));
+        }
+    };
     let credential_identity_key = if observed.state == LifecycleState::Running {
         let publication = match publication_path() {
             Ok(path) => path,

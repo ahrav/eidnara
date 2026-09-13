@@ -294,3 +294,119 @@ pub fn covered_among<'a>(
     }
     Ok(covered)
 }
+
+/// Supply the complete inventory; matching counts alone do not prove completeness.
+///
+/// # Errors
+///
+/// A failed check returns no certificate. Collision and database errors are not downgraded to absence.
+pub fn verify_construction(
+    conn: &GuardedConn<'_>,
+    batch: &crate::batch::ProjectionBatch<'_>,
+    generation: &VectorGeneration,
+    bounds: CoverageBounds,
+) -> Result<CoverageReport, ProjectionError> {
+    use crate::batch::{BatchStatus, batch_status};
+    let report = observe(
+        conn,
+        &batch.identity.kernel_incarnation_id,
+        generation,
+        bounds,
+    )?
+    .map_err(|_| ProjectionError::CorruptRow)?;
+    let mut unique = std::collections::HashSet::new();
+    let mut payloads = std::collections::HashSet::new();
+    for record in &batch.records {
+        let (encoded, selected) = crate::encode_record(record)?;
+        let (occurrence_id, payload_id) = crate::canonical_digests(&encoded, selected);
+        unique.insert(occurrence_id);
+        payloads.insert(payload_id);
+    }
+    let invalidated: std::collections::HashSet<_> = batch
+        .invalidations
+        .iter()
+        .map(|row| &row.occurrence_id)
+        .collect();
+    let (rows, payload_rows, tombstones, vectors, jobs, fresh_pending, obsolete, history): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = conn.query_row(
+        "SELECT (SELECT count(*) FROM occurrences),
+         (SELECT count(*) FROM payloads),
+         (SELECT count(*) FROM occurrence_tombstones),
+         (SELECT count(*) FROM occurrence_vectors),
+         (SELECT count(*) FROM embedding_jobs),
+         (SELECT count(*) FROM embedding_jobs WHERE state='pending' AND attempts=0
+            AND episode_allowance=0 AND episode_id IS NULL AND episode_deadline IS NULL
+            AND next_attempt_at IS NULL AND admitted_epoch IS NULL AND last_failure_kind IS NULL
+            AND host_job_id IS NULL AND host_incarnation IS NULL AND stop_reason IS NULL
+            AND authorization_ref IS NULL),
+         (SELECT count(*) FROM embedding_jobs WHERE state='obsolete'),
+         (SELECT count(*) FROM embedding_recovery_authorizations)
+           + (SELECT count(*) FROM retirement_receipts)",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        },
+    )?;
+    let mut excluded_jobs = false;
+    for class in OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| !dense_eligible(*class))
+    {
+        excluded_jobs |= conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM embedding_jobs j JOIN occurrences o USING(occurrence_id) WHERE o.class=?1)",
+            [class.code()], |row| row.get::<_, bool>(0),
+        )?;
+    }
+    let only_generation: bool = conn.query_row(
+        "SELECT count(*)=1 AND min(generation_id)=?1 AND min(state)='building' FROM vector_generations",
+        [&generation.generation_id], |row| row.get(0),
+    )?;
+    if invalidated.len() != batch.invalidations.len()
+        || !only_generation
+        || unique.len() != batch.records.len()
+        || usize::try_from(rows).ok() != Some(batch.records.len())
+        || usize::try_from(payload_rows).ok() != Some(payloads.len())
+        || usize::try_from(tombstones).ok() != Some(batch.invalidations.len())
+        || vectors != 0
+        || jobs != fresh_pending + obsolete
+        || history != 0
+        || excluded_jobs
+        || batch.generation_id != Some(generation.generation_id.as_str())
+        || report.checkpoint.checkpoint_commit_seq != batch.identity.through_commit_seq
+        || report
+            .classes
+            .iter()
+            .any(|class| class.missing_without_pending != 0)
+        || usize::try_from(fresh_pending).ok()
+            != Some(
+                report
+                    .classes
+                    .iter()
+                    .map(|class| class.pending)
+                    .sum::<usize>(),
+            )
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
+    if batch_status(conn, batch)? != BatchStatus::Applied {
+        return Err(ProjectionError::CorruptRow);
+    }
+    Ok(report)
+}

@@ -1,11 +1,14 @@
 //! The projection's lifecycle intent, kept outside the disposable `search/` family so a rebuild or an authorized recovery survives deleting the database it is about. One record, `search-lifecycle/intent.json`, names the transition, the selected generation, the kernel incarnation, the consumer binding, the cause, the attempt identity, the fixed recovery target once established, the episode allowance and how much of it is consumed, and the operator authorization a recovery needs. A repeated request with the same attempt identity reconciles to the record already there; a request that disagrees with it is refused and changes nothing. The record is replaced by rename after its bytes are synced and the directory is synced afterwards, so a reader sees the prior record, the new one, or explicit unavailability, never a mixture. The family is deleted under its own storage lease, so a live projection is never unlinked from under itself.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use host_runtime::LifecycleTransactionLock;
+use host_runtime::lifecycle::is_canonical_payload_digest;
 use retrieval::dispatch::valid_authorization_ref;
 use rustix::fs::{FlockOperation, OFlags};
 use serde::{Deserialize, Serialize};
@@ -32,7 +35,7 @@ pub enum Transition {
 
 impl Transition {
     /// The hook whose admission the transition needs: a rebuild bootstraps the projection; a recovery resumes its backfill.
-    fn hook(self) -> ProjectionHook {
+    pub(crate) fn hook(self) -> ProjectionHook {
         match self {
             Self::Rebuilding => ProjectionHook::EmbeddingBootstrap,
             Self::AuthorizedRecovery => ProjectionHook::EmbeddingBackfill,
@@ -77,6 +80,26 @@ pub struct EpisodeAccounting {
     pub deadline: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplacementCapture {
+    pub hold_id: String,
+    pub snapshot: i64,
+    pub lease_epoch: u64,
+    pub source_policy_version: String,
+    pub expires_at: i64,
+    pub stage: Option<Box<crate::search_seed::SeedVerification>>,
+}
+
+impl ReplacementCapture {
+    /// A stage certificate must name this capture's hold and snapshot.
+    fn stage_is_bound(&self) -> bool {
+        self.stage.as_deref().is_none_or(|stage| {
+            stage.hold_id == self.hold_id && stage.snapshot_commit_seq == self.snapshot
+        })
+    }
+}
+
 /// What a caller asks to persist. `attempt_id` is the caller's identity for the request; a replay carries the same one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleRequest {
@@ -86,6 +109,7 @@ pub struct LifecycleRequest {
     pub consumer: ConsumerBinding,
     pub cause: Cause,
     pub attempt_id: String,
+    /// Omitting the requested target does not reset an existing target.
     pub recovery_target: Option<RecoveryTarget>,
     pub allowance: u32,
     pub deadline: i64,
@@ -108,6 +132,8 @@ pub struct LifecycleIntent {
     pub authorization_ref: Option<String>,
     /// The lifecycle-store digest of the closed seed staged for this transition; the reclaimer protects it while the intent stands.
     pub staged_seed_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_capture: Option<Box<ReplacementCapture>>,
     pub recorded_at: i64,
 }
 
@@ -120,7 +146,8 @@ impl LifecycleIntent {
             && self.consumer == request.consumer
             && self.cause == request.cause
             && self.attempt_id == request.attempt_id
-            && self.recovery_target == request.recovery_target
+            && (request.recovery_target.is_none()
+                || self.recovery_target == request.recovery_target)
             && self.episodes.allowance == request.allowance
             && self.episodes.deadline == request.deadline
             && self.authorization_ref == request.authorization_ref
@@ -200,6 +227,10 @@ pub enum IntentRefusal {
     Oversized,
     #[error("control record I/O failed: {0}")]
     Io(String),
+    #[error("the staged seed digest is not 64 lowercase hexadecimal digits")]
+    InvalidDigest,
+    #[error("another lifecycle operation holds the control record lock")]
+    WouldBlock,
     /// The control directory's sync failed. After a rename the new record is visible and may or may not survive power loss; the caller reads the record again rather than retrying the write.
     #[error("the control directory sync failed: {0}")]
     DurabilityUnknown(String),
@@ -287,11 +318,14 @@ impl ProjectionLifecycle {
 
     /// Takes the handle's thread lock and then the directory's exclusive `flock` for the guard's lifetime, so one read-then-replace at a time runs in this process or any other.
     fn lock(&self) -> io::Result<DirectoryLock<'_>> {
-        let threads = self
-            .threads
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        rustix::fs::flock(&self.dir_fd, FlockOperation::LockExclusive)?;
+        let threads = match self.threads.try_lock() {
+            Ok(threads) => threads,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        };
+        rustix::fs::flock(&self.dir_fd, FlockOperation::NonBlockingLockExclusive)?;
         Ok(DirectoryLock {
             _flock: FlockRelease(&self.dir_fd),
             _threads: threads,
@@ -355,11 +389,54 @@ impl ProjectionLifecycle {
                 intent.authorization_ref.as_deref(),
                 intent.cause,
             ) {
+                Ok(())
+                    if !intent
+                        .replacement_capture
+                        .as_deref()
+                        .is_none_or(ReplacementCapture::stage_is_bound) =>
+                {
+                    ControlState::Unavailable("certificate names another capture".to_owned())
+                }
                 Ok(()) => ControlState::Intent(intent),
                 Err(refusal) => ControlState::Unavailable(refusal.to_string()),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
         }
+    }
+
+    /// Reads projection generation pins for a reclaimer holding the lifecycle transaction lock.
+    /// Unavailable intent blocks reclamation because its references are unknown.
+    pub fn protected_generations(
+        data_home: &Path,
+        _transaction: &LifecycleTransactionLock,
+    ) -> Result<BTreeSet<String>, IntentRefusal> {
+        // A read-only probe must not create a control directory on hosts without a projection.
+        match fs::symlink_metadata(data_home.join(CONTROL_DIR)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            Err(error) => return Err(io_refusal(error)),
+            Ok(_) => {}
+        }
+        let lifecycle = Self::open(data_home).map_err(io_refusal)?;
+        let _lock = lifecycle.lock().map_err(io_refusal)?;
+        let intent = match lifecycle.read() {
+            ControlState::Absent => return Ok(BTreeSet::new()),
+            ControlState::Unavailable(reason) => return Err(IntentRefusal::Unavailable(reason)),
+            ControlState::Intent(intent) => intent,
+        };
+        let mut protected = BTreeSet::new();
+        if let Some(digest) = intent.staged_seed_digest {
+            if !is_canonical_payload_digest(&digest) {
+                return Err(IntentRefusal::Unavailable(
+                    "invalid staged digest".to_owned(),
+                ));
+            }
+            protected.insert(digest);
+        }
+        if let Some(stage) = intent.replacement_capture.and_then(|capture| capture.stage) {
+            // Hashing the manifest constructs this digest instead of accepting persisted text.
+            protected.insert(stage.stage_manifest().digest());
+        }
+        Ok(protected)
     }
 
     /// Validates `request` before asking `gate` to admit its hook at [`EntryPoint::Reload`], and reads the record only once admitted.
@@ -421,6 +498,7 @@ impl ProjectionLifecycle {
             },
             authorization_ref: request.authorization_ref.clone(),
             staged_seed_digest: None,
+            replacement_capture: None,
             recorded_at: now,
         };
         fits_when_exhausted(&intent)?;
@@ -455,17 +533,33 @@ impl ProjectionLifecycle {
     }
 
     /// Pins the staged seed `digest` to the recorded intent under the gate's admission, so the reclaimer keeps that object while the intent stands. Pinning the same digest again changes nothing; another digest is refused, since one transition builds from one seed.
+    /// Caller must hold the data home's lifecycle transaction lock through staging and pinning.
     ///
     /// # Errors
     ///
     /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], [`IntentRefusal::Conflict`] with the recorded attempt when another seed is already pinned, [`IntentRefusal::Oversized`] when the pinned record would not fit once its allowance is consumed, or [`IntentRefusal::Revoked`] when the gate invalidated the admission before the write; the record is unchanged in every refused case.
+    /// Noncanonical digests return [`IntentRefusal::InvalidDigest`]; a certificate mismatch returns [`IntentRefusal::Conflict`].
     pub fn pin_seed(
         &self,
         gate: &HookGate,
+        _transaction: &LifecycleTransactionLock,
         digest: &str,
     ) -> Result<LifecycleIntent, IntentRefusal> {
+        if !is_canonical_payload_digest(digest) {
+            return Err(IntentRefusal::InvalidDigest);
+        }
         let _lock = self.lock().map_err(io_refusal)?;
         let (mut intent, admission) = self.admitted_intent(gate)?;
+        if let Some(stage) = intent
+            .replacement_capture
+            .as_ref()
+            .and_then(|capture| capture.stage.as_ref())
+            && stage.stage_manifest().digest() != digest
+        {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
         match intent.staged_seed_digest.as_deref() {
             // A prior pin may have renamed the record and failed its directory sync; the replay syncs before reporting the pin durable, as `record` does.
             Some(pinned) if pinned == digest => {
@@ -485,8 +579,41 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
+    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a target moves only through a new intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::NoIntent`], [`IntentRefusal::Unavailable`], [`IntentRefusal::Denied`], or [`IntentRefusal::Conflict`] with the recorded attempt when another target is already fixed.
+    pub fn fix_target(
+        &self,
+        gate: &HookGate,
+        target: RecoveryTarget,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        if target.commit_seq < 0 {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        match intent.recovery_target {
+            Some(fixed) if fixed == target => {
+                self.sync_directory()?;
+                return Ok(intent);
+            }
+            Some(_) => {
+                return Err(IntentRefusal::Conflict {
+                    attempt_id: intent.attempt_id,
+                });
+            }
+            None => {}
+        }
+        intent.recovery_target = Some(target);
+        fits_when_exhausted(&intent)?;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
     /// The gate admits the intent's transition before callers modify the control record or remove the disposable family.
-    fn admitted_intent(
+    pub(crate) fn admitted_intent(
         &self,
         gate: &HookGate,
     ) -> Result<(LifecycleIntent, Admission), IntentRefusal> {
@@ -534,6 +661,96 @@ impl ProjectionLifecycle {
         self.dir_fd
             .sync_all()
             .map_err(|error| IntentRefusal::DurabilityUnknown(error.kind().to_string()))
+    }
+
+    /// Keep `replacement_capture` until `delete_sqlite_family` succeeds.
+    /// The storage primitive acquires its own exclusive lease after `release_lease` closes the owner.
+    /// Errors can follow `release_lease`; record the relinquished owner inside `release_lease`.
+    pub fn delete_replacement_family(
+        &self,
+        gate: &HookGate,
+        expected_hold: Option<&str>,
+        release_lease: impl FnOnce(),
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (intent, admission) = self.admitted_intent(gate)?;
+        if intent.staged_seed_digest.is_some()
+            || intent
+                .replacement_capture
+                .as_deref()
+                .map(|capture| capture.hold_id.as_str())
+                != expected_hold
+        {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        self.sync_directory()?;
+        let home = self.data_home.join(CONTROL_DIR).join("replacement");
+        let descriptor = search_descriptor(&home).map_err(store_refusal)?;
+        self.at(WriteBarrier::BeforeFamilyRemoval);
+        if admission.invalidated.is_cancelled() {
+            return Err(IntentRefusal::Revoked);
+        }
+        release_lease();
+        if admission.invalidated.is_cancelled() {
+            return Err(IntentRefusal::Revoked);
+        }
+        delete_sqlite_family(&descriptor).map_err(store_refusal)
+    }
+
+    /// Caller must hold the data home's lifecycle transaction lock while changing capture ownership.
+    /// Before clearing a staged capture, finish its owned discard and private-family cleanup under that lock.
+    pub fn record_capture(
+        &self,
+        gate: &HookGate,
+        _transaction: &LifecycleTransactionLock,
+        capture: Option<ReplacementCapture>,
+        expected_hold: Option<&str>,
+    ) -> Result<(), IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent.staged_seed_digest.is_none()
+            && intent.replacement_capture.is_none()
+            && capture.is_none()
+        {
+            // An absent capture is already cleared; sync the replay without rewriting it.
+            self.sync_directory()?;
+            return Ok(());
+        }
+        if intent.staged_seed_digest.is_some()
+            || intent
+                .replacement_capture
+                .as_deref()
+                .map(|capture| capture.hold_id.as_str())
+                != expected_hold
+        {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        if let (Some(old), Some(new)) = (intent.replacement_capture.as_deref(), capture.as_ref()) {
+            // Comparing the clone keeps every non-stage field immutable, including added fields.
+            let mut allowed = old.clone();
+            allowed.stage = new.stage.clone();
+            if allowed != *new
+                || (old.stage.is_some() && old.stage != new.stage)
+                || !new.stage_is_bound()
+            {
+                return Err(IntentRefusal::Conflict {
+                    attempt_id: intent.attempt_id,
+                });
+            }
+        } else if intent.replacement_capture.is_none()
+            && capture
+                .as_ref()
+                .is_some_and(|capture| capture.stage.is_some())
+        {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        intent.replacement_capture = capture.map(Box::new);
+        fits_when_exhausted(&intent)?;
+        self.replace(&intent, &admission)
     }
 
     /// Writes the record to a fresh temp file, syncs it, renames it over the record, and syncs the directory.
@@ -593,7 +810,7 @@ fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
 /// The hex SHA-256 a staged seed's digest takes; the record reserves room for one before any is pinned.
 const DIGEST_HEX_LEN: usize = 64;
 
-/// `consumed` grows to `allowance` and a seed digest may be pinned; every write of the record checks that it still fits with both, so neither a granted episode nor the pin of an accepted intent is refused as [`IntentRefusal::Oversized`].
+/// Reserves space for exhausted `episodes`, a staged seed digest, and a `recovery_target` so later valid updates do not make the intent [`IntentRefusal::Oversized`].
 fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
     let exhausted = LifecycleIntent {
         episodes: EpisodeAccounting {
@@ -606,6 +823,9 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
                 .clone()
                 .unwrap_or_else(|| "0".repeat(DIGEST_HEX_LEN)),
         ),
+        recovery_target: Some(intent.recovery_target.unwrap_or(RecoveryTarget {
+            commit_seq: i64::MAX,
+        })),
         ..intent.clone()
     };
     if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
@@ -640,7 +860,11 @@ fn owned_by_caller(metadata: &fs::Metadata) -> bool {
 }
 
 fn io_refusal(error: io::Error) -> IntentRefusal {
-    IntentRefusal::Io(error.kind().to_string())
+    if error.kind() == io::ErrorKind::WouldBlock {
+        IntentRefusal::WouldBlock
+    } else {
+        IntentRefusal::Io(error.kind().to_string())
+    }
 }
 
 fn store_refusal(error: StoreError) -> IntentRefusal {

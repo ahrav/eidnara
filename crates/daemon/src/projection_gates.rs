@@ -395,6 +395,8 @@ pub struct Evidence {
 /// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes, never content.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Denial {
+    #[error("the projection admission was invalidated")]
+    Invalidated,
     #[error("no manifest is installed")]
     NoManifest,
     #[error("hook {} is not enabled", .0.id())]
@@ -697,5 +699,34 @@ impl HookGate {
     pub fn admit(&self, hook: ProjectionHook, entry: EntryPoint) -> Result<Admission, Denial> {
         self.admit_all(&[hook], entry)
             .map(|mut admissions| admissions.remove(0))
+    }
+
+    /// Checks only `requested`; the caller supplies every charge its operation needs.
+    pub fn check_limits(
+        &self,
+        grant: &Admission,
+        expected: &InvalidationIdentity,
+        requested: &[(&str, u64)],
+    ) -> Result<(), Denial> {
+        let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
+        if grant.invalidated.is_cancelled() {
+            return Err(Denial::Invalidated);
+        }
+        let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+        if *expected != evaluator.current {
+            return Err(Denial::EvidenceIdentity);
+        }
+        evaluator.judge(grant.hook)?;
+        for &(name, observed) in requested {
+            let max = evaluator.limit(name)?;
+            if observed > max {
+                return Err(Denial::LimitExceeded {
+                    limit: name.to_owned(),
+                    observed,
+                    max,
+                });
+            }
+        }
+        Ok(())
     }
 }
