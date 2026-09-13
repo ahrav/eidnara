@@ -848,7 +848,7 @@ impl Drop for FlockRelease<'_> {
     }
 }
 
-fn open_directory(dir: &Path) -> io::Result<File> {
+pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)

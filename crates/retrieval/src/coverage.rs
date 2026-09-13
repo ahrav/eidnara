@@ -410,3 +410,98 @@ pub fn verify_construction(
     }
     Ok(report)
 }
+
+/// Checks mutable state without comparing it to immutable seed bytes. Required dense rows
+/// need valid vectors or current durable work; completed jobs need their vectors.
+pub fn verify_active(
+    conn: &GuardedConn<'_>,
+    expected: &ProjectionIdentity,
+    generation: &VectorGeneration,
+    bounds: CoverageBounds,
+) -> Result<CoverageReport, ProjectionError> {
+    read_identity(conn)?
+        .ok_or(ProjectionError::IdentityMismatch)?
+        .require_compatible(expected)?;
+    let report = observe(conn, &expected.kernel_incarnation_id, generation, bounds)?
+        .map_err(|_| ProjectionError::CorruptRow)?;
+    let (all_vectors, foreign_jobs, vectorless, generations): (i64, i64, i64, i64) = conn.query_row(
+        "SELECT (SELECT count(*) FROM occurrence_vectors),
+                (SELECT count(*) FROM embedding_jobs WHERE generation_id<>?1),
+                (SELECT count(*) FROM embedding_jobs j WHERE state IN ('embedded','published')
+                 AND NOT EXISTS(SELECT 1 FROM occurrence_vectors v WHERE v.occurrence_id=j.occurrence_id AND v.generation_id=j.generation_id)),
+                (SELECT count(*) FROM vector_generations)",
+        [&generation.generation_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
+    )?;
+    if foreign_jobs != 0 || vectorless != 0 || generations != 1 {
+        return Err(ProjectionError::CorruptRow);
+    }
+    if report.checkpoint.hold_id.is_empty()
+        || report
+            .classes
+            .iter()
+            .any(|class| class.missing_without_pending != 0)
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
+    let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok"
+        || conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some()
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
+    let mut statement = conn.prepare("SELECT occurrence_id FROM occurrences")?;
+    for id in statement.query_map([], |row| row.get::<_, String>(0))? {
+        let row = crate::read_occurrence(conn, &id?)?.ok_or(ProjectionError::CorruptRow)?;
+        if row.created_commit_seq > report.checkpoint.checkpoint_commit_seq
+            || row
+                .tombstone
+                .is_some_and(|t| t.invalidated_commit_seq > report.checkpoint.checkpoint_commit_seq)
+        {
+            return Err(ProjectionError::CorruptRow);
+        }
+    }
+    let mut vectors = conn.prepare(
+        "SELECT v.vector_dimension,CASE WHEN length(v.vector)=4*v.vector_dimension THEN v.vector END
+         FROM occurrence_vectors v JOIN vector_generations g USING(generation_id)
+         WHERE v.vector_dimension=g.vector_dimension AND v.generation_id=?1"
+    )?;
+    let mut jobs = conn.prepare("SELECT job_id,occurrence_id,generation_id FROM embedding_jobs")?;
+    for row in jobs.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (id, occurrence, generation) = row?;
+        if id != crate::batch::job_id(&occurrence, &generation) {
+            return Err(ProjectionError::CorruptRow);
+        }
+        crate::dispatch::job_ledger(conn, &id)?
+            .ok_or(ProjectionError::CorruptRow)?
+            .episode()?;
+    }
+    let mut seen = 0i64;
+    for row in vectors.query_map([&generation.generation_id], |row| {
+        Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })? {
+        let (dimension, bytes) = row?;
+        crate::vectors::validate_vector(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| f32::from_le_bytes(*word)),
+            dimension,
+        )?;
+        seen += 1;
+    }
+    if seen != all_vectors {
+        return Err(ProjectionError::CorruptRow);
+    }
+    Ok(report)
+}

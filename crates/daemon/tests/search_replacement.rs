@@ -2,6 +2,10 @@
 mod source_fixture;
 mod support;
 
+#[path = "search_replacement/selection.rs"]
+mod selection;
+use selection::selection_child;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -1642,6 +1646,10 @@ fn expected_pending(rows: &Rows) -> Vec<String> {
 fn replacement_child() {
     let root = std::path::PathBuf::from(std::env::var("REPLACEMENT_CHILD_ROOT").unwrap());
     let cut = std::env::var("REPLACEMENT_CHILD_CUT").unwrap();
+    if cut.starts_with("select-") || cut.starts_with("active-") {
+        selection_child(&root, &cut);
+        return;
+    }
     let kernel_root = tempfile::Builder::new()
         .prefix("kernel")
         .rand_bytes(0)

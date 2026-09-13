@@ -519,9 +519,9 @@ fn verify_closed_until(
     let identity = retrieval::read_identity(&conn)
         .map_err(interrupted(SeedRefusal::Identity))?
         .ok_or(SeedRefusal::Identity)?;
-    if identity != *expected {
-        return Err(SeedRefusal::IdentityMismatch);
-    }
+    identity
+        .require_compatible(expected)
+        .map_err(|_| SeedRefusal::IdentityMismatch)?;
     // A retired generation is one the projection refuses to queue work for, and several live generations of one identity would leave the certificate naming an arbitrary one; the seed's generation is the single live row.
     let mut live: Vec<(String, String)> = conn
         .prepare(
