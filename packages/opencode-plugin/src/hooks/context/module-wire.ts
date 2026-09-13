@@ -281,7 +281,7 @@ function redactedReasoningData(part: Record<string, unknown>): string | undefine
 }
 
 /** `serde_json::to_string` of the value `JSON.stringify` would put on the wire. */
-function serdeJsonCompact(value: unknown): string {
+export function serdeJsonCompact(value: unknown): string {
     if (Array.isArray(value)) {
         return `[${value.map((item) => (item === undefined ? "null" : serdeJsonCompact(item))).join(",")}]`;
     }
