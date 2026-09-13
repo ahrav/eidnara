@@ -9,15 +9,6 @@
 //!
 //! Exactly one thread records inside a window; the live and peak counters are
 //! updated by the owner thread only.
-//!
-//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
-//! `examples/canonical_output_evidence.rs`. Each binary that observes allocations
-//! declares the global allocator itself:
-//!
-//! ```ignore
-//! #[global_allocator]
-//! static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
-//! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
