@@ -678,7 +678,8 @@ impl ProjectionLifecycle {
             || intent
                 .replacement_capture
                 .as_deref()
-                .is_some_and(|capture| Some(capture.hold_id.as_str()) != expected_hold)
+                .map(|capture| capture.hold_id.as_str())
+                != expected_hold
         {
             return Err(IntentRefusal::Conflict {
                 attempt_id: intent.attempt_id,

@@ -333,6 +333,11 @@ fn capture_replacement_and_stage_reversal_require_owned_cleanup() {
         .record_capture(&gate, &transaction, None, Some(&capture.hold_id))
         .unwrap();
     assert_eq!(fs::read(record_path(root.path())).unwrap(), cleared);
+    // A cleared capture refuses a cleanup that still names the old hold.
+    assert!(matches!(
+        lifecycle.delete_replacement_family(&gate, Some(&capture.hold_id), || ()),
+        Err(IntentRefusal::Conflict { .. })
+    ));
     assert_eq!(
         lifecycle.record_capture(&gate, &transaction, Some(staged), None),
         Err(IntentRefusal::IllegalCombination)
