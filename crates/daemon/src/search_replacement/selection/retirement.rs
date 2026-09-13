@@ -109,11 +109,7 @@ impl SearchSelection {
             incarnation: family.incarnation,
         };
         let old_digest = old.seed.stage_manifest().digest();
-        if old_digest != certificate.intent.selected_generation
-            || old.consumer.generation_id != old.seed.generation_id
-            || old.consumer.consumer_id == certificate.intent.consumer.consumer_id
-            || old.seed.kernel_incarnation_id != certificate.seed.kernel_incarnation_id
-        {
+        if !certificate.retiring_is_bound(old) {
             return Err(BuildError::Invalid("retirement binding mismatch"));
         }
         let obligations = kernel

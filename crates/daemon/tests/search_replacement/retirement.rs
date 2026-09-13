@@ -337,6 +337,61 @@ fn a_stale_inspection_copy_of_the_old_database_is_owned_residue_not_a_permanent_
 }
 
 #[test]
+fn a_tampered_retiring_binding_never_becomes_available_after_reopen() {
+    for (path, value) in [
+        ("consumer/consumer_id", serde_json::json!("second-consumer")),
+        ("seed/generation_id", serde_json::json!("ghost-generation")),
+        (
+            "seed/kernel_incarnation_id",
+            serde_json::json!("other-incarnation"),
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut case = RetirementCase::new(root.path());
+        drop(case.old.take());
+        let certificate = case
+            .selection
+            .pin(
+                &case.corpus.kernel,
+                &case.gate,
+                &budget(Duration::from_secs(10)),
+            )
+            .unwrap()
+            .projection()
+            .path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("bootstrap.json");
+        let RetirementCase {
+            corpus,
+            gate,
+            selection,
+            ..
+        } = case;
+        drop(selection);
+        let mut bootstrap: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&certificate).unwrap()).unwrap();
+        *bootstrap.pointer_mut(&format!("/retiring/{path}")).unwrap() = value;
+        std::fs::write(&certificate, serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+        let selection = selector(root.path());
+        assert!(
+            selection
+                .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err(),
+            "{path}"
+        );
+        assert!(
+            selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn ownership_certificate_survives_a_missing_database_before_replacement_selection() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

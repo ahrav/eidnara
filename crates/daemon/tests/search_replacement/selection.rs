@@ -1376,6 +1376,46 @@ fn transient_reopen_failures_keep_the_live_family_without_quarantine() {
 }
 
 #[test]
+fn sweep_reclaims_an_abandoned_schema_one_family() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    corpus.publish("late", "late bytes");
+    let candidate = next_candidate(root.path(), &corpus, &gate);
+    let partial_digest = candidate.staged().digest.clone();
+    let failure = selection
+        .select(candidate, &mut |event| {
+            if event == SelectionEvent::Copied {
+                return Err(GenerationError::NativePayloadInvalid {
+                    detail: "lost copy reply",
+                });
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    drop(failure);
+    std::fs::rename(
+        root.path().join("search-lifecycle/intent.json"),
+        root.path().join("search-lifecycle/abandoned-intent.json"),
+    )
+    .unwrap();
+    let family = root.path().join("search-families").join(&partial_digest);
+    let certificate = family.join("bootstrap.json");
+    // A schema-1 writer emitted the same fields in the same order and no `retiring` block.
+    let written = String::from_utf8(std::fs::read(&certificate).unwrap()).unwrap();
+    let legacy = written.replacen("\"schema\":2", "\"schema\":1", 1);
+    let legacy = format!("{}}}", &legacy[..legacy.find(",\"retiring\":").unwrap()]);
+    std::fs::write(&certificate, legacy).unwrap();
+
+    let report = selection.sweep().unwrap();
+    assert_eq!((report.removed, report.retained), (1, 0));
+    assert!(!family.exists());
+}
+
+#[test]
 fn sweep_reclaims_unreferenced_families_and_retains_selected_protected_and_leased_ones() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
