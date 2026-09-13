@@ -151,6 +151,7 @@ pub(crate) fn map_sqlite(error: rusqlite::Error) -> KernelError {
         return KernelError::Io;
     };
     match failure.code {
+        rusqlite::ffi::ErrorCode::OperationInterrupted => KernelError::Deadline,
         rusqlite::ffi::ErrorCode::ConstraintViolation => KernelError::Conflict,
         rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked => {
             KernelError::Busy

@@ -2003,6 +2003,8 @@ pub(super) fn strip_legacy_candidate_verifiers(
     Ok(rewritten)
 }
 
+/// A budget interrupt during the fence read is the caller's exhaustion, not a superseded writer;
+/// every other read failure fails closed as `FenceLost`.
 pub(super) fn check_fence(tx: &Connection, expected: u64) -> Result<(), KernelError> {
     let durable: i64 = tx
         .query_row_cached(
@@ -2010,7 +2012,10 @@ pub(super) fn check_fence(tx: &Connection, expected: u64) -> Result<(), KernelEr
             [],
             |row| row.get(0),
         )
-        .map_err(|_| KernelError::FenceLost)?;
+        .map_err(|error| match map_sqlite(error) {
+            KernelError::Deadline => KernelError::Deadline,
+            _ => KernelError::FenceLost,
+        })?;
     if u64::try_from(durable).ok() != Some(expected) {
         return Err(KernelError::FenceLost);
     }

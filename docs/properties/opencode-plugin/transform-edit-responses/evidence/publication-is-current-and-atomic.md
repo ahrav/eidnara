@@ -7,33 +7,38 @@ at publication, and preservation of OpenCode's array identity on every outcome.
 
 ## Evidence trail
 
-Revision: the #533 change on `fix/client-transform-owner`, parent `b0023512`.
+Revision: the #533 change on `fix/client-transform-owner` after merging
+`origin/main` at `5def3c71`. Line numbers were verified against that tree.
 
 - [transform-capture.ts](../../../../../packages/opencode-plugin/src/hooks/context/transform-capture.ts):
-  `hostArrayReplacementRejection` (`:400-425`) rejects proxies, non-arrays,
-  malformed or over-budget lengths, non-extensible arrays, a non-writable
-  `length`, and any slot that is not writable and configurable, walking the
-  destination's own descriptors only. `replaceHostArrayContents` (`:432-437`)
-  is a define loop over own slots plus one `length` define; its preconditions
-  (`:427-431`) are that the rejection check returned `null` and the candidate
-  passed `inspectReferenceableMessages`.
+  `hostArrayReplacementRejection(target)` (`:439-455`) takes no length
+  argument and applies no candidate-length cap. It rejects proxies,
+  non-arrays, non-extensible arrays, a non-writable `length`, any slot that is
+  not writable and configurable, and every `SourceRejected` reason the walk
+  raises (including `prototype_accessor` from `rootArrayRejection`, `:94-117`),
+  walking the destination's own descriptors only. `replaceHostArrayContents`
+  (`:461-466`) is a define loop over own slots plus one `length` define; its
+  only precondition (`:457-460`) is that the rejection check returned `null`.
 - [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts):
-  `buildNativeCandidate` reserves candidate slots (`:1425-1434`), the
-  candidate is inspected (`:1436-1441`) before `assertNativeBoundary`
-  (`:1443-1445`), the continuation shift runs on the staged memo
-  (`:1446-1465`), `recheckCapture("publish")` and the container check run
-  (`:1467-1471`), and then replacement, `nativeOutput`, `state.ordinals`,
+  `buildNativeCandidate` reserves candidate slots at `CANDIDATE_SLOT_BYTES`
+  (`:1433-1442`; definition `:578-626`), `assertNativeBoundary` follows
+  directly (`:1443-1446`) and reads the candidate's head entries plainly
+  (`:377-383`), the continuation shift runs on the staged memo
+  (`:1447-1466`), `recheckCapture("publish")` and the container check run
+  (`:1468-1472`), and then replacement, `nativeOutput`, `state.ordinals`,
   `state.initialized`, `wireCaches.set`, and `deliveries.applied` are assigned
-  with no await between them (`:1475-1482`). Successful publication transfers
-  the candidate array and `captured.snapshots` (through the pending wire
-  cache's `rawContentSnapshots`, `:289`) to the 64-session `wireCaches` owner
-  (`:126`, `:787`) and the promoted memo to `states`; the lease releases in
-  `.finally` after that block (`:1520-1521`). This count-bounded retention is
-  the current boundary; the separate optional-output byte budget is TE25 in
-  #538.
+  with no await between them (`:1476-1483`). The candidate is not inspected
+  before `assertNativeBoundary`; kept-prefix validation is #538's TE21.
+  Successful publication transfers the candidate array and
+  `captured.snapshots` (through the pending wire cache's
+  `rawContentSnapshots`, `:285`) to the 64-session `wireCaches` owner
+  (`:122`, `:789`) and the promoted memo to `states`; the lease releases in
+  `.finally` after that block (`:1526`). This count-bounded retention is the
+  current boundary; the separate optional-output byte budget is TE25 in #538.
 - [messages-transform.ts](../../../../../packages/opencode-plugin/src/plugin/messages-transform.ts)
   catches hook errors, logs them, and returns the current `output.messages`
-  (`:65-83`); it never assigns `output.messages`.
+  after a root-only `rootArrayRejection` check (`:65-82`); it never assigns
+  `output.messages`.
 - Reachability is `explicit-config-only`: the Rust-mode
   [hook](../../../../../packages/opencode-plugin/src/hooks/context/hook.ts)
   (`:337-345`) calls this application path;
@@ -50,16 +55,18 @@ supersession would also violate the contract.
 
 The final check/write/promotion block and every rejection path matter. The
 all-or-none claim rests on the define loop having no user-code path once its
-preconditions hold: own data slots on a plain extensible array with a writable
-length, and a candidate whose members are plain data.
+precondition holds: own data slots on a plain extensible array with a writable
+length and unpolluted built-in prototypes. The loop reads only own slots of the
+plain candidate array; the candidate's member values are not read there.
 
 ## What a test must construct
 
 Use invalid containers and candidates. After rejection, compare current
 contents and array identity with an independent expected value. Exercise
-clear, supersession, and invalidation before application. Recipe integration
-must add the malformed-final-operation case; the current candidate builder is
-exercised through `native_messages` and `native_messages_delta` only.
+clear, supersession, invalidation, and a between-pages source change before
+application. Recipe integration must add the malformed-final-operation case;
+the current candidate builder is exercised through `native_messages` and
+`native_messages_delta` only.
 
 ## Investigation log
 
@@ -72,35 +79,64 @@ exercised through `native_messages` and `native_messages_delta` only.
   define loop; the argument for that case is the precondition proof, not a
   fault injection.
 - Missing evidence: #538's malformed-final-operation candidate case.
-- Conclusion (2026-09-13, revision-bound run, 1098 pass, 0 fail): resolved
-  as exercised for this revision's candidate shapes. Witnesses and markers:
-  - `transform-capture.test.ts:569` "bounds the candidate length at the slot
-    budget and rejects malformed lengths"; `:606` "reports a destination slot
-    that stopped accepting writes and reads no candidate getter"
-    (`counter.count` 0); `:621` "replaces every slot and the length of an
-    accepted destination in place"; `:632` "rejects inherited membership and
-    does not consult its getter"; `:653` "accepts a plain extensible array and
-    replaces its contents in place"; `:662` "rejects containers whose element
-    or length assignment could throw" (each rejection reason named); `:581`
-    `it.each` "bypasses inherited numeric setters for capture and
-    publication" (inherited setter on `"0"`, `counter.count` 0).
-  - `rust-mode-transform.test.ts:1916` "publishes at the exact candidate
+- Conclusion: resolved as exercised for this revision's candidate shapes; the
+  witness list is under the next question.
+
+### Q: What bounds the candidate, and what is not checked on this path?
+
+- Sources examined: `hostArrayReplacementRejection` and
+  `replaceHostArrayContents` at the lines above, `buildNativeCandidate` at
+  `rust-mode-transform.ts:578-626`, the application block at `:1431-1488`,
+  and the witnesses below.
+- Findings: `hostArrayReplacementRejection` takes no length and applies no
+  candidate-length cap; the slot charge inside `buildNativeCandidate`
+  (`:586`, `:601`, `:622`) is the only candidate bound. The define loop's only
+  precondition is a `null` rejection. The candidate is not inspected before
+  `assertNativeBoundary`, so a kept previous-output entry that gained an
+  accessor is not refused on this path; `assertNativeBoundary` reads the head
+  entries plainly. The between-pages witness shows a completed series refused
+  at publication with identity kept. The numeric-accessor witness shows
+  `hostArrayReplacementRejection` returning `prototype_accessor` for an
+  accessor on `Array.prototype` or `Object.prototype` slot `0` while the
+  define loop fills the destination without consulting it.
+- Missing evidence: #538's malformed-final-operation candidate case.
+- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
+  `5def3c71`, 1107 pass, 0 fail): resolved as exercised for this revision's
+  candidate shapes. Witnesses and markers:
+  - `transform-capture.test.ts:783` "refuses a numeric accessor on a built-in
+    prototype and defines slots without invoking it" (2 cases; marker:
+    `hostRejection` is `prototype_accessor`, `target` equals `next` with
+    `target[0]` the same object as `next[0]`, `counter.count` 0).
+  - `:817` "reports a destination slot that stopped accepting writes and
+    reads no candidate getter" (`element_not_writable`,
+    `counter.count` 0); `:832` "replaces every slot and the length of an
+    accepted destination in place" (`length` stays writable); `:843` "rejects
+    inherited membership and does not consult its getter"; `:864` "accepts a
+    plain extensible array and replaces its contents in place"; `:873`
+    "rejects containers whose element or length assignment could throw"
+    (`not_array`, `proxy`, `not_extensible`, `length_not_writable`,
+    `element_not_writable`, `prototype`).
+  - `rust-mode-transform.test.ts:1961` "publishes at the exact candidate
     charge and leaves the host array intact" and "declines one byte short of
     the candidate charge and leaves the host array intact". Marker:
-    `started.promise` race with `calls` 1, then a blocker lease reserves
-    `remainingBytes - candidateLength * 8 + offset`; on decline the log names
-    `native candidate array`, `output.messages[0]` is still `member`, and
-    the NACK carries `candidate`.
-  - `:2600` "declines a proxied or non-replaceable host container without
+    `started.promise` race, then a blocker lease reserves
+    `remainingBytes - candidateLength * 8 + offset` (`:1992`); on decline the
+    log names `native candidate array`, `output.messages[0]` is still
+    `member`, and the NACK carries `candidate`.
+  - `:2594` "declines a proxied or non-replaceable host container without
     dispatch" (`calls` 0, `failureCount` 0).
-  - `:2725` "stops an in-flight pass when the session is cleared and keeps
+  - `:2719` "stops an in-flight pass when the session is cleared and keeps
     the host array intact" (`calls` 1 before `clearSession`).
-  - `:1980` "refuses a kept previous-output entry that gained an accessor and
-    invokes no hook" (`second.messages` equals its pre-pass members).
+  - `:2646` "rejects publication when a message is edited in place while the
+    transform response is pending" (`calls` 1 before the edit).
+  - `:2536` "declines before publication and NACKs known deliveries when the
+    source changes between pages". Marker: the series completed with
+    `transform_page_complete` true; `output.messages` is `messages`, length
+    1, `[0]` is `member`, and the hook was never called.
   - `hook.test.ts:273` "preserves host array and returned payload identity
     through the actual <hook|wrapper>" (2 cases).
-  - `messages-transform.test.ts:254` "keeps the current host contents when the
-    inner hook mutates then throws"; `:282` "does not roll back a concurrent
+  - `messages-transform.test.ts:293` "keeps the current host contents when the
+    inner hook mutates then throws"; `:321` "does not roll back a concurrent
     <replace-member|rebind-array> when the pending hook throws" (2 cases;
-    `started.promise` race before the host edit); `:171` "checks only the
+    `started.promise` race before the host edit); `:210` "checks only the
     return container after the hook publishes".

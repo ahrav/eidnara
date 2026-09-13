@@ -15,9 +15,11 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
+use super::applicability::EvalBudget;
 use super::backup::release_capture_pin_in_tx;
 use super::cas::{ArtifactErrorKind, ObjectPresence, is_artifact_digest};
 use super::envelope::check_fence;
+use super::open::AcquireLimit;
 use super::outbox::acknowledge_outbox_in_tx;
 use super::source_descriptor::SOURCE_DESCRIPTOR_KIND;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
@@ -393,24 +395,39 @@ impl KernelStore {
         binding: &SourceHoldBinding,
         bounds: SourceHoldBounds,
     ) -> Result<SourceHold, SourceHoldError> {
-        self.capture_source_hold_inner(binding, bounds, None)
+        self.capture_source_hold_inner(&AcquireLimit::default(), binding, bounds, None)
     }
 
-    /// [`Self::capture_source_hold`] with `at_admission` run inside the writer
-    /// transaction after the admission decision and before any reference is
-    /// written, receiving the number of `capture_pin_refs` rows visible there.
+    /// Exhaustion before commit rolls back the capture and returns `KernelError::Deadline`
+    /// inside `SourceHoldError::Kernel`. A successful commit is not reclassified by a late cancellation.
+    pub fn capture_source_hold_within_budget(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        bounds: SourceHoldBounds,
+    ) -> Result<SourceHold, SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.capture_source_hold_inner(&limit, binding, bounds, None))
+    }
+
+    /// The hook runs before reference writes and observes the transaction's existing reference count.
     #[cfg(feature = "test-support")]
     pub fn capture_source_hold_with_hook_for_test(
         &self,
+        budget: &EvalBudget,
         binding: &SourceHoldBinding,
         bounds: SourceHoldBounds,
         mut at_admission: impl FnMut(i64),
     ) -> Result<SourceHold, SourceHoldError> {
-        self.capture_source_hold_inner(binding, bounds, Some(&mut at_admission))
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.capture_source_hold_inner(&limit, binding, bounds, Some(&mut at_admission))
+        })
     }
 
     fn capture_source_hold_inner(
         &self,
+        limit: &AcquireLimit,
         binding: &SourceHoldBinding,
         bounds: SourceHoldBounds,
         at_admission: Option<&mut dyn FnMut(i64)>,
@@ -430,10 +447,8 @@ impl KernelStore {
         if binding.lease_epoch != self.lease_epoch() {
             return Err(SourceHoldError::IncarnationMismatch);
         }
-        let mut writer = self.lock_writer()?;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite)?;
+        let mut writer = self.writer_with_limit(limit)?;
+        let tx = writer.transaction(TransactionBehavior::Immediate)?;
         check_fence(&tx, self.lease_epoch())?;
         let registered: bool = tx
             .query_row_cached(
@@ -491,6 +506,7 @@ impl KernelStore {
             bounds.admission,
             at_admission,
         )?;
+        limit.check()?;
         tx.execute_cached(
             "INSERT INTO capture_pins(
                  capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
@@ -509,7 +525,7 @@ impl KernelStore {
         .map_err(sqlite)?;
         admitted.materialize(&tx)?;
         let (references, encoded_bytes) = (admitted.references, admitted.encoded_bytes);
-        tx.commit().map_err(sqlite)?;
+        tx.commit()?;
         Ok(SourceHold {
             hold_id,
             binding: binding.clone(),
@@ -534,42 +550,66 @@ impl KernelStore {
         through: i64,
         admission: SourceHoldAdmission,
     ) -> Result<SourceHold, SourceHoldError> {
-        self.extend_source_hold_inner(binding, hold_id, through, admission, None)
+        self.extend_source_hold_inner(
+            &AcquireLimit::default(),
+            binding,
+            hold_id,
+            through,
+            admission,
+            None,
+        )
     }
 
-    /// [`Self::extend_source_hold`] with `at_admission` run inside the writer
-    /// transaction after the admission decision and before any reference is
-    /// written, receiving the number of `capture_pin_refs` rows visible there.
+    /// Uses the capture budget contract for the whole extension, without renewing the hold's expiry.
+    pub fn extend_source_hold_within_budget(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        admission: SourceHoldAdmission,
+    ) -> Result<SourceHold, SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.extend_source_hold_inner(&limit, binding, hold_id, through, admission, None)
+        })
+    }
+
+    /// The hook runs before reference writes and observes the transaction's existing reference count.
     #[cfg(feature = "test-support")]
     pub fn extend_source_hold_with_hook_for_test(
         &self,
+        budget: &EvalBudget,
         binding: &SourceHoldBinding,
         hold_id: &str,
         through: i64,
         admission: SourceHoldAdmission,
         mut at_admission: impl FnMut(i64),
     ) -> Result<SourceHold, SourceHoldError> {
-        self.extend_source_hold_inner(
-            binding,
-            hold_id,
-            through,
-            admission,
-            Some(&mut at_admission),
-        )
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.extend_source_hold_inner(
+                &limit,
+                binding,
+                hold_id,
+                through,
+                admission,
+                Some(&mut at_admission),
+            )
+        })
     }
 
     fn extend_source_hold_inner(
         &self,
+        limit: &AcquireLimit,
         binding: &SourceHoldBinding,
         hold_id: &str,
         through: i64,
         admission: SourceHoldAdmission,
         at_admission: Option<&mut dyn FnMut(i64)>,
     ) -> Result<SourceHold, SourceHoldError> {
-        let mut writer = self.lock_writer()?;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite)?;
+        let mut writer = self.writer_with_limit(limit)?;
+        let tx = writer.transaction(TransactionBehavior::Immediate)?;
         check_fence(&tx, self.lease_epoch())?;
         let pin = self.load_valid_pin(&tx, binding, hold_id, current_time_ms())?;
         let hold = self.hold_from_pin(&tx, binding, hold_id, &pin)?;
@@ -585,8 +625,9 @@ impl KernelStore {
             admission,
             at_admission,
         )?;
+        limit.check()?;
         admitted.materialize(&tx)?;
-        tx.commit().map_err(sqlite)?;
+        tx.commit()?;
         Ok(SourceHold {
             references: admitted.references,
             encoded_bytes: admitted.encoded_bytes,
@@ -627,16 +668,75 @@ impl KernelStore {
         updated_at: i64,
         authorize: impl FnOnce() -> Option<Authorization>,
     ) -> Result<bool, SourceHoldError> {
+        self.acknowledge_through_source_hold_inner(
+            &AcquireLimit::default(),
+            binding,
+            hold_id,
+            through,
+            updated_at,
+            authorize,
+        )
+    }
+
+    /// Exhaustion before commit leaves the checkpoint unchanged.
+    pub fn acknowledge_through_source_hold_within_budget(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        updated_at: i64,
+    ) -> Result<(), SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.acknowledge_through_source_hold_inner(
+                &limit,
+                binding,
+                hold_id,
+                through,
+                updated_at,
+                || Some(()),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Calls `authorize` only after budgeted writer acquisition. Its token lives through commit.
+    /// Cancellation before commit refuses the acknowledgement; cancellation after success does not undo it.
+    pub fn acknowledge_through_source_hold_if_within_budget<Authorization>(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        updated_at: i64,
+        authorize: impl FnOnce() -> Option<Authorization>,
+    ) -> Result<bool, SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            self.acknowledge_through_source_hold_inner(
+                &limit, binding, hold_id, through, updated_at, authorize,
+            )
+        })
+    }
+
+    fn acknowledge_through_source_hold_inner<Authorization>(
+        &self,
+        limit: &AcquireLimit,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        through: i64,
+        updated_at: i64,
+        authorize: impl FnOnce() -> Option<Authorization>,
+    ) -> Result<bool, SourceHoldError> {
         if updated_at < 0 {
             return Err(SourceHoldError::InvalidRequest);
         }
-        let mut writer = self.lock_writer()?;
+        let mut writer = self.writer_with_limit(limit)?;
         let Some(_authorization) = authorize() else {
             return Ok(false);
         };
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite)?;
+        let tx = writer.transaction(TransactionBehavior::Immediate)?;
         check_fence(&tx, self.lease_epoch())?;
         let pin = self.load_valid_pin(&tx, binding, hold_id, current_time_ms())?;
         check_window(&tx, pin.snapshot, through)?;
@@ -645,7 +745,7 @@ impl KernelStore {
             return Err(SourceHoldError::Invalid(SourceHoldInvalidity::Expired));
         }
         acknowledge_outbox_in_tx(&tx, &binding.consumer_id, through, updated_at)?;
-        tx.commit().map_err(sqlite)?;
+        tx.commit()?;
         Ok(true)
     }
 
@@ -663,33 +763,47 @@ impl KernelStore {
         hold_id: &str,
         now: i64,
     ) -> Result<SourceHold, SourceHoldError> {
-        self.source_hold_status_inner(binding, hold_id, now, None)
+        self.source_hold_status_inner(&AcquireLimit::default(), binding, hold_id, now, None)
+    }
+
+    /// Polls the budget between verified objects and bounds both reader acquisitions and SQL scans.
+    /// Regular-file reads and hashing are synchronous; timely completion requires healthy storage.
+    pub fn source_hold_status_within_budget(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+    ) -> Result<SourceHold, SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.source_hold_status_inner(&limit, binding, hold_id, now, None))
     }
 
     /// Runs `hook` at snapshot and object-read boundaries without holding a reader transaction.
     #[cfg(feature = "test-support")]
     pub fn source_hold_status_with_hook_for_test(
         &self,
+        budget: &EvalBudget,
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
         mut hook: impl FnMut(SourceHoldCheckPhase),
     ) -> Result<SourceHold, SourceHoldError> {
-        self.source_hold_status_inner(binding, hold_id, now, Some(&mut hook))
+        let limit = budget.acquire_limit();
+        limit.run(|| self.source_hold_status_inner(&limit, binding, hold_id, now, Some(&mut hook)))
     }
 
     fn source_hold_status_inner(
         &self,
+        limit: &AcquireLimit,
         binding: &SourceHoldBinding,
         hold_id: &str,
         now: i64,
         mut hook: Option<&mut dyn FnMut(SourceHoldCheckPhase)>,
     ) -> Result<SourceHold, SourceHoldError> {
         let started = Instant::now();
-        let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(sqlite)?;
+        let mut reader = self.reader_with_limit(limit)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
         let restore_generation = self.restore_generation.load(Ordering::SeqCst);
         let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
         let hold = self.hold_from_pin(&tx, binding, hold_id, &pin)?;
@@ -715,6 +829,7 @@ impl KernelStore {
             hook(SourceHoldCheckPhase::AfterSnapshot);
         }
         for digest in &digests {
+            limit.check()?;
             let Some(digest) = digest
                 .as_deref()
                 .filter(|digest| is_artifact_digest(digest))
@@ -724,6 +839,7 @@ impl KernelStore {
             if let Some(hook) = hook.as_mut() {
                 hook(SourceHoldCheckPhase::BeforeObjectRead);
             }
+            limit.check()?;
             self.read_verified_object(digest).map_err(|error| {
                 if error.kind() == ArtifactErrorKind::CorruptObject
                     || (error.kind() == ArtifactErrorKind::MissingObject
@@ -736,10 +852,8 @@ impl KernelStore {
             })?;
         }
         // A purge can commit degradation while its object is still readable.
-        let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(sqlite)?;
+        let mut reader = self.reader_with_limit(limit)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
         self.recheck_source_hold_after_read(&tx, binding, hold_id, now, started)?;
         if self.restore_generation.load(Ordering::SeqCst) != restore_generation {
             return Err(SourceHoldError::VerificationChanged);
@@ -755,6 +869,7 @@ impl KernelStore {
         if usize::try_from(references).map_err(corrupt)? != hold.references {
             return Err(SourceHoldError::VerificationChanged);
         }
+        limit.check()?;
         Ok(hold)
     }
 
@@ -844,18 +959,38 @@ impl KernelStore {
         hold_id: &str,
         released_at: i64,
     ) -> Result<(), SourceHoldError> {
+        self.release_source_hold_inner(&AcquireLimit::default(), binding, hold_id, released_at)
+    }
+
+    /// Refuses an exhausted budget before releasing any hold, including when the writer is free.
+    pub fn release_source_hold_within_budget(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        released_at: i64,
+    ) -> Result<(), SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.release_source_hold_inner(&limit, binding, hold_id, released_at))
+    }
+
+    fn release_source_hold_inner(
+        &self,
+        limit: &AcquireLimit,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        released_at: i64,
+    ) -> Result<(), SourceHoldError> {
         if released_at < 0 {
             return Err(SourceHoldError::InvalidRequest);
         }
-        let mut writer = self.lock_writer()?;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite)?;
+        let mut writer = self.writer_with_limit(limit)?;
+        let tx = writer.transaction(TransactionBehavior::Immediate)?;
         check_fence(&tx, self.lease_epoch())?;
         self.load_pin(&tx, binding, hold_id)?
             .ok_or(SourceHoldError::Invalid(SourceHoldInvalidity::Missing))?;
         release_capture_pin_in_tx(&tx, hold_id, released_at)?;
-        tx.commit().map_err(sqlite)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -868,17 +1003,35 @@ impl KernelStore {
         consumer_id: &str,
         released_at: i64,
     ) -> Result<Vec<String>, SourceHoldError> {
+        self.reconcile_source_holds_inner(&AcquireLimit::default(), consumer_id, released_at)
+    }
+
+    /// Exhaustion before commit rolls back every release rather than reconciling only part of the set.
+    pub fn reconcile_source_holds_within_budget(
+        &self,
+        budget: &EvalBudget,
+        consumer_id: &str,
+        released_at: i64,
+    ) -> Result<Vec<String>, SourceHoldError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| self.reconcile_source_holds_inner(&limit, consumer_id, released_at))
+    }
+
+    fn reconcile_source_holds_inner(
+        &self,
+        limit: &AcquireLimit,
+        consumer_id: &str,
+        released_at: i64,
+    ) -> Result<Vec<String>, SourceHoldError> {
         if !is_token(consumer_id) || released_at < 0 {
             return Err(SourceHoldError::InvalidRequest);
         }
         let epoch = i64::try_from(self.lease_epoch()).map_err(|_| KernelError::InvalidInput)?;
-        let mut writer = self.lock_writer()?;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(sqlite)?;
+        let mut writer = self.writer_with_limit(limit)?;
+        let tx = writer.transaction(TransactionBehavior::Immediate)?;
         check_fence(&tx, self.lease_epoch())?;
         let stale = release_consumer_holds_in_tx(&tx, consumer_id, Some(epoch), released_at)?;
-        tx.commit().map_err(sqlite)?;
+        tx.commit()?;
         Ok(stale)
     }
 

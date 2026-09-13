@@ -16,9 +16,10 @@ are the only edited files. No ownership or response-protocol cutover is claimed.
    getter calls. The test restores the descriptor before running any assertions.
    The combined repair made this witness pass. An independent mutation check
    found that the new array terminators also reject this case before the tape
-   ends, so the witness does not isolate the explicit bounds check. That check
-   remains defense in depth, not an independently demonstrated requirement of
-   this fixture.
+   ends, and the root check now refuses any accessor on `Array.prototype`
+   before the tape is read, so the witness does not isolate the explicit bounds
+   check. That check remains defense in depth, not an independently
+   demonstrated requirement of this fixture.
 2. **Array metadata collisions and missing root metadata: fixed.** Array tapes
    encode extra-key markers, names, order, attributes and an explicit end marker.
    Capture retains a separate root tape while recording each member. Recheck
@@ -62,10 +63,24 @@ are the only edited files. No ownership or response-protocol cutover is claimed.
 - **Remove checks after `await assertCurrentRetryPass()`: rejected.** The await
   opens a real microtask window even when its synchronous check succeeds. The
   retained post-await deep check and the NACK regression exercise this window.
-- **Drop hook-side capture and recapture in direct `run`: rejected.** A mutation
-  during directory lookup would become the direct call's accepted input instead
-  of being detected against hook entry. Capture stays before that await; PR2
-  moves ownership before preflight without discarding this obligation.
+- **Drop hook-side capture and recapture in direct `run`: rejected as stated,
+  then narrowed.** A mutation during directory lookup would become the direct
+  call's accepted input instead of being detected against hook entry, so the
+  hook's capture stays before that await. The hook now passes that capture to
+  `run`, which rechecks against it at its first post-await check instead of
+  building a second tape from the same synchronous state. Direct callers that
+  supply no capture still capture at entry. PR2 moves ownership before
+  preflight without discarding this obligation.
+- **Recheck the source on every wire page: removed.** Page bodies are
+  serialized before the send loop, so a per-page walk cannot change the bytes
+  sent, and its cost grows with page count times history size. The loop keeps
+  the cleared/superseded ownership check; the recheck before serialization and
+  the one before publication bracket the series, and a paged mutation test
+  proves publication is still refused and known deliveries are NACKed.
+- **Back-to-back rechecks with no intervening await: removed.** The checks after
+  the subagent and prompt-hash lookups and before the availability reads ran
+  with no await or host callback since the post-directory check. A regression
+  test counts walks between the prompt-hash read and the permission read.
 - **Arbitrary nested visitor calls as a public defect: not established.** The
   walker is private and callers cannot supply arbitrary nested operations.
   Preserving the outer visitor is nevertheless necessary for the concrete root
@@ -78,7 +93,11 @@ are the only edited files. No ownership or response-protocol cutover is claimed.
   counts UTF-16 strings, descriptors, snapshot slots and repeated shared-tree
   visits. It is separate from encoded-output bytes and from aggregate live
   capture accounting. It is not a whole-process RSS guarantee, and JSON below
-  the encoded-output limit can still exceed the source-walk estimate.
+  the encoded-output limit can still exceed the source-walk estimate. A later
+  review measured real sessions against the 64 MiB estimate and found that it
+  declined histories of 10 to 18 MiB JSON on every pass; the budget is now
+  256 MiB and walk-limit declines log at warn. See
+  [the source-guard supplement](source-guards.md#measured-local-cost).
 - **Split the walker class or an 87-line method solely for style: deferred.**
   No additional correctness defect requires that restructuring. The repair
   shares one internal record/compare operation without a broader refactor.

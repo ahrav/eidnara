@@ -162,8 +162,13 @@ impl ServedMessage {
     /// Divergence fingerprints use the serialized `WireBlock` basis of `FlatBlock.content_hash`.
     /// Overlaid, reduced, and rewritten blocks serialize and hash afresh.
     fn from_message_reusing(message: WireMessage, projected_blocks: Option<&[&FlatBlock]>) -> Self {
-        let canonical_bytes = crate::served_json::to_vec(&message)
-            .expect("CK wire message values must always serialize");
+        // The canonicalizer may hand back its growth buffer with spare capacity;
+        // converting to the exact-size `Arc` first keeps that slack from outliving
+        // the block-receipt serialization below.
+        let canonical_bytes: Arc<[u8]> = Arc::from(
+            crate::served_json::to_vec(&message)
+                .expect("CK wire message values must always serialize"),
+        );
         let mut by_index = HashMap::new();
         for flat in projected_blocks.into_iter().flatten().copied() {
             by_index.entry(flat.block_index).or_insert(flat);
@@ -195,7 +200,7 @@ impl ServedMessage {
                 if let Some(fp) = reused {
                     return fp;
                 }
-                let serialized = serde_json::to_string(block)
+                let serialized = crate::served_json::canonical_block_bytes(block)
                     .expect("CK wire blocks must always have a JSON representation");
                 (wire::fingerprint(&serialized), serialized.len())
             })
@@ -204,7 +209,6 @@ impl ServedMessage {
         let output_identity = format!("{canonical_digest:x}");
         let canonical_hash: [u8; 32] = canonical_digest.into();
         let message = Arc::new(message);
-        let canonical_bytes: Arc<[u8]> = Arc::from(canonical_bytes);
         let output_identity: Arc<str> = Arc::from(output_identity);
         let block_fingerprints: Arc<[(String, usize)]> = Arc::from(block_fingerprints);
         let retained_bytes = served_message_retained_bytes(
@@ -244,9 +248,28 @@ impl ServedMessage {
         &self.canonical_bytes
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn canonical_bytes_for_test(&self) -> &[u8] {
+        self.canonical_bytes()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn block_fingerprints_for_test(&self) -> &[(String, usize)] {
+        &self.block_fingerprints
+    }
+
     fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+}
+
+/// Runs the no-projection constructor arm (`from_message`) alone so an out-of-crate
+/// allocation observer can attribute construction apart from response assembly;
+/// `TransformResponse::passthrough` would fold that assembly into the window. The
+/// daemon crate forbids unsafe code, so the observer cannot live in-crate.
+#[cfg(feature = "test-support")]
+pub fn served_message_for_test(message: WireMessage) -> ServedMessage {
+    ServedMessage::from_message(message)
 }
 
 fn served_message_retained_bytes(
@@ -11837,7 +11860,8 @@ pub(crate) mod tests {
     use storage::{Isolation, StorageBackend, StorageDescriptor};
 
     use memory_store::{
-        ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, StoredCompartment, TagRow,
+        BlockKind, HarnessMeta, ModuleDropSeedRow, ModuleStateSyncRequest, ModuleUsage, OutputKind,
+        ProviderExtras, StoredCompartment, TagRow, ToolOutput,
     };
 
     fn tag_baseline_test_entry() -> TagBaselineCacheEntry {
@@ -13711,6 +13735,345 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn positive_output_cache_hit_reuses_owned_artifacts_without_constructing() {
+        let message: WireMessage = serde_json::from_str(
+            r#"{"role":"user","content":[{"kind":{"type":"text","text":"cached"}}]}"#,
+        )
+        .unwrap();
+        let served = ServedMessage::from_message(message.clone());
+        let mut entries = HashMap::new();
+        entries.insert(
+            "synthetic:m0".to_string(),
+            SerializedOutputCacheEntry {
+                identity: "identity-a".to_string(),
+                served: Some(served.clone()),
+            },
+        );
+        entries.insert(
+            "synthetic:m1".to_string(),
+            SerializedOutputCacheEntry {
+                identity: "identity-b".to_string(),
+                served: None,
+            },
+        );
+        let snapshot = SerializedOutputCacheSnapshot { entries };
+        let mut timings = BuildOutputTimings::default();
+
+        // A clean matching positive entry never invokes the constructor closure and
+        // returns pointer-equal owned artifacts.
+        let (hit, reused) = cached_or_serialize_output(
+            Some(&snapshot),
+            "synthetic:m0",
+            "identity-a",
+            false,
+            &mut timings,
+            || unreachable!("a positive hit must not construct"),
+        );
+        assert!(reused);
+        assert!(Arc::ptr_eq(&hit.message, &served.message));
+        assert!(Arc::ptr_eq(&hit.canonical_bytes, &served.canonical_bytes));
+        assert!(Arc::ptr_eq(&hit.output_identity, &served.output_identity));
+        assert!(Arc::ptr_eq(
+            &hit.block_fingerprints,
+            &served.block_fingerprints
+        ));
+        assert_eq!(hit.canonical_hash, served.canonical_hash);
+        assert_eq!((timings.cache_hits, timings.cache_misses), (1, 0));
+
+        // `Some(None)`, a dirty item, a foreign identity, and an absent key all construct.
+        let constructed = std::cell::Cell::new(0);
+        for (key, identity, dirty) in [
+            ("synthetic:m1", "identity-b", false),
+            ("synthetic:m0", "identity-a", true),
+            ("synthetic:m0", "identity-other", false),
+            ("synthetic:m9", "identity-a", false),
+        ] {
+            let (fresh, reused) = cached_or_serialize_output(
+                Some(&snapshot),
+                key,
+                identity,
+                dirty,
+                &mut timings,
+                || {
+                    constructed.set(constructed.get() + 1);
+                    message.clone()
+                },
+            );
+            assert!(!reused, "{key}/{identity}/{dirty}");
+            assert!(!Arc::ptr_eq(
+                &fresh.canonical_bytes,
+                &served.canonical_bytes
+            ));
+            assert_eq!(fresh.canonical_bytes(), served.canonical_bytes());
+        }
+        assert_eq!(constructed.get(), 4);
+        assert_eq!((timings.cache_hits, timings.cache_misses), (1, 4));
+        assert_eq!(timings.cache_dirty_skips, 1);
+    }
+
+    /// Daemon-built blocks carry no ingress text, so their canonical bytes come from
+    /// the typed value alone: span-sorted keys, a false `provider_executed` omitted, a
+    /// true one kept, and every payload key retained. The literals are the frozen
+    /// expectation; the sorted `Value` serialization is the independent ordering oracle.
+    #[test]
+    fn typed_only_blocks_canonicalize_by_field_selection_and_sorted_order() {
+        fn oracle(block: &WireBlock) -> String {
+            String::from_utf8(serde_json::to_vec(&serde_json::to_value(block).unwrap()).unwrap())
+                .unwrap()
+        }
+        let cases: Vec<(WireBlock, &str)> = vec![
+            (
+                WireBlock::bare(BlockKind::ToolCall {
+                    id: "todo_1".into(),
+                    name: "todowrite".into(),
+                    input: json!({"todos": [{"content": "a", "status": "pending", "priority": "high"}]}),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"todo_1","input":{"todos":[{"content":"a","priority":"high","status":"pending"}]},"name":"todowrite","type":"tool_call"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolCall {
+                    id: "web_1".into(),
+                    name: "websearch".into(),
+                    input: json!({"query": "q"}),
+                    provider_executed: true,
+                }),
+                r#"{"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":true,"type":"tool_call"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolResult {
+                    id: "todo_1".into(),
+                    tool_name: "todowrite".into(),
+                    output: ToolOutput::bare(OutputKind::Json {
+                        value: json!({"ok": true, "n": 42}),
+                    }),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"todo_1","output":{"kind":{"type":"json","value":{"n":42,"ok":true}}},"tool_name":"todowrite","type":"tool_result"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolResult {
+                    id: "deny_1".into(),
+                    tool_name: "delete".into(),
+                    output: ToolOutput::bare(OutputKind::ExecutionDenied {
+                        reason: Some("policy".into()),
+                    }),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"deny_1","output":{"kind":{"reason":"policy","type":"execution_denied"}},"tool_name":"delete","type":"tool_result"}}"#,
+            ),
+            (
+                WireBlock::bare(BlockKind::ToolResult {
+                    id: "err_1".into(),
+                    tool_name: "run".into(),
+                    output: ToolOutput::bare(OutputKind::ErrorJson {
+                        value: json!({"code": 7, "-0": -0.0, "big": 18446744073709551615u64}),
+                    }),
+                    provider_executed: false,
+                }),
+                r#"{"kind":{"id":"err_1","output":{"kind":{"type":"error_json","value":{"-0":-0.0,"big":18446744073709551615,"code":7}}},"tool_name":"run","type":"tool_result"}}"#,
+            ),
+            (
+                WireBlock::with_provider_extras(
+                    BlockKind::Text {
+                        text: "typed".into(),
+                    },
+                    ProviderExtras::from([(
+                        "opencode".to_string(),
+                        BTreeMap::from([(
+                            "metadata".to_string(),
+                            json!({"z": 1, "a": [1, {"y": 2, "x": 3}]}),
+                        )]),
+                    )]),
+                ),
+                r#"{"kind":{"text":"typed","type":"text"},"provider_extras":{"opencode":{"metadata":{"a":[1,{"x":3,"y":2}],"z":1}}}}"#,
+            ),
+        ];
+        for (block, literal) in &cases {
+            assert!(block.original().is_none());
+            let canonical = crate::served_json::canonical_block_bytes(block).unwrap();
+            assert_eq!(canonical, *literal);
+            assert_eq!(canonical, oracle(block));
+            // A false flag round-trips as absent; a true flag round-trips as present.
+            let decoded: WireBlock = serde_json::from_str(&canonical).unwrap();
+            assert_eq!(decoded.kind(), block.kind());
+        }
+        // Explicit false on ingress is retained text and stays a distinct identity.
+        let explicit_false: WireBlock = serde_json::from_str(
+            r#"{"kind":{"id":"web_1","input":{"query":"q"},"name":"websearch","provider_executed":false,"type":"tool_call"}}"#,
+        )
+        .unwrap();
+        assert!(explicit_false.original().is_some());
+        assert!(
+            crate::served_json::canonical_block_bytes(&explicit_false)
+                .unwrap()
+                .contains("\"provider_executed\":false")
+        );
+    }
+
+    /// The three fresh-byte consumers must read `canonical_block_bytes`; a consumer
+    /// that serializes a block any other way changes identity silently.
+    #[test]
+    fn fresh_block_byte_consumers_call_the_canonical_producer() {
+        let flatten = include_str!("wire.rs")
+            .split_once("fn flatten_block(")
+            .unwrap()
+            .1
+            .split_once("fn tool_arc_id(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            flatten
+                .matches("served_json::canonical_block_bytes(")
+                .count(),
+            1
+        );
+        assert!(!flatten.contains("serde_json::to_string("));
+        assert!(!flatten.contains("serde_json::to_vec("));
+
+        let constructor = include_str!("transform.rs")
+            .split_once("    fn from_message_reusing(")
+            .unwrap()
+            .1
+            .split_once("    fn with_output_identity(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            constructor
+                .matches("served_json::canonical_block_bytes(")
+                .count(),
+            1
+        );
+        assert!(!constructor.contains("serde_json::to_string("));
+
+        let sidecar = include_str!("codec/sidecar.rs")
+            .split_once("pub(crate) fn decoded_block_fingerprint(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn stamp_block_identity(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            sidecar
+                .matches("served_json::canonical_block_bytes(")
+                .count(),
+            1
+        );
+        assert!(!sidecar.contains("serde_json::to_value("));
+        assert!(!sidecar.contains("stable_hash("));
+    }
+
+    /// Receipt reuse selects by equality digest and position; fresh hashing serializes
+    /// the served block. The two are separate operations with separate oracles.
+    #[test]
+    fn receipt_reuse_is_separate_from_fresh_hashing() {
+        fn call(id: &str, x: f64) -> WireBlock {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "f".into(),
+                input: json!({ "x": x }),
+                provider_executed: false,
+            })
+        }
+        let projected_message = wire_message_from_blocks(
+            "assistant",
+            vec![call("a", 0.0), call("b", 1.0), call("b", 1.0)],
+        );
+        let projection = project_messages(&[Arc::new(IngressMessage {
+            mid: "p".into(),
+            ordinal: 1,
+            ck: projected_message.clone(),
+        })])
+        .unwrap();
+        let flats: Vec<&FlatBlock> = projection.blocks.iter().collect();
+
+        // Positional match: served index 0 equals projected index 0 by `PartialEq`
+        // (`-0.0 == 0.0`), so the receipt is reused even though fresh bytes differ.
+        let served = wire_message_from_blocks("assistant", vec![call("a", -0.0)]);
+        let reused = ServedMessage::from_message_reusing(served.clone(), Some(&flats));
+        let fresh = ServedMessage::from_message(served.clone());
+        assert_eq!(
+            reused.block_fingerprints[0].0,
+            wire::fingerprint_digest(&flats[0].content_hash)
+        );
+        assert_eq!(reused.block_fingerprints[0].1, flats[0].bytes.len());
+        assert_ne!(reused.block_fingerprints[0], fresh.block_fingerprints[0]);
+        assert_eq!(
+            reused.canonical_bytes(),
+            fresh.canonical_bytes(),
+            "served bytes never come from receipts"
+        );
+        assert!(
+            std::str::from_utf8(reused.canonical_bytes())
+                .unwrap()
+                .contains("-0.0")
+        );
+
+        // The equality index applies only when the served index has no projected block.
+        // Distinct receipts make first-candidate selection observable independently of content.
+        let mut receipts = projection.blocks.clone();
+        for (index, flat) in receipts.iter_mut().enumerate() {
+            flat.content_hash = [index as u8; 32];
+        }
+        let receipts: Vec<&FlatBlock> = receipts.iter().collect();
+        let shifted = wire_message_from_blocks(
+            "assistant",
+            vec![
+                call("b", 1.0),
+                call("y", 6.0),
+                call("x", 7.0),
+                call("b", 1.0),
+            ],
+        );
+        let reused = ServedMessage::from_message_reusing(shifted.clone(), Some(&receipts));
+        let fresh = ServedMessage::from_message(shifted);
+        // Served indexes 0-2 each have an unequal positional candidate, so none reuses
+        // an equal projected block even though projected indexes 1 and 2 equal index 0.
+        assert_eq!(
+            reused.block_fingerprints[0], fresh.block_fingerprints[0],
+            "unequal positional candidate: fresh hash"
+        );
+        assert_eq!(
+            reused.block_fingerprints[1], fresh.block_fingerprints[1],
+            "unequal positional candidate: fresh hash"
+        );
+        assert_eq!(
+            reused.block_fingerprints[2], fresh.block_fingerprints[2],
+            "unequal positional candidate: fresh hash"
+        );
+        assert_eq!(
+            reused.block_fingerprints[3],
+            (wire::fingerprint_digest(&[1; 32]), receipts[1].bytes.len()),
+            "served index 3 has no projected block: the equality index keeps the first equal candidate"
+        );
+        assert_ne!(reused.block_fingerprints[3], fresh.block_fingerprints[3]);
+        assert_eq!(
+            fresh.block_fingerprints[0], fresh.block_fingerprints[3],
+            "identical typed blocks hash identically"
+        );
+
+        // No receipts: every fingerprint is the fresh canonical hash.
+        let none = ServedMessage::from_message_reusing(projected_message.clone(), None);
+        for (index, block) in projected_message.content().iter().enumerate() {
+            let canonical = crate::served_json::canonical_block_bytes(block).unwrap();
+            assert_eq!(
+                none.block_fingerprints[index],
+                (wire::fingerprint(&canonical), canonical.len())
+            );
+        }
+    }
+
+    fn wire_message_from_blocks(role: &str, blocks: Vec<WireBlock>) -> WireMessage {
+        WireMessage::from_parts(
+            role,
+            blocks,
+            None,
+            ProviderExtras::new(),
+            HarnessMeta::default(),
+        )
+    }
+
+    #[test]
     fn served_canonical_shell_bytes_and_segments_are_frozen() {
         let original: WireMessage = serde_json::from_str(
             r#"{"z":null,"role":"user","content":[{"kind":{"type":"text","text":"é\n"},"unknown":{"😀":-0.0,"é":1.25,"a":18446744073709551615}}],"meta":{"synthetic":false,"future":true}}"#,
@@ -14463,16 +14826,30 @@ pub(crate) mod tests {
         );
     }
 
+    /// The corpus mirrors every block shape `module-wire.ts` emits: each `BlockKind`
+    /// and `OutputKind` variant, tool flags absent and `true`, media with and without
+    /// `filename`, opaque with and without `arc`, reasoning with and without
+    /// `signature`, and every `meta` flag combination. Regenerate with
+    /// `EIDNARA_REGEN_PROJECTION_GOLDEN=1`; a diff on any entry is an identity change
+    /// that must be reviewed, not accepted by rerunning.
     #[test]
     fn wire_golden_projects_to_flat_blocks() {
-        let ck: Vec<WireMessage> =
-            serde_json::from_str(include_str!("../testdata/wire-golden.json")).unwrap();
-        let projection = project_messages(
-            &ingress_from_ck(ck)
-                .into_iter()
-                .collect::<wire::IngressMessages>(),
-        )
-        .unwrap();
+        let messages: Vec<wire::IngressMessage> =
+            serde_json::from_str(include_str!("../testdata/ingress-projection-corpus.json"))
+                .unwrap();
+        for message in &messages {
+            assert!(
+                message.ck.original().is_some(),
+                "{}: corpus entries decode as retained plugin ingress",
+                message.mid
+            );
+        }
+        let projection =
+            project_messages(&messages.into_iter().collect::<wire::IngressMessages>()).unwrap();
+        for block in &projection.blocks {
+            let digest: [u8; 32] = Sha256::digest(block.bytes.as_bytes()).into();
+            assert_eq!(block.content_hash, digest, "{}", block.id);
+        }
         let actual = serde_json::to_value(&projection.blocks).unwrap();
         if std::env::var_os("EIDNARA_REGEN_PROJECTION_GOLDEN").is_some() {
             std::fs::write(

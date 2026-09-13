@@ -34,6 +34,8 @@ export interface ReferenceableRejection {
         | "proxy"
         | "accessor"
         | "prototype"
+        | "prototype_accessor"
+        | "boxed_primitive"
         | "cycle"
         | "depth"
         | "sparse_array"
@@ -70,7 +72,48 @@ function defineSlot<T>(array: T[], index: number, value: T): void {
 export function readOwnDataProperty(value: unknown, key: string): unknown {
     if (value === null || typeof value !== "object" || types.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+}
+
+// Source values are arrays, plain objects, strings, numbers and booleans; a read that misses an
+// own property, or any method call on a primitive, resolves through one of these prototypes.
+const BUILTIN_PROTOTYPES: readonly (readonly [string, object])[] = [
+    ["Array", Array.prototype],
+    ["Object", Object.prototype],
+    ["String", String.prototype],
+    ["Number", Number.prototype],
+    ["Boolean", Boolean.prototype],
+];
+
+/**
+ * The root array is the one value that crosses back to the host as a return value, so a `then`
+ * anywhere on its chain would be assimilated by the host's promise machinery; `in` observes an
+ * inherited accessor without invoking it. Reads of absent optional fields and out-of-range indexes
+ * fall through to the built-in prototypes, so an accessor installed there is refused the same way.
+ */
+export function rootArrayRejection(value: unknown): ReferenceableRejection | undefined {
+    if (types.isProxy(value)) return { reason: "proxy", path: "" };
+    if (!Array.isArray(value)) return { reason: "not_array", path: "" };
+    if (
+        Object.getPrototypeOf(value) !== Array.prototype ||
+        Object.getPrototypeOf(Array.prototype) !== Object.prototype ||
+        Object.getPrototypeOf(Object.prototype) !== null
+    )
+        return { reason: "prototype", path: "" };
+    if ("then" in value) return { reason: "extra_property", path: "/then" };
+    // Indexed loops: `for...of` would read `Array.prototype[Symbol.iterator]` before it is inspected.
+    for (let p = 0; p < BUILTIN_PROTOTYPES.length; p += 1) {
+        const name = BUILTIN_PROTOTYPES[p]![0];
+        const prototype = BUILTIN_PROTOTYPES[p]![1];
+        const keys = Reflect.ownKeys(prototype);
+        for (let k = 0; k < keys.length; k += 1) {
+            const key = keys[k]!;
+            const slot = Object.getOwnPropertyDescriptor(prototype, key);
+            if (key !== "__proto__" && slot && !Object.hasOwn(slot, "value"))
+                return { reason: "prototype_accessor", path: `${name}.prototype/${String(key)}` };
+        }
+    }
+    return undefined;
 }
 
 class SourceRejected extends Error {
@@ -95,15 +138,7 @@ class ReferenceableWalk {
     private field?: (value: SnapshotField) => void;
     private readonly ancestors = new Set<object>();
 
-    constructor(private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES) {
-        // A non-finite or oversize limit would disable the traversal bound.
-        if (
-            !Number.isSafeInteger(maxBytes) ||
-            maxBytes < 0 ||
-            maxBytes > TRANSFORM_CAPTURE_MAX_BYTES
-        )
-            throw new CaptureBudgetExceeded("invalid walk limit");
-    }
+    constructor(private readonly maxBytes = TRANSFORM_CAPTURE_MAX_BYTES) {}
 
     spend(bytes: number): void {
         if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > this.maxBytes - this.bytes) {
@@ -150,10 +185,10 @@ class ReferenceableWalk {
     }
 
     members(messages: unknown, visit: (slot: PropertyDescriptor, index: number) => void): number {
-        if (types.isProxy(messages)) throw new SourceRejected("proxy", "");
-        if (!Array.isArray(messages)) throw new SourceRejected("not_array", "");
+        const rejection = rootArrayRejection(messages);
+        if (rejection) throw new SourceRejected(rejection.reason, rejection.path);
         this.spend(ROOT_CAPTURE_BYTES);
-        return this.entries(messages, "", (key, slot) => {
+        return this.entries(messages as unknown[], "", (key, slot) => {
             this.spend(ROOT_MEMBER_BYTES);
             visit(slot, Number(key));
         });
@@ -194,7 +229,7 @@ class ReferenceableWalk {
         this.spend(TAPE_SLOT_BYTES);
         const slot = Object.getOwnPropertyDescriptor(value, key);
         if (!slot) throw new SourceRejected("sparse_array", path);
-        if (!("value" in slot)) throw new SourceRejected("accessor", path);
+        if (!Object.hasOwn(slot, "value")) throw new SourceRejected("accessor", path);
         return slot;
     }
 
@@ -205,6 +240,8 @@ class ReferenceableWalk {
         visit: (key: string, slot: PropertyDescriptor) => void,
     ): number {
         if (types.isProxy(value)) throw new SourceRejected("proxy", path);
+        // JSON serializes a boxed primitive by its internal slot, which no own property records.
+        if (types.isBoxedPrimitive(value)) throw new SourceRejected("boxed_primitive", path);
         const array = Array.isArray(value);
         const prototype = Object.getPrototypeOf(value);
         if (
@@ -223,8 +260,8 @@ class ReferenceableWalk {
             holder = Object.getPrototypeOf(holder)
         ) {
             const hook = Object.getOwnPropertyDescriptor(holder, "toJSON");
-            if (hook && (!("value" in hook) || hook.value !== undefined)) {
-                const reason = !("value" in hook)
+            if (hook && (!Object.hasOwn(hook, "value") || hook.value !== undefined)) {
+                const reason = !Object.hasOwn(hook, "value")
                     ? "accessor"
                     : types.isProxy(hook.value)
                       ? "proxy"
@@ -244,6 +281,8 @@ class ReferenceableWalk {
         }
         // Opening and closing brackets; each element or key pays its own separator.
         this.emit(array ? ARRAY : OBJECT, 1);
+        // A null prototype changes what an absent optional field reads as, so the tape records it.
+        if (!array) this.emit(prototype === null, 0);
         if (lengthSlot) {
             this.emit(length, 0);
             this.attributes(lengthSlot);
@@ -397,18 +436,9 @@ type HostArrayRejectionReason =
     | "element_not_writable"
     | "budget";
 
-export function hostArrayReplacementRejection(
-    target: unknown,
-    nextLength: number,
-): HostArrayRejectionReason | null {
+export function hostArrayReplacementRejection(target: unknown): HostArrayRejectionReason | null {
     if (types.isProxy(target)) return "proxy";
     if (!Array.isArray(target)) return "not_array";
-    if (
-        !Number.isSafeInteger(nextLength) ||
-        nextLength < 0 ||
-        nextLength > TRANSFORM_CAPTURE_MAX_BYTES / 64
-    )
-        return "budget";
     if (!Object.isExtensible(target)) return "not_extensible";
     if (!Object.getOwnPropertyDescriptor(target, "length")?.writable) return "length_not_writable";
     try {
@@ -425,9 +455,8 @@ export function hostArrayReplacementRejection(
 }
 
 /**
- * Preconditions: `hostArrayReplacementRejection(target, next.length)` returns `null` and `next`
- * passed `inspectReferenceableMessages`. Own-slot definitions bypass inherited setters; a writable
- * length and configurable slots allow shrinking.
+ * Precondition: `hostArrayReplacementRejection(target)` returns `null`. Own-slot definitions
+ * bypass inherited setters; a writable length and configurable slots allow shrinking.
  */
 export function replaceHostArrayContents(target: unknown[], next: readonly unknown[]): void {
     for (let index = 0; index < next.length; index += 1) {
@@ -450,24 +479,12 @@ export interface CaptureLease {
 export class TransformCaptureAdmission {
     private readonly leases = new Map<string, CaptureLease>();
     private chargedBytesTotal = 0;
-    /** Injected limits may only tighten the process ceiling; a copy keeps later caller mutation out. */
     constructor(
         private readonly limits = {
             maxPasses: TRANSFORM_CAPTURE_MAX_PASSES,
             maxBytes: TRANSFORM_CAPTURE_MAX_BYTES,
         },
-    ) {
-        for (const limit of [limits.maxPasses, limits.maxBytes]) {
-            if (!Number.isSafeInteger(limit) || limit < 0)
-                throw new RangeError("invalid capture limits");
-        }
-        if (
-            limits.maxPasses > TRANSFORM_CAPTURE_MAX_PASSES ||
-            limits.maxBytes > TRANSFORM_CAPTURE_MAX_BYTES
-        )
-            throw new RangeError("capture limits exceed the process ceiling");
-        this.limits = { ...limits };
-    }
+    ) {}
 
     get activePasses(): number {
         return this.leases.size;

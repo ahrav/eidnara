@@ -341,14 +341,16 @@ pub enum BlockKind {
         id: String,
         name: String,
         input: Value,
-        #[serde(default)]
+        /// Emitters send this field only when true, so a typed block omits the
+        /// false default and serializes to the same bytes as its ingress form.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         provider_executed: bool,
     },
     ToolResult {
         id: String,
         tool_name: String,
         output: ToolOutput,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         provider_executed: bool,
     },
     Media(MediaBlock),

@@ -109,8 +109,8 @@ reassembles native continuation chunks before responding. It uses the final
 page's tail-delta metadata. Intermediate responses use `{ staged: true }` and
 count toward response bytes. It does not implement CK policy, CK continuation
 assembly, digest validation, note delivery, or a real shared-memory transport.
-Its native-only echo is not U5's CK-plus-native daemon baseline or the complete
-suffix-comparator experiment.
+Its native-only echo is not U5's combined CK and native daemon baseline or the
+complete suffix-comparator experiment.
 
 ### Measurements
 

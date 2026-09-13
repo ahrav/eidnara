@@ -298,6 +298,65 @@ describe("eidnara hook", () => {
         });
     }
 
+    it("logs a byte-budget decline at warn before preflight", async () => {
+        useTempDataHome("hook-source-limit-");
+        const fake = createFakeModuleClient(() => ({ native_messages: [] }));
+        const client = createClientMock();
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        const sessionId = "ses-byte-budget";
+        // Forty two-MiB strings charge more than the 64 MiB owner can grant.
+        const messages = Array.from({ length: 40 }, (_, index) => ({
+            info: { id: `m-${index}`, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "x".repeat(2 ** 21) }],
+        }));
+        const warn = spyOn(logger.sessionLog, "warn");
+        try {
+            await hook["experimental.chat.messages.transform"]({}, { messages });
+            expect(
+                warn.mock.calls.some(
+                    ([session, message]) =>
+                        session === sessionId &&
+                        String(message).includes("pass declined: capture_bytes"),
+                ),
+            ).toBe(true);
+        } finally {
+            warn.mockRestore();
+        }
+        expect(client.session.get).not.toHaveBeenCalled();
+        expect(fake.calls).toHaveLength(0);
+    });
+
+    it("captures the source once per pass", async () => {
+        useTempDataHome("hook-single-capture-");
+        const sessionId = "ses-single-capture";
+        const messages = installOneRawMessage(sessionId);
+        const member = messages[0]!;
+        const approved = { info: { id: "approved" }, parts: [{ type: "text", text: "result" }] };
+        const fake = createFakeModuleClient(() => ({ native_messages: [approved] }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
+        const define = Object.defineProperty;
+        let memberSlotDefinitions = 0;
+        const spy = spyOn(Object, "defineProperty").mockImplementation(
+            (target, key, descriptor) => {
+                if (Array.isArray(target) && "value" in descriptor && descriptor.value === member)
+                    memberSlotDefinitions += 1;
+                return define(target, key, descriptor);
+            },
+        );
+        try {
+            await hook["experimental.chat.messages.transform"]({}, { messages });
+        } finally {
+            spy.mockRestore();
+        }
+        expect(fake.calls.map((call) => call.method)).toEqual(["transform"]);
+        expect(messages[0]).toBe(approved);
+        expect(memberSlotDefinitions).toBe(1);
+    });
+
     it("rejects source mutation during hook directory lookup before direct transform", async () => {
         useTempDataHome("hook-source-directory-");
         const sessionId = "ses-source-directory";

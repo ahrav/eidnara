@@ -1,6 +1,9 @@
-import { types } from "node:util";
 import type { ResolvedTransformMode as TransformMode } from "../config/transform-mode";
-import { readOwnDataProperty } from "../hooks/context/transform-capture";
+import {
+    type ReferenceableRejection,
+    readOwnDataProperty,
+    rootArrayRejection,
+} from "../hooks/context/transform-capture";
 import { log } from "../shared/logger";
 
 type MessageWithParts = {
@@ -10,14 +13,10 @@ type MessageWithParts = {
 
 type MessagesTransformOutput = { messages: MessageWithParts[] };
 
-function returnableMessageArray(value: unknown): boolean {
-    return (
-        !types.isProxy(value) &&
-        Array.isArray(value) &&
-        Object.getPrototypeOf(value) === Array.prototype &&
-        Object.getPrototypeOf(Array.prototype) === Object.prototype &&
-        Object.getPrototypeOf(Object.prototype) === null &&
-        !("then" in value)
+/** A polluted built-in prototype affects every session, so that refusal is logged for operators. */
+function logRootDecline(rejection: ReferenceableRejection, stage: string): void {
+    log[rejection.reason === "prototype_accessor" ? "warn" : "debug"](
+        `[eidnara] transform declined: ${rejection.reason} at ${rejection.path || "/"} (${stage})`,
     );
 }
 
@@ -56,9 +55,10 @@ export function createMessagesTransformHandler(args: {
     }
 
     return async (input, output): Promise<MessageWithParts[] | undefined> => {
-        const messages = readOwnDataProperty(output, "messages");
-        if (!returnableMessageArray(messages)) {
-            log("[eidnara] transform declined: unsupported wrapper array or then property");
+        // Only the root is checked here: nested data is the hook's concern, and this check guards promise assimilation of the return value.
+        const entryRejection = rootArrayRejection(readOwnDataProperty(output, "messages"));
+        if (entryRejection) {
+            logRootDecline(entryRejection, "entry");
             return;
         }
         const eidnara = args.getEidnara ? args.getEidnara() : args.eidnara;
@@ -74,10 +74,9 @@ export function createMessagesTransformHandler(args: {
             );
         }
         const result = readOwnDataProperty(output, "messages") as MessageWithParts[];
-        if (!returnableMessageArray(result)) {
-            log(
-                "[eidnara] transform return declined SourceRejected: unsupported array or then property",
-            );
+        const returnRejection = rootArrayRejection(result);
+        if (returnRejection) {
+            logRootDecline(returnRejection, "return");
             return;
         }
         return result;

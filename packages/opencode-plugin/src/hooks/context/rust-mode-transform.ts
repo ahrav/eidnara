@@ -96,16 +96,12 @@ function activeAgentFromMessages(messages: readonly MessageLike[]): string | und
 async function resolveCombinedTodowriteVerdict(
     deps: RustModeTransformDeps,
     sessionId: string,
-    messages: readonly MessageLike[],
+    activeAgent: string | undefined,
     availability: ToolAvailabilityVerdict,
 ): Promise<boolean> {
     if (!availability.frozen || !availability.callable || deps.compactionOff === true) return false;
 
-    return !(await todowritePermissionDenied(
-        deps.client,
-        sessionId,
-        activeAgentFromMessages(messages),
-    ));
+    return !(await todowritePermissionDenied(deps.client, sessionId, activeAgent));
 }
 
 export interface RustModeModuleClient {
@@ -272,7 +268,6 @@ function buildWireCache(args: {
 }): RustWireCache {
     const { messages, encoded, snapshots, delta } = args;
     const rawLast = messages.at(-1);
-    const rawLastId = rawLast === undefined ? null : messageIdOf(rawLast);
     const ck = buildWireFingerprint(encoded, delta?.ckAfter);
     const native = buildWireFingerprint(
         delta ? messages.slice(delta.rawStart) : messages,
@@ -281,7 +276,8 @@ function buildWireCache(args: {
     return {
         rawCount: messages.length,
         wireCount: (delta?.wireStart ?? 0) + encoded.length,
-        rawLastVisible: rawLast !== undefined && encoded.some((entry) => entry.mid === rawLastId),
+        rawLastVisible:
+            rawLast !== undefined && encoded.some((entry) => entry.mid === messageIdOf(rawLast)),
         ckFingerprint: ck.fingerprint,
         ckPrefixFingerprintBeforeLast: ck.prefixFingerprintBeforeLast,
         nativeFingerprint: native.fingerprint,
@@ -726,14 +722,20 @@ type PassDeclineReason =
     | "deleted"
     | "internal_child";
 
-/** A local refusal prevents publication without counting a daemon failure. */
+/**
+ * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
+ * polluted built-in prototype recur on every call for the affected session, so they log at warn.
+ */
 class PassDeclined extends Error {
+    readonly logLevel: "debug" | "warn";
     constructor(
         sessionId: string,
         readonly reason: PassDeclineReason,
         detail?: string,
+        logLevel: "debug" | "warn" = reason === "capture_bytes" ? "warn" : "debug",
     ) {
         super(`rust session ${sessionId} pass declined: ${reason}${detail ? ` (${detail})` : ""}`);
+        this.logLevel = logLevel;
     }
 }
 
@@ -842,9 +844,9 @@ export function createRustModeTransform(
             applied: new Set(),
         };
         const target = readOwnDataProperty(output, "messages") as unknown[];
-        const hostRejection = hostArrayReplacementRejection(target, 0);
+        const hostRejection = hostArrayReplacementRejection(target);
         if (hostRejection !== null) {
-            sessionLog.debug(
+            sessionLog[hostRejection === "prototype_accessor" ? "warn" : "debug"](
                 sessionId,
                 `rust transform declined before dispatch: host_container ${hostRejection}`,
             );
@@ -970,6 +972,7 @@ export function createRustModeTransform(
                     sessionId,
                     "unsupported_source",
                     `${inspection.rejection.reason} at ${inspection.rejection.path}`,
+                    inspection.rejection.reason === "prototype_accessor" ? "warn" : "debug",
                 );
             }
             inputCount = inspection.messageWireBytes.length;
@@ -1014,6 +1017,34 @@ export function createRustModeTransform(
             }
             const passUsageSnapshot = loadContextUsage(deps, sessionId);
             let model = modelFromMessages(messages);
+            // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
+            resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
+            const reduceAvailability = resolveCtxReduceAvailability(sessionId);
+            resolveTodowriteAvailabilityFromMessages(sessionId, messages);
+            const todoAvailability = resolveTodowriteAvailability(sessionId);
+            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
+            const activeAgent = activeAgentFromMessages(messages);
+            // Ordinal work stages in a charged pass-local copy of the memo; only accepted publication promotes it.
+            const stagedMemo: ModuleOrdinalMemo = {
+                ...state.ordinals,
+                entries: new Map(state.ordinals.entries),
+            };
+            const provisionalBase = wireDelta
+                ? (() => {
+                      for (let index = wireDelta.rawStart - 1; index >= 0; index -= 1) {
+                          const priorId = messageIdOf(messages[index]);
+                          if (!priorId) continue;
+                          const prior = stagedMemo.entries.get(priorId);
+                          if (prior !== undefined)
+                              return Math.max(prior, stagedMemo.continuationBase ?? 0);
+                      }
+                      return Math.max(
+                          stagedMemo.canonicalCount ?? 0,
+                          stagedMemo.continuationBase ?? 0,
+                      );
+                  })()
+                : stagedMemo.continuationBase;
+            // Every message read above is synchronous; the awaits below read nothing from the source, so the next recheck precedes ordinal annotation.
             // The directory read also records a host-reported `parentID`, so it runs before the subagent classification is read.
             const directory = await resolveSessionDirectory(deps, sessionId);
             if (deps.isSessionDeleted?.(sessionId)) {
@@ -1053,22 +1084,16 @@ export function createRustModeTransform(
                 }
             }
             const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
-            recheckCapture("preflight");
-            // Both verdicts freeze from the first user message in the live array before the DB is consulted; a session whose first user row is not yet persisted otherwise reads as provisional and fails closed.
-            resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
-            const reduceAvailability = resolveCtxReduceAvailability(sessionId);
+            assertCurrentPass();
             // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
             // Synthesis fails closed when host evidence is provisional or missing.
-            resolveTodowriteAvailabilityFromMessages(sessionId, messages);
-            const todoAvailability = resolveTodowriteAvailability(sessionId);
-            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
             const todoToolPresent = await resolveCombinedTodowriteVerdict(
                 deps,
                 sessionId,
-                messages,
+                activeAgent,
                 todoAvailability,
             );
-            recheckCapture("permission");
+            assertCurrentPass();
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
             const contextLimit =
@@ -1120,26 +1145,6 @@ export function createRustModeTransform(
                 prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
-            // Ordinal work stages in a charged pass-local copy of the memo; only accepted publication promotes it.
-            const stagedMemo: ModuleOrdinalMemo = {
-                ...state.ordinals,
-                entries: new Map(state.ordinals.entries),
-            };
-            const provisionalBase = wireDelta
-                ? (() => {
-                      for (let index = wireDelta.rawStart - 1; index >= 0; index -= 1) {
-                          const priorId = messageIdOf(messages[index]);
-                          if (!priorId) continue;
-                          const prior = stagedMemo.entries.get(priorId);
-                          if (prior !== undefined)
-                              return Math.max(prior, stagedMemo.continuationBase ?? 0);
-                      }
-                      return Math.max(
-                          stagedMemo.canonicalCount ?? 0,
-                          stagedMemo.continuationBase ?? 0,
-                      );
-                  })()
-                : stagedMemo.continuationBase;
             /**
              * Prime the memo asynchronously, recheck the captured messages, then annotate them
              * synchronously so no message read follows an await without a fresh guard.
@@ -1184,10 +1189,6 @@ export function createRustModeTransform(
                 }
                 return resolved;
             };
-            // A memo generation the scan cannot match forces a full re-prime without an anchor.
-            const resetStagedMemo = (): void => {
-                stagedMemo.memoGeneration = -1;
-            };
             let resolved = await resolveOrdinals(
                 wireDelta?.rawStart ?? 0,
                 provisionalBase,
@@ -1196,7 +1197,8 @@ export function createRustModeTransform(
             if (!resolved.ok) {
                 if (wireDelta) reserveWire(0, wireDelta.rawStart);
                 wireDelta = undefined;
-                resetStagedMemo();
+                // A memo generation the scan cannot match forces a full re-prime without an anchor.
+                stagedMemo.memoGeneration = -1;
                 resolved = await resolveOrdinals(
                     0,
                     stagedMemo.continuationBase,
@@ -1292,7 +1294,8 @@ export function createRustModeTransform(
                         restart: { reason, pages: series.length, atPage: index },
                     });
                     // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
-                    recheckCapture(`page:${index}${detail}`);
+                    // Page bodies are frozen text, so a source walk here cannot change what is sent; the recheck before publication covers the series.
+                    assertCurrentPass();
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {
@@ -1354,6 +1357,8 @@ export function createRustModeTransform(
                 }
                 return result.response;
             };
+            // The daemon commits its native-output snapshot on response, so a pass that exits after dispatch without committing its cache must resend the full history.
+            state.forceFullWire = true;
             let response = await sendTransformSeriesWithSingleRestart(body, "");
             captureResponseTelemetry(response);
             if (isNeedFullSync(response) || !hasNativeResponseContent(response)) {
@@ -1375,7 +1380,7 @@ export function createRustModeTransform(
                         "retry=full",
                     );
                     if (!retryResolved.ok) {
-                        resetStagedMemo();
+                        stagedMemo.memoGeneration = -1;
                         retryResolved = await resolveOrdinals(
                             0,
                             undefined,
@@ -1408,6 +1413,9 @@ export function createRustModeTransform(
                         timings,
                         "retry=full",
                     );
+                } else {
+                    // The same body is serialized again from the live objects, so the source is rechecked first.
+                    recheckCapture("full-retry");
                 }
                 response = await sendTransformSeriesWithSingleRestart(body, " retry=full");
                 captureResponseTelemetry(response);
@@ -1432,13 +1440,6 @@ export function createRustModeTransform(
                         : undefined,
                     (slots) => lease.reserve(slots * CANDIDATE_SLOT_BYTES),
                 );
-                // Kept prefix entries are host-owned since their publication, so the candidate is inspected before any plain read.
-                const candidateInspection = inspectReferenceableMessages(candidate);
-                if (!candidateInspection.ok) {
-                    throw new Error(
-                        `rust transform output is not referenceable: ${candidateInspection.rejection.reason} at ${candidateInspection.rejection.path}`,
-                    );
-                }
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     assertNativeBoundary(candidate, sessionId, boundaryId);
@@ -1465,7 +1466,7 @@ export function createRustModeTransform(
                 }
                 // Final synchronous guards: ownership, wire invalidation, source membership and content, and the host container contract.
                 recheckCapture("publish");
-                const publishRejection = hostArrayReplacementRejection(target, candidate.length);
+                const publishRejection = hostArrayReplacementRejection(target);
                 if (publishRejection !== null) {
                     throw new PassDeclined(sessionId, "host_container", publishRejection);
                 }
@@ -1496,7 +1497,10 @@ export function createRustModeTransform(
                     : caught;
             if (error instanceof PassDeclined || lease.signal.aborted) {
                 decision = error instanceof PassDeclined ? `declined:${error.reason}` : "cancelled";
-                sessionLog.debug(sessionId, error instanceof Error ? error.message : String(error));
+                sessionLog[error instanceof PassDeclined ? error.logLevel : "debug"](
+                    sessionId,
+                    error instanceof Error ? error.message : String(error),
+                );
             } else {
                 if (decision.toLowerCase() !== "need_full_sync") decision = "error";
                 markFailure(sessionId, state, error);
@@ -1509,7 +1513,8 @@ export function createRustModeTransform(
     const run = (sessionId: string, output: { messages: unknown[] }): Promise<void> => {
         const admission = captureAdmission.admit(sessionId);
         if ("declined" in admission) {
-            sessionLog.debug(
+            // Global count exhaustion is a saturation signal; a same-session supersession is routine.
+            sessionLog[admission.declined === "pass_count" ? "warn" : "debug"](
                 sessionId,
                 `rust transform declined before dispatch: ${admission.declined}`,
             );
@@ -1557,7 +1562,6 @@ export function createRustModeTransform(
 
 export const __rustModeTransformTest = {
     WIRE_CACHE_SESSION_CAPACITY,
-    WIRE_PROJECTION_FACTOR,
     buildNativeCandidate,
     buildTransformBody,
     transformGeometryForWire,

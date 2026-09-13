@@ -15,7 +15,9 @@ use std::time::Instant;
 
 use rusqlite::TransactionBehavior;
 
+use super::applicability::EvalBudget;
 use super::cas::{ArtifactError, ArtifactErrorKind, is_artifact_digest};
+use super::open::AcquireLimit;
 use super::slice::ObservationPayload;
 use super::source_descriptor::{
     SOURCE_DESCRIPTOR_DETAIL_VERSION, SourceDescriptorDetail, descriptor_object_id,
@@ -241,14 +243,62 @@ impl KernelStore {
         cursor: Option<&SourceCursor>,
         bounds: SourcePageBounds,
     ) -> Result<SourcePage, SourceExportError> {
+        SourceExport {
+            store: self,
+            limit: AcquireLimit::default(),
+        }
+        .page(binding, hold_id, now, window, cursor, bounds)
+    }
+
+    /// Budget checks cannot interrupt synchronous regular-file reads or hashing.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserves the legacy page arguments with an explicit caller budget"
+    )]
+    pub fn export_source_page_within_budget(
+        &self,
+        budget: &EvalBudget,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        window: ExportWindow,
+        cursor: Option<&SourceCursor>,
+        bounds: SourcePageBounds,
+    ) -> Result<SourcePage, SourceExportError> {
+        let export = SourceExport {
+            store: self,
+            limit: budget.acquire_limit(),
+        };
+        export
+            .limit
+            .run(|| export.page(binding, hold_id, now, window, cursor, bounds))
+    }
+}
+
+struct SourceExport<'a> {
+    store: &'a KernelStore,
+    limit: AcquireLimit,
+}
+
+impl SourceExport<'_> {
+    fn page(
+        &self,
+        binding: &SourceHoldBinding,
+        hold_id: &str,
+        now: i64,
+        window: ExportWindow,
+        cursor: Option<&SourceCursor>,
+        bounds: SourcePageBounds,
+    ) -> Result<SourcePage, SourceExportError> {
+        let limit = &self.limit;
         let started = Instant::now();
         if cursor.is_some_and(|cursor| cursor.hold_id != hold_id || cursor.window != window) {
             return Err(SourceHoldError::InvalidRequest.into());
         }
         let (admitted, next, charge) = {
-            let mut reader = self.lock_reader()?;
-            let tx = reader.transaction_with_behavior(TransactionBehavior::Deferred)?;
-            let pin = self.load_valid_pin(&tx, binding, hold_id, now)?;
+            let mut reader = self.store.reader_with_limit(limit)?;
+            let tx = reader.transaction(TransactionBehavior::Deferred)?;
+            let pin = self.store.load_valid_pin(&tx, binding, hold_id, now)?;
             let (body, end, start) = match window {
                 ExportWindow::Snapshot => {
                     (Descriptors::LiveAtEnd.cited_evidence_sql(), pin.snapshot, 0)
@@ -305,27 +355,30 @@ impl KernelStore {
             hook();
         }
         let rows = self.materialize(admitted)?;
-        let mut reader = self.lock_reader()?;
-        let tx = reader.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        self.recheck_source_hold_after_read(&tx, binding, hold_id, now, started)?;
+        let mut reader = self.store.reader_with_limit(limit)?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
+        self.store
+            .recheck_source_hold_after_read(&tx, binding, hold_id, now, started)?;
         let next = next.map(|key| SourceCursor {
             hold_id: hold_id.to_string(),
             window,
             key,
         });
+        limit.check()?;
         Ok(SourcePage { rows, next, charge })
     }
 
-    /// Reads each distinct artifact once, verifies its digest and stored
-    /// length, and slices every admitted row's span out of it as exact UTF-8.
+    /// Reads each distinct artifact once, verifies its digest and length, and extracts exact UTF-8 spans.
     fn materialize(&self, admitted: Vec<Preflight>) -> Result<Vec<SourceRow>, SourceExportError> {
         let mut buffers: HashMap<String, String> = HashMap::new();
         let mut rows = Vec::with_capacity(admitted.len());
         for preflight in admitted {
+            self.limit.check()?;
             let mut row = preflight.row;
             if preflight.exports_text {
                 if !buffers.contains_key(&preflight.digest) {
                     let bytes = self
+                        .store
                         .read_verified_object(&preflight.digest)
                         .map_err(|error| bytes_unavailable(&row.object_id, error))?;
                     let buffer = String::from_utf8(bytes).map_err(|_| malformed(&row.object_id))?;

@@ -113,7 +113,7 @@ describe("createMessagesTransformHandler — rust mode", () => {
             "prototype-proxy",
         ])(`logs and refuses %s at ${window} without invoking traps`, async (unsupported) => {
             const key = "then";
-            const logSpy = spyOn(logger, "log");
+            const logSpy = spyOn(logger.log, "debug");
             let trapCalls = 0;
             let hookCalls = 0;
             const trap = () => {
@@ -155,10 +155,14 @@ describe("createMessagesTransformHandler — rust mode", () => {
                 expect(hookCalls).toBe(window === "await" ? 1 : 0);
                 expect(output.messages).toBe(current);
                 expect(array[0]).toBe(member);
+                const rejection =
+                    unsupported === "own-then"
+                        ? "extra_property at /then"
+                        : unsupported === "root-proxy"
+                          ? "proxy at /"
+                          : "prototype at /";
                 expect(logSpy).toHaveBeenCalledWith(
-                    window === "entry"
-                        ? "[eidnara] transform declined: unsupported wrapper array or then property"
-                        : "[eidnara] transform return declined SourceRejected: unsupported array or then property",
+                    `[eidnara] transform declined: ${rejection} (${window === "entry" ? "entry" : "return"})`,
                 );
             } finally {
                 release.resolve();
@@ -167,6 +171,41 @@ describe("createMessagesTransformHandler — rust mode", () => {
             }
         });
     }
+
+    it("logs a polluted built-in prototype at warn and skips the inner hook", async () => {
+        const warn = spyOn(logger.log, "warn");
+        let hookCalls = 0;
+        let getterCalls = 0;
+        const handler = createMessagesTransformHandler({
+            eidnara: {
+                "experimental.chat.messages.transform": async () => {
+                    hookCalls += 1;
+                },
+            },
+            transformMode: "rust",
+        });
+        const output = makeOutput();
+        const saved = Object.getOwnPropertyDescriptor(Object.prototype, "agent");
+        try {
+            Object.defineProperty(Object.prototype, "agent", {
+                configurable: true,
+                get: () => {
+                    getterCalls += 1;
+                    return "polluted";
+                },
+            });
+            expect(await handler({}, output)).toBeUndefined();
+            expect(warn).toHaveBeenCalledWith(
+                "[eidnara] transform declined: prototype_accessor at Object.prototype/agent (entry)",
+            );
+        } finally {
+            if (saved) Object.defineProperty(Object.prototype, "agent", saved);
+            else Reflect.deleteProperty(Object.prototype, "agent");
+            warn.mockRestore();
+        }
+        expect(hookCalls).toBe(0);
+        expect(getterCalls).toBe(0);
+    });
 
     it("checks only the return container after the hook publishes", async () => {
         let getterCalls = 0;

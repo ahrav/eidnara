@@ -800,6 +800,38 @@ describe("Rust mode transform transport", () => {
         expect(deleteSession).toHaveBeenCalledWith(other, "/tmp/project");
     });
 
+    it("forces a full send after a dispatched delta pass is source-declined", async () => {
+        const sessionId = `rust-decline-after-dispatch-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let live: unknown[] | undefined;
+        const { client, bodies, calls } = recordingClient(() => {
+            // The daemon committed its snapshot for this request; the host replaces a member before the response is applied.
+            if (live) live[0] = makeMessages(sessionId)[0];
+            return { native_messages: [] };
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        for (let pass = 0; pass < 2; pass += 1) {
+            await transform.run(sessionId, { messages: [...makeMessages(sessionId)] });
+        }
+        expect(bodies[1]?.tail_delta).toBeDefined();
+
+        live = [...makeMessages(sessionId)];
+        const original = live[0];
+        await transform.run(sessionId, { messages: live });
+        expect(bodies[2]?.tail_delta).toBeDefined();
+        expect(live[0]).not.toBe(original);
+        expect(calls.filter((call) => call.method === "transform").length).toBe(3);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+        expect(transform.getState(sessionId).forceFullWire).toBe(true);
+
+        live = undefined;
+        const next = makeMessages(sessionId);
+        await transform.run(sessionId, { messages: [...next] });
+        expect(bodies[3]?.tail_delta).toBeUndefined();
+        expect(bodies[3]?.native_messages).toEqual(next);
+        expect(transform.getState(sessionId).forceFullWire).toBe(false);
+    });
+
     it("forces a full send after invalidateWireState", async () => {
         const sessionId = `rust-invalidate-wire-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -1876,10 +1908,18 @@ describe("bounded transform ownership", () => {
             const member = messages[0];
             const reachedPage1 = Promise.withResolvers<void>();
             const reconnect = Promise.withResolvers<unknown>();
+            let reconnectReported = false;
             const { client, bodies, calls } = recordingClient((page) => {
-                if (page.transform_page_index === 1) {
+                if (page.transform_page_index === 1 && !reconnectReported) {
+                    reconnectReported = true;
                     reachedPage1.resolve();
                     return reconnect.promise;
+                }
+                if (page.transform_page_complete === true) {
+                    return {
+                        native_messages: [{ role: "assistant", parts: [] }],
+                        note_deliveries: [{ transform_pass_id: "restarted" }],
+                    };
                 }
                 return { staged: true, note_deliveries: [{ transform_pass_id: "page-zero" }] };
             });
@@ -1898,15 +1938,20 @@ describe("bounded transform ownership", () => {
                 current_generation: 4,
             });
             await pass;
-            expect(bodies.filter((body) => body.transform_page_index === 0)).toHaveLength(1);
+            // Invalidation is an ownership fence and stops the restart; a content change is only observed by the publication recheck.
+            expect(bodies.filter((body) => body.transform_page_index === 0)).toHaveLength(
+                fault === "mutation" ? 2 : 1,
+            );
             expect(output.messages).toBe(messages);
             expect(output.messages[0]).toBe(member);
-            expect(calls.map((call) => call.method)).toEqual([
-                "transform",
-                "transform",
-                "transform.nack",
-            ]);
-            expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "page-zero" });
+            expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
+            // Every delivery either series reported is NACKed for this attempt.
+            expect(
+                calls
+                    .filter((call) => call.method === "transform.nack")
+                    .map((call) => (call.body as { transform_pass_id: string }).transform_pass_id)
+                    .sort(),
+            ).toEqual(fault === "mutation" ? ["page-zero", "restarted"] : ["page-zero"]);
             expect(transform.getState(sessionId).failureCount).toBe(0);
             expect(defaultTransformCaptureAdmission.chargedBytes).toBe(0);
         });
@@ -1935,7 +1980,7 @@ describe("bounded transform ownership", () => {
             });
             const output = { messages: [...messages] as unknown[] };
             const array = output.messages;
-            const logSpy = spyOn(logger.sessionLog, "debug");
+            const logSpy = spyOn(logger.sessionLog, "warn");
             try {
                 const pass = transform.run(sessionId, output);
                 await Promise.race([started.promise, pass]);
@@ -1976,63 +2021,6 @@ describe("bounded transform ownership", () => {
             }
         });
     }
-
-    it("refuses a kept previous-output entry that gained an accessor and invokes no hook", async () => {
-        const sessionId = "rust-kept-prefix-accessor";
-        const rows = rawRows(2);
-        installRawRows(sessionId, rows);
-        const hook = mock(trap);
-        const { client, calls, bodies } = recordingClient((request, index) => {
-            if (index === 0) {
-                return {
-                    native_messages: [
-                        {
-                            info: { id: "kept", role: "assistant", sessionID: sessionId },
-                            parts: [],
-                        },
-                        {
-                            info: { id: "tail", role: "assistant", sessionID: sessionId },
-                            parts: [],
-                        },
-                    ],
-                };
-            }
-            return {
-                native_messages_delta: {
-                    after: bodies[0]?.full_array_fingerprint,
-                    replace_from: 1,
-                    messages: [
-                        {
-                            info: { id: "tail-2", role: "assistant", sessionID: sessionId },
-                            parts: [],
-                        },
-                    ],
-                },
-                note_deliveries: [{ transform_pass_id: "kept-attempt" }],
-            };
-        });
-        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const first = { messages: rowMessages(sessionId, rows.slice(0, 1)) as unknown[] };
-        await transform.run(sessionId, first);
-        expect(first.messages).toHaveLength(2);
-        // The host removes the kept entry from its array and installs a getter on it; the next pass may still reuse it as the kept prefix.
-        const kept = first.messages[0] as { parts: unknown };
-        Object.defineProperty(kept, "parts", { get: hook, enumerable: true, configurable: true });
-        const second = { messages: rowMessages(sessionId, rows) as unknown[] };
-        const array = second.messages;
-        const members = [...second.messages];
-        await transform.run(sessionId, second);
-        expect(hook).not.toHaveBeenCalled();
-        expect(second.messages).toBe(array);
-        expect(second.messages).toEqual(members);
-        expect(calls.map((call) => call.method)).toEqual([
-            "transform",
-            "transform",
-            "transform.nack",
-        ]);
-        expect(calls.at(-1)?.body).toMatchObject({ transform_pass_id: "kept-attempt" });
-        expect(transform.getState(sessionId).failureCount).toBe(1);
-    });
 
     it("recovers with a full request when byte pressure rejects a full-sync retry", async () => {
         const sessionId = "rust-full-retry-byte-pressure";
@@ -2086,7 +2074,7 @@ describe("bounded transform ownership", () => {
         expect(blocker.lease.reserve(wireBytes[2])).toBe(true);
         const output = { messages: input as unknown[] };
         const array = output.messages;
-        const logSpy = spyOn(logger.sessionLog, "debug");
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             await transform.run(sessionId, output);
             expect(bodies).toHaveLength(2);
@@ -2189,7 +2177,7 @@ describe("bounded transform ownership", () => {
         );
         const blocker = admission.admit("rust-warm-memo-budget-blocker");
         if (!("lease" in blocker)) throw new Error("blocker admission failed");
-        const logSpy = spyOn(logger.sessionLog, "debug");
+        const logSpy = spyOn(logger.sessionLog, "warn");
         try {
             expect(
                 blocker.lease.reserve(
@@ -2539,41 +2527,47 @@ describe("bounded transform ownership", () => {
             } else {
                 expect(state.ordinals).toEqual(priorMemo);
             }
-            // The need_full_sync flag belongs to the pass that received it; a pass that no longer owns the session cannot set it.
-            expect(state.forceFullWire).toBe(fault === "mutation" || fault === "invalidation");
+            // A dispatched pass marks the next send full before awaiting the daemon; only a cleared session starts from fresh state.
+            expect(state.forceFullWire).toBe(fault !== "clear");
             expect(state.failureCount).toBe(0);
         });
     }
 
-    it("stops a multi-page send after page zero when its source changes", async () => {
-        const sessionId = "rust-page-zero-mutation";
+    it("declines before publication and NACKs known deliveries when the source changes between pages", async () => {
+        const sessionId = "rust-page-mutation";
+        installAvailabilityDb(sessionId, {});
         installRawRows(sessionId, rawRows(1));
         const messages = rowMessages(sessionId, rawRows(1), () => "x".repeat(600_000));
         const member = messages[0];
-        const started = Promise.withResolvers<void>();
-        const response = Promise.withResolvers<unknown>();
-        const { client, calls, bodies } = recordingClient(() => {
-            started.resolve();
-            return response.promise;
+        const hook = mock(trap);
+        const delivered: string[] = [];
+        const { client, calls, bodies } = recordingClient((page) => {
+            // Page bodies are frozen text, so the series completes; the accessor must stay unread until the recheck refuses publication.
+            if (page.transform_page_index === 1)
+                Object.defineProperty(member, "parts", { get: hook, enumerable: true });
+            if (page.transform_page_complete !== true) return { staged: true };
+            delivered.push("paged");
+            return {
+                native_messages: [{ role: "assistant", parts: [] }],
+                note_deliveries: [{ transform_pass_id: "paged" }],
+            };
         });
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
-        const output = { messages };
-        const pass = transform.run(sessionId, output);
-        await Promise.race([started.promise, pass]);
-        expect(bodies).toHaveLength(1);
-        expect(bodies[0]?.transform_page_index).toBe(0);
-        expect(bodies[0]?.transform_page_total).toBeGreaterThan(1);
-        expect(bodies[0]?.transform_page_complete).toBe(false);
-        (member.parts[0] as { text: string }).text = "edited after page zero";
-        response.resolve({
-            status: "collecting",
-            note_deliveries: [{ transform_pass_id: "page-zero-discarded" }],
-        });
-        await pass;
-        expect(bodies).toHaveLength(1);
-        expect(calls.map((call) => call.method)).toEqual(["transform", "transform.nack"]);
+        const output = { messages: messages as unknown[] };
+        await transform.run(sessionId, output);
+        expect(bodies.length).toBeGreaterThan(1);
+        expect(bodies.at(-1)?.transform_page_complete).toBe(true);
+        expect(hook).not.toHaveBeenCalled();
         expect(output.messages).toBe(messages);
+        expect(output.messages).toHaveLength(1);
         expect(output.messages[0]).toBe(member);
+        expect(calls.some((call) => call.method === "transform.ack")).toBe(false);
+        // Every delivery the daemon reported is NACKed.
+        expect(
+            calls
+                .filter((call) => call.method === "transform.nack")
+                .map((call) => (call.body as { transform_pass_id: string }).transform_pass_id),
+        ).toEqual(delivered);
         expect(transform.getState(sessionId).ordinals.entries.size).toBe(0);
         expect(transform.getState(sessionId).failureCount).toBe(0);
     });
@@ -2776,7 +2770,7 @@ describe("bounded transform ownership", () => {
         }));
         const declinedArray = outputs[2].messages;
         const declinedMember = declinedArray[0];
-        const logSpy = spyOn(logger.sessionLog, "debug");
+        const logSpy = spyOn(logger.sessionLog, "warn");
         const passes = sessions.map((sessionId, index) => transform.run(sessionId, outputs[index]));
         try {
             await Promise.race([started.promise, Promise.all(passes)]);

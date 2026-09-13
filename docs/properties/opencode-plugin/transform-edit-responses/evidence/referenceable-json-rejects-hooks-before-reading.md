@@ -12,57 +12,78 @@ inferred from this supplement.
 
 ## Evidence trail
 
-Revision: the #533 change on `fix/client-transform-owner`, parent `b0023512`. Line
-numbers below are from that tree.
+Revision: the #533 change on `fix/client-transform-owner` after merging
+`origin/main` at `5def3c71`. Line numbers below are from that tree.
 
 - [transform-capture.ts](../../../../../packages/opencode-plugin/src/hooks/context/transform-capture.ts):
-  `ReferenceableWalk.entries` rejects proxies with `util.types.isProxy` before
-  any prototype or descriptor read (`:207`), checks the prototype, depth, and
-  cycles (`:208-218`), walks the prototype chain for an own or inherited
-  `toJSON` (`:220-236`), and charges the declared array length before element
-  reads (`:240-241`). `data` spends one slot per descriptor read and rejects
-  sparse slots and accessors (`:192-198`). `walk` rejects functions, symbols,
-  bigints, and non-finite numbers (`:137-147`). `readOwnDataProperty` (`:70`)
-  returns `undefined` for accessors, proxies, and inherited properties.
+  `rootArrayRejection` (`:94-117`) returns a `ReferenceableRejection`
+  (`{reason, path}`) for a proxy root (`:95`), a non-array root (`:96`), an
+  altered prototype chain (`:97-102`), an own or inherited `then` (`:103`),
+  or an accessor on `Array`, `Object`, `String`, `Number`, or
+  `Boolean.prototype` (`:105-115`, reason `prototype_accessor`, path such as
+  `Object.prototype/agent`). `ReferenceableWalk.members` (`:187-195`) calls it
+  first, so `inspectReferenceableMessages` (`:345-363`), `captureMessages`
+  (`:383-400`), `capturedMessagesUnchanged` (`:403-430`), and
+  `hostArrayReplacementRejection` (`:439-455`) all refuse a polluted
+  prototype.
+- `entries` (`:237-334`) rejects proxies with `util.types.isProxy` before any
+  prototype or descriptor read (`:242`), rejects boxed primitives with
+  `util.types.isBoxedPrimitive` (`:244`), checks the prototype, depth, and
+  cycles (`:245-255`), walks the prototype chain for an own or inherited
+  `toJSON` using `Object.hasOwn(hook, "value")` (`:257-273`), charges the
+  declared array length before element reads (`:277-278`), and records
+  `prototype === null` on the tape for objects (`:285`). `data` spends one
+  slot per descriptor read and rejects sparse slots and accessors with
+  `Object.hasOwn(slot, "value")` (`:228-234`). `walk` rejects functions,
+  symbols, bigints, and non-finite numbers (`:170-185`). `readOwnDataProperty`
+  (`:72-76`) returns `undefined` for accessors, proxies, and inherited
+  properties.
 - [rust-mode-transform.ts](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts):
-  `execute` reads `output.messages` with `readOwnDataProperty` (`:844`),
-  checks the container (`:845`), inspects the source before any message read
-  (`:967`), and captures it (`:977`). The candidate returned by the daemon,
-  including host-owned kept prefix entries, is inspected before
-  `assertNativeBoundary` and any plain read (`:1436-1445`).
+  `execute` reads `output.messages` with `readOwnDataProperty` (`:846`),
+  checks the container (`:847-854`, logging `prototype_accessor` at warn),
+  inspects the source before any message read (`:969-977`, `unsupported_source`
+  at warn for `prototype_accessor`, debug otherwise), and captures it
+  (`:980`). The daemon's candidate is not inspected before
+  `assertNativeBoundary` (`:1433-1446`); kept-prefix validation is #538's
+  TE21.
 - [module-wire.ts](../../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts):
   `primeOrdinalMemo` (`:473`) scans asynchronously; the caller rechecks the
-  capture (`rust-mode-transform.ts:1167`) before `annotateOrdinals` reads
+  capture (`rust-mode-transform.ts:1172`) before `annotateOrdinals` reads
   messages synchronously.
 - [hook.ts](../../../../../packages/opencode-plugin/src/hooks/context/hook.ts):
   the session ID is read through nested `readOwnDataProperty` calls
   (`:96-97`) and the transform entry reads `output.messages` the same way
   (`:339`).
 - [messages-transform.ts](../../../../../packages/opencode-plugin/src/plugin/messages-transform.ts):
-  `returnableMessageArray` (`:13-22`) checks proxy, array, prototype chain,
-  and `then` before the hook and again before returning (`:59-63`, `:76-82`).
-  The wrapper never assigns `output.messages`.
+  the wrapper checks only the root array with `rootArrayRejection` at entry
+  (`:59`) and return (`:77`) and logs `[eidnara] transform declined: <reason>
+  at <path> (entry|return)` (`:17-21`), warn for `prototype_accessor` and
+  debug otherwise. The wrapper never assigns `output.messages`.
 
 ## Failure scenario
 
 A getter installed on `parts` during an ordinal scan can execute before a
 post-resolver guard runs. The resolver therefore rechecks before its
 synchronous source-reading half. A proxy root can trap even during length or
-membership inspection; the non-trapping runtime proxy predicate runs first.
+membership inspection; the non-trapping runtime proxy predicate runs first. An
+accessor installed on `Object.prototype` runs on any read of an absent
+optional field; the built-in prototype scan refuses the pass before such a
+read.
 
 ## Timing windows and dependencies
 
 The direct tests distinguish initial rejection from installation after an
 earlier valid dispatch. They pause directory and transport promises and
-schedule installation from the ordinal provider or a post-response microtask.
-Each pause window has an unmutated control that publishes. Pure helpers also
-test content edits, membership replacement, removal, metadata renames and
-descriptor changes.
+schedule installation from the ordinal provider, a page callback, or a
+post-response microtask. Each pause window has an unmutated control that
+publishes. Pure helpers also test content edits, membership replacement,
+removal, metadata renames, descriptor changes, and prototype pollution.
 
 ## What a test must construct
 
-- Construct an unsupported root, member or nested value and count every getter
-  and proxy trap independently of dispatch counts.
+- Construct an unsupported root, member, nested value, or built-in prototype
+  accessor and count every getter and proxy trap independently of dispatch
+  counts.
 - Demonstrate a successful readonly-input transform with exact approved output
   and preserved destination and payload identity.
 - Capture supported input, reach the named await, then install the hook.
@@ -81,27 +102,73 @@ descriptor changes.
 - Missing evidence: Native-addon-enabled CI coverage and U5 measurements are
   outside this run. Earlier review findings and repairs are recorded in
   [the dispositions](../review-dispositions.md).
-- Conclusion (2026-09-13, revision-bound run, 1098 pass, 0 fail): resolved
-  as exercised. Witnesses, all with marker `expect(counter.count).toBe(0)`,
-  `expect(trap).not.toHaveBeenCalled()`, or a zero `getterCalls` or
-  `trapCalls` count:
-  - `transform-capture.test.ts:75`, `:107`, `:212`, `:282`, `:291`, `:305`,
-    `:338`, `:364`, `:549`, `:891`, and the `it.each` families at `:132`
-    (own array `toJSON`), `:154` (hidden array operation overrides), `:168`
-    (membership accessors), `:185` (inherited `toJSON`), `:249` (hidden
+- Conclusion: resolved as exercised; the witness list is under the next
+  question.
+
+### Q: Does the guard refuse built-in prototype pollution without reads?
+
+- Sources examined: `rootArrayRejection` and `entries` at the lines above,
+  the `prototype_accessor` log levels in `rust-mode-transform.ts:849` and
+  `:975` and `messages-transform.ts:18`, and the witnesses below.
+- Findings: Every guard entry has a trap-counter witness. The
+  "built-in prototype scan" describe covers `Object.prototype`,
+  `Array.prototype` (iterator symbol and `then`), and `String.prototype`
+  accessors, boxed primitives, the null-prototype tape marker, and a 12,000
+  message positive control. The daemon's candidate is not inspected before
+  `assertNativeBoundary`; that path is TE21 in #538. The `Number.prototype`
+  and `Boolean.prototype` entries of the scan have no dedicated witness.
+- Missing evidence: A witness for an accessor on `Number.prototype` or
+  `Boolean.prototype`; native-addon CI coverage as before.
+- Conclusion (2026-09-13, revision-bound run after merging `origin/main` at
+  `5def3c71`, 1107 pass, 0 fail): resolved as exercised. Witnesses, all with
+  a zero trap, getter, or hook count:
+  - `transform-capture.test.ts:76`, `:108`, `:213`, `:283`, `:292`, `:306`,
+    `:339`, `:365`, `:760`, `:1094`, and the `it.each` families at `:133`
+    (own array `toJSON`), `:147` (hidden array operation overrides), `:166`
+    (membership accessors), `:183` (inherited `toJSON`), `:241` (hidden
     accessors on production-read fields).
-  - `rust-mode-transform.test.ts:2581` "declines an unsupported source before
-    any dispatch and leaves the host array intact" (`calls` 0); `:2387`
+  - "built-in prototype scan" (`:381`): `:384` "rejects an accessor inherited
+    from Object.prototype without calling it" (`rejection` equals
+    `{ reason: "prototype_accessor", path: "Object.prototype/agent" }`,
+    `capturedMessagesUnchanged` false, then `undefined` after restore);
+    `:409` "rejects an Array.prototype iterator accessor without calling it"
+    (path `Array.prototype/Symbol(Symbol.iterator)`); `:428` "rejects an
+    Object.prototype value accessor alongside a source accessor without
+    calling either" (`readOwnDataProperty` returns `undefined`, both counters
+    0); `:453` "rejects prototype-reset boxed primitives whose tapes cannot
+    distinguish their values" (`boxed_primitive` at `/0/flag`); `:463`
+    "rejects a String.prototype accessor without calling it"; `:481`
+    "records whether a nested object has a null prototype"
+    (`capturedMessagesUnchanged` flips with the prototype); `:491` "rejects
+    an inherited then on the root array without calling it"
+    (`extra_property` at `/then`, plus `proxy` and `not_array` roots); `:518`
+    "accepts a metadata-heavy history of short messages within the walk
+    budget" (12,000 messages, `estimatedBytes < 5 * jsonBytes`).
+  - `:843` "rejects inherited membership and does not consult its getter"
+    (getter on `Array.prototype["0"]`; `capturedMessagesUnchanged` false and
+    `inspectReferenceableMessages` not ok); `:783` "refuses a numeric
+    accessor on a built-in prototype and defines slots without invoking it"
+    (2 cases; `inspectReferenceableMessages` reports `prototype_accessor` at
+    `<Array|Object>.prototype/0`, `counter.count` 0).
+  - `rust-mode-transform.test.ts:2575` "declines an unsupported source before
+    any dispatch and leaves the host array intact" (`calls` 0); `:2375`
     "rejects nested <accessor|toJSON|proxy> installed at <source-await|
-    pre-apply> without invoking it" (6 cases); `:1980` "refuses a kept
-    previous-output entry that gained an accessor and invokes no hook".
+    pre-apply> without invoking it" (6 cases); `:2536` "declines before
+    publication and NACKs known deliveries when the source changes between
+    pages" (`hook` never called); `:2608` (accessor on `info` during the
+    directory await, `getter` never called).
   - `hook.test.ts:210` "rejects <unsupported> at the actual <hook|wrapper>
-    entry without triggering reads" (12 cases; also `client.session.get` and
-    `fake.calls` untouched); `hook.test.ts:174` `it.each` accepts hidden own
-    data through both entries as a positive control.
-  - `messages-transform.test.ts:64` and `:114` `it.each` families refuse
-    `then`, root proxies, and prototype proxies at entry and after the await;
-    `:196` leaves array-slot inspection to the inner owner.
+    entry without triggering reads" (12 cases; also `client.session.get`,
+    `client.app.agents`, and `fake.calls` untouched); `hook.test.ts:171`
+    `it.each` accepts hidden own data through both entries as a positive
+    control.
+  - `messages-transform.test.ts:61` and `:110` `it.each` families refuse
+    `then`, root proxies, and prototype proxies at entry and after the await
+    and assert the debug log text; `:175` "logs a polluted built-in prototype
+    at warn and skips the inner hook" (`warn` called with `transform
+    declined: prototype_accessor at Object.prototype/agent (entry)`,
+    `hookCalls` 0, `getterCalls` 0); `:232` "leaves array-slot inspection at
+    <entry|await> to the inner owner" (2 cases).
 
 Focused command, run from `packages/opencode-plugin` with Node 24.18.0 first on
 PATH:
@@ -111,8 +178,7 @@ bun test src/hooks/context/ src/plugin/messages-transform.test.ts \
   src/shared/host-client/client.test.ts
 ```
 
-Result: 1098 pass, 0 fail, 31,141 `expect()` calls, 34 files. `tsc --noEmit`
-over `src/` passes in the same tree; the package `typecheck` script then fails
-in `tsconfig.scripts.json` at `scripts/bench-transform-client.ts:206`
-(`Expected 2 arguments, but got 3`), which is outside these records. Earlier
-whole-repository gate claims from a prior revision are not repeated here.
+Result: 1107 pass, 0 fail, 31,373 `expect()` calls, 34 files. `bun run
+typecheck` (which includes `tsc --noEmit`, `tsconfig.scripts.json`, and
+`tsconfig.tui.json`) exits 0 in the same tree. Earlier whole-repository
+gate claims from a prior revision are not repeated here.
