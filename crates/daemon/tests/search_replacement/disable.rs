@@ -1429,7 +1429,7 @@ fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
     }
 }
 
-/// Nothing repairs the record file's own mode: a record readable by others is refused like a rejected record, so the gate latches closed and cancels every grant.
+/// Nothing repairs the record file's own mode: a record readable by others, or one its owner can no longer read, is refused like a rejected record, so the gate latches closed and cancels every grant.
 #[test]
 fn a_record_file_with_drifted_mode_latches_the_gate_closed() {
     use daemon::projection_gates::Denial;
@@ -1440,24 +1440,101 @@ fn a_record_file_with_drifted_mode_latches_the_gate_closed() {
     let gate = gate_for(root.path());
     let selection = build_selected(root.path(), &corpus, &gate);
     let record = root.path().join("search-lifecycle").join("intent.json");
-    let grant = gate
-        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+    let mut modes = vec![0o644];
+    if rustix::process::geteuid().as_raw() != 0 {
+        modes.push(0o000);
+    }
+    for mode in modes {
+        let gate = gate_for(root.path());
+        let grant = gate
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(mode)).unwrap();
+        let denial = gate
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err();
+        assert!(
+            matches!(denial, Denial::RecoveryRequired),
+            "mode {mode:o}: {denial:?}"
+        );
+        assert!(grant.invalidated.is_cancelled(), "mode {mode:o}");
+        assert!(matches!(
+            ProjectionLifecycle::open(root.path()).unwrap().read(),
+            ControlState::Unavailable(_)
+        ));
+        assert!(
+            selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err()
+        );
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// A kernel restored from before the disable holds the consumer again. The record's completion marker does not outrank that: reconciliation refuses instead of reporting the resurrected consumer as deregistered.
+#[tokio::test]
+async fn a_deregistered_record_refuses_a_consumer_the_kernel_holds_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(backup.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let saved = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup.path().to_path_buf(),
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
         .unwrap();
-    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let denial = gate
-        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-        .unwrap_err();
-    assert!(matches!(denial, Denial::RecoveryRequired), "{denial:?}");
-    assert!(grant.invalidated.is_cancelled());
-    assert!(matches!(
-        ProjectionLifecycle::open(root.path()).unwrap().read(),
-        ControlState::Unavailable(_)
-    ));
-    assert!(
-        selection
-            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
-            .is_err()
+    let checkpoint = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
+    assert!(checkpoint.is_some());
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    corpus.kernel.restore(&saved.destination_path).unwrap();
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        checkpoint
     );
+    for _ in 0..2 {
+        let mut selection = selector(root.path());
+        let result = selection
+            .reconcile_disabled(
+                &corpus.kernel,
+                &gate_for(root.path()),
+                &spec(root.path()),
+                &budget(Duration::from_secs(20)),
+                &mut |_| {},
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Invalid(
+                    "deregistered consumer is registered again"
+                ))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(disabled(root.path()), done);
+        assert_eq!(
+            corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+            checkpoint
+        );
+    }
 }
 
 /// Cleanup walks the same commit pages construction and retirement admitted, so it charges the same per-page catch-up limits. A manifest sized for one page admits construction and must admit the disable that follows.

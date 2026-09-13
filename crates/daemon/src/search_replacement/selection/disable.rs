@@ -109,8 +109,22 @@ impl SearchSelection {
         if let Some(owner) = &self.maintenance {
             owner.supervisor.request_shutdown();
         }
+        // A validated record with `deregistered` names its consumer; a kernel that holds that consumer again was restored from before the disable, and the marker does not outrank it. A completed replay owes no budget, so this read is bounded by the store alone.
+        let registered_again = |disabled: &DisabledIntent| -> Result<bool, BuildError> {
+            let Some(handoff) = disabled.handoff.as_deref() else {
+                return Ok(false);
+            };
+            Ok(kernel
+                .outbox_consumer_checkpoint(&handoff.consumer.consumer_id)?
+                .is_some())
+        };
         if self.maintenance.is_none() && self.selected.load().is_none() {
             if disabled.deregistered {
+                if registered_again(&disabled)? {
+                    return Err(BuildError::Invalid(
+                        "deregistered consumer is registered again",
+                    ));
+                }
                 return Ok(disabled);
             }
             if disabled.handoff.is_none() {
@@ -161,6 +175,11 @@ impl SearchSelection {
         observer(DisableEvent::WorkersJoined);
         deadline(budget)?;
         if disabled.deregistered {
+            if registered_again(&disabled)? {
+                return Err(BuildError::Invalid(
+                    "deregistered consumer is registered again",
+                ));
+            }
             return Ok(disabled);
         }
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
@@ -254,7 +273,10 @@ impl SearchSelection {
             }
             settled(&disabled, history)?;
             self.selected.store(None);
-            drop(family);
+            // Taking the last reference is atomic; a count can be satisfied and then raced by a `Weak` upgrade.
+            let SelectedFamily { projection, .. } =
+                Arc::into_inner(family).ok_or(IntentRefusal::FamilyHeld)?;
+            drop(Arc::into_inner(projection).ok_or(IntentRefusal::FamilyHeld)?);
             let mut next = disabled.clone();
             next.through = Some(through);
             lifecycle.update_disabled(&disabled, &next)?;

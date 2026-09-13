@@ -427,6 +427,10 @@ impl ProjectionLifecycle {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(ControlState::Absent);
             }
+            // The directory was entered, so this is the record's own mode; nothing repairs it.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(ControlState::Unavailable("record not readable".to_owned()));
+            }
             Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
         let metadata = match file.metadata() {

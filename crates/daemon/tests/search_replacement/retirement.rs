@@ -323,6 +323,89 @@ async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
     }
 }
 
+/// A projection reference upgraded from a `Weak` while retirement runs is a live holder. Local release is refused rather than recorded over it, and the retry after the holder drops proceeds.
+#[tokio::test]
+async fn a_projection_upgraded_during_retirement_blocks_local_release() {
+    use daemon::search_replacement::selection::disable::DisableEvent;
+    let root = tempfile::tempdir().unwrap();
+    let mut case = RetirementCase::new(root.path());
+    case.gate
+        .install(super::disable::cleanup_evaluator(root.path()));
+    let selected = case
+        .selection
+        .pin(
+            &case.corpus.kernel,
+            &case.gate,
+            &budget(Duration::from_secs(10)),
+        )
+        .unwrap();
+    let weak = Arc::downgrade(selected.projection());
+    drop(selected);
+    drop(case.old.take());
+    case.selection
+        .begin_disable(&case.gate, &mut |_| {})
+        .unwrap();
+    let mut held = None;
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event == DisableEvent::Retirement(RetirementEvent::Removed) {
+                    held = weak.upgrade();
+                }
+                ledger.push(event);
+            },
+        )
+        .await;
+    assert!(
+        held.is_some(),
+        "the weak reference upgraded during retirement"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Intent(
+                daemon::projection_lifecycle::IntentRefusal::FamilyHeld
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(!ledger.contains(&DisableEvent::LocalReleased));
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => assert_eq!(current.through, None),
+        other => panic!("{other:?}"),
+    }
+    drop(held);
+    let mut ledger = Vec::new();
+    let result = case
+        .selection
+        .reconcile_disabled(
+            &case.corpus.kernel,
+            &case.gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |event| ledger.push(event),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{result:?}"
+    );
+    assert!(ledger.contains(&DisableEvent::LocalReleased));
+    match ProjectionLifecycle::open(root.path()).unwrap().read() {
+        ControlState::Disabled(current) => assert_eq!(current.through, Some(case.target)),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn disabled_receipt_refusal_retains_the_selected_owner_and_original_target() {
     let root = tempfile::tempdir().unwrap();
