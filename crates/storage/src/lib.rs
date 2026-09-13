@@ -574,9 +574,13 @@ mod sqlite_backend {
         conn.busy_timeout(remaining).map_err(backend_error)?;
         #[cfg(test)]
         observe_busy_wait_for_test();
-        let result = f(conn);
+        // The standing timeout is restored whether `f` returns or unwinds; a caller's callback runs under it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(conn)));
         let restored = conn.busy_timeout(BUSY_TIMEOUT).map_err(backend_error);
-        with_cleanup_failure(result, restored)
+        match result {
+            Ok(result) => with_cleanup_failure(result, restored),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// `DatabaseBusy` and `DatabaseLocked` return [`StoreError::Deadline`] after the
@@ -4537,6 +4541,33 @@ mod tests {
         store
             .with_conn_unfenced(|c| c.execute_batch("VACUUM"))
             .expect("maintenance after a panicking read still reaches the database");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A bounded maintenance callback that unwinds leaves the connection's standing busy timeout in place, not the shortened per-call one.
+    #[test]
+    fn a_panicking_bounded_callback_restores_the_busy_timeout() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let standing: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA busy_timeout", [], |r| r.get(0)))
+            .expect("read the standing timeout");
+        assert_eq!(standing, 5_000);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_conn_unfenced_within(
+                Instant::now() + Duration::from_millis(50),
+                |_| -> rusqlite::Result<()> { panic!("the bounded callback unwinds") },
+            )
+        }));
+        assert!(panicked.is_err());
+        let after: i64 = store
+            .with_conn(|c| c.query_row("PRAGMA busy_timeout", [], |r| r.get(0)))
+            .expect("read the timeout after the unwind");
+        assert_eq!(
+            after, standing,
+            "the unwind restored the standing busy timeout"
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }
 
