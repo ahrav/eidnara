@@ -1210,6 +1210,42 @@ fn same_manager_reopen_reuses_live_pins_and_quarantines_corruption() {
 }
 
 #[test]
+fn same_manager_identity_corruption_withdraws_existing_and_new_pins() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    old.projection()
+        .write(|conn| {
+            conn.execute(
+                "UPDATE projection_identity SET projection_policy_version='foreign'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        old.read(&budget(Duration::from_secs(10)), |_| Ok(()))
+            .is_err()
+    );
+}
+
+#[test]
 fn transient_reopen_failures_keep_the_live_family_without_quarantine() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

@@ -800,11 +800,7 @@ impl GenerationStore {
             CurrentProfile::Quarantined => return Err(GenerationError::UnsupportedStateSchema),
             _ => {}
         }
-        let pin = open_child_dir(&self.generations_fd, digest);
-        if let Some(pin) = &pin {
-            rustix::fs::flock(pin, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-                .map_err(|_| invalid("corrupt generation is pinned"))?;
-        }
+        let _pin = lock_for_reclamation(&self.generations_fd, digest)?;
         exchange_dirs(&self.generations_fd, temp_name, digest)?;
         fsync_preserving_storage(&self.generations_fd, "generations fsync failed")?;
         self.validate(digest)?;
@@ -1037,13 +1033,9 @@ impl GenerationStore {
             if search_quarantined || protected.contains(&name) {
                 continue;
             }
-            let pin = open_child_dir(&self.generations_fd, &name);
-            if let Some(pin) = &pin
-                && rustix::fs::flock(pin, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-                    .is_err()
-            {
+            let Ok(_pin) = lock_for_reclamation(&self.generations_fd, &name) else {
                 continue;
-            }
+            };
             // An unprotected generation's contents affect pruning only through its manifest schema.
             if self.is_quarantined_schema(&name) {
                 report.quarantined += 1;
@@ -1263,6 +1255,20 @@ fn open_child_dir(parent: &OwnedFd, name: &str) -> Option<OwnedFd> {
         return None;
     }
     Some(fd)
+}
+
+/// Takes the exclusive reclamation lock on `name` whatever its mode bits, so a reader's shared
+/// pin is honored on a directory whose mode no longer validates. `Ok(None)` only when `name` is
+/// absent; an existing entry that cannot be opened or locked fails closed.
+fn lock_for_reclamation(parent: &OwnedFd, name: &str) -> Result<Option<OwnedFd>, GenerationError> {
+    let fd = match crate::store_fs::open_dir_for_removal(parent, name) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(invalid("generation cannot be locked for reclamation")),
+    };
+    rustix::fs::flock(&fd, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| invalid("corrupt generation is pinned"))?;
+    Ok(Some(fd))
 }
 
 /// `open_child_dir_existing` returns `Ok(None)` only when `name` is absent; it returns `Err` when an existing entry fails the directory trust predicate.
@@ -2595,6 +2601,39 @@ mod tests {
         )
         .unwrap();
         assert!(store.stage(&sources, &meta(), &BTreeSet::new()).is_err());
+        drop(pin);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            1
+        );
+    }
+
+    #[test]
+    fn directory_mode_corruption_does_not_bypass_live_generation_pins() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        stage_default(&store, src.path());
+        let sources = [SourceSpec {
+            rel_path: "search.sqlite".to_owned(),
+            source: write_source(src.path(), "search", b"seed"),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let search = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let pin = store.validate(&search).unwrap();
+        pin.pin().unwrap();
+        let home = store.root().join(GENERATIONS_DIR_NAME).join(&search);
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o1700)).unwrap();
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            0
+        );
+        assert!(home.join("search.sqlite").is_file());
+        assert!(store.stage(&sources, &meta(), &BTreeSet::new()).is_err());
+        assert!(home.join("search.sqlite").is_file());
         drop(pin);
         assert_eq!(
             store.prune(&BTreeSet::new()).unwrap().removed_generations,

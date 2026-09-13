@@ -405,7 +405,15 @@ impl SearchSelection {
     ) -> Result<(), BuildError> {
         family.check_kernel(kernel, budget)?;
         let report = family.projection.read_within(deadline(budget)?, |conn| {
-            verify_active(conn, &self.identity, &family.generation(), self.bounds)
+            verify_active(conn, &self.identity, &family.generation(), self.bounds).map_err(
+                |error| {
+                    match error {
+                        // `check_kernel` excludes a kernel change, so the stored identity row itself is corrupt.
+                        ProjectionError::IdentityMismatch => ProjectionError::CorruptRow,
+                        error => error,
+                    }
+                },
+            )
         })?;
         let seed = &family.certificate.seed;
         if report.checkpoint.snapshot_commit_seq != seed.snapshot_commit_seq

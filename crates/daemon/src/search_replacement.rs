@@ -890,12 +890,12 @@ impl<'a> ReplacementBuilder<'a> {
             return Err(BuildError::Expired);
         }
         self.checked_target(budget)?;
+        let (intent, _) = self.lifecycle.admitted_intent(self.gate)?;
         if let Some(stage) = self
             .capture
             .as_ref()
             .and_then(|capture| capture.stage.as_deref())
         {
-            let (intent, _) = self.lifecycle.admitted_intent(self.gate)?;
             if intent.staged_seed_digest.is_some()
                 || intent.replacement_capture.as_deref() != self.capture.as_ref()
             {
@@ -922,22 +922,27 @@ impl<'a> ReplacementBuilder<'a> {
             },
             family => family,
         };
-        self.lifecycle.delete_replacement_family(
-            self.gate,
-            self.capture
-                .as_ref()
-                .map(|capture| capture.hold_id.as_str()),
-            || self.family = Family::Unopened,
-        )?;
+        let recorded_hold = self
+            .capture
+            .as_ref()
+            .filter(|_| intent.replacement_capture.is_some())
+            .map(|capture| capture.hold_id.as_str());
+        self.lifecycle
+            .delete_replacement_family(self.gate, recorded_hold, || {
+                self.family = Family::Unopened
+            })?;
         if let Some(capture) = &self.capture {
             let binding = self.binding()?;
             if capture.lease_epoch == self.kernel.lease_epoch() {
-                self.kernel.release_source_hold_within_budget(
+                match self.kernel.release_source_hold_within_budget(
                     budget,
                     &binding,
                     &capture.hold_id,
                     wall_ms()?,
-                )?;
+                ) {
+                    Ok(()) | Err(SourceHoldError::Invalid(SourceHoldInvalidity::Missing)) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         let binding = self.binding()?;
@@ -946,13 +951,9 @@ impl<'a> ReplacementBuilder<'a> {
             &binding.consumer_id,
             wall_ms()?,
         )?;
-        if let Some(capture) = &self.capture {
-            self.lifecycle.record_capture(
-                self.gate,
-                &self._transaction,
-                None,
-                Some(capture.hold_id.as_str()),
-            )?;
+        if self.capture.is_some() {
+            self.lifecycle
+                .record_capture(self.gate, &self._transaction, None, recorded_hold)?;
         }
         self.capture = None;
         self.hold_deadline = None;
