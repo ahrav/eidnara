@@ -242,6 +242,32 @@ describe("referenceable source guard", () => {
         expect(referenceableMessages(source)).toBe(false);
     });
 
+    it("rejects a String.prototype accessor without calling it", () => {
+        const key = "polluted";
+        const trap = mock(() => "");
+        const source = [{ url: "file:///tmp/a.png" }];
+        let reason: SourceRejected | undefined;
+        try {
+            Object.defineProperty(String.prototype, key, { get: trap, configurable: true });
+            reason = rootArrayRejection(source);
+        } finally {
+            Reflect.deleteProperty(String.prototype, key);
+        }
+        expect(reason?.message).toBe("accessor polluted on String.prototype");
+        expect(reason?.logLevel).toBe("warn");
+        expect(trap).not.toHaveBeenCalled();
+    });
+
+    it("records whether a nested object has a null prototype", () => {
+        const info = { role: "user" };
+        const source = [{ info }];
+        const captured = captureMessages(source);
+        Object.setPrototypeOf(info, null);
+        expect(capturedMessagesUnchanged(source, captured)).toBe(false);
+        Object.setPrototypeOf(info, Object.prototype);
+        expect(capturedMessagesUnchanged(source, captured)).toBe(true);
+    });
+
     it("rejects an inherited then on the root array without calling it", () => {
         const key = "then";
         const trap = mock(() => undefined);

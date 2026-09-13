@@ -92,9 +92,14 @@ export function rootArrayRejection(value: unknown): SourceRejected | undefined {
     return undefined;
 }
 
+// Source values are arrays, plain objects, strings, numbers and booleans; a read that misses an
+// own property, or any method call on a primitive, resolves through one of these prototypes.
 const BUILTIN_PROTOTYPES: readonly (readonly [string, object])[] = [
     ["Array", Array.prototype],
     ["Object", Object.prototype],
+    ["String", String.prototype],
+    ["Number", Number.prototype],
+    ["Boolean", Boolean.prototype],
 ];
 
 const CONTENT_CHANGED = Symbol("content_changed");
@@ -219,6 +224,8 @@ class ReferenceableWalk {
             }
         }
         this.emit(array ? ARRAY : OBJECT);
+        // A null prototype changes what an absent optional field reads as, so the tape records it.
+        if (!array) this.emit(prototype === null);
         if (lengthSlot) {
             this.emit(length);
             this.attributes(lengthSlot);

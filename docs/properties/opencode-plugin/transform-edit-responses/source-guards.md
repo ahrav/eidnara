@@ -53,13 +53,16 @@ in the guard. Optional undefined object fields are omitted; array holes and
 undefined array entries are rejected. Dense readonly input arrays are accepted
 when the destination is mutable. Neither capture nor recheck freezes or
 deep-clones source payloads. Reads of absent optional fields, out-of-range
-indexes and the returned array's `then` fall through to `Array.prototype` and
-`Object.prototype`, so the root check refuses an accessor on either prototype
-(other than `__proto__`) by descriptor inspection, without invoking it, and logs
-that decline at warn because it repeats on every pass in the process. The guard
-runs in the host's realm and calls built-in methods and `Object` reflection
-functions itself, so a built-in replaced by a data property is a compromised
-process, not a source hook it can detect.
+indexes, method calls on source strings, numbers and booleans, and the returned
+array's `then` resolve through the `Array`, `Object`, `String`, `Number` and
+`Boolean` prototypes, so the root check refuses an accessor on any of them
+(other than `__proto__`) by descriptor inspection with indexed loops, without
+invoking it, and logs that decline at warn because it repeats on every pass in
+the process. Boxed primitives are refused because JSON serializes their internal
+slot, and an object tape records whether its prototype is null. The guard runs
+in the host's realm and calls built-in methods and `Object` reflection functions
+itself, so a built-in replaced by a data property is a compromised process, not
+a source hook it can detect.
 
 Exact field tapes, not hashes, decide whether the existing inbound cache prefix
 and terminal message can be reused. The old recursive traversal and snapshot
