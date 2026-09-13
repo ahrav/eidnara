@@ -203,7 +203,15 @@ async fn aborted_waiter_preserves_commit_bookkeeping_and_worker_charges() {
     );
 
     drop(gate);
+    let released_at_ms = now_ms().max(0) as u64;
     runner.join_all().await;
+    assert!(
+        DISPATCH_HEALTH
+            .last_dispatch_completed_at_ms
+            .load(Ordering::Relaxed)
+            >= released_at_ms,
+        "the unit's end must advance the lane heartbeat after its waiter was aborted"
+    );
     assert!(
         handler.transform_session_roots.lock().unwrap()["ses"].contains(&canonical_root(&project))
     );
@@ -649,6 +657,29 @@ async fn admission_refuses_the_request_past_the_waiter_bound_and_declares_it() {
     .await;
     assert_eq!(error_code(refused), "queue_full");
     assert_pool_released(&refused_pool);
+    let refused_route = test_route(40);
+    handler.bind_route(refused_route, binding(project.to_str().unwrap(), "refused"));
+    let mut refused_input = request(vec![ck("m1", 1, "refused unit")]);
+    refused_input["session_id"] = json!("refused");
+    refused_input["prompt_surface_config_identity"] = json!("refused-identity");
+    let refused =
+        watchdog(handler.handle_transform_with_runner(refused_route, refused_input, &*runner))
+            .await;
+    assert_eq!(error_code(refused), "queue_full");
+    assert!(
+        !handler
+            .transform_route_channels
+            .lock()
+            .unwrap()
+            .contains_key(&refused_route)
+    );
+    assert!(
+        !handler
+            .prompt_surface_epochs
+            .lock()
+            .unwrap()
+            .contains_key("refused")
+    );
     assert_eq!(
         runner.submitted.load(Ordering::SeqCst),
         TRANSFORM_UNITS_AT_ONCE
@@ -711,6 +742,30 @@ async fn cancelled_unit_releases_its_charges_without_store_work() {
     assert!(store.load_pass_trace("ses").unwrap().is_none());
     assert_eq!(handler.transform_units.available_permits(), 4);
     assert_pool_released(&pool);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_unit_keeps_the_prior_ready_snapshot() {
+    let (handler, _store, _dir, _project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let runner = JoinedUnitRunner::default();
+    let pool = TestPool::unbounded();
+    let input = request(vec![ck("m1", 1, "first full pass")]);
+    let first = watchdog(metered_transform(&handler, input.clone(), &runner, &pool)).await;
+    assert_eq!(tool_body(first)["committed"], true);
+    assert!(matches!(
+        handler.transform_snapshots.lock().unwrap().get("ses"),
+        TransformSnapshotLookup::Ready(_)
+    ));
+
+    runner.worker.cancel.cancel();
+    let cancelled = watchdog(metered_transform(&handler, input, &runner, &pool)).await;
+    runner.join_all().await;
+    assert_eq!(error_code(cancelled), "cancelled");
+    assert!(matches!(
+        handler.transform_snapshots.lock().unwrap().get("ses"),
+        TransformSnapshotLookup::Ready(_)
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

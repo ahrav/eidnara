@@ -666,6 +666,20 @@ impl Drop for TransformDispatchTicket<'_> {
     }
 }
 
+/// `UnitHeartbeat` records non-panicking closure completion even if its waiter aborts.
+struct UnitHeartbeat;
+
+impl Drop for UnitHeartbeat {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        DISPATCH_HEALTH
+            .last_dispatch_completed_at_ms
+            .store(now_ms().max(0) as u64, Ordering::Relaxed);
+    }
+}
+
 /// Compatibility requires this exact memory-render format epoch.
 pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = release_contract::MEMORY_RENDER_EPOCH;
 /// Compatibility requires this exact compartment-render format epoch.
@@ -8336,6 +8350,10 @@ impl HandlerCore {
                 };
             }
         };
+        let _admission = match self.admit_pass() {
+            Ok(admission) => admission,
+            Err(outcome) => return outcome,
+        };
         apply_claude_code_config_controls(&mut parsed, &binding.config, serializer_profile);
         parsed
             .prompt_surface_tool_descriptions
@@ -8401,20 +8419,11 @@ impl HandlerCore {
                 message: "transform is blocked until all transform pages arrive".to_string(),
             };
         }
-        let _admission = match self.admit_pass() {
-            Ok(admission) => admission,
-            Err(outcome) => return outcome,
-        };
         let permit = match self.acquire_unit_permit().await {
             Ok(permit) => permit,
             Err(outcome) => return outcome,
         };
         ticket.accept();
-        let snapshot_generation = self
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex")
-            .begin(&parsed.session_id);
         let intake = PassIntake {
             store,
             parsed,
@@ -8423,7 +8432,7 @@ impl HandlerCore {
             serializer_profile,
             pass_load,
             native_delta_frontier,
-            snapshot_generation,
+            snapshot_generation: 0,
             entry: EntryTimings {
                 handler_started_at,
                 request_observed_to_handler,
@@ -8441,7 +8450,10 @@ impl HandlerCore {
         let signal = entry.runner.cancel_signal();
         let outcome = entry
             .runner
-            .run_unit(Box::new(move || core.first_unit(intake, &signal, permit)))
+            .run_unit(Box::new(move || {
+                let _heartbeat = UnitHeartbeat;
+                core.first_unit(intake, &signal, permit)
+            }))
             .await;
         let carry = match outcome {
             Ok(UnitOutcome::Terminal(outcome)) => return outcome,
@@ -8480,15 +8492,21 @@ impl HandlerCore {
     /// Every committing unit invalidates the guidance pin; `apply_once` replaces serialized outputs.
     /// Lineage follows the first successful transform. Projection and attachments are recomputable.
     /// Response observations are advisory. A newer `begin` supersedes an unfinished `finish_ready` generation.
+    /// Cancellation before `begin` preserves the session's prior `Ready` snapshot.
     fn first_unit(
         &self,
-        intake: PassIntake,
+        mut intake: PassIntake,
         signal: &CancelSignal,
         _permit: UnitPermit,
     ) -> UnitOutcome {
         if signal.is_cancelled() {
             return UnitOutcome::Terminal(cancelled_before_transform());
         }
+        intake.snapshot_generation = self
+            .transform_snapshots
+            .lock()
+            .expect("transform snapshots mutex")
+            .begin(&intake.parsed.session_id);
         let (env, start) = match self.start_transform_pass(intake) {
             Ok(started) => started,
             Err(outcome) => return UnitOutcome::Terminal(outcome),
@@ -8583,6 +8601,7 @@ impl HandlerCore {
         let outcome = entry
             .runner
             .run_unit(Box::new(move || {
+                let _heartbeat = UnitHeartbeat;
                 let _permit = permit;
                 let mut pass = pass;
                 if signal.is_cancelled() {
@@ -8628,6 +8647,7 @@ impl HandlerCore {
         let outcome = entry
             .runner
             .run_unit(Box::new(move || {
+                let _heartbeat = UnitHeartbeat;
                 let _permit = permit;
                 let mut pass = pass;
                 if signal.is_cancelled() {
