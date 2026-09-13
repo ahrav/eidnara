@@ -231,9 +231,9 @@ panic test, a destructor-panic matrix, or a proof covering arbitrary panics.
 
 [runner-live]: ../../../../../crates/daemon/src/transform_unit.rs#L23-L49
 [blocking-live]: ../../../../../crates/host-runtime/src/handler.rs#L606
-[mapping]: ../../../../../crates/daemon/src/lib.rs#L16394
+[mapping]: ../../../../../crates/daemon/src/lib.rs#L16414
 [panic-test]: ../../../../../crates/daemon/src/transform_unit/host_tests.rs#L375
-[failure-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L812
+[failure-test]: ../../../../../crates/daemon/src/transform_unit/tests.rs#L867
 [kernel-live]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L462
 [receipt]: ../../existing-checks.md#transform-unit-execution-receipt-2026-09-13
 

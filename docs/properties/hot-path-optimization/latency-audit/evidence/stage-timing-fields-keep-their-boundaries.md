@@ -147,9 +147,9 @@ not a latency improvement. No comprehensive per-field timing test or TypeScript-
 schema check is claimed, and no full-cap paged or slow-disk duration is measured.
 The broader field-ownership question remains open on this invalidated record.
 
-[entry-live]: ../../../../../crates/daemon/src/lib.rs#L8250-L8271
-[pre-live]: ../../../../../crates/daemon/src/lib.rs#L8703-L8747
-[timings-live]: ../../../../../crates/daemon/src/lib.rs#L8997-L9107
+[entry-live]: ../../../../../crates/daemon/src/lib.rs#L8264-L8285
+[pre-live]: ../../../../../crates/daemon/src/lib.rs#L8723-L8767
+[timings-live]: ../../../../../crates/daemon/src/lib.rs#L9017-L9127
 
 ## Upstream stage evidence, e451a2b4
 
@@ -172,4 +172,4 @@ boundary without turning it into a performance result.
 
 [upstream-meta-load]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L8257-L8267
 [upstream-timing]: https://github.com/ahrav/eidnara/blob/e451a2b4/crates/daemon/src/lib.rs#L8799-L8809
-[metadata-load-live]: ../../../../../crates/daemon/src/lib.rs#L8380-L8393
+[metadata-load-live]: ../../../../../crates/daemon/src/lib.rs#L8398-L8411

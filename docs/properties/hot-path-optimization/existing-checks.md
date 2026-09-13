@@ -244,16 +244,16 @@ units with recomputed or superseded derived state. Neither decision asserts
 that every duration, fault, or recovery path has been tested.
 
 [u-abort]: ../../../crates/daemon/src/transform_unit/tests.rs#L144
-[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L249
-[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L337
-[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L497
-[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L695
-[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L717
+[u-page]: ../../../crates/daemon/src/transform_unit/tests.rs#L257
+[u-stale]: ../../../crates/daemon/src/transform_unit/tests.rs#L345
+[u-cap]: ../../../crates/daemon/src/transform_unit/tests.rs#L505
+[u-cancel]: ../../../crates/daemon/src/transform_unit/tests.rs#L726
+[u-emergency]: ../../../crates/daemon/src/transform_unit/tests.rs#L772
 [u-host-close]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L365
 [u-host-cancel]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L370
 [u-panic]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L375
 [u-child]: ../../../crates/daemon/src/transform_unit/host_tests.rs#L406
-[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L812
+[u-failure]: ../../../crates/daemon/src/transform_unit/tests.rs#L867
 [u-meter]: ../../../crates/daemon/src/metered_decode.rs#L1189
 [u-meter-spent]: ../../../crates/daemon/src/metered_decode.rs#L1232
 
@@ -509,7 +509,7 @@ that no related check exists anywhere in the repository.
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L16346-L16359
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L16366-L16379
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
 [route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1079
@@ -526,10 +526,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1032
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1216
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1313
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19866
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20598-L20604
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20605-L20614
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20615-L20626
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19886
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20618-L20624
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20625-L20634
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20635-L20646
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -599,7 +599,7 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5233
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25966
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L25986
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1494
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L877
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1464
