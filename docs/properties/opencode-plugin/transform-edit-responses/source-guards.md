@@ -59,7 +59,7 @@ and terminal message can be reused. The old recursive traversal and snapshot
 signature functions are removed. SHA-256 wire fingerprints remain part of the
 existing transport contract, not the authority for field equality.
 
-The walk has a 64 MiB cumulative conservative source/snapshot estimate and a
+The walk has a 256 MiB cumulative conservative source/snapshot estimate and a
 bounded ancestor depth. Strings retain their UTF-16 charge, and descriptors,
 field slots and repeated visits to shared subtrees also count. This unit is
 independent of the 64 MiB encoded-output limit. JSON below that encoded limit
@@ -67,8 +67,10 @@ can exceed the walk estimate and be refused; accepting every 64 MiB JSON value
 is not promised. The walk limit is not aggregate capture admission, engine
 enumeration allocation or process RSS. It cannot stand in for TE23 or TE24.
 
-Source declines log `SourceRejected` or `SourceWalkLimitExceeded` through
-existing loggers without incrementing daemon-failure counters. If a source
+Source declines log `SourceRejected` at debug and `SourceWalkLimitExceeded` at
+warn through existing loggers without incrementing daemon-failure counters. A
+walk-limit decline repeats on every pass of that session until its history
+shrinks, so it is the one decline an operator must be able to see. If a source
 check rejects after delivery IDs are known, the existing NACK path handles
 those IDs. Checks after `await assertCurrentRetryPass()` remain necessary:
 even an already-resolved promise opens a microtask window.
@@ -82,14 +84,15 @@ contract. The ordinal resolver still updates shared memo state. The wrapper
 still restores its shallow membership snapshot on thrown hook errors. Existing
 splice-based publication and post-delivery cache promotion remain unchanged.
 
-The wrapper validates the source tree before copying membership. Its shared
-root-returnability check rejects proxies, unsupported prototype chains and an
-own or inherited `then` property without invoking it. After the hook, only this
-cheap root check runs. It protects promise assimilation, not publication: an
-`undefined` return cannot undo changes the hook has already made to the host
-array. Source rejection before the hook leaves host data unchanged. Supported
-calls retain the existing array result. The root check is not an output-owner
-or all-or-none publication check.
+The wrapper validates the source tree before copying membership. The walker's
+root entry and the wrapper share one exported predicate, `rootArrayRejection`,
+which rejects proxies, unsupported prototype chains and an own or inherited
+`then` property without invoking it. After the hook, only this cheap root check
+runs. It protects promise assimilation, not publication: an `undefined` return
+cannot undo changes the hook has already made to the host array. Source
+rejection before the hook leaves host data unchanged. Supported calls retain
+the existing array result. The root check is not an output-owner or
+all-or-none publication check.
 
 This is partial input for TE17, not completion of TE17, TE18, TE20-TE24 or TE30.
 Recipe response validation and applied-output revisions belong to #538.
@@ -114,6 +117,14 @@ The completed ownership and recipe implementation must include these costs in
 the parent's three-artifact comparison and meet its performance gate. This
 precursor does not establish that the gate will pass.
 
-The conservative walk estimate also depends on structure. Local probes measured
-roughly 2.0 to 3.2 estimated bytes per JSON byte across four text-heavy shapes.
-This ratio is illustrative, not a conversion rule or another limit.
+The conservative walk estimate also depends on structure. Text-heavy shapes
+measured roughly 2.0 to 3.2 estimated bytes per JSON byte. Persisted OpenCode
+rows are metadata-heavy: each message carries identifier, timestamp, token and
+tool-state fields, and each property is charged for its descriptor, three
+attribute fields and a tape slot in addition to its bytes. Synthetic shapes with
+200-, 800- and 3,000-character parts measured 11.9, 7.0 and 3.8 estimated bytes
+per JSON byte; replaying three real sessions measured 3.5 to 6.3. At the earlier
+64 MiB budget those ratios admitted roughly 5 to 18 MiB of JSON and declined
+every pass of a 12,351-message, 19 MiB session. The 256 MiB budget admits the
+19 MiB session and about 20 MiB of the shortest measured shape. The ratio is
+illustrative, not a conversion rule or another limit.

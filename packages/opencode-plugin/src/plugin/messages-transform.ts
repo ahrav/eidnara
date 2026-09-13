@@ -1,8 +1,8 @@
-import { types } from "node:util";
 import type { ResolvedTransformMode as TransformMode } from "../config/transform-mode";
 import {
     assertReferenceableMessages,
     readOwnDataProperty,
+    rootArrayRejection,
     SourceRejected,
 } from "../hooks/context/transform-capture";
 import { log } from "../shared/logger";
@@ -14,15 +14,8 @@ type MessageWithParts = {
 
 type MessagesTransformOutput = { messages: MessageWithParts[] };
 
-function returnableMessageArray(value: unknown): boolean {
-    return (
-        !types.isProxy(value) &&
-        Array.isArray(value) &&
-        Object.getPrototypeOf(value) === Array.prototype &&
-        Object.getPrototypeOf(Array.prototype) === Object.prototype &&
-        Object.getPrototypeOf(Object.prototype) === null &&
-        !("then" in value)
-    );
+function logSourceDecline(error: SourceRejected, stage: string): void {
+    log(`[eidnara] transform declined ${error.name}: ${error.message} (${stage})`);
 }
 
 /**
@@ -60,12 +53,10 @@ export function createMessagesTransformHandler(args: {
     return async (input, output): Promise<MessageWithParts[] | undefined> => {
         const messages = readOwnDataProperty(output, "messages") as MessageWithParts[];
         try {
-            if (!returnableMessageArray(messages))
-                throw new SourceRejected("unsupported wrapper array or then property");
             assertReferenceableMessages(messages);
         } catch (error) {
             if (!(error instanceof SourceRejected)) throw error;
-            log(`[eidnara] transform declined ${error.name}: ${error.message}`);
+            logSourceDecline(error, "entry");
             return;
         }
         // A throw after the hook has replaced some entries would otherwise send that partial history to the model.
@@ -83,11 +74,12 @@ export function createMessagesTransformHandler(args: {
                 error,
             );
         }
+        // Only the root is rechecked here: nested data is the hook's published output, and this check
+        // guards promise assimilation of the return value, not publication.
         const result = readOwnDataProperty(output, "messages") as MessageWithParts[];
-        if (!returnableMessageArray(result)) {
-            log(
-                "[eidnara] transform return declined SourceRejected: unsupported array or then property",
-            );
+        const rejection = rootArrayRejection(result);
+        if (rejection !== undefined) {
+            logSourceDecline(new SourceRejected(rejection), "return");
             return;
         }
         return result;

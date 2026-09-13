@@ -40,6 +40,7 @@ import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
 import {
     assertCapturedMessagesUnchanged,
+    type CapturedMessages,
     captureMessages,
     readOwnDataProperty,
     SourceRejected,
@@ -335,8 +336,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               const messages = readOwnDataProperty(output, "messages") as MessageLike[];
               const sessionId = resolveSessionId(messages);
               if (sessionId && deletedSessions.has(sessionId)) return;
+              let captured: CapturedMessages;
               try {
-                  const captured = captureMessages(messages);
+                  captured = captureMessages(messages);
                   if (!sessionId) return;
                   // Hidden children receive no project context; the directory lookup identifies restored children.
                   await sessionDirectoryFor(sessionId);
@@ -351,7 +353,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                   return;
               }
               if (internalChildSessions.has(sessionId)) return;
-              await rustTransform.run(sessionId, messages, output);
+              await rustTransform.run(sessionId, messages, output, captured);
           }
         : async (): Promise<void> => {};
 

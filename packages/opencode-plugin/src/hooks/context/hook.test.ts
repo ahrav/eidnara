@@ -242,6 +242,35 @@ describe("eidnara hook", () => {
         }
     }
 
+    it("captures the source once per pass and hands that capture to the direct transform", async () => {
+        useTempDataHome("hook-single-capture-");
+        const sessionId = "ses-single-capture";
+        const messages = installOneRawMessage(sessionId);
+        const member = messages[0]!;
+        const approved = { info: { id: "approved" }, parts: [{ type: "text", text: "result" }] };
+        const fake = createFakeModuleClient(() => ({ native_messages: [approved] }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ rustModeModuleClient: fake.client })),
+        );
+        const define = Object.defineProperty;
+        let memberSlotDefinitions = 0;
+        const spy = spyOn(Object, "defineProperty").mockImplementation(
+            (target, key, descriptor) => {
+                if (Array.isArray(target) && "value" in descriptor && descriptor.value === member)
+                    memberSlotDefinitions += 1;
+                return define(target, key, descriptor);
+            },
+        );
+        try {
+            await hook["experimental.chat.messages.transform"]({}, { messages });
+        } finally {
+            spy.mockRestore();
+        }
+        expect(fake.calls.map((call) => call.method)).toEqual(["transform"]);
+        expect(messages[0]).toBe(approved);
+        expect(memberSlotDefinitions).toBe(1);
+    });
+
     it("rejects source mutation during hook directory lookup before direct transform", async () => {
         useTempDataHome("hook-source-directory-");
         const sessionId = "ses-source-directory";

@@ -52,6 +52,7 @@ import {
     type MessageContentSnapshot,
     readOwnDataProperty,
     SourceRejected,
+    SourceWalkLimitExceeded,
     snapshotFieldsEqual,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -662,6 +663,8 @@ export function createRustModeTransform(
         sessionId: string,
         messages: readonly MessageLike[],
         output: { messages: unknown[] },
+        /** A capture of `messages` to recheck against instead of building a new one. */
+        captured?: CapturedMessages,
     ) => Promise<void>;
     clearSession: (sessionId: string) => void;
     invalidateWireState: (sessionId: string) => void;
@@ -742,14 +745,17 @@ export function createRustModeTransform(
         sessionId: string,
         liveMessages: readonly MessageLike[],
         output: { messages: unknown[] },
+        supplied?: CapturedMessages,
     ): Promise<void> => {
         const passStartedAt = performance.now();
         const logSourceDecline = (error: SourceRejected): void => {
-            sessionLog.debug(sessionId, `rust transform declined ${error.name}: ${error.message}`);
+            const level = error instanceof SourceWalkLimitExceeded ? "warn" : "debug";
+            sessionLog[level](sessionId, `rust transform declined ${error.name}: ${error.message}`);
         };
         let captured: CapturedMessages;
         try {
-            captured = captureMessages(liveMessages);
+            // A stale supplied capture declines at the next `sourceUnchanged` check instead of here.
+            captured = supplied ?? captureMessages(liveMessages);
             const target = readOwnDataProperty(output, "messages");
             if (target !== liveMessages) assertReferenceableMessages(target);
         } catch (error) {
@@ -774,9 +780,12 @@ export function createRustModeTransform(
         const state = ensureState(states, sessionId);
         const timings = emptyRustPassTimings();
         const passSequence = ++state.passCount;
-        const assertCurrentPass = (): void => {
+        const assertPassOwnership = (): void => {
             if (states.get(sessionId) !== state) throw new SessionClearedDuringPass(sessionId);
             if (state.passCount !== passSequence) throw new PassSupersededDuringPass(sessionId);
+        };
+        const assertCurrentPass = (): void => {
+            assertPassOwnership();
             assertSourceUnchanged();
         };
         const syntheticTurn = observeSyntheticTurn(state, messages);
@@ -800,7 +809,6 @@ export function createRustModeTransform(
         if (!sourceUnchanged()) return;
         const isSubagent = deps.isSubagentSession(sessionId);
         const systemPromptHash = deps.systemPromptHashFor(sessionId);
-        if (!sourceUnchanged()) return;
         let preflightError: unknown;
         let model = modelFromMessages(messages);
         if (!model) {
@@ -921,7 +929,6 @@ export function createRustModeTransform(
                     sessionLog.debug(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
-        if (!sourceUnchanged()) return;
         resolveCtxReduceAvailabilityFromMessages(sessionId, messages);
         const reduceAvailability = resolveCtxReduceAvailability(sessionId);
         // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
@@ -1247,7 +1254,8 @@ export function createRustModeTransform(
                 let response: Record<string, unknown> | undefined;
                 for (const [index, { page, bytes }] of pages.entries()) {
                     // A `session.deleted` that landed during preflight or an earlier page has already queued the daemon-side delete; sending now would recreate the session's durable state.
-                    assertCurrentPass();
+                    // Page bodies were serialized before this loop, so a source recheck here cannot change what is sent; the recheck before publication covers the series.
+                    assertPassOwnership();
                     const transportStartedAt = performance.now();
                     let moduleResponse: unknown;
                     try {

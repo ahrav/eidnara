@@ -5,6 +5,7 @@ import {
     type CapturedMessages,
     captureMessages,
     readOwnDataProperty,
+    rootArrayRejection,
     SourceRejected,
     SourceWalkLimitExceeded,
     snapshotFieldsEqual,
@@ -167,6 +168,36 @@ describe("referenceable source guard", () => {
         expect(trap).not.toHaveBeenCalled();
     });
 
+    it("rejects an inherited then on the root array without calling it", () => {
+        const key = "then";
+        const trap = mock(() => undefined);
+        const source = [{ text: "hello" }];
+        const captured = captureMessages(source);
+        const saved = Object.getOwnPropertyDescriptor(Array.prototype, key);
+        let valid = true;
+        let unchanged = true;
+        let reason: string | undefined;
+        try {
+            Object.defineProperty(Array.prototype, key, { get: trap, configurable: true });
+            valid = referenceableMessages(source);
+            unchanged = capturedMessagesUnchanged(source, captured);
+            reason = rootArrayRejection(source);
+        } finally {
+            if (saved) Object.defineProperty(Array.prototype, key, saved);
+            else Reflect.deleteProperty(Array.prototype, key);
+        }
+        expect(valid).toBe(false);
+        expect(unchanged).toBe(false);
+        expect(reason).toBe("then property on root array");
+        expect(rootArrayRejection(source)).toBeUndefined();
+        expect(rootArrayRejection(new Proxy(source, {}))).toBe("proxy root array");
+        expect(rootArrayRejection({ length: 0 })).toBe("root is not an array");
+        expect(rootArrayRejection(Object.defineProperty([], key, { value: 1 }))).toBe(
+            "then property on root array",
+        );
+        expect(trap).not.toHaveBeenCalled();
+    });
+
     it("rejects own and inherited serialization hooks without calling them", () => {
         const trap = mock(() => "serialized");
         for (const prototype of [Object.prototype, Array.prototype]) {
@@ -313,7 +344,7 @@ describe("referenceable source guard", () => {
     it("bounds cumulative work, large sparse roots and shared-reference amplification", () => {
         const source = [{ text: "x".repeat(20 * 1024 * 1024) }];
         const captured = captureMessages(source);
-        source.push(source[0]);
+        for (let index = 0; index < 6; index += 1) source.push(source[0]);
         expect(() => captureMessages(source)).toThrow(SourceWalkLimitExceeded);
         expect(referenceableMessages(source)).toBe(false);
         expect(capturedMessagesUnchanged(source, captured)).toBe(false);
@@ -321,6 +352,74 @@ describe("referenceable source guard", () => {
         for (let index = 0; index < 25; index += 1) shared = { left: shared, right: shared };
         expect(() => captureMessages([shared])).toThrow(SourceWalkLimitExceeded);
         expect(() => captureMessages(new Array(2 ** 32 - 1))).toThrow(SourceWalkLimitExceeded);
+    });
+
+    it("accepts a metadata-heavy history of short messages within the encoded-output limit", () => {
+        // Persisted OpenCode rows carry many short identifier, timestamp and token fields per
+        // message, so descriptor charges dominate string bytes; this shape must not trip the walk.
+        const sessionID = "ses_0123456789abcdefghijkl";
+        const message = (index: number) => ({
+            info: {
+                id: `msg_${String(index).padStart(24, "0")}`,
+                sessionID,
+                role: index % 2 ? "assistant" : "user",
+                time: { created: 1_700_000_000_000 + index, completed: 1_700_000_000_500 + index },
+                ...(index % 2
+                    ? {
+                          providerID: "anthropic",
+                          modelID: "claude-sonnet-4",
+                          mode: "build",
+                          path: { cwd: "/home/user/project", root: "/home/user/project" },
+                          cost: 0.0123,
+                          tokens: {
+                              input: 1200,
+                              output: 300,
+                              reasoning: 0,
+                              cache: { read: 1000, write: 0 },
+                          },
+                          system: [],
+                      }
+                    : {}),
+                agent: "build",
+            },
+            parts: [
+                {
+                    id: `prt_${index}a`,
+                    sessionID,
+                    messageID: `msg_${index}`,
+                    type: "text",
+                    text: "y".repeat(200),
+                    time: { start: 1, end: 2 },
+                },
+                ...(index % 2
+                    ? [
+                          {
+                              id: `prt_${index}b`,
+                              sessionID,
+                              messageID: `msg_${index}`,
+                              type: "tool",
+                              callID: `call_${index}`,
+                              tool: "read",
+                              state: {
+                                  status: "completed",
+                                  input: { filePath: "/home/user/project/src/a.ts" },
+                                  output: "z".repeat(200),
+                                  title: "a.ts",
+                                  metadata: { preview: "p".repeat(64), truncated: false },
+                                  time: { start: 1, end: 2 },
+                              },
+                          },
+                      ]
+                    : []),
+            ],
+        });
+        const source = Array.from({ length: 12_000 }, (_, index) => message(index));
+        const jsonBytes = Buffer.byteLength(JSON.stringify(source));
+        expect(jsonBytes).toBeGreaterThan(8 * 1024 * 1024);
+        expect(jsonBytes).toBeLessThan(16 * 1024 * 1024);
+        const captured = captureMessages(source);
+        expect(captured.members).toHaveLength(12_000);
+        expect(capturedMessagesUnchanged(source, captured)).toBe(true);
     });
 
     it("visits source leaves once during capture and once during recheck", () => {
