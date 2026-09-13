@@ -1108,3 +1108,167 @@ async fn disable_process_cuts_and_lost_ack_reconcile_twice_without_reenable() {
         }
     }
 }
+
+/// A supervisor that stopped on its own, here by a panicking slice, has joined every slice and drained its native work like one the disable cancelled. Reconciliation joins it and completes deregistration instead of refusing for the process lifetime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_supervisor_stopped_before_disable_still_reconciles() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds, Stop, SupervisorEvent};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let weak = Arc::downgrade(reader.projection());
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    selection
+        .start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                synapse,
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            SliceBounds {
+                dispatch: fixtures::bounds(),
+                sweep_candidates: NonZeroUsize::new(16).unwrap(),
+                slice: Duration::from_millis(200),
+                idle: Duration::from_millis(20),
+            },
+            Arc::new(|| fixtures::NOW),
+            events,
+        )
+        .unwrap();
+    drop(reader);
+    selection
+        .maintenance_supervisor_for_test()
+        .unwrap()
+        .panic_next_slice_for_test();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            received.recv().await.expect("supervisor event stream"),
+            SupervisorEvent::Stopped(Stop::Panicked(_))
+        ) {}
+    })
+    .await
+    .unwrap();
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &spec(root.path()),
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+    assert!(
+        weak.upgrade().is_none(),
+        "the joined task released its reader"
+    );
+    assert_eq!(admissions(&selection, &corpus, &gate), (0, 0));
+}
+
+/// A record the gate cannot read denies the call in hand and decides nothing durable: a directory whose mode drifted is repaired by the next lifecycle open, and a directory the daemon cannot enter is served again once it can. Neither latches the gate closed behind a recovery demand.
+#[test]
+fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
+    use daemon::projection_gates::Denial;
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let directory = root.path().join("search-lifecycle");
+    let mut modes = vec![0o750];
+    if rustix::process::geteuid().as_raw() != 0 {
+        modes.push(0o000);
+    }
+    for mode in modes {
+        let grant = gate
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(mode)).unwrap();
+        let denial = gate
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err();
+        assert!(
+            matches!(denial, Denial::ControlUnreadable(_)),
+            "mode {mode:o} was read as a durable stop: {denial:?}"
+        );
+        assert!(!grant.invalidated.is_cancelled());
+        assert!(
+            selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err()
+        );
+        if mode == 0o000 {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        } else {
+            ProjectionLifecycle::open(root.path()).unwrap();
+        }
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_or_else(|denial| panic!("mode {mode:o} latched the gate: {denial}"));
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap();
+    }
+}
+
+/// Cleanup walks the same commit pages construction and retirement admitted, so it charges the same per-page catch-up limits. A manifest sized for one page admits construction and must admit the disable that follows.
+#[tokio::test]
+async fn cleanup_charges_the_retirement_walk_per_page_like_construction() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let config = spec(root.path());
+    assert!(config.episode.max_source_pages.get() > 1);
+    let gate = Arc::new(HookGate::for_home(root.path()));
+    let mut evaluator = cleanup_evaluator(root.path());
+    for (key, value) in [
+        (
+            "catchup_batch_commits",
+            config.episode.commits.max_commits.get() as u64,
+        ),
+        (
+            "catchup_batch_encoded_bytes",
+            config
+                .episode
+                .commits
+                .max_payload_bytes
+                .get()
+                .max(config.episode.max_source_encoded_bytes.get()),
+        ),
+    ] {
+        evaluator.manifest.limits.insert(key.to_owned(), value);
+    }
+    gate.install(evaluator);
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    let done = selection
+        .reconcile_disabled(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(done.deregistered);
+}

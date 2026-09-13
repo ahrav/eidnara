@@ -166,13 +166,6 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
-        if matches!(
-            ProjectionLifecycle::read_at(&self.data_home),
-            crate::projection_lifecycle::ControlState::Disabled(_)
-                | crate::projection_lifecycle::ControlState::Unavailable(_)
-        ) {
-            return Err(crate::projection_lifecycle::IntentRefusal::Disabled.into());
-        }
         let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
         gate.check_limits(
             &grant,

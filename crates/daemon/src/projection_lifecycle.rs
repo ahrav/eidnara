@@ -313,8 +313,10 @@ impl ProjectionLifecycle {
                 "the lifecycle directory is not the caller's own directory",
             ));
         }
-        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only.
+        // The umask may have narrowed the requested mode; the caller's own directory is set to exactly owner-only before the shared check.
         dir_fd.set_permissions(Permissions::from_mode(0o700))?;
+        owner_only_directory(&dir_fd.metadata()?)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
         let this = Self {
             data_home: data_home.to_path_buf(),
             dir,
@@ -379,15 +381,21 @@ impl ProjectionLifecycle {
     }
 
     pub(crate) fn read_at(data_home: &Path) -> ControlState {
+        Self::probe_at(data_home)
+            .unwrap_or_else(|Unreadable(reason)| ControlState::Unavailable(reason))
+    }
+
+    /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory or file whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes were read and refused.
+    pub(crate) fn probe_at(data_home: &Path) -> Result<ControlState, Unreadable> {
         let dir = data_home.join(CONTROL_DIR);
         let metadata = match open_directory(&dir).and_then(|fd| fd.metadata()) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return ControlState::Absent,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ControlState::Absent);
+            }
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
-        if metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return ControlState::Unavailable("insecure lifecycle directory".to_owned());
-        }
+        owner_only_directory(&metadata).map_err(|reason| Unreadable(reason.to_owned()))?;
         let path = dir.join(CONTROL_RECORD);
         let file = match OpenOptions::new()
             .read(true)
@@ -395,26 +403,28 @@ impl ProjectionLifecycle {
             .open(&path)
         {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return ControlState::Absent,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ControlState::Absent);
+            }
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
         let metadata = match file.metadata() {
             Ok(metadata) => metadata,
-            Err(error) => return ControlState::Unavailable(error.kind().to_string()),
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
         if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return ControlState::Unavailable(
+            return Err(Unreadable(
                 "not the caller's own owner-only regular file".to_owned(),
-            );
+            ));
         }
         if metadata.len() > MAX_RECORD_BYTES {
-            return ControlState::Unavailable("over the size cap".to_owned());
+            return Ok(ControlState::Unavailable("over the size cap".to_owned()));
         }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
-            return ControlState::Unavailable(error.kind().to_string());
+            return Err(Unreadable(error.kind().to_string()));
         }
-        match serde_json::from_slice::<StoredIntent>(&bytes) {
+        Ok(match serde_json::from_slice::<StoredIntent>(&bytes) {
             Ok(StoredIntent::Disabled(intent)) => {
                 if intent.schema != 3
                     || intent.recorded_at < 0
@@ -467,7 +477,7 @@ impl ProjectionLifecycle {
                 Err(refusal) => ControlState::Unavailable(refusal.to_string()),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
-        }
+        })
     }
 
     /// Reads projection generation pins for a reclaimer holding the lifecycle transaction lock.
@@ -977,6 +987,24 @@ pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
         .read(true)
         .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
         .open(dir)
+}
+
+/// Why a record could not be read: an I/O failure or a failed owner-only check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unreadable(pub(crate) String);
+
+/// Requires the caller's own directory with no group or other permission bits; every reader and the opener judge the directory by this one predicate.
+fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
+    if !metadata.is_dir() {
+        return Err("the lifecycle path is not a directory");
+    }
+    if !owned_by_caller(metadata) {
+        return Err("the lifecycle directory is not the caller's own");
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err("the lifecycle directory is not owner-only");
+    }
+    Ok(())
 }
 
 fn owned_by_caller(metadata: &fs::Metadata) -> bool {

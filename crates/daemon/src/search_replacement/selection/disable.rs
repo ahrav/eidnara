@@ -1,7 +1,5 @@
 use super::*;
-use crate::embedding_supervisor::{
-    EmbeddingSupervisor, Maintained, SliceBounds, Stop, SupervisorEvent,
-};
+use crate::embedding_supervisor::{EmbeddingSupervisor, Maintained, SliceBounds, SupervisorEvent};
 use crate::projection_lifecycle::{ControlState, DisabledIntent, EpisodeAccounting, IntentRefusal};
 use kernel::CommitIntent;
 use sha2::{Digest, Sha256};
@@ -45,12 +43,6 @@ impl SearchSelection {
     ) -> Result<(), BuildError> {
         if self.maintenance.is_some() {
             return Err(BuildError::Invalid("maintenance already owned"));
-        }
-        if matches!(
-            ProjectionLifecycle::read_at(&self.data_home),
-            ControlState::Disabled(_) | ControlState::Unavailable(_)
-        ) {
-            return Err(IntentRefusal::Disabled.into());
         }
         let family = self
             .selected
@@ -96,6 +88,7 @@ impl SearchSelection {
     }
 
     /// Joins the owned supervisor before reconciling its released local prefix and ordinary deregistration.
+    /// A supervisor that already stopped on its own joins like one this disable cancelled.
     /// Cancellation or an expired wait retains the supervisor and join handle; its tracked task owns the reader.
     /// An empty selection or an already completed deregistration returns without consuming a cleanup episode.
     /// Filesystem calls require healthy dependencies; a deadline cannot interrupt a blocked syscall.
@@ -154,13 +147,11 @@ impl SearchSelection {
         let end = self.cleanup_admission(gate, spec, budget, &disabled)?;
         if let Some(owner) = &mut self.maintenance {
             observer(DisableEvent::DrainStarted);
-            let report = owner
+            // A resolved drain has joined every slice and owned call regardless of what stopped the loop; refusing an earlier stop here would block cleanup until restart.
+            owner
                 .supervisor
                 .shutdown(end.saturating_duration_since(Instant::now()))
                 .await?;
-            if !matches!(report.stop, Some(Stop::Shutdown)) {
-                return Err(BuildError::Invalid("maintenance requires reconciliation"));
-            }
             let joined = tokio::time::timeout_at(end.into(), &mut owner.task)
                 .await
                 .map_err(|_| BuildError::Expired)?;
@@ -306,6 +297,14 @@ impl SearchSelection {
         Ok(next)
     }
 
+    /// The supervisor this selection owns, so a test can drive it to a stop the selection did not request.
+    #[cfg(feature = "test-support")]
+    pub fn maintenance_supervisor_for_test(&self) -> Option<Arc<EmbeddingSupervisor>> {
+        self.maintenance
+            .as_ref()
+            .map(|owner| Arc::clone(&owner.supervisor))
+    }
+
     #[cfg(feature = "test-support")]
     pub fn with_disable_write_barrier_for_test(
         mut self,
@@ -339,53 +338,41 @@ impl SearchSelection {
         if end > Instant::now() + Duration::from_millis(remaining) {
             return Err(BuildError::Invalid("cleanup exceeds original deadline"));
         }
-        let work = spec.episode.max_source_pages.get() as u64;
-        gate.cleanup_limits(
-            &InvalidationIdentity::from(&self.identity),
-            &[
-                ("physical_drain_ms", remaining),
-                (
-                    "B_recovery_ms",
-                    episodes
-                        .deadline
-                        .checked_sub(disabled.recorded_at)
-                        .and_then(|n| u64::try_from(n).ok())
-                        .ok_or(BuildError::Expired)?,
-                ),
-                ("retry_attempts", u64::from(episodes.allowance)),
-                (
-                    "catchup_batch_commits",
-                    work.checked_mul(spec.episode.commits.max_commits.get() as u64)
-                        .ok_or(BuildError::InventoryBound)?,
-                ),
-                (
-                    "catchup_batch_encoded_bytes",
-                    work.checked_mul(spec.episode.commits.max_payload_bytes.get())
-                        .ok_or(BuildError::InventoryBound)?,
-                ),
-                (
-                    "local_transaction_rows",
-                    (spec.episode.batch.persist.max_records.get() as u64)
-                        .saturating_add(1)
-                        .max(self.bounds.max_live().saturating_add(
-                            self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
-                        ) as u64)
-                        .max(spec.episode.commits.max_rows.get() as u64),
-                ),
-                (
-                    "export_page_rows",
-                    self.bounds.max_live_per_class.get() as u64,
-                ),
-                (
-                    "local_transaction_bytes",
-                    spec.episode
-                        .max_source_encoded_bytes
-                        .get()
-                        .checked_add(MAX_RECORD_BYTES)
-                        .ok_or(BuildError::InventoryBound)?,
-                ),
-            ],
-        )?;
+        let mut requested = vec![
+            ("physical_drain_ms", remaining),
+            (
+                "B_recovery_ms",
+                episodes
+                    .deadline
+                    .checked_sub(disabled.recorded_at)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .ok_or(BuildError::Expired)?,
+            ),
+            ("retry_attempts", u64::from(episodes.allowance)),
+            (
+                "local_transaction_rows",
+                (spec.episode.batch.persist.max_records.get() as u64)
+                    .saturating_add(1)
+                    .max(self.bounds.max_live().saturating_add(
+                        self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
+                    ) as u64)
+                    .max(spec.episode.commits.max_rows.get() as u64),
+            ),
+            (
+                "export_page_rows",
+                self.bounds.max_live_per_class.get() as u64,
+            ),
+            (
+                "local_transaction_bytes",
+                spec.episode
+                    .max_source_encoded_bytes
+                    .get()
+                    .checked_add(MAX_RECORD_BYTES)
+                    .ok_or(BuildError::InventoryBound)?,
+            ),
+        ];
+        requested.extend(spec.catchup_page_charges());
+        gate.cleanup_limits(&InvalidationIdentity::from(&self.identity), &requested)?;
         Ok(end)
     }
 }

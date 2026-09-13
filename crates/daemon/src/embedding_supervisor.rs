@@ -504,12 +504,15 @@ impl EmbeddingSupervisor {
             });
         }
         // Slices are joined; the host still owns whatever native calls they admitted. A call has no join handle, so its exit is observed by polling the host until the grace ends; a ready result is a held lease the next incarnation reconciles.
-        let held_results = tokio::time::timeout_at(deadline.into(), self.wait_native())
-            .await
-            .map_err(|_| Unresolved {
-                slices: 0,
-                native: self.native_census().0,
-            })?;
+        let held_results = match tokio::time::timeout_at(deadline.into(), self.wait_native()).await
+        {
+            Ok(held) => held,
+            // A final census excludes calls that exited since the last poll.
+            Err(_) => match self.native_census() {
+                (0, held) => held,
+                (native, _) => return Err(Unresolved { slices: 0, native }),
+            },
+        };
         // The first writer wins: this records `Shutdown` only for a loop the cancellation reached before it was first polled, so the report is final.
         self.stop_with(Stop::Shutdown);
         Ok(DrainReport {
