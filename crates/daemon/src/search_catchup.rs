@@ -144,6 +144,11 @@ pub enum Blocked {
         through: i64,
         kernel_checkpoint: Option<i64>,
     },
+    /// The acknowledgement may have committed, but its checkpoint could not be read back.
+    AcknowledgementReconciliationFailed {
+        through: i64,
+        error: KernelError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +162,8 @@ pub enum EpisodeEnd {
 pub struct EpisodeReport {
     /// `target` is `0` when the episode is refused before capture.
     pub target: i64,
-    /// `acknowledged_through` is the kernel consumer checkpoint at episode end; it remains `0` if refusal occurs before the checkpoint read.
+    /// The last confirmed kernel checkpoint; zero if refusal occurs before the checkpoint read.
+    /// `acknowledged_through` can trail the kernel checkpoint when its reconciliation read fails.
     pub acknowledged_through: i64,
     pub batches_applied: usize,
     pub commits_consumed: usize,
@@ -182,6 +188,8 @@ pub enum EpisodeFault {
     LoseLocalCommitReply,
     /// The acknowledgement commits, then its reply arrives as a kernel I/O failure.
     LoseAcknowledgementReply,
+    /// The acknowledgement commits, its reply is lost, and cancellation prevents reconciliation.
+    LoseAcknowledgementReplyAndCancel,
     /// Acknowledges while the local write transaction is still open.
     AcknowledgeInsideLocalTransaction,
 }
@@ -235,13 +243,19 @@ impl From<CommitStreamBlocked> for Stop {
 
 impl From<CatchUpError> for Stop {
     fn from(error: CatchUpError) -> Self {
-        Stop::Failed(error)
+        match error {
+            CatchUpError::Kernel(error) => error.into(),
+            error => Stop::Failed(error),
+        }
     }
 }
 
 impl From<KernelError> for Stop {
     fn from(error: KernelError) -> Self {
-        Stop::Failed(error.into())
+        match error {
+            KernelError::Deadline => Stop::Blocked(Blocked::Cancelled),
+            error => Stop::Failed(error.into()),
+        }
     }
 }
 
@@ -257,7 +271,7 @@ impl<'a> SearchCatchUp<'a> {
     }
 
     /// Shares the caller's cancellation and absolute deadline across all episodes on this driver.
-    /// Checks are cooperative at page and publication boundaries. The deadline bounds local write-lock acquisition, but kernel lock calls are not interruptible by this budget.
+    /// Kernel acquisition and SQL scans share this budget; synchronous filesystem I/O can outlive it.
     pub fn with_budget(mut self, budget: EvalBudget) -> Self {
         self.budget = budget;
         self
@@ -324,7 +338,9 @@ impl<'a> SearchCatchUp<'a> {
         if let Some(quarantine) = self.projection.quarantine() {
             return Err(CatchUpError::Quarantined(quarantine));
         }
-        Ok(self.kernel.capture_commit_read_target()?)
+        Ok(self
+            .kernel
+            .capture_commit_read_target_within_budget(&self.budget)?)
     }
 
     fn run_episode_inner(
@@ -371,7 +387,7 @@ impl<'a> SearchCatchUp<'a> {
         report.target = target.through_commit;
         report.acknowledged_through = self
             .kernel
-            .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?
+            .outbox_consumer_checkpoint_within_budget(&self.budget, &consumer.binding.consumer_id)?
             .ok_or(Blocked::Read(CommitReadError::UnknownConsumer))?;
         self.check_budget()?;
         if target.incarnation != captured.incarnation {
@@ -401,7 +417,8 @@ impl<'a> SearchCatchUp<'a> {
             self.check_budget()?;
             let hold = self
                 .kernel
-                .extend_source_hold(
+                .extend_source_hold_within_budget(
+                    &self.budget,
                     &consumer.binding,
                     &consumer.hold_id,
                     local,
@@ -433,6 +450,7 @@ impl<'a> SearchCatchUp<'a> {
         drive_commit_pages(
             self.kernel,
             CommitWalk {
+                budget: self.budget.clone(),
                 consumer_id: &consumer.binding.consumer_id,
                 incarnation: captured.incarnation,
                 now,
@@ -508,7 +526,8 @@ impl<'a> SearchCatchUp<'a> {
         self.check_budget()?;
         let hold = self
             .kernel
-            .extend_source_hold(
+            .extend_source_hold_within_budget(
+                &self.budget,
                 &consumer.binding,
                 &consumer.hold_id,
                 through,
@@ -569,7 +588,8 @@ impl<'a> SearchCatchUp<'a> {
             if acknowledge_inside {
                 // The control only needs the kernel writer taken inside the local transaction; its outcome is not this batch's.
                 observer(EpisodeEvent::AcknowledgementRequested { through });
-                let _ = kernel.acknowledge_through_source_hold(
+                let _ = kernel.acknowledge_through_source_hold_within_budget(
+                    &self.budget,
                     &consumer.binding,
                     &consumer.hold_id,
                     through,
@@ -688,7 +708,8 @@ impl<'a> SearchCatchUp<'a> {
             };
             let page = self
                 .kernel
-                .export_source_page(
+                .export_source_page_within_budget(
+                    &self.budget,
                     &consumer.binding,
                     &consumer.hold_id,
                     self.audit_time(now),
@@ -748,23 +769,34 @@ impl<'a> SearchCatchUp<'a> {
         self.refuse_if_quarantined()?;
         self.check_budget()?;
         let mut guard_cancelled = false;
-        let mut acknowledged = self.kernel.acknowledge_through_source_hold_if(
-            &consumer.binding,
-            &consumer.hold_id,
-            through,
-            self.audit_time(now),
-            || {
-                let guard = self.projection.acknowledgement_guard()?;
-                if self.check_budget().is_err() {
-                    guard_cancelled = true;
-                    return None;
-                }
-                Some(guard)
-            },
-        );
-        if self.fault == Some(EpisodeFault::LoseAcknowledgementReply)
-            && matches!(acknowledged, Ok(true))
+        let mut acknowledged = self
+            .kernel
+            .acknowledge_through_source_hold_if_within_budget(
+                &self.budget,
+                &consumer.binding,
+                &consumer.hold_id,
+                through,
+                self.audit_time(now),
+                || {
+                    let guard = self.projection.acknowledgement_guard()?;
+                    if self.check_budget().is_err() {
+                        guard_cancelled = true;
+                        return None;
+                    }
+                    Some(guard)
+                },
+            );
+        if matches!(
+            self.fault,
+            Some(
+                EpisodeFault::LoseAcknowledgementReply
+                    | EpisodeFault::LoseAcknowledgementReplyAndCancel
+            )
+        ) && matches!(acknowledged, Ok(true))
         {
+            if self.fault == Some(EpisodeFault::LoseAcknowledgementReplyAndCancel) {
+                self.budget.cancel();
+            }
             acknowledged = Err(SourceHoldError::Kernel(KernelError::Io));
         }
         match acknowledged {
@@ -780,10 +812,21 @@ impl<'a> SearchCatchUp<'a> {
                     .expect("quarantine intent must record its cause before publication");
                 return Err(CatchUpError::Quarantined(quarantine).into());
             }
+            Err(SourceHoldError::Kernel(KernelError::Deadline)) => {
+                // A definite pre-commit refusal does not need the checkpoint read used for unknown outcomes.
+                return Err(Blocked::Cancelled.into());
+            }
             Err(SourceHoldError::Kernel(error)) if outcome_unknown(error) => {
                 let kernel_checkpoint = self
                     .kernel
-                    .outbox_consumer_checkpoint(&consumer.binding.consumer_id)?;
+                    .outbox_consumer_checkpoint_within_budget(
+                        &self.budget,
+                        &consumer.binding.consumer_id,
+                    )
+                    .map_err(|error| Blocked::AcknowledgementReconciliationFailed {
+                        through,
+                        error,
+                    })?;
                 if kernel_checkpoint.is_none_or(|checkpoint| checkpoint < through) {
                     return Err(Blocked::AcknowledgementUnresolved {
                         through,

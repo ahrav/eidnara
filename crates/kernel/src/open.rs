@@ -23,6 +23,7 @@ const BUSY_TIMEOUT_MS: i64 = 5_000;
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
 const READ_POOL_SIZE: usize = 2;
 const WRITER_ACQUIRE_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+const SQL_BUDGET_PROGRESS_STEPS: i32 = 1_000;
 const RESTORE_MARKER_SUFFIX: &str = ".restore";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
@@ -172,6 +173,8 @@ pub struct KernelStore {
     /// Outbox payload rows selected by this store's `read_complete_commits` calls.
     #[cfg(feature = "test-support")]
     pub(super) materialized_outbox_rows: AtomicUsize,
+    #[cfg(feature = "test-support")]
+    pub(super) verified_object_reads: AtomicUsize,
     pub(super) db_path: PathBuf,
     // Fields drop in declaration order, so `_lease` must stay last: it releases
     // the file lock only after every connection field above it has closed.
@@ -397,6 +400,8 @@ impl KernelStore {
             restore_generation: AtomicU64::new(0),
             #[cfg(feature = "test-support")]
             materialized_outbox_rows: AtomicUsize::new(0),
+            #[cfg(feature = "test-support")]
+            verified_object_reads: AtomicUsize::new(0),
             db_path,
             _lease: lease,
         };
@@ -493,6 +498,7 @@ impl KernelStore {
                 return Err(KernelError::InvalidRestore);
             }
             for offset in 0..candidates.len() {
+                limit.check()?;
                 let guard = match candidates[(start + offset) % candidates.len()].try_lock() {
                     Ok(guard) => guard,
                     Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -501,6 +507,7 @@ impl KernelStore {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(KernelError::InvalidRestore);
                 }
+                limit.check()?;
                 return Ok(guard);
             }
             if limit.should_stop() {
@@ -530,14 +537,22 @@ impl KernelStore {
     /// read against a fully occupied pool.
     #[cfg(feature = "test-support")]
     pub fn hold_readers_for_test(&self, held: &std::sync::Barrier, duration: std::time::Duration) {
+        self.with_readers_held_for_test(|| {
+            held.wait();
+            std::thread::sleep(duration);
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn with_readers_held_for_test<T>(&self, operation: impl FnOnce() -> T) -> T {
         let guards = self
             .readers
             .iter()
             .map(|reader| reader.lock().unwrap_or_else(PoisonError::into_inner))
             .collect::<Vec<_>>();
-        held.wait();
-        std::thread::sleep(duration);
+        let result = operation();
         drop(guards);
+        result
     }
 
     #[cfg(feature = "test-support")]
@@ -1399,6 +1414,28 @@ pub(crate) struct AcquireLimit {
 }
 
 impl AcquireLimit {
+    /// Checks after a read catch exhaustion between progress callbacks, including for negative answers.
+    pub(crate) fn check(&self) -> Result<(), KernelError> {
+        if self.should_stop() {
+            Err(KernelError::Deadline)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn run<T, E: From<KernelError>>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.check()?;
+        operation()
+    }
+
+    /// A budget without a deadline still carries a cancellation flag and needs polling.
+    fn has_control(&self) -> bool {
+        self.deadline.is_some() || self.interrupt.is_some()
+    }
+
     pub(crate) fn new(
         deadline: Option<Instant>,
         interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -1420,10 +1457,14 @@ impl AcquireLimit {
         connection: &Connection,
         steps: i32,
     ) -> Result<ProgressInterrupt<'_>, KernelError> {
+        self.set_progress_handler(connection, steps)?;
+        Ok(ProgressInterrupt { connection })
+    }
+
+    fn set_progress_handler(self, connection: &Connection, steps: i32) -> Result<(), KernelError> {
         connection
             .progress_handler(steps, Some(move || self.should_stop()))
-            .map_err(|_| KernelError::Io)?;
-        Ok(ProgressInterrupt { connection })
+            .map_err(|_| KernelError::Io)
     }
 
     /// Raises the interrupt when the deadline passes, so one crossing stops
@@ -1460,3 +1501,174 @@ impl Drop for ProgressInterrupt<'_> {
         let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
     }
 }
+
+/// Owns per-operation SQL limits and restores connection settings before mutex guard release.
+pub(crate) struct LimitedConnection<'a> {
+    connection: std::sync::MutexGuard<'a, Connection>,
+    limit: AcquireLimit,
+    busy_timeout_ms: Option<i64>,
+}
+
+impl KernelStore {
+    pub(crate) fn reader_with_limit(
+        &self,
+        limit: &AcquireLimit,
+    ) -> Result<LimitedConnection<'_>, KernelError> {
+        let connection = if limit.has_control() {
+            self.lock_reader_within(limit)?
+        } else {
+            self.lock_reader()?
+        };
+        LimitedConnection::new(connection, limit)
+    }
+
+    pub(crate) fn writer_with_limit(
+        &self,
+        limit: &AcquireLimit,
+    ) -> Result<LimitedConnection<'_>, KernelError> {
+        let connection = if limit.has_control() {
+            self.lock_writer_within(limit)?
+        } else {
+            self.lock_writer()?
+        };
+        LimitedConnection::new(connection, limit)
+    }
+}
+
+impl<'a> LimitedConnection<'a> {
+    fn new(
+        connection: std::sync::MutexGuard<'a, Connection>,
+        limit: &AcquireLimit,
+    ) -> Result<Self, KernelError> {
+        limit.check()?;
+        let busy_timeout_ms = if limit.has_control() {
+            Some(
+                connection
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                    .map_err(super::map_sqlite)?,
+            )
+        } else {
+            None
+        };
+        let access = Self {
+            connection,
+            limit: limit.clone(),
+            busy_timeout_ms,
+        };
+        if limit.has_control() {
+            // SQLite's built-in busy sleep does not poll cancellation.
+            access
+                .connection
+                .busy_timeout(std::time::Duration::ZERO)
+                .map_err(super::map_sqlite)?;
+            limit
+                .clone()
+                .set_progress_handler(&access.connection, SQL_BUDGET_PROGRESS_STEPS)?;
+        }
+        Ok(access)
+    }
+
+    pub(crate) fn transaction(
+        &mut self,
+        behavior: TransactionBehavior,
+    ) -> Result<LimitedTransaction<'_>, KernelError> {
+        let started = Instant::now();
+        loop {
+            self.limit.check()?;
+            // The mutable receiver excludes another transaction while BEGIN retries through a shared borrow.
+            match Transaction::new_unchecked(&self.connection, behavior) {
+                Ok(tx) => {
+                    return Ok(LimitedTransaction {
+                        tx: Some(tx),
+                        connection: &self.connection,
+                        limit: &self.limit,
+                    });
+                }
+                Err(error)
+                    if self.limit.has_control()
+                        && error.sqlite_error_code()
+                            == Some(rusqlite::ffi::ErrorCode::DatabaseBusy) =>
+                {
+                    self.limit.check()?;
+                    if self.busy_timeout_ms.is_some_and(|timeout| {
+                        started.elapsed().as_millis() >= u128::try_from(timeout).unwrap_or(0)
+                    }) {
+                        return Err(KernelError::Busy);
+                    }
+                    std::thread::sleep(WRITER_ACQUIRE_POLL);
+                }
+                Err(error) => return Err(super::map_sqlite(error)),
+            }
+        }
+    }
+}
+
+pub(crate) struct LimitedTransaction<'a> {
+    tx: Option<Transaction<'a>>,
+    connection: &'a Connection,
+    limit: &'a AcquireLimit,
+}
+
+impl LimitedTransaction<'_> {
+    pub(crate) fn commit(mut self) -> Result<(), KernelError> {
+        self.limit.check()?;
+        if self.limit.has_control() {
+            // COMMIT may make writes durable. Cancellation must not interrupt it or hide its outcome.
+            self.connection
+                .progress_handler(0, None::<fn() -> bool>)
+                .map_err(super::map_sqlite)?;
+        }
+        self.tx
+            .take()
+            .expect("transaction is live until commit or drop")
+            .commit()
+            .map_err(super::map_sqlite)
+    }
+}
+
+impl<'a> std::ops::Deref for LimitedTransaction<'a> {
+    type Target = Transaction<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.tx
+            .as_ref()
+            .expect("transaction is live until commit or drop")
+    }
+}
+
+impl Drop for LimitedTransaction<'_> {
+    fn drop(&mut self) {
+        if self.limit.has_control() {
+            // Rollback is cleanup, not cancellable work; an interrupted ROLLBACK can leave a transaction open.
+            let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
+        }
+        drop(self.tx.take());
+        if self.limit.has_control() {
+            let _ = self
+                .limit
+                .clone()
+                .set_progress_handler(self.connection, SQL_BUDGET_PROGRESS_STEPS);
+        }
+    }
+}
+
+impl std::ops::Deref for LimitedConnection<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl Drop for LimitedConnection<'_> {
+    fn drop(&mut self) {
+        if let Some(timeout) = self.busy_timeout_ms {
+            let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
+            let _ = self.connection.pragma_update(None, "busy_timeout", timeout);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "budget_tests.rs"]
+mod budget_tests;

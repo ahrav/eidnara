@@ -6,6 +6,7 @@
 //!
 //! A descriptor's admission records the decision's admission classes as they stood in the publishing transaction, with the decision as `trigger_object_id`. The materializer consumes decision registry rows only; an admission-only disposition of the decision (quarantine, rejection, contradiction, staleness) is recorded on the decision and not on its descriptors, so a reader that must honor it resolves eligibility through the decision the descriptor names.
 
+use kernel::applicability::EvalBudget;
 use kernel::source_identity::{
     Occurrence, OccurrenceClass, OccurrenceRefusal, encode_preserving_span, identity_digest,
 };
@@ -327,6 +328,7 @@ impl<'a> ClaimMaterializer<'a> {
     /// Captures a target and processes complete commits from the consumer checkpoint toward it one bounded page at a time, acknowledging each page after its decisions are published or retired.
     ///
     /// `now` is Unix-epoch milliseconds, recorded as the descriptors' observation time and the acknowledgement's `updated_at`.
+    /// Page admission does not impose a time limit on this legacy entry point.
     ///
     /// # Errors
     ///
@@ -379,6 +381,7 @@ impl<'a> ClaimMaterializer<'a> {
         let outcome = drive_commit_pages(
             self.kernel,
             CommitWalk {
+                budget: EvalBudget::unbounded(),
                 consumer_id: CLAIM_CONSUMER,
                 incarnation: target.incarnation,
                 now,

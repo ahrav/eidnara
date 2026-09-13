@@ -1,5 +1,6 @@
 //! One bounded walk over a registered consumer's complete commits toward a captured target, shared by every daemon consumer of the kernel commit log.
 
+use kernel::applicability::EvalBudget;
 use kernel::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
     KernelError, KernelStore, PageEnd,
@@ -26,8 +27,9 @@ pub enum CommitStreamBlocked {
 }
 
 /// One consumer's walk over `(after, target]` under a captured incarnation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CommitWalk<'a> {
+    pub(crate) budget: EvalBudget,
     pub(crate) consumer_id: &'a str,
     pub(crate) incarnation: CommitReadIncarnation,
     /// Unix-epoch milliseconds the pages are acknowledged at.
@@ -52,6 +54,7 @@ where
     E: From<CommitStreamBlocked> + From<KernelError>,
 {
     let CommitWalk {
+        budget,
         consumer_id,
         incarnation,
         now,
@@ -64,7 +67,8 @@ where
     }
     while after < target {
         let page = kernel
-            .read_complete_commits(
+            .read_complete_commits_within_budget(
+                &budget,
                 &CommitReadRequest {
                     consumer_id: consumer_id.to_owned(),
                     incarnation,
