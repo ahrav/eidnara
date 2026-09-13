@@ -364,9 +364,9 @@ impl SearchSelection {
         let certificate: Bootstrap =
             serde_json::from_slice(&bytes).map_err(|_| BuildError::Invalid("bootstrap corrupt"))?;
         if certificate.schema != 1
+            || certificate.intent.validate().is_err()
             || certificate.seed.stage_manifest().digest() != digest
             || certificate.intent.staged_seed_digest.as_deref() != Some(digest)
-            || certificate.intent.consumer.consumer_id.is_empty()
             || certificate.intent.consumer.generation_id != certificate.seed.generation_id
         {
             return Err(BuildError::Invalid("bootstrap binding mismatch"));
@@ -455,6 +455,8 @@ impl SearchSelection {
                         || row.payload_id != source.detail.payload_id
                         || row.source_object_id != source.object_id
                         || row.domain_id != source.domain_id
+                        || row.sensitivity != source.sensitivity
+                        || row.created_commit_seq != source.created_commit_seq
                         || row.source_evidence_id != source.detail.evidence_id
                         || row.source_artifact_digest != source.detail.artifact_digest
                     {

@@ -276,6 +276,8 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
         "DELETE FROM embedding_jobs",
         "UPDATE projection_checkpoint SET checkpoint_commit_seq=checkpoint_commit_seq+1",
         "UPDATE occurrences SET tuple=x'00'",
+        "UPDATE occurrences SET sensitivity='secret'",
+        "UPDATE occurrences SET created_commit_seq=created_commit_seq-1",
         "UPDATE embedding_jobs SET job_id='wrong-job'",
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -312,6 +314,50 @@ fn readable_semantic_corruption_never_becomes_available_after_reopen() {
                     .is_err()
             );
         }
+    }
+}
+
+#[test]
+fn tampered_certificate_intent_never_becomes_available_after_reopen() {
+    for (field, value) in [
+        ("schema", serde_json::json!(999)),
+        ("authorization_ref", serde_json::json!("op:1")),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(root.path());
+        corpus.seed();
+        corpus.publish("base", "bytes");
+        let gate = open_gate();
+        let selection = build_selected(root.path(), &corpus, &gate);
+        let reader = selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap();
+        let certificate = reader
+            .projection()
+            .path()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("bootstrap.json");
+        drop(reader);
+        drop(selection);
+        let mut bootstrap: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&certificate).unwrap()).unwrap();
+        bootstrap["intent"][field] = value;
+        std::fs::write(&certificate, serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+        let selection = selector(root.path());
+        assert!(
+            selection
+                .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err(),
+            "{field}"
+        );
+        assert!(
+            selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .is_err()
+        );
     }
 }
 
