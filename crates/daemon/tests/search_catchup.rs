@@ -1800,6 +1800,59 @@ fn target_fixed_before_a_restore_is_refused() {
 }
 
 #[test]
+fn original_deadline_bounds_lost_commit_reconciliation() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+    let target = corpus.publish("next", &[("a", "1", "next message")]);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+    let held = std::sync::Barrier::new(2);
+    let (report, finished) = std::thread::scope(|scope| {
+        // Another task takes the projection's only connection once the local transaction has released it.
+        scope.spawn(|| {
+            held.wait();
+            projection
+                .read(|_| {
+                    held.wait();
+                    std::thread::sleep(Duration::from_secs(4));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .with_budget(budget.clone())
+            .run_episode_with_fault_for_test(
+                &consumer,
+                &bounds(),
+                hold.captured_at,
+                &mut |event| {
+                    if matches!(event, EpisodeEvent::LocalReleased { .. }) {
+                        held.wait();
+                        held.wait();
+                    }
+                },
+                EpisodeFault::LoseLocalCommitReply,
+            );
+        (report.unwrap(), Instant::now())
+    });
+    assert_eq!(blocked(&report), &Blocked::Cancelled);
+    assert!(budget.is_exhausted());
+    assert!(finished.duration_since(deadline) < Duration::from_secs(1));
+    assert_eq!(corpus.kernel_checkpoint(), hold.snapshot);
+    assert!(projection.quarantine().is_none());
+    // The committed batch is reconciled and acknowledged by the next episode.
+    let replay = SearchCatchUp::new(&corpus.kernel, &projection)
+        .run_episode(&consumer, &bounds(), hold.captured_at, &mut |_| {})
+        .unwrap();
+    reached(&replay);
+    assert_eq!(replay.batches_applied, 0);
+    assert_eq!(corpus.kernel_checkpoint(), target);
+    assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+}
+
+#[test]
 fn original_deadline_bounds_write_lock_wait_and_staged_rollback() {
     for cut in ["lock", "staged"] {
         let dir = tempfile::tempdir().unwrap();

@@ -623,11 +623,23 @@ impl<'a> SearchCatchUp<'a> {
                 Err(CatchUpError::ProjectionFenced.into())
             }
             // The store failed somewhere between BEGIN and COMMIT; the durable rows, not the error, say whether COMMIT took effect.
-            Err(SearchProjectionError::Store(_)) => match self.projection.batch_status(batch) {
-                Ok(BatchStatus::Applied) => Ok(()),
-                Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
-                Err(error) => Err(self.stop_from_projection_error(error)),
-            },
+            Err(SearchProjectionError::Store(_)) => {
+                self.check_budget()?;
+                let status =
+                    |conn: &storage::GuardedConn<'_>| retrieval::batch::batch_status(conn, batch);
+                let status = match self.budget.deadline() {
+                    Some(deadline) => self.projection.read_within(deadline, status),
+                    None => self.projection.read(status),
+                };
+                match status {
+                    Ok(BatchStatus::Applied) => Ok(()),
+                    Ok(BatchStatus::NotApplied) => Err(Blocked::LocalCommitUnresolved.into()),
+                    Err(SearchProjectionError::Store(storage::StoreError::Deadline)) => {
+                        Err(Blocked::Cancelled.into())
+                    }
+                    Err(error) => Err(self.stop_from_projection_error(error)),
+                }
+            }
         }
     }
 
