@@ -6,15 +6,15 @@ Plan U1 returns the serialization buffer A when every object is already in
 canonical order, and plan U4 requires the baseline and candidate to run side by
 side on the frozen ten-pair schedule before any saving is claimed. This record
 compares the U0 baseline harness revision `c1dafa76` (A) against candidate
-`2050f3a63aaa903504c63a05920f0758c0f68a51` (B), which contains the
+`0827d6f00cd5e277214cdcfdfe52534a35e42eb8` (B), which contains the
 canonicalizer change and the constructor's early `Arc` conversion.
 
 ## Evidence trail
 
-- Raw artifacts: [`runs/u1-paired-c1dafa76-vs-2050f3a6/`](runs/u1-paired-c1dafa76-vs-2050f3a6/):
+- Raw artifacts: [`runs/u1-paired-c1dafa76-vs-0827d6f0/`](runs/u1-paired-c1dafa76-vs-0827d6f0/):
   `pair-01-A.json` .. `pair-10-B.json` and
-  [`provenance.json`](runs/u1-paired-c1dafa76-vs-2050f3a6/provenance.json).
-- Schedule: `scripts/perf/canonical-output-paired-runs.sh paired c1dafa76 2050f3a6 <dir>`;
+  [`provenance.json`](runs/u1-paired-c1dafa76-vs-0827d6f0/provenance.json).
+- Schedule: `scripts/perf/canonical-output-paired-runs.sh paired c1dafa76 0827d6f0 <dir>`;
   odd pairs run A then B, even pairs run B then A, every run a fresh release
   process built from a detached worktree of its own revision.
 - Baseline record: [u0-baseline-measurement](u0-baseline-measurement.md).
@@ -71,12 +71,13 @@ Observations:
   are unchanged in every column.
 - A's spare capacity is real: `cap/len` is 1.10 to 2.00 on the ownership path.
   For a single 64 KiB scalar the returned buffer holds 2N.
-- The first candidate (`7378f53d`, canonicalizer change only) raised the
+- The first candidate (canonicalizer change only, before the constructor
+  reorder) raised the
   complete-constructor peak for `retained_large_payload/1blocks_65536B` from
   197176 to 262332 bytes (3.01x to 4.00x N): A's 2N capacity outlived the
   65 KiB block-receipt string and the `Arc` copy. Converting to the exact-size
   `Arc` before building receipts drops the slack first; the peak is 196818 at
-  `2050f3a6`, and no cell exceeds its baseline peak. No `shrink_to_fit` or
+  `0827d6f0`, and no cell exceeds its baseline peak. No `shrink_to_fit` or
   accounting change is involved; retained accounting is unchanged because the
   `Arc` payload was already exactly N.
 
@@ -103,30 +104,30 @@ counts pairs where B's p50 is lower. Per-sample setup runs outside both clocks.
 
 | Boundary | Population | A p50 ns: median (min..max) | B p50 ns: median (min..max) | Pairs B<A | B/A p50 per pair: median (min..max) | A p95 | B p95 | A CPU ns/sample | B CPU ns/sample |
 |---|---|---|---|---|---|---|---|---|---|
-| canonicalizer | `retained_ascii/1blocks` | 1256 (1241..1277) | 1133 (1119..1153) | 10/10 | 0.901 (0.892..0.913) | 1302 | 1268 | 1726 | 1618 |
-| full_constructor | `retained_ascii/1blocks` | 3714 (3704..3737) | 3464 (3450..3488) | 10/10 | 0.933 (0.926..0.941) | 3845 | 3567 | 4200 | 3973 |
-| canonicalizer | `retained_escaped/1blocks` | 2042 (2016..2050) | 1795 (1765..1825) | 10/10 | 0.881 (0.864..0.894) | 2115 | 1879 | 2508 | 2265 |
-| full_constructor | `retained_escaped/1blocks` | 4592 (4578..4612) | 4331 (4294..4379) | 10/10 | 0.944 (0.937..0.954) | 4707 | 4444 | 5088 | 4876 |
-| canonicalizer | `retained_large_payload/1blocks_65536B` | 30643 (30606..30680) | 29043 (29020..29162) | 10/10 | 0.948 (0.946..0.952) | 30782 | 29083 | 31227 | 29626 |
-| full_constructor | `retained_large_payload/1blocks_65536B` | 454021 (453727..454338) | 452084 (451738..452300) | 10/10 | 0.996 (0.995..0.996) | 459360 | 457521 | 455561 | 453415 |
-| canonicalizer | `typed_shell/1blocks` | 924 (919..945) | 966 (952..999) | 0/10 | 1.044 (1.020..1.084) | 976 | 1018 | 1392 | 1427 |
-| full_constructor | `typed_shell/1blocks` | 2573 (2561..2594) | 2687 (2660..2706) | 0/10 | 1.042 (1.031..1.054) | 2635 | 2748 | 3057 | 3161 |
-| canonicalizer | `one_edited_block/1blocks` | 924 (915..929) | 940 (929..948) | 0/10 | 1.017 (1.003..1.034) | 965 | 985 | 1382 | 1393 |
-| full_constructor | `one_edited_block/1blocks` | 2557 (2547..2641) | 2643 (2621..2674) | 1/10 | 1.035 (0.997..1.050) | 2615 | 2699 | 3067 | 3121 |
-| canonicalizer | `retained_ascii/65blocks` | 59518 (58678..59953) | 44080 (43885..44727) | 10/10 | 0.742 (0.735..0.751) | 62772 | 47503 | 60543 | 45508 |
-| full_constructor | `retained_ascii/65blocks` | 171843 (171228..173309) | 156021 (155001..157161) | 10/10 | 0.907 (0.894..0.915) | 177976 | 161942 | 173582 | 157645 |
-| canonicalizer | `retained_escaped/65blocks` | 104145 (103802..105131) | 89640 (88931..90268) | 10/10 | 0.859 (0.850..0.863) | 109522 | 93074 | 105318 | 90462 |
-| full_constructor | `retained_escaped/65blocks` | 220774 (219528..221682) | 203381 (202318..204339) | 10/10 | 0.922 (0.913..0.926) | 227412 | 209729 | 222659 | 205209 |
-| canonicalizer | `retained_large_payload/65blocks_65536B` | 1933363 (1927123..1941021) | 1786901 (1785028..1789817) | 10/10 | 0.924 (0.922..0.929) | 1953569 | 1801822 | 1936991 | 1788846 |
-| full_constructor | `retained_large_payload/65blocks_65536B` | 32065786 (32015294..32119255) | 31915623 (31871527..31971187) | 10/10 | 0.995 (0.993..0.998) | 32143620 | 31978396 | 32073038 | 31921347 |
-| canonicalizer | `typed_shell/65blocks` | 29004 (28840..29160) | 28800 (28672..28894) | 10/10 | 0.994 (0.988..0.998) | 29304 | 29088 | 29657 | 29406 |
-| full_constructor | `typed_shell/65blocks` | 98031 (97909..98607) | 99161 (98761..99744) | 0/10 | 1.011 (1.004..1.018) | 98720 | 99725 | 98841 | 99971 |
-| canonicalizer | `one_edited_block/65blocks` | 124494 (123620..125803) | 123929 (122949..124978) | 7/10 | 0.995 (0.984..1.002) | 130015 | 129570 | 125841 | 125247 |
-| full_constructor | `one_edited_block/65blocks` | 226122 (224816..228163) | 225476 (223451..226705) | 6/10 | 0.999 (0.979..1.003) | 232579 | 231864 | 227692 | 227157 |
-| transform_cold | `100msgs_2KiB_mixed` | 4189928 (4108629..4301122) | 4091865 (4056640..4214548) | 7/10 | 0.974 (0.945..1.010) | 4290089 | 4173525 | 4193355 | 4101366 |
-| transform_warm | `100msgs_2KiB_mixed` | 2827778 (2803763..2891012) | 2827688 (2802437..2896016) | 4/10 | 1.001 (0.977..1.016) | 2911059 | 2914232 | 2859334 | 2864959 |
-| transform_cold | `1000msgs_2KiB_mixed` | 36129588 (35457760..36814433) | 36080938 (35593903..36504817) | 7/10 | 0.994 (0.980..1.018) | 36745169 | 36479248 | 36162713 | 36065605 |
-| transform_warm | `1000msgs_2KiB_mixed` | 22354367 (21931501..23009647) | 22470194 (22129995..22799909) | 4/10 | 1.009 (0.969..1.026) | 23004762 | 23177695 | 22421693 | 22486579 |
+| canonicalizer | `retained_ascii/1blocks` | 1267 (1244..1278) | 1138 (1125..1176) | 10/10 | 0.903 (0.891..0.922) | 1307 | 1276 | 1743 | 1647 |
+| full_constructor | `retained_ascii/1blocks` | 3721 (3697..3841) | 3434 (3418..3474) | 10/10 | 0.923 (0.890..0.937) | 3852 | 3535 | 4208 | 3940 |
+| canonicalizer | `retained_escaped/1blocks` | 2038 (2018..2080) | 1771 (1745..1808) | 10/10 | 0.869 (0.847..0.879) | 2109 | 1855 | 2504 | 2239 |
+| full_constructor | `retained_escaped/1blocks` | 4586 (4542..4763) | 4321 (4287..4358) | 10/10 | 0.943 (0.900..0.949) | 4703 | 4425 | 5093 | 4808 |
+| canonicalizer | `retained_large_payload/1blocks_65536B` | 30640 (30622..30728) | 29059 (29031..29070) | 10/10 | 0.948 (0.946..0.949) | 30765 | 29108 | 31227 | 29644 |
+| full_constructor | `retained_large_payload/1blocks_65536B` | 454111 (453760..454400) | 452179 (451884..452521) | 10/10 | 0.996 (0.995..0.997) | 459680 | 457698 | 455718 | 453496 |
+| canonicalizer | `typed_shell/1blocks` | 927 (920..946) | 980 (964..987) | 0/10 | 1.054 (1.028..1.068) | 975 | 1033 | 1383 | 1436 |
+| full_constructor | `typed_shell/1blocks` | 2579 (2571..2685) | 2659 (2646..2674) | 1/10 | 1.028 (0.992..1.036) | 2637 | 2721 | 3064 | 3156 |
+| canonicalizer | `one_edited_block/1blocks` | 923 (917..933) | 945 (938..949) | 0/10 | 1.025 (1.005..1.035) | 966 | 993 | 1394 | 1403 |
+| full_constructor | `one_edited_block/1blocks` | 2564 (2554..2652) | 2601 (2576..2622) | 1/10 | 1.013 (0.981..1.023) | 2614 | 2651 | 3047 | 3078 |
+| canonicalizer | `retained_ascii/65blocks` | 59406 (59045..60997) | 43913 (43597..44564) | 10/10 | 0.740 (0.717..0.750) | 62850 | 44968 | 60393 | 44658 |
+| full_constructor | `retained_ascii/65blocks` | 171842 (170782..178340) | 156149 (155247..156432) | 10/10 | 0.908 (0.877..0.913) | 177588 | 161577 | 173409 | 157635 |
+| canonicalizer | `retained_escaped/65blocks` | 104451 (103653..107036) | 89484 (89203..89835) | 10/10 | 0.857 (0.834..0.863) | 109132 | 93062 | 105534 | 90224 |
+| full_constructor | `retained_escaped/65blocks` | 220586 (218968..231183) | 203315 (202205..204143) | 10/10 | 0.923 (0.879..0.928) | 227472 | 208798 | 222451 | 204856 |
+| canonicalizer | `retained_large_payload/65blocks_65536B` | 1931566 (1927126..1952367) | 1787812 (1784739..1793856) | 10/10 | 0.925 (0.916..0.931) | 1953444 | 1803914 | 1936130 | 1790233 |
+| full_constructor | `retained_large_payload/65blocks_65536B` | 32055604 (32010386..32129667) | 31924584 (31867060..32035619) | 9/10 | 0.996 (0.993..1.001) | 32137673 | 31988560 | 32063252 | 31934474 |
+| canonicalizer | `typed_shell/65blocks` | 28915 (28836..29783) | 28891 (28723..28999) | 6/10 | 0.999 (0.971..1.005) | 29295 | 29173 | 29583 | 29487 |
+| full_constructor | `typed_shell/65blocks` | 98502 (97921..105063) | 98734 (98609..99601) | 1/10 | 1.003 (0.939..1.017) | 98981 | 99196 | 99285 | 99472 |
+| canonicalizer | `one_edited_block/65blocks` | 123742 (122657..124893) | 123765 (122893..124725) | 6/10 | 0.999 (0.984..1.014) | 128768 | 128704 | 125500 | 125022 |
+| full_constructor | `one_edited_block/65blocks` | 225834 (224610..233411) | 225763 (224253..227427) | 7/10 | 0.998 (0.974..1.006) | 231883 | 231394 | 227583 | 227163 |
+| transform_cold | `100msgs_2KiB_mixed` | 4199205 (4131502..4311008) | 4100439 (4038437..4130405) | 10/10 | 0.969 (0.951..0.995) | 4256494 | 4187894 | 4188759 | 4100599 |
+| transform_warm | `100msgs_2KiB_mixed` | 2823450 (2790580..2884609) | 2833252 (2790939..2887946) | 2/10 | 1.006 (0.980..1.024) | 2999334 | 3034013 | 2863529 | 2871813 |
+| transform_cold | `1000msgs_2KiB_mixed` | 36080522 (35765881..36757640) | 35884871 (35497840..36210364) | 7/10 | 0.992 (0.977..1.012) | 36575051 | 36319468 | 36116664 | 35919120 |
+| transform_warm | `1000msgs_2KiB_mixed` | 22443970 (21822378..22967230) | 22391551 (21982927..23146880) | 4/10 | 1.002 (0.957..1.031) | 23016327 | 22971675 | 22442311 | 22390838 |
 
 Reading, at the actual scope of each boundary:
 
@@ -137,18 +138,19 @@ Reading, at the actual scope of each boundary:
 - Full constructor, canonical-miss populations: B is faster in 10 of 10 pairs;
   ratios 0.91 to 0.99. Receipt serialization and hashing dominate the large
   scalar cells, so the elided copy is a small share there.
-- Unordered populations: canonicalizer ratios 0.99 to 1.03 and full-constructor
-  ratios 0.99 to 1.02. `typed_shell/65blocks` full constructor is slower in
-  10 of 10 pairs by about 1.1%; `typed_shell/1blocks` canonicalizer by about
-  3%. These cells still take the copy path and now also pay the aggregate
-  order check and the earlier `Arc` conversion. This is an adverse effect at
-  the scale of the reorder itself and is reported, not offset against the
-  canonical cells.
-- Transform cold and warm, 100 and 1000 messages: pair wins are 7/10, 4/10,
-  7/10, 4/10 with median ratios 0.97 to 1.01 and per-pair ranges spanning 1.0.
-  No transform-level change is detectable at these sizes; the canonicalizer
-  is a small share of a pass that also projects, renders, hashes, and builds
-  receipts for a thousand messages.
+- Unordered populations: `typed_shell/1blocks` and `one_edited_block/1blocks`
+  are slower in 9 or 10 of 10 pairs, canonicalizer ratios 1.03 to 1.05 and
+  full-constructor ratios 1.01 to 1.03; the 65-block unordered cells are within
+  0.97 to 1.02 with mixed pair wins. These cells still take the copy path and
+  now also pay the aggregate order check and the earlier `Arc` conversion. This
+  is an adverse effect at the scale of the reorder itself and is reported, not
+  offset against the canonical cells.
+- Transform cold and warm, 100 and 1000 messages: the 100-message cold cell
+  is faster in 10 of 10 pairs with a median ratio of 0.97; the other three
+  cells have pair wins of 2, 7, and 4 of 10 with median ratios 0.99 to 1.01
+  and per-pair ranges spanning 1.0. Only the smallest cold cell shows a
+  consistent transform-level change; the canonicalizer is a small share of a
+  pass that also projects, renders, hashes, and builds receipts.
 - CPU per sample moves with the elapsed medians in every cell.
 
 ### Host latency
@@ -186,8 +188,8 @@ comparison.
 
 ### Q: Did the complete-constructor peak rise?
 
-- Sources examined: the first paired run against `7378f53d` and the rerun
-  against `2050f3a6`.
+- Sources examined: the first paired run against the canonicalizer-only
+  candidate and the rerun against `0827d6f0`.
 - Findings: yes for the single 64 KiB scalar until the `Arc` conversion moved
   ahead of receipt construction; afterwards every cell is at or below its
   baseline peak.

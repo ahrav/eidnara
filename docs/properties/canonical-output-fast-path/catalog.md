@@ -36,7 +36,7 @@ S1 through S6 are **Exercised: yes** after plan U1 landed the copy elision;
 S7 and C1 remain **not yet** and C2 **partial**. The U0 harness at `c1dafa76`
 captured the [baseline record](evidence/u0-baseline-measurement.md) and the
 [U1 paired record](evidence/u1-copy-elision-paired-measurement.md) compares it
-against candidate `2050f3a6`. Inspected pre-U0 tests remain **unaudited**.
+against candidate `0827d6f0`. Inspected pre-U0 tests remain **unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
 not proof that an implementation satisfies it.
 
