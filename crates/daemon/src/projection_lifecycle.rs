@@ -406,7 +406,7 @@ impl ProjectionLifecycle {
             .unwrap_or_else(|Unreadable(reason)| ControlState::Unavailable(reason))
     }
 
-    /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory or file whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes were read and refused.
+    /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes or own metadata were refused.
     pub(crate) fn probe_at(data_home: &Path) -> Result<ControlState, Unreadable> {
         let dir = data_home.join(CONTROL_DIR);
         let metadata = match open_directory(&dir).and_then(|fd| fd.metadata()) {
@@ -433,8 +433,9 @@ impl ProjectionLifecycle {
             Ok(metadata) => metadata,
             Err(error) => return Err(Unreadable(error.kind().to_string())),
         };
+        // Nothing repairs the record's own mode or owner, unlike the directory's, so this is a refused record rather than a transient failure.
         if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
-            return Err(Unreadable(
+            return Ok(ControlState::Unavailable(
                 "not the caller's own owner-only regular file".to_owned(),
             ));
         }
@@ -957,7 +958,22 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
         })),
         ..intent.clone()
     };
-    if encode(&exhausted)?.len() as u64 > MAX_RECORD_BYTES {
+    // `disable` wraps the active record and cleanup later fills every optional field, so the accepted intent must fit in that form too.
+    let disabled = DisabledIntent {
+        schema: 3,
+        handoff: Some(Box::new(exhausted)),
+        recorded_at: i64::MAX,
+        episodes: Some(EpisodeAccounting {
+            allowance: u32::MAX,
+            consumed: u32::MAX,
+            deadline: i64::MAX,
+        }),
+        through: Some(i64::MAX),
+        deregistered: true,
+    };
+    let bytes =
+        serde_json::to_vec(&disabled).map_err(|_| IntentRefusal::Io("encode".to_owned()))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err(IntentRefusal::Oversized);
     }
     Ok(())

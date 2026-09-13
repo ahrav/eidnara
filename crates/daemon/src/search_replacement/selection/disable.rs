@@ -356,7 +356,13 @@ impl SearchSelection {
                     .max(self.bounds.max_live().saturating_add(
                         self.bounds.max_tombstoned_per_class.get().saturating_mul(5),
                     ) as u64)
-                    .max(spec.episode.commits.max_rows.get() as u64),
+                    .max(spec.episode.commits.max_rows.get() as u64)
+                    .max(
+                        u64::try_from(spec.retirement.max_obligations.get())
+                            .ok()
+                            .and_then(|rows| rows.checked_add(1))
+                            .ok_or(BuildError::InventoryBound)?,
+                    ),
             ),
             (
                 "export_page_rows",
@@ -367,6 +373,7 @@ impl SearchSelection {
                 spec.episode
                     .max_source_encoded_bytes
                     .get()
+                    .max(spec.retirement.max_obligation_bytes.get())
                     .checked_add(MAX_RECORD_BYTES)
                     .ok_or(BuildError::InventoryBound)?,
             ),

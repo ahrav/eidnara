@@ -240,6 +240,89 @@ async fn default_disable_uses_certified_retirement_then_preserves_the_selected_p
     }
 }
 
+/// A manifest too small for the retirement obligation transaction refuses disabled cleanup before any retirement write, and the selected projection and consumer checkpoint stay unchanged.
+#[tokio::test]
+async fn disabled_cleanup_charges_the_retirement_bounds_before_retiring() {
+    use daemon::projection_gates::Denial;
+    use daemon::projection_lifecycle::MAX_RECORD_BYTES;
+    for (name, max) in [
+        ("local_transaction_rows", 5_000),
+        ("local_transaction_bytes", 4 << 20),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut case = RetirementCase::new(root.path());
+        let mut evaluator = super::disable::cleanup_evaluator(root.path());
+        evaluator.manifest.limits.insert(name.to_owned(), max);
+        case.gate.install(evaluator);
+        let mut config = spec(root.path());
+        config.retirement.max_obligations = NonZeroUsize::new(10_000).unwrap();
+        config.retirement.max_obligation_bytes = NonZeroU64::new(8 << 20).unwrap();
+        let expected = match name {
+            "local_transaction_rows" => 10_001,
+            _ => (8 << 20) + MAX_RECORD_BYTES,
+        };
+        let old_path = case.old.as_ref().unwrap().projection().path().to_owned();
+        let selected_path = case
+            .selection
+            .pin(
+                &case.corpus.kernel,
+                &case.gate,
+                &budget(Duration::from_secs(10)),
+            )
+            .unwrap()
+            .projection()
+            .path()
+            .to_owned();
+        drop(case.old.take());
+        case.selection
+            .begin_disable(&case.gate, &mut |_| {})
+            .unwrap();
+        let mut ledger = Vec::new();
+        let result = case
+            .selection
+            .reconcile_disabled(
+                &case.corpus.kernel,
+                &case.gate,
+                &config,
+                &budget(Duration::from_secs(20)),
+                &mut |event| ledger.push(event),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(BuildError::Denied(Denial::LimitExceeded {
+                    limit: ref denied,
+                    observed,
+                    max: cap,
+                })) if denied == name && observed == expected && cap == max
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(ledger.iter().all(|event| !matches!(
+            event,
+            daemon::search_replacement::selection::disable::DisableEvent::Retirement(_)
+        )));
+        assert!(old_path.exists());
+        let raw = Connection::open(selected_path).unwrap();
+        for table in ["retirement_receipts", "retirement_dispositions"] {
+            assert_eq!(
+                raw.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            case.corpus
+                .kernel
+                .outbox_consumer_checkpoint(CONSUMER)
+                .unwrap(),
+            Some(case.old_checkpoint)
+        );
+    }
+}
+
 #[tokio::test]
 async fn disabled_receipt_refusal_retains_the_selected_owner_and_original_target() {
     let root = tempfile::tempdir().unwrap();

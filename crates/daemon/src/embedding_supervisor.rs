@@ -144,6 +144,8 @@ pub struct EmbeddingSupervisor {
     tracker: TaskTracker,
     shutdown: CancellationToken,
     slices: AtomicUsize,
+    /// Set by `spawn_pinned`: one tracked task is the reader's owner, not a slice.
+    pinned: AtomicBool,
     /// Set by the first `run`; the loop it starts is the only one this supervisor ever runs.
     started: AtomicBool,
     stop: Mutex<Option<Stop>>,
@@ -177,6 +179,7 @@ impl EmbeddingSupervisor {
             tracker: TaskTracker::new(),
             shutdown: CancellationToken::new(),
             slices: AtomicUsize::new(0),
+            pinned: AtomicBool::new(false),
             started: AtomicBool::new(false),
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
@@ -499,7 +502,10 @@ impl EmbeddingSupervisor {
         {
             // The loop's own token is tracked too; everything beyond it is a slice thread.
             return Err(Unresolved {
-                slices: self.tracker.len().saturating_sub(1),
+                slices: self
+                    .tracker
+                    .len()
+                    .saturating_sub(1 + usize::from(self.pinned.load(Ordering::SeqCst))),
                 native: self.native_census().0,
             });
         }
@@ -566,6 +572,7 @@ impl EmbeddingSupervisor {
         reader: crate::search_replacement::selection::SearchReader,
     ) -> tokio::task::JoinHandle<()> {
         let owner = Arc::clone(self);
+        self.pinned.store(true, Ordering::SeqCst);
         self.tracker.spawn(async move {
             let _reader = reader;
             Arc::clone(&owner).run().await;

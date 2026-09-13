@@ -1180,6 +1180,71 @@ async fn a_supervisor_stopped_before_disable_still_reconciles() {
     assert_eq!(admissions(&selection, &corpus, &gate), (0, 0));
 }
 
+/// A slice held inside a projection write past the grace is reported once, not once more for the tracked task that pins the reader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds, SupervisorEvent, Unresolved};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    remove_fixture_consumer(&corpus);
+    corpus.publish("source", "bytes");
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let blocker = Connection::open(reader.projection().path()).unwrap();
+    blocker.busy_timeout(Duration::ZERO).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let engine = fixtures::TestEngine::new();
+    let synapse = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::synapse::SynapseLimits::default(),
+    ));
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    selection
+        .start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                synapse,
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            SliceBounds {
+                dispatch: fixtures::bounds(),
+                sweep_candidates: NonZeroUsize::new(16).unwrap(),
+                slice: Duration::from_secs(10),
+                idle: Duration::from_millis(20),
+            },
+            Arc::new(|| fixtures::NOW),
+            events,
+        )
+        .unwrap();
+    drop(reader);
+    let supervisor = selection.maintenance_supervisor_for_test().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            received.recv().await.expect("supervisor event stream"),
+            SupervisorEvent::SliceStarted { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        supervisor.shutdown(Duration::from_millis(100)).await,
+        Err(Unresolved {
+            slices: 1,
+            native: 0
+        })
+    );
+    blocker.execute_batch("COMMIT").unwrap();
+    supervisor.shutdown(Duration::from_secs(10)).await.unwrap();
+}
+
 /// A record the gate cannot read denies the call in hand and decides nothing durable: a directory whose mode drifted is repaired by the next lifecycle open, and a directory the daemon cannot enter is served again once it can. Neither latches the gate closed behind a recovery demand.
 #[test]
 fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
@@ -1228,6 +1293,37 @@ fn an_unreadable_record_denies_per_call_without_latching_the_gate() {
             .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
             .unwrap();
     }
+}
+
+/// Nothing repairs the record file's own mode: a record readable by others is refused like a rejected record, so the gate latches closed and cancels every grant.
+#[test]
+fn a_record_file_with_drifted_mode_latches_the_gate_closed() {
+    use daemon::projection_gates::Denial;
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let record = root.path().join("search-lifecycle").join("intent.json");
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let denial = gate
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .unwrap_err();
+    assert!(matches!(denial, Denial::RecoveryRequired), "{denial:?}");
+    assert!(grant.invalidated.is_cancelled());
+    assert!(matches!(
+        ProjectionLifecycle::open(root.path()).unwrap().read(),
+        ControlState::Unavailable(_)
+    ));
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
 }
 
 /// Cleanup walks the same commit pages construction and retirement admitted, so it charges the same per-page catch-up limits. A manifest sized for one page admits construction and must admit the disable that follows.
