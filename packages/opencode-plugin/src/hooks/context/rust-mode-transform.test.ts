@@ -1189,6 +1189,37 @@ describe("Rust mode transform transport", () => {
         expect(deleteSession).toHaveBeenCalledWith(other, "/tmp/project");
     });
 
+    it("forces a full send after a dispatched delta pass is source-declined", async () => {
+        const sessionId = `rust-decline-after-dispatch-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        let live: MessageLike[] | undefined;
+        const { client, bodies, calls } = recordingClient(() => {
+            if (live) live[0] = makeMessages(sessionId)[0];
+            return { native_messages: [] };
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        for (let pass = 0; pass < 2; pass += 1) {
+            const input = makeMessages(sessionId);
+            await transform.run(sessionId, input, { messages: [...input] });
+        }
+        expect(bodies[1]?.tail_delta).toBeDefined();
+
+        live = makeMessages(sessionId);
+        const host = [...live];
+        await transform.run(sessionId, live, { messages: host });
+        expect(bodies[2]?.tail_delta).toBeDefined();
+        expect(host[0]).not.toBe(live[0]);
+        expect(calls.filter((call) => call.method === "transform").length).toBe(3);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+
+        live = undefined;
+        const next = makeMessages(sessionId);
+        await transform.run(sessionId, next, { messages: [...next] });
+        expect(bodies[3]?.tail_delta).toBeUndefined();
+        expect(bodies[3]?.native_messages).toEqual(next);
+        expect(transform.getState(sessionId).forceFullWire).toBe(false);
+    });
+
     it("forces a full send after invalidateWireState", async () => {
         const sessionId = `rust-invalidate-wire-${Date.now()}`;
         installRawRows(sessionId, rawRows(1));
@@ -1369,7 +1400,9 @@ describe("Rust mode transform transport", () => {
         }));
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
         const ordinalsOf = (body: Record<string, unknown> | undefined): number[] =>
-            (body?.messages as Array<{ ordinal: number }>).map((message) => message.ordinal);
+            (body as { messages: Array<{ ordinal: number }> }).messages.map(
+                (message) => message.ordinal,
+            );
 
         const first = rowMessages(sessionId, rawRows(2));
         await transform.run(sessionId, first, { messages: [...first] });

@@ -194,6 +194,54 @@ describe("referenceable source guard", () => {
         expect(trap).not.toHaveBeenCalled();
     });
 
+    it("rejects an Array.prototype iterator accessor without calling it", () => {
+        const key = Symbol.iterator;
+        const original = Object.getOwnPropertyDescriptor(Array.prototype, key)!;
+        const trap = mock(() => original.value);
+        const source = [{ text: "hello" }];
+        let reason: SourceRejected | undefined;
+        try {
+            Object.defineProperty(Array.prototype, key, { get: trap, configurable: true });
+            reason = rootArrayRejection(source);
+        } finally {
+            Object.defineProperty(Array.prototype, key, original);
+        }
+        expect(reason?.message).toBe("accessor Symbol(Symbol.iterator) on Array.prototype");
+        expect(trap).not.toHaveBeenCalled();
+    });
+
+    it("rejects an Object.prototype value accessor alongside a source accessor without calling either", () => {
+        const protoTrap = mock(() => undefined);
+        const sourceTrap = mock(() => "parts");
+        const source = [{ info: { role: "user" } }];
+        Object.defineProperty(source[0], "parts", { get: sourceTrap, enumerable: true });
+        const saved = Object.getOwnPropertyDescriptor(Object.prototype, "value");
+        let valid = true;
+        let hidden: unknown = "unset";
+        try {
+            Object.defineProperty(Object.prototype, "value", {
+                get: protoTrap,
+                configurable: true,
+            });
+            valid = referenceableMessages(source);
+            hidden = readOwnDataProperty(source[0], "parts");
+        } finally {
+            if (saved) Object.defineProperty(Object.prototype, "value", saved);
+            else Reflect.deleteProperty(Object.prototype, "value");
+        }
+        expect(valid).toBe(false);
+        expect(hidden).toBeUndefined();
+        expect(protoTrap).not.toHaveBeenCalled();
+        expect(sourceTrap).not.toHaveBeenCalled();
+    });
+
+    it("rejects prototype-reset boxed primitives whose tapes cannot distinguish their values", () => {
+        const boxed = (value: boolean): object => Object.setPrototypeOf(new Boolean(value), null);
+        const source = [{ flag: boxed(true) }];
+        expect(JSON.stringify(boxed(true))).not.toBe(JSON.stringify(boxed(false)));
+        expect(referenceableMessages(source)).toBe(false);
+    });
+
     it("rejects an inherited then on the root array without calling it", () => {
         const key = "then";
         const trap = mock(() => undefined);

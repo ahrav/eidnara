@@ -1332,6 +1332,8 @@ export function createRustModeTransform(
                 }
                 return result.response;
             };
+            // The daemon commits its native-output snapshot on response, so a pass that exits before this pass commits its cache must resend the full history.
+            state.forceFullWire = true;
             let response = await sendTransformSeriesWithSingleRestart(body);
             captureResponseTelemetry(response);
             const allDeliveryPassIds = new Set(noteDeliveryPassIds(response));

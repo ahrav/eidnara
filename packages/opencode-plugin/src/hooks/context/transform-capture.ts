@@ -19,17 +19,28 @@ export interface MessageContentSnapshot {
     fields: SnapshotField[];
 }
 
+// Explicit constructors: an implicit derived constructor spreads its arguments through
+// `Array.prototype[Symbol.iterator]`, which the prototype scan must be able to reject.
 export class SourceRejected extends Error {
     override name = "SourceRejected";
     readonly logLevel: "debug" | "warn" = "debug";
+    constructor(message: string) {
+        super(message);
+    }
 }
 export class SourceWalkLimitExceeded extends SourceRejected {
     override name = "SourceWalkLimitExceeded";
     override readonly logLevel = "warn";
+    constructor(message: string) {
+        super(message);
+    }
 }
 class SourcePrototypePolluted extends SourceRejected {
     override name = "SourcePrototypePolluted";
     override readonly logLevel = "warn";
+    constructor(message: string) {
+        super(message);
+    }
 }
 
 // Own-slot definitions bypass inherited numeric setters on private arrays.
@@ -45,7 +56,7 @@ function defineSlot<T>(array: T[], index: number, value: T): void {
 export function readOwnDataProperty(value: unknown, key: string): unknown {
     if (value === null || typeof value !== "object" || types.isProxy(value)) return undefined;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
 /**
@@ -66,20 +77,30 @@ export function rootArrayRejection(value: unknown): SourceRejected | undefined {
     )
         return new SourceRejected("unsupported prototype on root array");
     if ("then" in value) return new SourceRejected("then property on root array");
-    for (const [name, prototype] of [
-        ["Array", Array.prototype],
-        ["Object", Object.prototype],
-    ] as const) {
-        for (const key of Reflect.ownKeys(prototype)) {
+    // Indexed loops: `for...of` would read `Array.prototype[Symbol.iterator]` before it is inspected.
+    for (let p = 0; p < BUILTIN_PROTOTYPES.length; p += 1) {
+        const name = BUILTIN_PROTOTYPES[p]![0];
+        const prototype = BUILTIN_PROTOTYPES[p]![1];
+        const keys = Reflect.ownKeys(prototype);
+        for (let k = 0; k < keys.length; k += 1) {
+            const key = keys[k]!;
             const slot = Object.getOwnPropertyDescriptor(prototype, key);
-            if (key !== "__proto__" && slot && !("value" in slot))
+            if (key !== "__proto__" && slot && !Object.hasOwn(slot, "value"))
                 return new SourcePrototypePolluted(`accessor ${String(key)} on ${name}.prototype`);
         }
     }
     return undefined;
 }
 
+const BUILTIN_PROTOTYPES: readonly (readonly [string, object])[] = [
+    ["Array", Array.prototype],
+    ["Object", Object.prototype],
+];
+
 const CONTENT_CHANGED = Symbol("content_changed");
+
+/** A plain object or array whose own descriptors the walker inspects. */
+type Traversable = Record<PropertyKey, unknown> | unknown[];
 
 class ReferenceableWalk {
     private bytes = 0;
@@ -108,7 +129,9 @@ class ReferenceableWalk {
             this.emit(value as SnapshotField);
             return;
         }
-        this.entries(value as object, path, (key, slot) => this.walk(slot.value, `${path}/${key}`));
+        this.entries(value as Traversable, path, (key, slot) =>
+            this.walk(slot.value, `${path}/${key}`),
+        );
     }
 
     members(messages: unknown, visit: (slot: PropertyDescriptor, index: number) => void): number {
@@ -147,20 +170,22 @@ class ReferenceableWalk {
         this.emit(slot.configurable === true);
     }
 
-    private data(value: object, key: PropertyKey, path: string): PropertyDescriptor {
+    private data(value: Traversable, key: PropertyKey, path: string): PropertyDescriptor {
         this.spend(48 + (typeof key === "string" ? key.length * 4 : 0));
         const slot = Object.getOwnPropertyDescriptor(value, key);
         if (!slot) throw new SourceRejected(`sparse array at ${path}`);
-        if (!("value" in slot)) throw new SourceRejected(`accessor at ${path}`);
+        if (!Object.hasOwn(slot, "value")) throw new SourceRejected(`accessor at ${path}`);
         return slot;
     }
 
     private entries(
-        value: object,
+        value: Traversable,
         path: string,
         visit: (key: string, slot: PropertyDescriptor) => void,
     ): number {
         if (types.isProxy(value)) throw new SourceRejected(`proxy at ${path}`);
+        // JSON serializes a boxed primitive by its internal slot, which no own property records.
+        if (types.isBoxedPrimitive(value)) throw new SourceRejected(`boxed primitive at ${path}`);
         const array = Array.isArray(value);
         const prototype = Object.getPrototypeOf(value);
         if (
@@ -181,7 +206,7 @@ class ReferenceableWalk {
             holder = Object.getPrototypeOf(holder)
         ) {
             const hook = Object.getOwnPropertyDescriptor(holder, "toJSON");
-            if (hook && (!("value" in hook) || hook.value !== undefined))
+            if (hook && (!Object.hasOwn(hook, "value") || hook.value !== undefined))
                 throw new SourceRejected(`toJSON at ${path}`);
         }
         const lengthSlot = array ? this.data(value, "length", path) : undefined;

@@ -28,7 +28,7 @@ Reachability: explicit-config-only
 Status: active
 Exercised: partial - focused guard, direct transform, hook and wrapper witnesses run; the parent ownership and publication contract is not exercised in full.
 Guarantee: Unsupported initial message sources are refused before source hooks, preflight or dispatch, and guarded continuations refuse changed or unsupported sources before further source reads and publication.
-Check: `always` - source-hook counters stay zero, an initial refusal has zero preflight and transform calls, and a guarded continuation has no additional transform call or publication after source mutation.
+Check: `always` - source-hook counters stay zero, an initial refusal has zero preflight and transform calls, and a failed continuation source check prevents further source reads, retries and publication; already-serialized pages may finish sending before that check.
 Fault/timing angle: Entry inspection, directory lookup, ordinal scan completion, daemon response and full-sync retry.
 Required faults and enabling state: Construct a supported input and an independent expected output; install a getter or replace membership at a named pause; observe that the pause was reached and count any earlier valid dispatch separately.
 Confidence: medium - [evidence](evidence/referenceable-json-rejects-hooks-before-reading.md). Focused witnesses and repository checks pass; the supplied review findings have documented dispositions, while complete lifecycle coverage remains open.
