@@ -15,10 +15,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 
 /// Maximum events one window retains. Overflow is reported, never silently dropped.
-pub const LEDGER_CAPACITY: usize = 1 << 16;
+const LEDGER_CAPACITY: usize = 1 << 16;
 
 const KIND_ALLOC: usize = 1;
 const KIND_DEALLOC: usize = 2;
@@ -50,8 +50,8 @@ static OWNER: AtomicUsize = AtomicUsize::new(0);
 static CURSOR: AtomicUsize = AtomicUsize::new(0);
 static OVERFLOW: AtomicBool = AtomicBool::new(false);
 /// Bytes live above the window's starting point. Freeing memory that predates
-/// the window drives this negative, so the value is an `isize` stored as bits.
-static LIVE_DELTA: AtomicUsize = AtomicUsize::new(0);
+/// the window drives this negative.
+static LIVE_DELTA: AtomicIsize = AtomicIsize::new(0);
 static PEAK_DELTA: AtomicUsize = AtomicUsize::new(0);
 static REQUESTED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -83,16 +83,14 @@ fn record(kind: usize, ptr: usize, old_ptr: usize, size: usize, old_size: usize)
 }
 
 fn grow(bytes: usize) {
-    let live = (LIVE_DELTA.load(Ordering::Relaxed) as isize).wrapping_add(bytes as isize);
-    LIVE_DELTA.store(live as usize, Ordering::Relaxed);
-    if live > PEAK_DELTA.load(Ordering::Relaxed) as isize {
-        PEAK_DELTA.store(live as usize, Ordering::Relaxed);
+    let live = LIVE_DELTA.fetch_add(bytes as isize, Ordering::Relaxed) + bytes as isize;
+    if let Ok(live) = usize::try_from(live) {
+        PEAK_DELTA.fetch_max(live, Ordering::Relaxed);
     }
 }
 
 fn shrink(bytes: usize) {
-    let live = (LIVE_DELTA.load(Ordering::Relaxed) as isize).wrapping_sub(bytes as isize);
-    LIVE_DELTA.store(live as usize, Ordering::Relaxed);
+    LIVE_DELTA.fetch_sub(bytes as isize, Ordering::Relaxed);
 }
 
 unsafe impl GlobalAlloc for RecordingAlloc {
@@ -172,7 +170,64 @@ pub struct Ledger {
     pub overflow: bool,
 }
 
+/// Where a buffer that is live at window close came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferProvenance {
+    /// One `alloc` of exactly `len` bytes that never grew or shrank.
+    FreshExactSizeAllocation,
+    /// An alloc/realloc chain whose every step grew and whose last step matches
+    /// the buffer's capacity, so no shrink or replacement happened after growth.
+    GrowthChain,
+    /// The buffer was not produced inside the window, was released, or its
+    /// chain shrank or does not end at the reported capacity.
+    Unattributed,
+}
+
 impl Ledger {
+    /// Classifies the buffer at `ptr` with the given `len` and `capacity`.
+    pub fn buffer_provenance(&self, ptr: usize, len: usize, capacity: usize) -> BufferProvenance {
+        let chain = self.growth_chain(ptr);
+        if chain.is_empty() || self.was_released(ptr) {
+            return BufferProvenance::Unattributed;
+        }
+        match chain.as_slice() {
+            [Event::Alloc { size, .. }] if *size == len && capacity == len => {
+                BufferProvenance::FreshExactSizeAllocation
+            }
+            [Event::Alloc { .. }, rest @ ..] => {
+                let grows = rest.iter().all(|event| {
+                    matches!(event, Event::Realloc { old_size, new_size, .. } if new_size > old_size)
+                });
+                let ends_at_capacity = match chain.last() {
+                    Some(Event::Alloc { size, .. }) => *size == capacity,
+                    Some(Event::Realloc { new_size, .. }) => *new_size == capacity,
+                    _ => false,
+                };
+                if grows && ends_at_capacity {
+                    BufferProvenance::GrowthChain
+                } else {
+                    BufferProvenance::Unattributed
+                }
+            }
+            _ => BufferProvenance::Unattributed,
+        }
+    }
+
+    /// Allocation events requesting at least `size` bytes that are not part of
+    /// the chain producing `ptr`.
+    pub fn allocations_at_least_outside(&self, size: usize, ptr: usize) -> Vec<Event> {
+        let chain = self.growth_chain(ptr);
+        self.events
+            .iter()
+            .copied()
+            .filter(|event| match event {
+                Event::Alloc { size: s, .. } | Event::Realloc { new_size: s, .. } => *s >= size,
+                Event::Dealloc { .. } => false,
+            })
+            .filter(|event| !chain.contains(event))
+            .collect()
+    }
+
     /// Events whose requested size equals `size`, in ledger order.
     pub fn allocations_of_size(&self, size: usize) -> Vec<Event> {
         self.events
@@ -296,7 +351,7 @@ pub fn record_window<T>(f: impl FnOnce() -> T) -> (T, Ledger) {
         dealloc_events,
         requested_bytes: REQUESTED_BYTES.load(Ordering::Relaxed),
         peak_live_bytes: PEAK_DELTA.load(Ordering::Relaxed),
-        live_bytes_at_close: LIVE_DELTA.load(Ordering::Relaxed) as isize,
+        live_bytes_at_close: LIVE_DELTA.load(Ordering::Relaxed),
         overflow: OVERFLOW.load(Ordering::Relaxed),
     };
     (value, ledger)

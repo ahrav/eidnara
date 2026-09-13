@@ -16,19 +16,24 @@ mod transform_fixture;
 use std::hint::black_box;
 use std::time::Instant;
 
-use alloc_recorder::{Event, Ledger, record_window};
+use alloc_recorder::{BufferProvenance, Event, Ledger, record_window};
 use corpus::{CORPUS_SEED, ContentClass};
 use daemon::bench_internals::{self, transform_cached};
 use daemon::transform::{ProducerContext, TransformRequest};
 use daemon::wire::IngressMessage;
 use memory_store::{MemoryStore, WireMessage};
 use serde_json::{Value, json};
-use served_output_fixtures::{Population, ReturnProvenance, populations};
+use served_output_fixtures::{
+    Population, declaration_order_equals_canonical, populations, reference_bytes,
+};
 
 #[global_allocator]
 static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
 
 const TRANSFORM_MESSAGE_COUNTS: &[usize] = &[100, 1_000];
+/// Transform passes cost milliseconds, so a fixed short warmup replaces the
+/// tenth-of-samples rule used by the microsecond cells.
+const TRANSFORM_WARMUP: usize = 3;
 
 struct Options {
     out: Option<String>,
@@ -36,7 +41,6 @@ struct Options {
     commit: String,
     micro_samples: usize,
     transform_samples: usize,
-    skip_transform: bool,
 }
 
 fn parse_options() -> Options {
@@ -46,7 +50,6 @@ fn parse_options() -> Options {
         commit: "unknown".to_string(),
         micro_samples: 200,
         transform_samples: 30,
-        skip_transform: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -64,7 +67,6 @@ fn parse_options() -> Options {
             "--transform-samples" => {
                 options.transform_samples = value("--transform-samples").parse().expect("usize")
             }
-            "--skip-transform" => options.skip_transform = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -106,6 +108,25 @@ fn cpu_model() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Compile-time feature resolution of this binary's own crate; the script
+/// records the workspace feature graph separately.
+fn resolved_features() -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if cfg!(feature = "bench-internals") {
+        features.push("bench-internals");
+    }
+    if cfg!(feature = "test-support") {
+        features.push("test-support");
+    }
+    if cfg!(feature = "direct-host-fixture") {
+        features.push("direct-host-fixture");
+    }
+    if cfg!(debug_assertions) {
+        features.push("debug-assertions");
+    }
+    features
+}
+
 fn percentile(sorted: &[u128], fraction: f64) -> u128 {
     if sorted.is_empty() {
         return 0;
@@ -114,22 +135,30 @@ fn percentile(sorted: &[u128], fraction: f64) -> u128 {
     sorted[rank.min(sorted.len() - 1)]
 }
 
-/// `time_cell` drops each result outside the timed interval.
-fn time_cell<T>(warmup: usize, samples: usize, mut call: impl FnMut() -> T) -> Value {
+/// Per-sample `setup` output and each result's drop stay outside both clocks.
+fn time_cell<I, T>(
+    warmup: usize,
+    samples: usize,
+    mut setup: impl FnMut() -> I,
+    mut call: impl FnMut(I) -> T,
+) -> Value {
     for _ in 0..warmup {
-        black_box(call());
+        black_box(call(setup()));
     }
     let mut elapsed = Vec::with_capacity(samples);
-    let cpu_start = process_cpu_ns();
-    let wall_start = Instant::now();
+    let mut cpu_total = 0u128;
+    let mut wall_total = 0u128;
     for _ in 0..samples {
+        let input = setup();
+        let cpu_start = process_cpu_ns();
         let start = Instant::now();
-        let value = call();
-        elapsed.push(start.elapsed().as_nanos());
+        let value = call(input);
+        let wall = start.elapsed().as_nanos();
+        cpu_total += process_cpu_ns() - cpu_start;
+        wall_total += wall;
+        elapsed.push(wall);
         drop(black_box(value));
     }
-    let wall_total = wall_start.elapsed().as_nanos();
-    let cpu_total = process_cpu_ns() - cpu_start;
     let mut sorted = elapsed.clone();
     sorted.sort_unstable();
     let mean = if sorted.is_empty() {
@@ -163,19 +192,11 @@ fn ledger_json(ledger: &Ledger) -> Value {
     })
 }
 
-fn reference_bytes(message: &WireMessage) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::to_value(message).expect("to_value")).expect("to_vec")
-}
-
-fn is_canonical_order(message: &WireMessage, canonical: &[u8]) -> bool {
-    serde_json::to_vec(message).expect("to_vec") == canonical
-}
-
 fn allocation_cell(population: Population) -> Value {
     let message = population.build();
     let reference = reference_bytes(&message);
     let output_bytes = reference.len();
-    let class = if is_canonical_order(&message, &reference) {
+    let class = if declaration_order_equals_canonical(&message, &reference) {
         "canonical-miss"
     } else {
         "unordered-miss"
@@ -184,23 +205,21 @@ fn allocation_cell(population: Population) -> Value {
         record_window(|| daemon::served_json::canonical_served_bytes_for_test(&message));
     assert_eq!(bytes, reference, "{}", population.label());
     let ptr = bytes.as_ptr() as usize;
+    let return_capacity = bytes.capacity();
     let chain = canonicalizer.growth_chain(ptr);
-    let provenance = match chain.as_slice() {
-        [Event::Alloc { size, .. }] if *size == bytes.len() && bytes.capacity() == bytes.len() => {
-            ReturnProvenance::FreshExactSizeAllocation
-        }
-        _ => ReturnProvenance::SerializationGrowthChain,
-    };
+    let provenance = canonicalizer.buffer_provenance(ptr, bytes.len(), return_capacity);
     let output_sized_allocations = canonicalizer
         .allocations_of_size(output_bytes)
         .iter()
         .filter(|event| matches!(event, Event::Alloc { .. }))
         .count();
+    let storage_outside_chain = canonicalizer
+        .allocations_at_least_outside(output_bytes, ptr)
+        .len();
     let logical_reorder_output_bytes = match provenance {
-        ReturnProvenance::FreshExactSizeAllocation => output_bytes,
-        ReturnProvenance::SerializationGrowthChain => 0,
+        BufferProvenance::FreshExactSizeAllocation => output_bytes,
+        BufferProvenance::GrowthChain | BufferProvenance::Unattributed => 0,
     };
-    let return_capacity = bytes.capacity();
     drop(bytes);
     let (served, full_constructor) =
         record_window(|| daemon::transform::served_message_for_test(message));
@@ -218,6 +237,7 @@ fn allocation_cell(population: Population) -> Value {
             "return_provenance": format!("{provenance:?}"),
             "return_growth_chain_events": chain.len(),
             "output_sized_allocations": output_sized_allocations,
+            "output_sized_storage_outside_chain": storage_outside_chain,
             "logical_reorder_output_bytes": logical_reorder_output_bytes,
         },
         "full_constructor": {
@@ -234,16 +254,22 @@ fn micro_timing_cells(samples: usize) -> Vec<Value> {
         cells.push(json!({
             "boundary": "canonicalizer",
             "population": population.label(),
-            "timing": time_cell(samples / 10, samples, || {
-                daemon::served_json::canonical_served_bytes_for_test(black_box(&message))
-            }),
+            "timing": time_cell(
+                samples / 10,
+                samples,
+                || &message,
+                |message| daemon::served_json::canonical_served_bytes_for_test(black_box(message)),
+            ),
         }));
         cells.push(json!({
             "boundary": "full_constructor",
             "population": population.label(),
-            "timing": time_cell(samples / 10, samples, || {
-                daemon::transform::served_message_for_test(black_box(message.clone()))
-            }),
+            "timing": time_cell(
+                samples / 10,
+                samples,
+                || message.clone(),
+                |message| daemon::transform::served_message_for_test(black_box(message)),
+            ),
         }));
     }
     cells
@@ -254,7 +280,7 @@ fn served_order_counts(messages: &[daemon::transform::ServedMessage]) -> (usize,
     let mut noncanonical = 0;
     for served in messages {
         let message: &WireMessage = served;
-        if is_canonical_order(message, served.canonical_bytes_for_test()) {
+        if declaration_order_equals_canonical(message, served.canonical_bytes_for_test()) {
             canonical += 1;
         } else {
             noncanonical += 1;
@@ -303,10 +329,12 @@ fn transform_cells(samples: usize) -> (Vec<Value>, Vec<Value>) {
         timing.push(json!({
             "boundary": "transform_cold",
             "population": label,
-            "timing": time_cell(3.min(samples), samples, || {
-                let cache = bench_internals::OutputCache::default();
-                transform_pass(&store, &req, &ctx, &cache)
-            }),
+            "timing": time_cell(
+                TRANSFORM_WARMUP.min(samples),
+                samples,
+                bench_internals::OutputCache::default,
+                |cache| transform_pass(&store, &req, &ctx, &cache),
+            ),
         }));
 
         let cache = bench_internals::OutputCache::default();
@@ -317,9 +345,12 @@ fn transform_cells(samples: usize) -> (Vec<Value>, Vec<Value>) {
         timing.push(json!({
             "boundary": "transform_warm",
             "population": label,
-            "timing": time_cell(3.min(samples), samples, || {
-                transform_pass(&store, &req, &ctx, &cache)
-            }),
+            "timing": time_cell(
+                TRANSFORM_WARMUP.min(samples),
+                samples,
+                || (),
+                |()| transform_pass(&store, &req, &ctx, &cache),
+            ),
         }));
     }
     (timing, frequencies)
@@ -330,12 +361,8 @@ fn main() {
     let started = Instant::now();
     let allocation: Vec<Value> = populations().map(allocation_cell).collect();
     let mut timing = micro_timing_cells(options.micro_samples);
-    let mut frequencies = Vec::new();
-    if !options.skip_transform {
-        let (transform_timing, transform_frequencies) = transform_cells(options.transform_samples);
-        timing.extend(transform_timing);
-        frequencies = transform_frequencies;
-    }
+    let (transform_timing, frequencies) = transform_cells(options.transform_samples);
+    timing.extend(transform_timing);
     let document = json!({
         "kind": "canonical-output-evidence/v1",
         "label": options.label,
@@ -343,7 +370,8 @@ fn main() {
             "commit": options.commit,
             "package_version": env!("CARGO_PKG_VERSION"),
             "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
-            "features": ["bench-internals", "test-support"],
+            "requested_features": ["bench-internals", "test-support"],
+            "resolved_features": resolved_features(),
             "target_arch": std::env::consts::ARCH,
             "os": std::env::consts::OS,
             "cpu_model": cpu_model(),
@@ -358,7 +386,7 @@ fn main() {
         },
         "timing_boundaries": {
             "canonicalizer": "canonical_served_bytes_for_test: serialization, span sorting, and reorder copy; excludes hashing, receipts, and Arc conversion",
-            "full_constructor": "served_message_for_test: canonicalizer plus block receipts, SHA-256, identity formatting, and Arc conversion",
+            "full_constructor": "served_message_for_test: canonicalizer plus block receipts, SHA-256, identity formatting, and Arc conversion; the per-sample message clone runs before the clocks start",
             "transform_cold": "transform_cached with a fresh output cache per call; every served message is constructed",
             "transform_warm": "transform_cached with a primed output cache; positive hits reuse served messages",
         },

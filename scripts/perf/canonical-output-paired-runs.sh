@@ -6,7 +6,7 @@ set -euo pipefail
 TOOLCHAIN="${EIDNARA_TOOLCHAIN:-1.98}"
 MICRO_SAMPLES="${EIDNARA_MICRO_SAMPLES:-200}"
 TRANSFORM_SAMPLES="${EIDNARA_TRANSFORM_SAMPLES:-30}"
-PAIRS=10
+RUNS=10
 FEATURES="bench-internals,test-support"
 EXAMPLE="canonical_output_evidence"
 
@@ -48,11 +48,9 @@ cpu_model() {
 }
 
 # The detached worktree and separate target directory keep the caller's working
-# tree and build cache untouched.
+# tree and build cache untouched. Prints the built binary path.
 build_revision() {
-  local rev="$1" scratch="$2" label="$3"
-  local sha
-  sha=$(git rev-parse --verify "${rev}^{commit}")
+  local sha="$1" label="$2"
   local tree="$scratch/worktree-$label"
   git worktree add --detach --quiet "$tree" "$sha"
   (
@@ -60,10 +58,14 @@ build_revision() {
     cargo "+$TOOLCHAIN" build --release -p daemon --features "$FEATURES" \
       --example "$EXAMPLE" --locked \
       --target-dir "$scratch/target-$label" >&2
+    cargo "+$TOOLCHAIN" tree -p daemon --features "$FEATURES" --locked \
+      -e features --prefix none -f '{p} {f}' \
+      | grep -E '^(daemon|memory-store|serde|serde_json) v' \
+      | sed -E 's/ \(\*\)$//; s#\([^)]*\) ##' | sort -u \
+      >"$scratch/features-$label.txt"
   )
   git worktree remove --force "$tree"
-  local binary="$scratch/target-$label/release/examples/$EXAMPLE"
-  echo "$binary|$sha"
+  echo "$scratch/target-$label/release/examples/$EXAMPLE"
 }
 
 run_driver() {
@@ -73,9 +75,29 @@ run_driver() {
     --out "$out"
 }
 
+json_string_array() {
+  local first=1 item
+  printf '['
+  for item in "$@"; do
+    [ "$first" -eq 1 ] || printf ','
+    first=0
+    printf '"%s"' "$item"
+  done
+  printf ']'
+}
+
+json_lines_array() {
+  local file="$1"
+  if [ -s "$file" ]; then
+    mapfile -t lines <"$file"
+    json_string_array "${lines[@]}"
+  else
+    printf '[]'
+  fi
+}
+
 write_provenance() {
-  local out_dir="$1" mode="$2" schedule="$3"
-  shift 3
+  local out_dir="$1" mode="$2" schedule="$3" baseline_sha="$4" candidate_sha="${5:-}"
   local harness_rev dirty
   harness_rev=$(git rev-parse HEAD)
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then dirty=true; else dirty=false; fi
@@ -88,18 +110,22 @@ write_provenance() {
     echo "  \"toolchain\": \"$(cargo "+$TOOLCHAIN" --version)\","
     echo "  \"rustc\": \"$(rustc "+$TOOLCHAIN" --version)\","
     echo "  \"features\": \"$FEATURES\","
+    echo "  \"resolved_features_baseline\": $(json_lines_array "$scratch/features-A.txt"),"
+    if [ -n "$candidate_sha" ]; then
+      echo "  \"resolved_features_candidate\": $(json_lines_array "$scratch/features-B.txt"),"
+    fi
     echo "  \"profile\": \"release\","
     echo "  \"micro_samples\": $MICRO_SAMPLES,"
     echo "  \"transform_samples\": $TRANSFORM_SAMPLES,"
-    echo "  \"pairs\": $PAIRS,"
+    echo "  \"runs\": $RUNS,"
     echo "  \"cpu_model\": \"$(cpu_model)\","
     echo "  \"nproc\": $(nproc),"
     echo "  \"kernel\": \"$(uname -sr)\","
     echo "  \"schedule\": $schedule,"
-    while [ $# -gt 0 ]; do
-      echo "  $1"
-      shift
-    done
+    echo "  \"baseline_commit\": \"$baseline_sha\","
+    if [ -n "$candidate_sha" ]; then
+      echo "  \"candidate_commit\": \"$candidate_sha\","
+    fi
     echo "  \"unix_time_s\": $(date +%s)"
     echo "}"
   } >"$out_dir/provenance.json"
@@ -109,44 +135,35 @@ main() {
   [ $# -ge 3 ] || usage
   local mode="$1"
   cd "$(repo_root)"
-
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/eidnara-canonical-output.XXXXXX")
   trap 'rm -rf "$scratch"' EXIT
 
   case "$mode" in
     baseline)
       [ $# -eq 3 ] || usage
-      local rev="$2" out_dir="$3"
+      local out_dir="$3" sha binary
+      sha=$(git rev-parse --verify "$2^{commit}")
       mkdir -p "$out_dir"
-      local built binary sha
-      built=$(build_revision "$rev" "$scratch" A)
-      binary="${built%|*}"
-      sha="${built#*|}"
-      local schedule="["
-      for i in $(seq 1 $PAIRS); do
+      binary=$(build_revision "$sha" A)
+      local -a schedule=()
+      for i in $(seq 1 "$RUNS"); do
         local run
         run=$(printf 'run-%02d' "$i")
         run_driver "$binary" "baseline/$run" "$sha" "$out_dir/$run.json"
-        schedule+="\"$run:A\""
-        [ "$i" -lt $PAIRS ] && schedule+=","
+        schedule+=("$run:A")
       done
-      schedule+="]"
-      write_provenance "$out_dir" baseline "$schedule" \
-        "\"baseline_commit\": \"$sha\","
+      write_provenance "$out_dir" baseline "$(json_string_array "${schedule[@]}")" "$sha"
       ;;
     paired)
       [ $# -eq 4 ] || usage
-      local base_rev="$2" cand_rev="$3" out_dir="$4"
+      local out_dir="$4" sha_a sha_b bin_a bin_b
+      sha_a=$(git rev-parse --verify "$2^{commit}")
+      sha_b=$(git rev-parse --verify "$3^{commit}")
       mkdir -p "$out_dir"
-      local built_a built_b bin_a sha_a bin_b sha_b
-      built_a=$(build_revision "$base_rev" "$scratch" A)
-      bin_a="${built_a%|*}"
-      sha_a="${built_a#*|}"
-      built_b=$(build_revision "$cand_rev" "$scratch" B)
-      bin_b="${built_b%|*}"
-      sha_b="${built_b#*|}"
-      local schedule="["
-      for i in $(seq 1 $PAIRS); do
+      bin_a=$(build_revision "$sha_a" A)
+      bin_b=$(build_revision "$sha_b" B)
+      local -a schedule=()
+      for i in $(seq 1 "$RUNS"); do
         local pair order
         pair=$(printf 'pair-%02d' "$i")
         if [ $((i % 2)) -eq 1 ]; then order="AB"; else order="BA"; fi
@@ -157,13 +174,9 @@ main() {
           run_driver "$bin_b" "$pair/B" "$sha_b" "$out_dir/$pair-B.json"
           run_driver "$bin_a" "$pair/A" "$sha_a" "$out_dir/$pair-A.json"
         fi
-        schedule+="\"$pair:$order\""
-        [ "$i" -lt $PAIRS ] && schedule+=","
+        schedule+=("$pair:$order")
       done
-      schedule+="]"
-      write_provenance "$out_dir" paired "$schedule" \
-        "\"baseline_commit\": \"$sha_a\"," \
-        "\"candidate_commit\": \"$sha_b\","
+      write_provenance "$out_dir" paired "$(json_string_array "${schedule[@]}")" "$sha_a" "$sha_b"
       ;;
     *)
       usage

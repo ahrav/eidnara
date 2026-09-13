@@ -104,27 +104,28 @@ test-only observation cannot be built, stop U0 for seam approval.
 
 ### U0 harness landing
 
-Plan U0 landed the following at harness revision `5b54ecd6`. The
-[baseline record](evidence/u0-baseline-measurement.md) retains the captured
-numbers and provenance. These are new observations on the unchanged
-canonicalizer, not candidate evidence.
+Plan U0 lands the surfaces below. The [baseline record](evidence/u0-baseline-measurement.md)
+retains the captured numbers and provenance. Per the method contract every
+check keeps status `unaudited`; the execution column records only that a run
+happened on this revision, not an adequacy verdict.
 
-| Surface | What it observes | Status |
-| --- | --- | --- |
-| `crates/daemon/tests/support/alloc_recorder.rs` | Thread-owned, fixed-capacity, non-allocating ledger over `System`: alloc/realloc/dealloc events with pointers and sizes, cumulative requested bytes, peak live bytes, growth-chain and release queries. Windows serialize on a process mutex. | exercised by the tests below |
-| `crates/daemon/tests/support/served_output_fixtures.rs` | Retained ASCII, retained escaped/Unicode/prefix, retained large payload, typed shell, and one-edited-block populations at 1 and 65 blocks, with expected canonicality and expected return provenance. | exercised |
-| `canonical_miss_return_buffer_provenance_is_classified` | Independent canonicality oracle, byte oracle, returned-buffer growth chain, liveness at return, exact-N B allocation, and no replacement scratch. | passes on the baseline |
-| `full_constructor_observation_covers_receipts_hashing_and_arc_conversion` | Peak and events across the complete constructor through the `served_message_for_test` test-support entry. | passes on the baseline |
-| `recording_excludes_other_threads_and_tracks_growth_chains` | Foreign-thread exclusion and growth-chain attribution. | passes on the baseline |
-| `crates/daemon/examples/canonical_output_evidence.rs` | Release driver: allocation cells, canonicalizer and full-constructor timing, cold/warm transform timing and CPU, served-order and cache-counter frequencies, provenance, explicit host-latency-unmeasured status. | ran 10 processes |
-| `scripts/perf/canonical-output-paired-runs.sh` | Frozen ten-pair AB/BA process schedule with isolated worktree builds and a provenance sidecar. | ran in `baseline` mode |
+| Surface | What it observes | Status | Execution evidence |
+| --- | --- | --- | --- |
+| `crates/daemon/tests/support/alloc_recorder.rs` | Thread-owned, fixed-capacity, non-allocating ledger over `System`: alloc/realloc/dealloc events with pointers and sizes, cumulative requested bytes, peak live bytes, growth-chain, release, and buffer-provenance queries. Windows serialize on a process mutex. | unaudited | used by the tests and driver below |
+| `crates/daemon/tests/support/served_output_fixtures.rs` | Retained ASCII, retained escaped/Unicode/prefix, retained large payload, typed shell, and one-edited-block populations at 1 and 65 blocks, the independent byte and canonicality oracles, and the expected return-buffer kind per population. | unaudited | used by the tests and driver below |
+| `canonical_miss_return_buffer_provenance_is_classified` | Independent canonicality oracle, byte oracle, returned-buffer provenance (fresh exact-N allocation, growth chain, or unattributed), liveness at return, exactly one exact-N allocation for the copy path, and no output-sized storage outside the returned chain for the ownership path. | unaudited | passes on the baseline revision |
+| `full_constructor_observation_covers_receipts_hashing_and_arc_conversion` | Peak and events across the complete constructor through the `served_message_for_test` test-support entry, including the exact `Arc<[u8]>` payload allocation. | unaudited | passes on the baseline revision |
+| `recording_excludes_other_threads_and_tracks_growth_chains` | Foreign-thread exclusion, growth-chain attribution, and rejection of a shrunk buffer. | unaudited | passes on the baseline revision |
+| `crates/daemon/examples/canonical_output_evidence.rs` | Release driver: allocation cells, canonicalizer and full-constructor timing with per-sample setup outside both clocks, cold/warm transform timing and CPU, served-order and cache-counter frequencies, provenance, explicit host-latency-unmeasured status. | unaudited | ran 10 processes on the baseline revision |
+| `scripts/perf/canonical-output-paired-runs.sh` | Frozen ten-run or ten-pair AB/BA process schedule with isolated worktree builds, resolved feature lines, and a provenance sidecar. | unaudited | ran in `baseline` mode |
 
 The in-crate `--lib` observer route is infeasible: `crates/daemon/src/lib.rs`
 declares `#![forbid(unsafe_code)]`, so no `GlobalAlloc` can be declared in the
 daemon crate. The full-constructor observer uses the `test-support` entry
 `daemon::transform::served_message_for_test`, matching the existing
-`canonical_served_bytes_for_test` pattern; it is not a production API. A
-real-host transform driver is not retained; host latency remains unmeasured.
+`canonical_served_bytes_for_test` pattern. It is compiled only with the
+`test-support` feature and is not part of the production API. A real-host
+transform driver is not retained; host latency remains unmeasured.
 
 ## Suspiciously quiet areas and handoff
 

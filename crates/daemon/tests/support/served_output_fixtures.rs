@@ -1,6 +1,9 @@
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
-const KEYS_PER_EXTRA_OBJECT: usize = 8;
+pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
+/// Keys per passthrough block: `extra`, `kind`, `text`, `type`, plus the extras.
+pub const KEYS_PER_ASCII_BLOCK: usize = KEYS_PER_EXTRA_OBJECT + 4;
+pub const BLOCK_COUNTS: [usize; 2] = [1, 65];
 
 /// The fixture orders keys by decoded strings, not JSON escape sequences.
 const ESCAPED_KEYS: &[&str] = &[
@@ -15,14 +18,6 @@ const ESCAPED_KEYS: &[&str] = &[
     r#""😀""#,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReturnProvenance {
-    /// One `alloc` of exactly the output length that never grew: the reorder buffer.
-    FreshExactSizeAllocation,
-    /// The serialization buffer's own alloc/realloc chain.
-    SerializationGrowthChain,
-}
-
 /// Retained-original shells replay parsed `Value` maps, whose keys are already in
 /// decoded order. Typed shells serialize fields in declaration order and need reordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +30,7 @@ pub enum Population {
 }
 
 pub fn populations() -> impl Iterator<Item = Population> {
-    [1usize, 65].into_iter().flat_map(|blocks| {
+    BLOCK_COUNTS.into_iter().flat_map(|blocks| {
         [
             Population::RetainedAscii { blocks },
             Population::RetainedEscaped { blocks },
@@ -72,12 +67,11 @@ impl Population {
         )
     }
 
-    pub fn expected_return_provenance(&self) -> ReturnProvenance {
-        ReturnProvenance::FreshExactSizeAllocation
-    }
-
-    pub fn observes_full_constructor(&self) -> bool {
-        true
+    /// Whether the canonicalizer returns its serialization buffer for this
+    /// population instead of a fresh exact-size reorder buffer. The unchanged
+    /// canonicalizer copies every population into a fresh buffer.
+    pub fn expects_serialization_buffer_return(&self) -> bool {
+        false
     }
 
     pub fn build(&self) -> WireMessage {
@@ -92,6 +86,18 @@ impl Population {
             Self::OneEditedBlock { blocks } => one_edited_block_message(blocks),
         }
     }
+}
+
+/// Sorted `Value` maps with unique keys give canonical bytes independently of
+/// the span canonicalizer.
+pub fn reference_bytes(message: &WireMessage) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::to_value(message).expect("to_value")).expect("to_vec")
+}
+
+/// Declaration-order serialization equals the canonical bytes exactly when no
+/// object needs reordering.
+pub fn declaration_order_equals_canonical(message: &WireMessage, canonical: &[u8]) -> bool {
+    serde_json::to_vec(message).expect("to_vec") == canonical
 }
 
 fn retained(body: &str) -> WireMessage {

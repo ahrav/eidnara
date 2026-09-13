@@ -28,8 +28,9 @@ The owner-approved specification is published as
 Read-back confirms its body exactly matches the local
 [specification](../../specifications/canonical-output-fast-path.md), with SHA-256
 `ca3df7194f0a39f3ce454b69a39326363c5be819bafc233245c657e8719a93b1`.
-Publication creates one specification, not implementation tickets. This local
-catalog and its evidence remain uncommitted documentation artifacts.
+Publication creates one specification, not implementation tickets. This
+catalog, its evidence, and the specification copy are tracked with the U0
+harness.
 
 Seven records remain **Exercised: not yet**; S5 and C2 are **partial** after
 the plan U0 harness landed at `5b54ecd6` and captured the
@@ -73,8 +74,9 @@ covers default production situations, constructed by tests.
 The [manifest][serde-feature] requests `serde_json/raw_value`, not
 `preserve_order`. The [locked serde_json 1.0.151 entry][serde-lock] lists
 `itoa`, `memchr`, `serde`, `serde_core`, and `zmij`, with no `indexmap`.
-Together these support the inspected locked sorted-map assumption; they are
-not a runtime-captured feature graph. The algorithm must remain independent
+Together these support the inspected locked sorted-map assumption. The U0
+paired-run provenance retains the `cargo tree -e features` lines for `daemon`,
+`memory-store`, `serde`, and `serde_json`. The algorithm must remain independent
 of that feature. `to_vec(to_value(message))` is a canonical
 oracle only with sorted `Value` iteration and unique keys. Use frozen literals
 and independently decoded emitted-key permutations as unconditional witnesses.
@@ -384,8 +386,10 @@ are unaudited; no combined situation-coverage assertion was found.
 Impact: Warm-only measurements can conceal an unexercised optimization, while
 miss-only tests cannot establish that warm bypass remains intact.
 Open questions:
-- Record actual canonical/miss/hit frequencies. The 100/1,000-message fixture
-  sizes are not empirical evidence of a production population mix.
+- The U0 driver records canonical/miss/hit frequencies for the declared
+  100/1,000-message fixtures only; those sizes are not empirical evidence of a
+  production population mix. Completed-output page replay is still not
+  constructed.
 
 ## Relationships and handoff
 
@@ -415,7 +419,8 @@ Deliverables: [existing checks](existing-checks.md), [fault map](fault-map.md),
 [baseline](_lenses/portfolio-baseline.md)/[wildcard][wildcard] traces. Final
 independent analyst evaluation `ses_f675203e4ffevgEH7CseOxb6jK` is complete:
 accepted with no blockers. All eight findings are dispositioned in the
-evaluation report; implementation observations and measurements remain unrun.
+evaluation report. The U0 baseline measurement has run on the unchanged
+canonicalizer; candidate observations remain unrun.
 Semantics distribution: six `always`, one `always-or-unreached`, two
 `sometimes`; no `reachable`, `unreachable`, or liveness records.
 
