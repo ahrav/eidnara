@@ -1,3 +1,6 @@
+//! Included by `#[path]` from `benches/hot_path.rs` and
+//! `examples/canonical_output_evidence.rs`.
+
 use daemon::bench_internals::{self, CacheTtlProvenance, transform_cached};
 use daemon::canonical_memory::{CanonicalMemoryRead, CanonicalMemorySnapshot};
 use daemon::transform::{ProducerContext, TransformRequest};

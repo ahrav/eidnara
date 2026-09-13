@@ -1,3 +1,6 @@
+//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
+//! `examples/canonical_output_evidence.rs`.
+
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
 pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
@@ -89,8 +92,14 @@ impl Population {
 }
 
 /// Sorted `Value` maps with unique keys give canonical bytes independently of
-/// the span canonicalizer.
+/// the span canonicalizer. The oracle holds only while `serde_json` maps sort
+/// their keys, so it checks that assumption on every call.
 pub fn reference_bytes(message: &WireMessage) -> Vec<u8> {
+    assert_eq!(
+        serde_json::to_string(&serde_json::json!({"b": 0, "a": 0})).expect("to_string"),
+        r#"{"a":0,"b":0}"#,
+        "the reference oracle needs sorted serde_json maps"
+    );
     serde_json::to_vec(&serde_json::to_value(message).expect("to_value")).expect("to_vec")
 }
 

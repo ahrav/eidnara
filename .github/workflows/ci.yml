@@ -518,6 +518,15 @@ jobs:
         # nextest does not run doctests.
         run: cargo +1.98 test --workspace --doc --all-features --locked
 
+      - name: Served-output evidence driver smoke
+        if: matrix.shard == 2
+        # Exercises every allocation-cell assertion and population label so the
+        # retained harness cannot drift between its baseline and candidate runs.
+        run: >
+          cargo +1.98 run -p daemon --features bench-internals,test-support --locked
+          --example canonical_output_evidence --
+          --micro-samples 2 --transform-samples 1 --out "${{ runner.temp }}/canonical-output-smoke.json"
+
   test:
     name: test (1.98)
     runs-on: ubuntu-latest

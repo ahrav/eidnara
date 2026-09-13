@@ -35,6 +35,11 @@ const TRANSFORM_MESSAGE_COUNTS: &[usize] = &[100, 1_000];
 /// tenth-of-samples rule used by the microsecond cells.
 const TRANSFORM_WARMUP: usize = 3;
 
+const USAGE: &str = "\
+canonical_output_evidence [--out PATH] [--label NAME] [--commit SHA]
+                          [--micro-samples N] [--transform-samples N]
+Writes one JSON evidence document (kind canonical-output-evidence/v1) to PATH or stdout.";
+
 struct Options {
     out: Option<String>,
     label: String,
@@ -67,7 +72,11 @@ fn parse_options() -> Options {
             "--transform-samples" => {
                 options.transform_samples = value("--transform-samples").parse().expect("usize")
             }
-            other => panic!("unknown argument {other}"),
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => panic!("unknown argument {other}; try --help"),
         }
     }
     options
@@ -275,12 +284,16 @@ fn micro_timing_cells(samples: usize) -> Vec<Value> {
     cells
 }
 
+/// Classifies against the independent `Value` reference and checks that the served
+/// bytes equal it, so a canonicalizer regression cannot relabel the population.
 fn served_order_counts(messages: &[daemon::transform::ServedMessage]) -> (usize, usize) {
     let mut canonical = 0;
     let mut noncanonical = 0;
     for served in messages {
         let message: &WireMessage = served;
-        if declaration_order_equals_canonical(message, served.canonical_bytes_for_test()) {
+        let reference = reference_bytes(message);
+        assert_eq!(served.canonical_bytes_for_test(), reference.as_slice());
+        if declaration_order_equals_canonical(message, &reference) {
             canonical += 1;
         } else {
             noncanonical += 1;
@@ -310,6 +323,7 @@ fn frequency_json(label: &str, result: &daemon::transform::TransformWithProjecti
         "cache_hits": timings.map(|t| t.cache_hits),
         "cache_misses": timings.map(|t| t.cache_misses),
         "cache_dirty_skips": timings.map(|t| t.cache_dirty_skips),
+        "hit_counter_is_a_proxy": "response cache_hits counts lookups that returned an entry; it does not inspect whether each entry held a served message",
     })
 }
 
@@ -369,14 +383,14 @@ fn main() {
         "provenance": {
             "commit": options.commit,
             "package_version": env!("CARGO_PKG_VERSION"),
-            "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            "debug_assertions": cfg!(debug_assertions),
             "requested_features": ["bench-internals", "test-support"],
             "resolved_features": resolved_features(),
             "target_arch": std::env::consts::ARCH,
             "os": std::env::consts::OS,
             "cpu_model": cpu_model(),
             "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).ok(),
-            "allocator": "System behind a thread-owned recording wrapper; recording is disabled during timing cells",
+            "allocator": "System behind a thread-owned recording wrapper; recording is disabled during timing cells, and the wrapper's per-allocation check applies equally to baseline and candidate binaries",
             "pid": std::process::id(),
             "unix_time_s": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -386,13 +400,17 @@ fn main() {
         },
         "timing_boundaries": {
             "canonicalizer": "canonical_served_bytes_for_test: serialization, span sorting, and reorder copy; excludes hashing, receipts, and Arc conversion",
-            "full_constructor": "served_message_for_test: canonicalizer plus block receipts, SHA-256, identity formatting, and Arc conversion; the per-sample message clone runs before the clocks start",
+            "full_constructor": "served_message_for_test, the no-projection constructor arm: canonicalizer plus per-block receipt serialization, SHA-256, identity formatting, and Arc conversion; the per-sample message clone runs before the clocks start",
             "transform_cold": "transform_cached with a fresh output cache per call; every served message is constructed",
             "transform_warm": "transform_cached with a primed output cache; positive hits reuse served messages",
         },
         "allocation": allocation,
         "timing": timing,
         "frequencies": frequencies,
+        "projected_block_reuse": {
+            "status": "unmeasured",
+            "reason": "the constructor arm that reuses projected block receipts is not driven; the full_constructor cells measure the no-projection arm",
+        },
         "completed_output_replay": {
             "status": "not-constructed",
             "reason": "host-level PreparedOutput page replay is a separate reuse path outside this in-process driver",

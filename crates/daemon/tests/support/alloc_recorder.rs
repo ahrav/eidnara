@@ -4,9 +4,15 @@
 //! recurses. Sizes are layout sizes as requested by the caller. Allocator rounding
 //! is not included, so live and peak bytes are floors on the process heap
 //! footprint. A `realloc` request does not indicate whether the allocator moved
-//! the allocation.
+//! the allocation. Pointer queries key on raw addresses, so an address freed and
+//! reallocated inside one window is ambiguous; keep windows to one call.
 //!
-//! Each binary that observes allocations declares the global allocator itself:
+//! Exactly one thread records inside a window; the live and peak counters are
+//! updated by the owner thread only.
+//!
+//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
+//! `examples/canonical_output_evidence.rs`. Each binary that observes allocations
+//! declares the global allocator itself:
 //!
 //! ```ignore
 //! #[global_allocator]
@@ -166,7 +172,9 @@ pub struct Ledger {
     pub peak_live_bytes: usize,
     /// Live layout bytes above the starting point when the window closed.
     pub live_bytes_at_close: isize,
-    /// The ledger array filled; counters remain exact but `events` is truncated.
+    /// The ledger array filled. `requested_bytes`, `peak_live_bytes`, and
+    /// `live_bytes_at_close` stay exact; `events` and the three event counts
+    /// cover only the recorded prefix.
     pub overflow: bool,
 }
 
@@ -286,20 +294,31 @@ impl Ledger {
     }
 }
 
+/// Clears `ENABLED` even when `f` panics, so one failing window cannot poison
+/// every later window in the process.
+struct Disable;
+
+impl Drop for Disable {
+    fn drop(&mut self) {
+        ENABLED.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Records every allocator call the current thread makes while `f` runs.
 ///
-/// A second caller blocks until the active recording window closes. Keep reference
-/// work, fixture setup, and assertions outside `f`.
+/// A caller on another thread blocks until the active window closes; a nested call
+/// on the owning thread panics. Keep reference work, fixture setup, and assertions
+/// outside `f`.
 pub fn record_window<T>(f: impl FnOnce() -> T) -> (T, Ledger) {
     // A `std::sync::Mutex` never allocates on Linux, so taking it cannot be recorded.
     static WINDOW: Mutex<()> = Mutex::new(());
+    assert!(
+        !recording_here(),
+        "allocation recording windows do not nest on one thread"
+    );
     let _window = WINDOW
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert!(
-        !ENABLED.load(Ordering::Relaxed),
-        "allocation recording windows do not nest"
-    );
     CURSOR.store(0, Ordering::Relaxed);
     OVERFLOW.store(false, Ordering::Relaxed);
     LIVE_DELTA.store(0, Ordering::Relaxed);
@@ -307,8 +326,10 @@ pub fn record_window<T>(f: impl FnOnce() -> T) -> (T, Ledger) {
     REQUESTED_BYTES.store(0, Ordering::Relaxed);
     OWNER.store(current_thread_token(), Ordering::Relaxed);
     ENABLED.store(true, Ordering::SeqCst);
-    let value = f();
-    ENABLED.store(false, Ordering::SeqCst);
+    let value = {
+        let _disable = Disable;
+        f()
+    };
     let recorded = CURSOR.load(Ordering::Relaxed).min(LEDGER_CAPACITY);
     let mut events = Vec::with_capacity(recorded);
     let mut allocation_events = 0;

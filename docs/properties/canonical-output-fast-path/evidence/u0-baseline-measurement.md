@@ -45,8 +45,10 @@ mirrors the existing `canonical_served_bytes_for_test` pattern and compiles
 into no production artifact. It is a feature-gated test-support entry, not a
 production constructor API; the ticket's seam decision is recorded here and in
 the pull request rather than pre-approved. The observer records the complete
-constructor: canonicalizer, block receipts, SHA-256, identity formatting, and
-`Arc` conversion.
+no-projection constructor arm (`from_message`): canonicalizer, per-block
+receipt serialization, SHA-256, identity formatting, and `Arc` conversion. The
+arm that reuses projected block receipts is not driven and is marked
+unmeasured in the driver output.
 
 ### Isolation
 
