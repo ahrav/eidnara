@@ -1423,6 +1423,73 @@ fn invalidation_only_rows_obey_the_aggregate_row_bound() {
     assert_matches_ledger(dir.path(), &corpus.ledger(), target);
 }
 
+/// An invalidation-only row charges no text and no encoded bytes, so a byte allowance the text rows spent exactly still admits it; only the row allowance may refuse it.
+#[test]
+fn zero_charge_rows_after_an_exactly_spent_byte_allowance_are_admitted() {
+    for dimension in ["text", "encoded"] {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(dir.path());
+        corpus.seed();
+        // Keyset order follows digest-derived object ids, so the pool supplies an invalidation-only row after the text rows.
+        let pool: Vec<(String, String)> = (0..12)
+            .map(|index| (format!("pool-{index}"), format!("pool text {index}")))
+            .collect();
+        let messages: Vec<(&str, &str, &str)> = pool
+            .iter()
+            .map(|(message_id, text)| (message_id.as_str(), "1", text.as_str()))
+            .collect();
+        corpus.publish("pool", &messages);
+        let (projection, consumer, hold) = corpus.bootstrap(dir.path());
+        corpus.publish(
+            "three",
+            &[("a", "1", "aaaa"), ("b", "1", "bbbb"), ("c", "1", "cccc")],
+        );
+        let mut target = 0;
+        for (key, text) in &pool {
+            target = corpus.retire(key, text);
+        }
+        let ledger = corpus.ledger();
+        let object_of = |text: &str| {
+            let occurrence = ledger.occurrence_of(text);
+            ledger
+                .objects
+                .iter()
+                .find(|(_, id)| **id == occurrence)
+                .map(|(object, _)| object.clone())
+                .unwrap()
+        };
+        let last_text = ["aaaa", "bbbb", "cccc"]
+            .into_iter()
+            .map(object_of)
+            .max()
+            .unwrap();
+        assert!(
+            pool.iter().any(|(_, text)| object_of(text) > last_text),
+            "{dimension}: no invalidation-only row sorts after the text rows; widen the pool"
+        );
+        let mut limits = bounds();
+        limits.source_page.max_rows = NonZeroUsize::MIN;
+        limits.max_source_pages = NonZeroUsize::new(32).unwrap();
+        if dimension == "text" {
+            limits.batch.max_source_bytes = NonZeroUsize::new(12).unwrap();
+        } else {
+            limits.max_source_encoded_bytes = NonZeroU64::new(12).unwrap();
+        }
+        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+            .run_episode(&consumer, &limits, hold.captured_at, &mut |_| {})
+            .unwrap();
+        assert_eq!(
+            report.end,
+            EpisodeEnd::ReachedTarget,
+            "{dimension}: {report:?}"
+        );
+        reached(&report);
+        assert_eq!(report.batches_applied, 1, "{dimension}");
+        assert_eq!(corpus.kernel_checkpoint(), target, "{dimension}");
+        assert_matches_ledger(dir.path(), &corpus.ledger(), target);
+    }
+}
+
 #[test]
 fn cancellation_in_the_second_window_preserves_the_first_acknowledged_prefix() {
     let dir = tempfile::tempdir().unwrap();

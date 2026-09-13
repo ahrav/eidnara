@@ -650,15 +650,17 @@ impl<'a> SearchCatchUp<'a> {
         let capacity = |bound| Blocked::SourceCapacityExceeded { through, bound };
         for _ in 0..bounds.max_source_pages.get() {
             self.check_budget()?;
+            // A spent byte allowance still admits rows that charge nothing, such as invalidation-only rows.
+            // A one-byte page bound makes the kernel refuse any larger charging row at preflight; the charge check after the page refuses a one-byte row.
             let page_bounds = SourcePageBounds {
                 max_rows: NonZeroUsize::new(remaining_rows)
                     .ok_or_else(|| capacity("rows"))?
                     .min(bounds.source_page.max_rows),
                 max_decoded_bytes: NonZeroU64::new(remaining_decoded)
-                    .ok_or_else(|| capacity("text"))?
+                    .unwrap_or(NonZeroU64::MIN)
                     .min(bounds.source_page.max_decoded_bytes),
                 max_encoded_bytes: NonZeroU64::new(remaining_encoded)
-                    .ok_or_else(|| capacity("encoded"))?
+                    .unwrap_or(NonZeroU64::MIN)
                     .min(bounds.source_page.max_encoded_bytes),
                 max_row_bytes: bounds.source_page.max_row_bytes,
             };
