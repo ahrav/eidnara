@@ -1275,6 +1275,42 @@ fn same_manager_reopen_reuses_live_pins_and_quarantines_corruption() {
 }
 
 #[test]
+fn same_manager_reopen_scans_the_cached_family_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let gate = open_gate();
+    let selection = build_selected(root.path(), &corpus, &gate);
+    let old = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    // A dangling foreign key in a table no semantic check reads: only the page scan finds it.
+    let db = root
+        .path()
+        .join("search-families")
+        .join(old.digest())
+        .join("search")
+        .join("search.sqlite");
+    let raw = rusqlite::Connection::open(db).unwrap();
+    raw.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         INSERT INTO embedding_recovery_authorizations(job_id,authorization_ref) VALUES('ghost','op:9');",
+    )
+    .unwrap();
+    assert!(
+        selection
+            .reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+    assert!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .is_err()
+    );
+}
+
+#[test]
 fn same_manager_identity_corruption_withdraws_existing_and_new_pins() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

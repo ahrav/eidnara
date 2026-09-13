@@ -320,7 +320,13 @@ impl SearchSelection {
                     .filter(|family| family._seed_pin.digest == digest)
                 {
                     Some(family) => {
-                        if let Err(error) = self.validate_family(&family, kernel, budget) {
+                        // The cached family gets the same page scan a fresh open would run.
+                        if let Err(error) = family
+                            .projection
+                            .read_within(deadline(budget)?, verify_pages)
+                            .map_err(BuildError::from)
+                            .and_then(|()| self.validate_family(&family, kernel, budget))
+                        {
                             if let Some(kind) = family_damage(&error) {
                                 family.projection.enter_quarantine(kind, &error);
                                 self.selected.store(None);
