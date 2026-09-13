@@ -32,10 +32,11 @@ Publication creates one specification, not implementation tickets. This
 catalog, its evidence, and the specification copy are tracked with the U0
 harness.
 
-Seven records remain **Exercised: not yet**; S5 and C2 are **partial** after
-the plan U0 harness landed at `c1dafa76` and captured the
-[baseline record](evidence/u0-baseline-measurement.md) on the unchanged
-canonicalizer. No candidate ran. Inspected pre-U0 tests remain **unaudited**.
+S1 through S6 are **Exercised: yes** after plan U1 landed the copy elision;
+S7 and C1 remain **not yet** and C2 **partial**. The U0 harness at `c1dafa76`
+captured the [baseline record](evidence/u0-baseline-measurement.md) and the
+[U1 paired record](evidence/u1-copy-elision-paired-measurement.md) compares it
+against candidate `2050f3a6`. Inspected pre-U0 tests remain **unaudited**.
 Confidence describes the evidence for the obligation and its reachability,
 not proof that an implementation satisfies it.
 
@@ -88,12 +89,12 @@ authorize the fast path from `original().is_some()`, or admit arbitrary
 
 | ID | Property | Type | Reachability | Check | Exercised |
 | --- | --- | --- | --- | --- | --- |
-| S1 | [served-field-change-flag-matches-stable-permutation](#served-field-change-flag-matches-stable-permutation) | safety | default-production | always | not yet |
-| S2 | [served-order-decision-visits-every-object](#served-order-decision-visits-every-object) | safety | default-production | always | not yet |
-| S3 | [served-unchanged-span-copy-is-identity](#served-unchanged-span-copy-is-identity) | safety | default-production | always | not yet |
-| S4 | [served-serialization-is-single-pass-and-error-terminal](#served-serialization-is-single-pass-and-error-terminal) | safety | test-only | always | not yet |
-| S5 | [served-canonical-return-retains-a-without-b](#served-canonical-return-retains-a-without-b) | safety | default-production | always | partial |
-| S6 | [served-output-cache-hit-skips-construction](#served-output-cache-hit-skips-construction) | safety | default-production | always-or-unreached | not yet |
+| S1 | [served-field-change-flag-matches-stable-permutation](#served-field-change-flag-matches-stable-permutation) | safety | default-production | always | yes |
+| S2 | [served-order-decision-visits-every-object](#served-order-decision-visits-every-object) | safety | default-production | always | yes |
+| S3 | [served-unchanged-span-copy-is-identity](#served-unchanged-span-copy-is-identity) | safety | default-production | always | yes |
+| S4 | [served-serialization-is-single-pass-and-error-terminal](#served-serialization-is-single-pass-and-error-terminal) | safety | test-only | always | yes |
+| S5 | [served-canonical-return-retains-a-without-b](#served-canonical-return-retains-a-without-b) | safety | default-production | always | yes |
+| S6 | [served-output-cache-hit-skips-construction](#served-output-cache-hit-skips-construction) | safety | default-production | always-or-unreached | yes |
 | S7 | [prepared-output-diagnostics-preserved](#prepared-output-diagnostics-preserved) | safety | default-production | always | not yet |
 | C1 | [served-canonicalization-campaign-reaches-risk-classes](#served-canonicalization-campaign-reaches-risk-classes) | reachability | test-only | sometimes | not yet |
 | C2 | [served-cache-campaign-reaches-miss-and-hit](#served-cache-campaign-reaches-miss-and-hit) | reachability | default-production | sometimes | partial |
@@ -105,7 +106,9 @@ authorize the fast path from `original().is_some()`, or admit arbitrary
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - The changed flag is absent at HEAD; no candidate runs exist.
+Exercised: yes - `every_key_permutation_reports_change_exactly_when_disordered`
+runs all six permutations of raw ASCII, escape-only, prefix/quote, and mixed
+Unicode key triples against the U1 `sort_fields` flag and the byte reference.
 Guarantee: Sorting reports a change exactly when the stable decoded-key
 permutation differs from the recorded field order.
 Check: `always` - For each object's complete source-ordered field descriptors
@@ -136,7 +139,9 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No candidate aggregate-decision witness has run.
+Exercised: yes - `aggregate_order_decision_visits_every_object` constructs
+ordered-root/disordered-child, last-object-only, root-only, and fully ordered
+documents with declaration-ordered structs and checks the U1 aggregate flag.
 Guarantee: Every recorded object is sorted exactly once before the aggregate
 decision can authorize returning A.
 Check: `always` - Each completed encode preserves object-table order/ranges,
@@ -169,7 +174,9 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No direct unchanged-table copy comparison has run.
+Exercised: yes - `unchanged_span_copy_is_identity` copies whole buffers, each
+object range, and each field range through unsorted source-order tables from
+the real encode and requires byte equality for ordered and reversed inputs.
 Guarantee: Copying completed compact serialization through unchanged recorded
 field spans reproduces the selected source range byte for byte.
 Check: `always` - With A and unchanged source-order tables captured from the
@@ -199,7 +206,10 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - Success checks were inspected only; error probes are absent.
+Exercised: yes - `serialization_error_returns_before_finalization` fails a
+private source before writing and with an open nested object, requires one
+visit, the same error, and no finalization; canonical and disordered controls
+finalize once each.
 Guarantee: Each encode traverses its source once and enters finalization only
 after serialization succeeds.
 Check: `always` - Count root and distinct child emission sites independently.
@@ -228,9 +238,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - The U0 baseline observer records one exact-N B allocation
-and A's release for every population at `c1dafa76`; candidate ownership is
-unmeasured.
+Exercised: yes - `canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not`
+checks pointer, length, and capacity identity; the U0 integration oracle
+classifies the returned chain and the [U1 paired record](evidence/u1-copy-elision-paired-measurement.md)
+shows zero exact-N allocations and a constructor peak at or below baseline
+for every population, with an always-copy build rejected as a negative control.
 Guarantee: A successful encode with only identity field permutations returns
 A by ownership transfer without B or replacement output-sized scratch.
 Check: `always` - Independently establish identity permutations, then require
@@ -269,7 +281,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - No independent hit-path construction observation has run.
+Exercised: yes - `positive_output_cache_hit_reuses_owned_artifacts_without_constructing`
+feeds a clean matching positive entry to `cached_or_serialize_output` with a
+constructor closure that panics, requires pointer-equal message, canonical
+bytes, identity, and fingerprint Arcs, and constructs for `Some(None)`, dirty,
+foreign-identity, and absent-key items.
 Guarantee: Selecting a clean matching positive output-cache entry reuses its
 owned artifacts without constructing or canonicalizing that message.
 Check: `always-or-unreached` - For each selected positive hit, require zero

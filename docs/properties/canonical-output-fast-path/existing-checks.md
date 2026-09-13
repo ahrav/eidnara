@@ -133,6 +133,22 @@ daemon crate. The full-constructor observer uses the `test-support` entry
 `test-support` feature and is not part of the production API. A real-host
 transform driver is not retained; host latency remains unmeasured.
 
+### U1 copy-elision landing
+
+Plan U1 lands at candidate `2050f3a6` with the checks below. The
+[paired record](evidence/u1-copy-elision-paired-measurement.md) retains the
+ten-pair AB/BA comparison against baseline `c1dafa76`.
+
+| Check | What it observes | Status | Execution evidence |
+| --- | --- | --- | --- |
+| `served_json::tests::every_key_permutation_reports_change_exactly_when_disordered` | Six permutations of four key triples; flag equals disorder; bytes equal reference. | unaudited | passes at `2050f3a6` |
+| `served_json::tests::aggregate_order_decision_visits_every_object` | Late, last-object, root-only, and fully ordered documents. | unaudited | passes |
+| `served_json::tests::unchanged_span_copy_is_identity` | Copier over unsorted tables reproduces whole buffer, object ranges, and field ranges. | unaudited | passes |
+| `served_json::tests::canonical_input_returns_the_serialization_buffer_and_disordered_input_does_not` | Pointer, length, capacity identity for A; fresh exact buffer for B; one finalization each. | unaudited | passes |
+| `served_json::tests::serialization_error_returns_before_finalization` | Errors before writing and with an open nested object; no finalization. | unaudited | passes |
+| `transform::tests::positive_output_cache_hit_reuses_owned_artifacts_without_constructing` | Positive hit never calls the constructor closure and returns pointer-equal Arcs; four miss shapes construct. | unaudited | passes |
+| `canonical_miss_return_buffer_provenance_is_classified` | Retained populations now expect the growth chain; typed and edited still expect B; always-copy build fails. | unaudited | passes; negative control run |
+
 ## Suspiciously quiet areas and handoff
 
 Prioritize constant allocation costs hidden by slopes, escape-aware identity,
