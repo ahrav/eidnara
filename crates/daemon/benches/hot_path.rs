@@ -75,16 +75,23 @@ fn ingress_messages(class: ContentClass, count: usize, bytes: usize) -> IngressM
 
 /// Typed request decode from the wire bytes a transform body carries, alone and
 /// followed by projection. The body is built once; each iteration decodes fresh.
+/// `EIDNARA_DECODE_CORPUS` names a directory of frozen bodies to decode instead of generated bodies, so comparison legs decode identical bytes.
 fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode");
     for &count in &[40usize, 200] {
-        let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
-        let body = serde_json::to_vec(&request("bench-decode", &messages, false))
-            .expect("bench request serializes");
+        let file_name = format!("decode-{count}msgs_2KiB_mixed.json");
+        let body = match std::env::var_os("EIDNARA_DECODE_CORPUS") {
+            Some(dir) => std::fs::read(std::path::Path::new(&dir).join(&file_name))
+                .expect("read the frozen decode corpus"),
+            None => {
+                let messages = corpus::messages(ContentClass::Mixed, count, 2_048, CORPUS_SEED);
+                serde_json::to_vec(&request("bench-decode", &messages, false))
+                    .expect("bench request serializes")
+            }
+        };
         // The evidence manifest needs the exact bytes each cell decodes.
         if let Some(dir) = std::env::var_os("EIDNARA_DUMP_DECODE_CORPUS") {
-            let path =
-                std::path::Path::new(&dir).join(format!("decode-{count}msgs_2KiB_mixed.json"));
+            let path = std::path::Path::new(&dir).join(&file_name);
             std::fs::write(&path, &body).expect("write decode corpus");
         }
         group.throughput(criterion::Throughput::Bytes(body.len() as u64));
