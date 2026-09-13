@@ -360,7 +360,7 @@ that no related check exists anywhere in the repository.
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
 [render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
 [render-order]: ../../../crates/daemon/src/memory_render.rs#L375
-[parse-admission]: ../../../crates/daemon/src/lib.rs#L11921-L11936
+[parse-admission]: ../../../crates/daemon/src/lib.rs#L11920-L11938
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
 [route-overlap]: ../../../crates/host-runtime/tests/dispatch.rs#L1078-L1134
@@ -377,10 +377,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1032
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1216
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1313
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19301
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20013
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20013
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20013
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19336
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20048
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20048
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20048
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -450,7 +450,7 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5233
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25871
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L25915
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1494
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L877
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1464
