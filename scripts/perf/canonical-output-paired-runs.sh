@@ -126,6 +126,9 @@ write_provenance() {
 main() {
   [ $# -ge 3 ] || usage
   local mode="$1"
+  # The last argument is the output directory, relative to the invoking `$PWD`.
+  local out_dir="${!#}"
+  [[ $out_dir = /* ]] || out_dir="$PWD/$out_dir"
   cd "$(repo_root)"
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/eidnara-canonical-output.XXXXXX")
   # A failed build leaves its worktree registered; prune it with the scratch dir.
@@ -134,7 +137,7 @@ main() {
   case "$mode" in
     baseline)
       [ $# -eq 3 ] || usage
-      local out_dir="$3" sha binary
+      local sha binary
       sha=$(git rev-parse --verify "$2^{commit}")
       mkdir -p "$out_dir"
       binary=$(build_revision "$sha" A)
@@ -149,7 +152,7 @@ main() {
       ;;
     paired)
       [ $# -eq 4 ] || usage
-      local out_dir="$4" sha_a sha_b bin_a bin_b
+      local sha_a sha_b bin_a bin_b
       sha_a=$(git rev-parse --verify "$2^{commit}")
       sha_b=$(git rev-parse --verify "$3^{commit}")
       mkdir -p "$out_dir"

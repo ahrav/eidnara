@@ -213,7 +213,7 @@ impl Ledger {
             [Event::Alloc { size, .. }] if *size == len && capacity == len => {
                 BufferProvenance::FreshExactSizeAllocation
             }
-            [Event::Alloc { .. }, rest @ ..] => {
+            [Event::Alloc { .. }, rest @ ..] if !rest.is_empty() => {
                 let grows = rest.iter().all(|event| {
                     matches!(event, Event::Realloc { old_size, new_size, .. } if new_size > old_size)
                 });

@@ -290,23 +290,21 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         })
     };
     while foreign_allocations.load(Ordering::Relaxed) == 0 {
-        std::hint::spin_loop();
+        std::thread::yield_now();
     }
     let (grown, foreign_during_window, ledger) = {
-        let before = foreign_allocations.load(Ordering::Relaxed);
-        let ((grown, seen), ledger) = record_window(|| {
+        let ((grown, foreign_during_window), ledger) = record_window(|| {
+            let before = foreign_allocations.load(Ordering::Relaxed);
             let mut grown: Vec<u8> = Vec::with_capacity(8);
             grown.extend(std::iter::repeat_n(7u8, 100));
             let scratch = vec![1u8; 17];
             drop(scratch);
-            // Spin until the other thread has allocated at least 16 times inside
-            // this window, so the exclusion below is exercised rather than assumed.
             while foreign_allocations.load(Ordering::Relaxed) < before + 16 {
-                std::hint::spin_loop();
+                std::thread::yield_now();
             }
-            (grown, foreign_allocations.load(Ordering::Relaxed))
+            (grown, foreign_allocations.load(Ordering::Relaxed) - before)
         });
-        (grown, seen - before, ledger)
+        (grown, foreign_during_window, ledger)
     };
     stop.store(true, Ordering::Relaxed);
     noisy.join().unwrap();
@@ -351,6 +349,19 @@ fn recording_excludes_other_threads_and_tracks_growth_chains() {
         "a shrunk buffer is not a growth chain"
     );
     drop(shrunk);
+
+    // A one-shot over-allocation never grew, so it is neither fresh-exact nor a chain.
+    let (slack, ledger) = record_window(|| {
+        let mut slack: Vec<u8> = Vec::with_capacity(64);
+        slack.extend(std::iter::repeat_n(1u8, 10));
+        slack
+    });
+    assert_eq!(
+        ledger.buffer_provenance(slack.as_ptr() as usize, slack.len(), slack.capacity()),
+        BufferProvenance::Unattributed,
+        "a single over-allocated alloc is not a growth chain"
+    );
+    drop(slack);
 }
 
 #[test]
@@ -379,10 +390,13 @@ fn recorder_aggregates_follow_a_scripted_sequence_and_report_overflow() {
     assert_eq!(ledger.peak_live_bytes, 0);
 
     // More events than the ledger holds: aggregates stay exact, events truncate.
-    let (boxes, ledger) = record_window(|| (0..70_000).map(|_| Box::new(1u8)).collect::<Vec<_>>());
+    // `boxes` is preallocated outside the window, so only its `Box<u8>` allocations are recorded.
+    let mut boxes: Vec<Box<u8>> = Vec::with_capacity(70_000);
+    let ((), ledger) = record_window(|| boxes.extend((0..70_000).map(|_| Box::new(1u8))));
     assert!(ledger.overflow);
-    assert!(ledger.requested_bytes >= 70_000);
-    assert!(ledger.peak_live_bytes >= 70_000);
+    assert_eq!(ledger.requested_bytes, 70_000);
+    assert_eq!(ledger.peak_live_bytes, 70_000);
+    assert_eq!(ledger.live_bytes_at_close, 70_000);
     assert!(ledger.events.len() < 70_000);
     drop(boxes);
 }

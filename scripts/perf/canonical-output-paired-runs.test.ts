@@ -62,8 +62,12 @@ esac
 }
 
 function run(...args: string[]): { status: number | null; stderr: string; stdout: string } {
+    return runIn(repo, ...args);
+}
+
+function runIn(cwd: string, ...args: string[]): { status: number | null; stderr: string; stdout: string } {
     const result = spawnSync("bash", [SCRIPT, ...args], {
-        cwd: repo,
+        cwd,
         encoding: "utf8",
         env: {
             ...process.env,
@@ -147,5 +151,15 @@ describe("canonical-output-paired-runs.sh", () => {
         const provenance = JSON.parse(readFileSync(join(out, "provenance.json"), "utf8"));
         expect(provenance.schedule.slice(0, 2)).toEqual(["pair-01:AB", "pair-02:BA"]);
         expect(provenance.candidate_commit).toBe(git("rev-parse", "HEAD"));
+    });
+
+    test("a relative output directory resolves against the caller's directory, not the repo root", () => {
+        installShims("");
+        const sub = join(repo, "sub");
+        mkdirSync(sub);
+        const { status } = runIn(sub, "baseline", "HEAD~1", "out");
+        expect(status).toBe(0);
+        expect(existsSync(join(sub, "out", "provenance.json"))).toBe(true);
+        expect(existsSync(join(repo, "out"))).toBe(false);
     });
 });
