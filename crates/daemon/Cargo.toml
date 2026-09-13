@@ -14,11 +14,6 @@ name = "direct_host_fixture"
 path = "examples/direct_host_fixture.rs"
 required-features = ["direct-host-fixture"]
 
-[[example]]
-name = "canonical_output_evidence"
-path = "examples/canonical_output_evidence.rs"
-required-features = ["bench-internals", "test-support"]
-
 [[bin]]
 name = "eidnara-host"
 path = "src/bin/eidnara-host.rs"
@@ -71,10 +66,8 @@ libc = { workspace = true }
 [features]
 direct-host-fixture = []
 bench-internals = []
-# Exposes the request dispatcher, kernel lifecycle probes, and served-output
-# observation entries to integration tests in `tests/` and to the
-# `canonical_output_evidence` example; enabled through the self dev-dependency
-# below and explicitly on the command line for that example.
+# Exposes the request dispatcher and kernel lifecycle probes to integration
+# tests in `tests/`; enabled only through the self dev-dependency below.
 test-support = ["host-runtime/test-support"]
 
 [[test]]

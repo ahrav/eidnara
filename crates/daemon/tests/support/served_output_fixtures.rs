@@ -1,6 +1,3 @@
-//! Included by `#[path]` from `tests/served_json_passthrough_allocations.rs` and
-//! `examples/canonical_output_evidence.rs`.
-
 use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
 
 pub const KEYS_PER_EXTRA_OBJECT: usize = 8;
