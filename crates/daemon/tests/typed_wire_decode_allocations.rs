@@ -168,17 +168,14 @@ fn source_has_no_envelope_tree_or_replay_entry() {
         assert!(!wire.contains(handwritten), "{handwritten} exists");
     }
     let crates = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+    // Assembled so this file does not itself match the search.
     let needles = [
-        "original()",
-        "mark_modified",
-        "mark_fully_typed",
-        "WireMessageData",
-        "WireBlockData",
+        concat!("original", "()"),
+        concat!("mark_", "modified"),
+        concat!("mark_fully_", "typed"),
+        concat!("WireMessage", "Data"),
+        concat!("WireBlock", "Data"),
     ];
-    let this_file = std::path::Path::new(file!())
-        .file_name()
-        .expect("file name")
-        .to_owned();
     let mut hits = Vec::new();
     let mut stack = vec![std::path::PathBuf::from(crates)];
     while let Some(dir) = stack.pop() {
@@ -189,9 +186,7 @@ fn source_has_no_envelope_tree_or_replay_entry() {
                     continue;
                 }
                 stack.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path.file_name() != Some(this_file.as_os_str())
-            {
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
                 let source = std::fs::read_to_string(&path).expect("source file");
                 for (line_number, line) in source.lines().enumerate() {
                     if needles.iter().any(|needle| line.contains(needle)) {
