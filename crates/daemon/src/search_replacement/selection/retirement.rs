@@ -59,42 +59,7 @@ impl SearchSelection {
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable"))?;
         let certificate = &family.certificate;
-        let grants = spec.admit(gate, &certificate.intent)?;
-        let remaining = certificate
-            .intent
-            .episodes
-            .deadline
-            .checked_sub(super::super::wall_ms()?)
-            .and_then(|n| u64::try_from(n).ok())
-            .ok_or(BuildError::Expired)?;
-        if deadline(budget)?
-            > std::time::Instant::now() + std::time::Duration::from_millis(remaining)
-        {
-            return Err(BuildError::Invalid(
-                "retirement budget exceeds original deadline",
-            ));
-        }
-        for grant in &grants {
-            gate.check_limits(
-                grant,
-                &InvalidationIdentity::from(&self.identity),
-                &[
-                    ("physical_drain_ms", remaining),
-                    (
-                        "local_transaction_rows",
-                        spec.episode.batch.persist.max_records.get() as u64 + 1,
-                    ),
-                    (
-                        "local_transaction_bytes",
-                        spec.episode
-                            .max_source_encoded_bytes
-                            .get()
-                            .checked_add(MAX_RECORD_BYTES)
-                            .ok_or(BuildError::InventoryBound)?,
-                    ),
-                ],
-            )?;
-        }
+        let grants = self.admit_retirement(gate, spec, budget, &certificate.intent)?;
         let check = || -> Result<(), BuildError> {
             deadline(budget)?;
             if super::super::wall_ms()? >= certificate.intent.episodes.deadline
@@ -116,6 +81,53 @@ impl SearchSelection {
             },
             observer,
         )
+    }
+
+    /// Rejects a budget that ends after `intent.episodes.deadline`.
+    pub(super) fn admit_retirement(
+        &self,
+        gate: &HookGate,
+        spec: &super::super::ReplacementSpec,
+        budget: &EvalBudget,
+        intent: &LifecycleIntent,
+    ) -> Result<Vec<Admission>, BuildError> {
+        spec.identity.require_compatible(&self.identity)?;
+        let remaining = intent
+            .episodes
+            .deadline
+            .checked_sub(super::super::wall_ms()?)
+            .and_then(|n| u64::try_from(n).ok())
+            .ok_or(BuildError::Expired)?;
+        if deadline(budget)?
+            > std::time::Instant::now() + std::time::Duration::from_millis(remaining)
+        {
+            return Err(BuildError::Invalid(
+                "retirement budget exceeds original deadline",
+            ));
+        }
+        let grants = spec.admit(gate, intent)?;
+        for grant in &grants {
+            gate.check_limits(
+                grant,
+                &InvalidationIdentity::from(&self.identity),
+                &[
+                    ("physical_drain_ms", remaining),
+                    (
+                        "local_transaction_rows",
+                        spec.episode.batch.persist.max_records.get() as u64 + 1,
+                    ),
+                    (
+                        "local_transaction_bytes",
+                        spec.episode
+                            .max_source_encoded_bytes
+                            .get()
+                            .checked_add(MAX_RECORD_BYTES)
+                            .ok_or(BuildError::InventoryBound)?,
+                    ),
+                ],
+            )?;
+        }
+        Ok(grants)
     }
 
     pub(super) fn retire_bound(

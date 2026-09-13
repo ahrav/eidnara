@@ -19,8 +19,38 @@ is a separate operation; it does not amend those fields in the disabled
 operation. Missing or stale gate evidence cannot authorize that transition.
 The disabled handoff supplies the predecessor's deregistration evidence when
 the old consumer has already left.
-Completed cleanup drops that prior handoff while retaining the current
-operation's authorization, so repeated recovery does not nest old control records.
+An authorized recovery keeps one level of prior handoff. The handoff it embeds
+has its own `prior_disabled` cleared, so repeated aborted recoveries do not
+nest older control records, and completed cleanup drops the level it kept.
+Retirement reads only that one level.
+
+A disabled handoff may be the operation that produced the live selection, or an
+unfinished follow-up recorded above it whose `selected_generation` names that
+selection. Recovery accepts both. In the follow-up case the live consumer is the
+certified predecessor's, the request must name a different consumer, and a
+follow-up consumer that already registered must be reused so its checkpoint
+does not stay behind.
+
+Construction registers its consumer unless the intent inherits the disabled
+handoff's consumer. A request that names any other registered consumer fails
+with the kernel's `Conflict` rather than adopting that consumer's checkpoint.
+
+## Record compatibility
+
+This branch changes the durable control record in two ways: `Current` is a new
+schema-4 record, and an active intent may carry `prior_disabled` (also copied
+into the family certificate at selection). Both `LifecycleIntent` and
+`DisabledIntent` reject unknown fields, so a daemon built before this branch
+reads either shape as `Unavailable` or "bootstrap corrupt". On that older
+binary the gate disables on every admission, `protected_generations` fails and
+blocks reclamation, and `disable()` and `record()` return `Unavailable`.
+
+Rolling back to an older binary after any operation has completed or any
+authorized recovery has started is therefore one-way. Recovery on the older
+binary requires removing `search-lifecycle/intent.json` and any
+`search-families/<digest>/bootstrap.json` written by this branch, then
+rebuilding. Decide the rollback policy before wiring these writers into the
+daemon; no production caller writes these records yet.
 
 `Current` records completion history. It is not a query authorization or a
 persistent inventory proof. A new selection handle cannot serve from that
@@ -55,6 +85,15 @@ and revocation barrier; the certificate remains recorded until cleanup succeeds.
 - Explicit Disabled recovery with unfinished and completed construction,
   both registered-pending and deregistered predecessors, and rejected missing
   authorization and stale evidence.
+- Explicit recovery from a disabled follow-up above a live selection, with the
+  follow-up consumer both unregistered and registered, including the refusal of
+  a different consumer while the registered one is unfinished.
+- Three consecutive aborted recoveries that keep one prior handoff level and a
+  fixed record size, then complete.
+- Recovery requests refused as `DeadlineExpired` or `AllowanceExhausted` with
+  the disabled record unchanged.
+- Construction refusing to adopt a registered consumer the intent does not
+  inherit (`crates/daemon/tests/search_replacement.rs`).
 - Real child-process cuts at pinned construction, partial selection, final
   acknowledgement, and Current publication, including the rename and directory
   sync boundaries. Every case reopens twice and checks the retained envelope.

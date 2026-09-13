@@ -59,6 +59,9 @@ impl SearchSelection {
         {
             return Err(IntentRefusal::MissingAuthorization.into());
         }
+        // Refusing the request before any construction state is released keeps a rejected
+        // authorization side-effect free.
+        crate::projection_lifecycle::check_request(request, wall_ms()?)?;
         if self.maintenance.is_some() {
             return Err(IntentRefusal::FamilyHeld.into());
         }
@@ -81,27 +84,38 @@ impl SearchSelection {
         gate.cleanup_limits(&InvalidationIdentity::from(&self.identity), &[])?;
         let store = GenerationStore::open(Some(&self.data_home))?;
         let selected = store.reconcile_search(&transaction)?;
-        if let CurrentProfile::Current(digest) = &selected {
-            if *digest != request.selected_generation
-                || disabled
-                    .handoff
-                    .as_deref()
-                    .is_none_or(|h| h.staged_seed_digest.as_ref() != Some(digest))
-            {
-                return Err(BuildError::Invalid("recovery names another selection"));
+        let handoff = disabled.handoff.as_deref();
+        // A handoff that staged the selected digest serves the selection. A matching
+        // `selected_generation` marks an unfinished follow-up; its certified predecessor serves.
+        let live_consumer = match &selected {
+            CurrentProfile::Current(digest) => {
+                if *digest != request.selected_generation {
+                    return Err(BuildError::Invalid("recovery names another selection"));
+                }
+                match handoff {
+                    Some(h) if h.staged_seed_digest.as_ref() == Some(digest) => {
+                        Some(h.consumer.consumer_id.clone())
+                    }
+                    Some(h) if h.selected_generation == *digest => Some(
+                        self.predecessor(h)?
+                            .ok_or(BuildError::Invalid("recovery names another selection"))?
+                            .intent
+                            .consumer
+                            .consumer_id,
+                    ),
+                    _ => return Err(BuildError::Invalid("recovery names another selection")),
+                }
             }
-        } else if selected != CurrentProfile::Absent {
-            return Err(BuildError::Invalid("unknown selector references"));
-        }
-        if let Some(handoff) = disabled.handoff.as_deref() {
-            if request.consumer.consumer_id == handoff.consumer.consumer_id
-                && matches!(selected, CurrentProfile::Current(_))
-            {
+            CurrentProfile::Absent => None,
+            _ => return Err(BuildError::Invalid("unknown selector references")),
+        };
+        if let Some(handoff) = handoff {
+            if live_consumer.as_deref() == Some(request.consumer.consumer_id.as_str()) {
                 return Err(BuildError::Invalid(
                     "replacement requires a distinct consumer",
                 ));
             }
-            if selected == CurrentProfile::Absent
+            if live_consumer.as_deref() != Some(handoff.consumer.consumer_id.as_str())
                 && request.consumer.consumer_id != handoff.consumer.consumer_id
                 && kernel
                     .outbox_consumer_checkpoint_within_budget(
@@ -378,40 +392,7 @@ impl SearchSelection {
         budget: &EvalBudget,
         intent: &LifecycleIntent,
     ) -> Result<(), BuildError> {
-        spec.identity.require_compatible(&self.identity)?;
-        let remaining = intent
-            .episodes
-            .deadline
-            .checked_sub(wall_ms()?)
-            .and_then(|n| u64::try_from(n).ok())
-            .ok_or(BuildError::Expired)?;
-        if deadline(budget)?
-            > std::time::Instant::now() + std::time::Duration::from_millis(remaining)
-        {
-            return Err(BuildError::Invalid("recovery exceeds original deadline"));
-        }
-        let grants = spec.admit(gate, intent)?;
-        for grant in grants {
-            gate.check_limits(
-                &grant,
-                &InvalidationIdentity::from(&self.identity),
-                &[
-                    ("physical_drain_ms", remaining),
-                    (
-                        "local_transaction_rows",
-                        spec.episode.batch.persist.max_records.get() as u64 + 1,
-                    ),
-                    (
-                        "local_transaction_bytes",
-                        spec.episode
-                            .max_source_encoded_bytes
-                            .get()
-                            .checked_add(MAX_RECORD_BYTES)
-                            .ok_or(BuildError::InventoryBound)?,
-                    ),
-                ],
-            )?;
-        }
+        self.admit_retirement(gate, spec, budget, intent)?;
         self.admit(gate, budget)?;
         Ok(())
     }

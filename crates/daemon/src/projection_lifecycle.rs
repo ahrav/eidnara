@@ -565,18 +565,7 @@ impl ProjectionLifecycle {
         request: &LifecycleRequest,
         now: i64,
     ) -> Result<Recorded, IntentRefusal> {
-        check_invariants(
-            &request.consumer.consumer_id,
-            request.transition,
-            request.authorization_ref.as_deref(),
-            request.cause,
-        )?;
-        if request.allowance == 0 {
-            return Err(IntentRefusal::AllowanceExhausted);
-        }
-        if now > request.deadline {
-            return Err(IntentRefusal::DeadlineExpired);
-        }
+        check_request(request, now)?;
         let admission = gate
             .admit(request.transition.hook(), EntryPoint::Reload)
             .map_err(IntentRefusal::Denied)?;
@@ -989,15 +978,8 @@ impl ProjectionLifecycle {
         identity: &crate::projection_gates::InvalidationIdentity,
         now: i64,
     ) -> Result<(), IntentRefusal> {
-        check_invariants(
-            &request.consumer.consumer_id,
-            request.transition,
-            request.authorization_ref.as_deref(),
-            request.cause,
-        )?;
+        check_request(request, now)?;
         if request.transition != Transition::AuthorizedRecovery
-            || request.allowance == 0
-            || now >= request.deadline
             || expected
                 .handoff
                 .as_ref()
@@ -1010,7 +992,12 @@ impl ProjectionLifecycle {
             return Err(IntentRefusal::Disabled);
         }
         let mut intent = new_intent(request, now);
-        intent.prior_disabled = Some(Box::new(expected.clone()));
+        // Only one predecessor level is read; deeper levels grow the record on each aborted recovery.
+        let mut prior = expected.clone();
+        if let Some(handoff) = prior.handoff.as_deref_mut() {
+            handoff.prior_disabled = None;
+        }
+        intent.prior_disabled = Some(Box::new(prior));
         fits_when_exhausted(&intent)?;
         gate.authorized_recovery(&self.data_home, identity, || {
             self.write_record(&encode(&intent)?, None)
@@ -1117,6 +1104,22 @@ impl ProjectionLifecycle {
         self.at(WriteBarrier::AfterDirectorySync);
         Ok(())
     }
+}
+
+pub(crate) fn check_request(request: &LifecycleRequest, now: i64) -> Result<(), IntentRefusal> {
+    check_invariants(
+        &request.consumer.consumer_id,
+        request.transition,
+        request.authorization_ref.as_deref(),
+        request.cause,
+    )?;
+    if request.allowance == 0 {
+        return Err(IntentRefusal::AllowanceExhausted);
+    }
+    if now > request.deadline {
+        return Err(IntentRefusal::DeadlineExpired);
+    }
+    Ok(())
 }
 
 fn new_intent(request: &LifecycleRequest, now: i64) -> LifecycleIntent {

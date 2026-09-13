@@ -554,10 +554,19 @@ impl<'a> ReplacementBuilder<'a> {
             actor: "daemon".to_owned(),
             cause: "replacement capture".to_owned(),
         };
-        if self
-            .kernel
-            .outbox_consumer_checkpoint_within_budget(&run.budget, &binding.consumer_id)?
-            .is_none()
+        // An inherited disabled-handoff consumer is already registered by design. Every other registered
+        // consumer belongs to another operation, so the registration commit runs and the kernel's
+        // Conflict refuses the takeover.
+        let inherited = intent
+            .prior_disabled
+            .as_deref()
+            .and_then(|disabled| disabled.handoff.as_deref())
+            .is_some_and(|handoff| handoff.consumer.consumer_id == binding.consumer_id);
+        if !inherited
+            || self
+                .kernel
+                .outbox_consumer_checkpoint_within_budget(&run.budget, &binding.consumer_id)?
+                .is_none()
         {
             self.kernel
                 .commit_within_budget(&run.budget, registration, |envelope| {

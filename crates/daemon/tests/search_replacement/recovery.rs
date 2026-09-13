@@ -1465,3 +1465,263 @@ async fn explicit_recovery_bootstraps_deregistered_and_pending_disabled_consumer
         assert_eq!(observe(&reader).generation, "recovery-generation");
     }
 }
+
+#[tokio::test]
+async fn explicit_recovery_replaces_a_disabled_follow_up_over_a_live_selection() {
+    for registered in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(root.path());
+        corpus.seed();
+        let object = corpus.publish("base", "canonical truth");
+        let mut config = spec(root.path());
+        let gate = home_gate(root.path(), &config);
+        record(root.path(), &gate, None, &config.identity);
+        let mut selection = selector(root.path());
+        finish(&mut selection, &corpus, &gate, &config);
+        let live = current(root.path());
+        let live_digest = live.staged_seed_digest.clone().unwrap();
+        let mut follow_up = request(None, &config.identity);
+        follow_up.selected_generation = live_digest.clone();
+        follow_up.attempt_id = "follow-up".to_owned();
+        follow_up.consumer.consumer_id = "follow-up-consumer".to_owned();
+        follow_up.consumer.generation_id = "follow-up-generation".to_owned();
+        ProjectionLifecycle::open(root.path())
+            .unwrap()
+            .record(&gate, &follow_up, now())
+            .unwrap();
+        if registered {
+            let mut follow_config = config.clone();
+            follow_config.generation.generation_id = follow_up.consumer.generation_id.clone();
+            let first = budget(Duration::from_secs(30));
+            let failure =
+                ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, follow_config)
+                    .unwrap()
+                    .build(&first, &mut |event| {
+                        if matches!(event, BuildEvent::Captured { .. }) {
+                            first.cancel();
+                        }
+                    })
+                    .err()
+                    .unwrap();
+            drop(failure);
+        }
+        assert_eq!(
+            corpus
+                .kernel
+                .outbox_consumer_checkpoint("follow-up-consumer")
+                .unwrap()
+                .is_some(),
+            registered
+        );
+        gate.install(disable::cleanup_evaluator(root.path()));
+        selection.begin_disable(&gate, &mut |_| {}).unwrap();
+        assert!(
+            selection
+                .reconcile_disabled(
+                    &corpus.kernel,
+                    &gate,
+                    &config,
+                    &budget(Duration::from_secs(20)),
+                    &mut |_| {}
+                )
+                .await
+                .is_err()
+        );
+        let stopped = ProjectionLifecycle::open(root.path()).unwrap().read();
+        assert!(matches!(stopped, ControlState::Disabled(_)), "{stopped:?}");
+        gate.install(support::projection_gate::passing_evaluator(
+            &config.identity,
+            0,
+            &ProjectionHook::ALL,
+        ));
+        config.generation.generation_id = "recovery-generation".to_owned();
+        let mut next = request(None, &config.identity);
+        next.transition = Transition::AuthorizedRecovery;
+        next.cause = Cause::DisabledRecovery;
+        next.selected_generation = live_digest.clone();
+        next.consumer.generation_id = config.generation.generation_id.clone();
+        next.attempt_id = "explicit-recovery".to_owned();
+        next.authorization_ref = Some("operator:fixture-recovery".to_owned());
+        next.consumer.consumer_id = if registered {
+            let mut other = next.clone();
+            other.consumer.consumer_id = "another-consumer".to_owned();
+            assert!(
+                selection
+                    .begin_authorized_recovery(
+                        &corpus.kernel,
+                        &gate,
+                        &other,
+                        &budget(Duration::from_secs(20))
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                ProjectionLifecycle::open(root.path()).unwrap().read(),
+                stopped
+            );
+            "follow-up-consumer".to_owned()
+        } else {
+            "recovery-consumer".to_owned()
+        };
+        selection
+            .begin_authorized_recovery(
+                &corpus.kernel,
+                &gate,
+                &next,
+                &budget(Duration::from_secs(20)),
+            )
+            .unwrap();
+        finish(&mut selection, &corpus, &gate, &config);
+        let done = current(root.path());
+        assert_eq!(done.attempt_id, next.attempt_id);
+        assert_eq!(done.consumer, next.consumer);
+        assert!(done.prior_disabled.is_none());
+        assert_eq!(
+            corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+            None
+        );
+        assert_eq!(
+            corpus
+                .kernel
+                .outbox_consumer_checkpoint(&next.consumer.consumer_id)
+                .unwrap(),
+            done.recovery_target.map(|t| t.commit_seq)
+        );
+        let reader = selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(observe(&reader).rows[&object].1, b"canonical truth");
+        assert_eq!(observe(&reader).generation, "recovery-generation");
+        assert_ne!(reader.digest(), live_digest);
+    }
+}
+
+#[test]
+fn authorized_recovery_refusals_name_the_exhausted_allowance_or_expired_deadline() {
+    use daemon::projection_lifecycle::IntentRefusal;
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    gate.install(disable::cleanup_evaluator(root.path()));
+    selection.begin_disable(&gate, &mut |_| {}).unwrap();
+    gate.install(support::projection_gate::passing_evaluator(
+        &config.identity,
+        0,
+        &ProjectionHook::ALL,
+    ));
+    let stopped = ProjectionLifecycle::open(root.path()).unwrap().read();
+    config.generation.generation_id = "recovery-generation".to_owned();
+    let mut next = request(None, &config.identity);
+    next.transition = Transition::AuthorizedRecovery;
+    next.cause = Cause::DisabledRecovery;
+    next.selected_generation = live_digest;
+    next.consumer.consumer_id = "recovery-consumer".to_owned();
+    next.consumer.generation_id = config.generation.generation_id.clone();
+    next.attempt_id = "explicit-recovery".to_owned();
+    next.authorization_ref = Some("operator:fixture-recovery".to_owned());
+    let mut expired = next.clone();
+    expired.deadline = now() - 1;
+    let mut exhausted = next.clone();
+    exhausted.allowance = 0;
+    for (invalid, refusal) in [
+        (expired, IntentRefusal::DeadlineExpired),
+        (exhausted, IntentRefusal::AllowanceExhausted),
+    ] {
+        let error = selection
+            .begin_authorized_recovery(
+                &corpus.kernel,
+                &gate,
+                &invalid,
+                &budget(Duration::from_secs(20)),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, BuildError::Intent(found) if *found == refusal),
+            "{error:?}"
+        );
+        assert_eq!(
+            ProjectionLifecycle::open(root.path()).unwrap().read(),
+            stopped
+        );
+    }
+    selection
+        .begin_authorized_recovery(
+            &corpus.kernel,
+            &gate,
+            &next,
+            &budget(Duration::from_secs(20)),
+        )
+        .unwrap();
+    assert_eq!(control(root.path()).attempt_id, next.attempt_id);
+}
+
+#[test]
+fn repeated_aborted_recoveries_keep_one_prior_handoff_and_a_fixed_record_size() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "canonical truth");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let live_digest = current(root.path()).staged_seed_digest.unwrap();
+    let control_path = root.path().join("search-lifecycle/intent.json");
+    let mut sizes = Vec::new();
+    for cycle in ["a", "b", "c"] {
+        gate.install(disable::cleanup_evaluator(root.path()));
+        selection.begin_disable(&gate, &mut |_| {}).unwrap();
+        gate.install(support::projection_gate::passing_evaluator(
+            &config.identity,
+            0,
+            &ProjectionHook::ALL,
+        ));
+        config.generation.generation_id = format!("generation-{cycle}");
+        let mut next = request(None, &config.identity);
+        next.transition = Transition::AuthorizedRecovery;
+        next.cause = Cause::DisabledRecovery;
+        next.selected_generation = live_digest.clone();
+        next.consumer.consumer_id = format!("consumer-{cycle}");
+        next.consumer.generation_id = config.generation.generation_id.clone();
+        next.attempt_id = format!("recovery-{cycle}");
+        next.authorization_ref = Some("operator:fixture-recovery".to_owned());
+        selection
+            .begin_authorized_recovery(
+                &corpus.kernel,
+                &gate,
+                &next,
+                &budget(Duration::from_secs(20)),
+            )
+            .unwrap();
+        let intent = control(root.path());
+        assert_eq!(intent.attempt_id, next.attempt_id);
+        let prior = intent.prior_disabled.as_deref().unwrap();
+        let handoff = prior.handoff.as_deref().unwrap();
+        assert!(
+            handoff.prior_disabled.is_none(),
+            "cycle {cycle} nests the previous recovery's prior handoff"
+        );
+        sizes.push(std::fs::read(&control_path).unwrap().len());
+    }
+    // Cycles b and c have identical shape: a follow-up handoff above the live selection.
+    assert_eq!(sizes[1], sizes[2], "{sizes:?}");
+    finish(&mut selection, &corpus, &gate, &config);
+    let done = current(root.path());
+    assert_eq!(done.attempt_id, "recovery-c");
+    assert!(done.prior_disabled.is_none());
+    assert_ne!(
+        selection
+            .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+            .unwrap()
+            .digest(),
+        live_digest
+    );
+}

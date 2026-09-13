@@ -751,6 +751,50 @@ fn a_registration_receipt_does_not_recreate_a_deregistered_consumer() {
 }
 
 #[test]
+fn construction_refuses_to_adopt_a_registered_consumer_it_does_not_inherit() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "base bytes");
+    let foreign = "foreign-consumer";
+    corpus
+        .kernel
+        .commit(intent("register-foreign"), |envelope| {
+            envelope.register_outbox_consumer(foreign, now())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.publish("later", "rows the foreign consumer has not processed");
+    let before = corpus.kernel.outbox_consumer_checkpoint(foreign).unwrap();
+    assert!(before.is_some_and(|checkpoint| checkpoint < corpus.tip()));
+    let gate = open_gate();
+    let identity = spec(root.path()).identity;
+    let mut request = request(None, &identity);
+    request.consumer.consumer_id = foreign.to_owned();
+    ProjectionLifecycle::open(root.path())
+        .unwrap()
+        .record(&gate, &request, now())
+        .unwrap();
+    let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+        .unwrap()
+        .build(&budget(Duration::from_secs(30)), &mut |_| {})
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            failure.error,
+            BuildError::Kernel(kernel::KernelError::Conflict)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(foreign).unwrap(),
+        before
+    );
+    assert!(control(root.path()).replacement_capture.is_none());
+}
+
+#[test]
 fn changed_bytes_same_count_replacement_and_noncurrent_jobs_fail_construction() {
     for mutation in [
         "none",
