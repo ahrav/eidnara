@@ -1808,20 +1808,25 @@ fn original_deadline_bounds_lost_commit_reconciliation() {
     let target = corpus.publish("next", &[("a", "1", "next message")]);
     let deadline = Instant::now() + Duration::from_secs(2);
     let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
-    let held = std::sync::Barrier::new(2);
+    let (start_tx, start_rx) = mpsc::channel::<()>();
+    let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
     let (report, finished) = std::thread::scope(|scope| {
         // Another task takes the projection's only connection once the local transaction has released it.
-        scope.spawn(|| {
-            held.wait();
+        // A dropped `start_tx` lets the helper exit when the episode ends before that release.
+        let projection = &projection;
+        scope.spawn(move || {
+            if start_rx.recv().is_err() {
+                return;
+            }
             projection
                 .read(|_| {
-                    held.wait();
+                    acquired_tx.send(()).unwrap();
                     std::thread::sleep(Duration::from_secs(4));
                     Ok(())
                 })
                 .unwrap();
         });
-        let report = SearchCatchUp::new(&corpus.kernel, &projection)
+        let report = SearchCatchUp::new(&corpus.kernel, projection)
             .with_budget(budget.clone())
             .run_episode_with_fault_for_test(
                 &consumer,
@@ -1829,12 +1834,15 @@ fn original_deadline_bounds_lost_commit_reconciliation() {
                 hold.captured_at,
                 &mut |event| {
                     if matches!(event, EpisodeEvent::LocalReleased { .. }) {
-                        held.wait();
-                        held.wait();
+                        start_tx.send(()).unwrap();
+                        acquired_rx
+                            .recv_timeout(Duration::from_secs(10))
+                            .expect("the helper acquired the projection connection");
                     }
                 },
                 EpisodeFault::LoseLocalCommitReply,
             );
+        drop(start_tx);
         (report.unwrap(), Instant::now())
     });
     assert_eq!(blocked(&report), &Blocked::Cancelled);
