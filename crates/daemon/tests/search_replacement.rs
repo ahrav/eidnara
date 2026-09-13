@@ -1820,6 +1820,56 @@ fn cleanup_releases_a_capture_the_restored_history_never_held() {
 }
 
 #[test]
+fn cleanup_finishes_a_capture_clear_whose_directory_sync_never_returned() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "base bytes");
+    let gate = open_gate();
+    record(root.path(), &gate, None, &spec(root.path()).identity);
+    let cut = Arc::new(AtomicBool::new(false));
+    let armed = Arc::clone(&cut);
+    let allowance = budget(Duration::from_secs(30));
+    let mut failure =
+        ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
+            .unwrap()
+            .with_lifecycle_write_barrier_for_test(move |barrier| {
+                if barrier == daemon::projection_lifecycle::WriteBarrier::AfterRename
+                    && armed.swap(false, Ordering::SeqCst)
+                {
+                    std::panic::panic_any("directory sync never returned");
+                }
+            })
+            .build(&allowance, &mut |event| {
+                if event == BuildEvent::StagePrepared {
+                    allowance.cancel();
+                }
+            })
+            .err()
+            .unwrap();
+    assert!(matches!(failure.cleanup_error, Some(BuildError::Expired)));
+    assert!(
+        control(root.path())
+            .replacement_capture
+            .unwrap()
+            .stage
+            .is_some()
+    );
+    cut.store(true, Ordering::SeqCst);
+    let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        failure.cleanup(&budget(Duration::from_secs(30)))
+    }));
+    assert!(interrupted.is_err());
+    assert!(control(root.path()).replacement_capture.is_none());
+    failure.cleanup(&budget(Duration::from_secs(30))).unwrap();
+    assert!(control(root.path()).replacement_capture.is_none());
+    failure
+        .retry(&budget(Duration::from_secs(30)), &mut |_| {})
+        .unwrap();
+}
+
+#[test]
 fn exhausted_budget_refuses_before_kernel_readers_and_defers_cleanup() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());

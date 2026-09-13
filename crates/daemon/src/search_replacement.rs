@@ -382,6 +382,18 @@ impl<'a> ReplacementBuilder<'a> {
         })
     }
 
+    /// Calls `barrier` at each control-record write barrier of this builder's lifecycle handle.
+    #[cfg(feature = "test-support")]
+    pub fn with_lifecycle_write_barrier_for_test(
+        self,
+        barrier: impl Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            lifecycle: self.lifecycle.with_write_barrier_for_test(barrier),
+            ..self
+        }
+    }
+
     /// Runs one attempt under `budget` and the intent's original allowance and deadline.
     /// On failure, retain the returned owner until cleanup succeeds or ownership is handed off.
     /// Synchronous filesystem and COMMIT completion require healthy I/O; cancellation cannot preempt them.
@@ -942,9 +954,11 @@ impl<'a> ReplacementBuilder<'a> {
                 protected.remove(&manifest.digest());
                 self.store
                     .discard_unselected(&manifest, &self._transaction, &protected)?;
-            } else if recorded != Some(&unrecorded) {
+            } else if recorded.is_some() && recorded != Some(&unrecorded) {
                 return Err(BuildError::StagingUnresolved);
             }
+            // An absent record under this owner's lock is its own earlier clear whose directory sync
+            // did not return; the discard and family removal before that clear already ran.
             // `stage` writes the certificate before `search_seed::stage`, so an unrecorded certificate left no object to discard.
         }
         self.family = match std::mem::replace(&mut self.family, Family::Unopened) {
@@ -993,7 +1007,8 @@ impl<'a> ReplacementBuilder<'a> {
             &binding.consumer_id,
             wall_ms()?,
         )?;
-        if recorded.is_some() {
+        if recorded.is_some() || self.capture.is_some() {
+            // `record_capture` only re-syncs the directory when nothing is recorded, making the earlier clear durable.
             self.lifecycle.record_capture(
                 self.gate,
                 &self._transaction,
