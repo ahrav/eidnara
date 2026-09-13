@@ -8,7 +8,7 @@ task, not a new test run or portfolio evaluation. Anchors are rechecked in
 confirmation; historical citations and exercise are not carried forward.
 
 [The async transform handler][pass] pins one canonical read before its
-synchronous transform closure. Emergency reruns at [8329-8433][retry] reuse it.
+synchronous transform closure. Emergency reruns at [8338-8442][retry] reuse it.
 [The kernel query][sql] has an inner admission join and no memory domain/kind
 predicate. It materializes a full Vec before caller selection. Unadmitted
 objects therefore are not part of its candidate result.
@@ -28,8 +28,8 @@ the baseline. Skipped corrupt-row error observability remains unresolved.
 [Existing indexes][indexes] are evidence of schema shape, not an EQP result or
 a performance claim. No query-plan experiment runs here.
 
-[pass]: ../../../../crates/daemon/src/lib.rs#L8182-L8262
-[retry]: ../../../../crates/daemon/src/lib.rs#L8329-L8433
+[pass]: ../../../../crates/daemon/src/lib.rs#L8191-L8271
+[retry]: ../../../../crates/daemon/src/lib.rs#L8338-L8442
 [sql]: ../../../../crates/kernel/src/admission.rs#L3132-L3298
 [read]: ../../../../crates/daemon/src/kernel_routes/read.rs#L159-L248
 [convert]: ../../../../crates/daemon/src/canonical_memory.rs#L184-L212

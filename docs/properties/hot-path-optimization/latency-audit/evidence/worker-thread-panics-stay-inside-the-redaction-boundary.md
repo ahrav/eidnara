@@ -53,7 +53,7 @@ widens to every pass.
 - Three direct `spawn_blocking` calls: [`health.rs:224`][spawn-health];
   [`mod.rs:358-362`][spawn-kernel-open], where a `JoinError` is printed with
   `eprintln!` and mapped to `KernelError::Fault` (`:360-362`); and
-  [`lib.rs:3858-3866`][spawn-store-open], where a `JoinError` re-panics on the
+  [`lib.rs:3866-3874`][spawn-store-open], where a `JoinError` re-panics on the
   caller (`:3810`).
 - The evaluation names `routing.rs:591` as a production tenant of the pool.
   That call sits inside `#[cfg(test)] mod tests`
@@ -114,7 +114,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 
 - Sources examined: [`dispatch.rs:985-989`][terminal],
   [`mod.rs:462-468`][blocking], [`read.rs:296-322`][read-arms],
-  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3858-3866`][spawn-store-open].
+  [`mod.rs:358-362`][spawn-kernel-open], [`lib.rs:3866-3874`][spawn-store-open].
 - Findings: Three distinct mappings exist for a `JoinError` from a worker
   panic: an `internal_error` terminal (host), a `store_unavailable` response
   (kernel routes), and a re-panic (store open). The kernel-route mapping is a
@@ -163,7 +163,7 @@ settle a worker panic as an `unavailable` response by documented intent.
 [blk-read-rows]: ../../../../../crates/daemon/src/kernel_routes/read.rs#L311
 [spawn-health]: ../../../../../crates/daemon/src/kernel_routes/health.rs#L224
 [spawn-kernel-open]: ../../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
-[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3858-L3866
+[spawn-store-open]: ../../../../../crates/daemon/src/lib.rs#L3866-L3874
 [routing-tests]: ../../../../../crates/host-runtime/src/routing.rs#L458-L459
 [tc-local]: ../../../../../crates/daemon/src/token_cache.rs#L57-L76
 [tl-test]: ../../../../../crates/daemon/src/transform.rs#L495-L498
